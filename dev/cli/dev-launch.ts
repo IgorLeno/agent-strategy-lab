@@ -1,10 +1,9 @@
 #!/usr/bin/env tsx
 import { emit, fail, parseArgs, runMain } from '../lib/cli.js';
-import { LaunchError, launchWorker } from '../lib/launch.js';
 import { resolveHarnessPaths } from '../lib/paths.js';
-import { loadProfile } from '../lib/profile.js';
 import { readPacket } from '../lib/records.js';
-import { ensureRuntimeDirs, getTaskState, readState, withTaskState, writeState } from '../lib/state.js';
+import { ensureRuntimeDirs } from '../lib/state.js';
+import { launchTask } from '../lib/steps.js';
 
 const DEFAULT_PROFILE = 'claude-build-worker-v1';
 
@@ -25,84 +24,25 @@ async function main(): Promise<void> {
   const packet = await readPacket(paths, taskId);
   if (!packet) fail(`task packet ausente para ${taskId} — o orquestrador precisa persisti-lo antes`);
 
-  const profile = await loadProfile(paths.repoRoot, args.options.get('profile') ?? DEFAULT_PROFILE);
   const timeoutOverride = args.options.get('timeout-seconds');
-
-  const before = await readState(paths);
-  const task = getTaskState(before, taskId);
-  if (task.status !== 'READY') {
-    fail(`tarefa ${taskId} está ${task.status}; só READY pode ser lançada`);
-  }
-
-  const startedAt = new Date().toISOString();
-  let outcome;
-  try {
-    outcome = await launchWorker({
-      paths,
-      profile,
-      packet,
-      ...(timeoutOverride ? { timeoutSecondsOverride: Number(timeoutOverride) } : {}),
-      onStarted: async (identity) => {
-        const state = await readState(paths);
-        await writeState(
-          paths,
-          withTaskState(state, taskId, {
-            status: 'RUNNING',
-            phase: 'EXECUTING',
-            process: identity,
-            base_sha: packet.base_sha,
-            attempts: task.attempts + 1,
-            diagnostics: null,
-            started_at: startedAt,
-            finished_at: null,
-          }),
-        );
-      },
-    });
-  } catch (error) {
-    // Falha de lançamento é problema de infraestrutura, não do agente.
-    const state = await readState(paths);
-    const reason = error instanceof LaunchError ? error.message : String(error);
-    await writeState(
-      paths,
-      withTaskState(state, taskId, { status: 'INFRA_ERROR', phase: null, diagnostics: reason }),
-    );
-    emit({ task_id: taskId, classification: 'INFRA_ERROR', reason });
-    process.exit(8);
-  }
-
-  const state = await readState(paths);
-  const finishedAt = outcome.record.finished_at ?? new Date().toISOString();
-
-  if (outcome.classification === 'FINISHED') {
-    // Processo encerrado com fechamento pendente é estado LEGÍTIMO e repetível.
-    await writeState(
-      paths,
-      withTaskState(state, taskId, { phase: 'FINALIZING', diagnostics: null }),
-    );
-  } else {
-    await writeState(
-      paths,
-      withTaskState(state, taskId, {
-        status: outcome.classification === 'TIMED_OUT' ? 'TIMED_OUT' : 'INFRA_ERROR',
-        phase: null,
-        diagnostics: outcome.reason,
-        finished_at: finishedAt,
-      }),
-    );
-  }
+  const result = await launchTask(
+    paths,
+    packet,
+    args.options.get('profile') ?? DEFAULT_PROFILE,
+    timeoutOverride === undefined ? undefined : Number(timeoutOverride),
+  );
 
   emit({
     task_id: taskId,
-    classification: outcome.classification,
-    reason: outcome.reason,
-    exit_code: outcome.record.exit_code,
-    duration_ms: outcome.record.duration_ms,
-    process: outcome.record.process,
-    controlled: outcome.record.controlled,
+    classification: result.classification,
+    reason: result.reason,
+    exit_code: result.outcome?.record.exit_code ?? null,
+    duration_ms: result.outcome?.record.duration_ms ?? null,
+    process: result.outcome?.record.process ?? null,
+    controlled: result.outcome?.record.controlled ?? null,
   });
   process.exit(
-    outcome.classification === 'FINISHED' ? 0 : outcome.classification === 'TIMED_OUT' ? 7 : 8,
+    result.classification === 'FINISHED' ? 0 : result.classification === 'TIMED_OUT' ? 7 : 8,
   );
 }
 

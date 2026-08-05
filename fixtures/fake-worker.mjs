@@ -44,7 +44,9 @@ function main() {
 
   if (mode === 'leak') {
     // Descendente que sobrevive ao pai — alvo da verificação de sobreviventes.
-    spawn('sleep', ['300'], { detached: true, stdio: 'ignore' }).unref();
+    // 30s: tempo de sobra para ser detectado, curto o bastante para não deixar
+    // processo pendurado na máquina depois da suíte.
+    spawn('sleep', ['30'], { detached: true, stdio: 'ignore' }).unref();
   }
 
   let changedFiles = [];
