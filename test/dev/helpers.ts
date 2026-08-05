@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -76,8 +76,19 @@ export interface Sandbox {
  */
 export async function makeSandboxRepo(plan: string = SANDBOX_PLAN): Promise<Sandbox> {
   const root = await mkdtemp(path.join(tmpdir(), 'agentlab-sandbox-'));
-  await mkdir(path.join(root, 'dev'), { recursive: true });
+  await mkdir(path.join(root, 'dev', 'profiles'), { recursive: true });
+  await mkdir(path.join(root, 'fixtures'), { recursive: true });
   await writeFile(path.join(root, 'dev', 'plan.yaml'), plan, 'utf8');
+  // O sandbox recebe cópias reais do fixture e do perfil — o teste exercita os
+  // mesmos arquivos que o harness usa, não versões paralelas.
+  await copyFile(
+    path.join(REPO_ROOT, 'fixtures', 'fake-worker.mjs'),
+    path.join(root, 'fixtures', 'fake-worker.mjs'),
+  );
+  await copyFile(
+    path.join(REPO_ROOT, 'dev', 'profiles', 'fake-worker-v1.yaml'),
+    path.join(root, 'dev', 'profiles', 'fake-worker-v1.yaml'),
+  );
   await writeFile(path.join(root, 'README.md'), '# sandbox\n', 'utf8');
   await writeFile(path.join(root, '.gitignore'), '.dev/\n', 'utf8');
 

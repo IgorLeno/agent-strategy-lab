@@ -1,0 +1,28 @@
+# Perfil de worker falso — usado pelos testes do harness e por qualquer
+# verificação do protocolo que não deva custar dinheiro nem depender de rede.
+# O argv é relativo porque o launcher roda com cwd na raiz do repositório.
+id: fake-worker-v1
+agent: fake
+argv:
+  - node
+  - fixtures/fake-worker.mjs
+prompt_delivery: argv
+timeout_seconds: 60
+kill_after_seconds: 2
+forbidden_flags:
+  - --resume
+  - -r
+  - --continue
+  - -c
+  - --fork-session
+  - --session-id
+env_allowlist:
+  - PATH
+  - HOME
+  - LANG
+  - LC_ALL
+  - AGENTLAB_FAKE_MODE
+env_extra: {}
+control_markers: {}
+notes:
+  - 'Não fala formato de provider nenhum: exercita a interface interna do harness.'

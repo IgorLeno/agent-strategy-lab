@@ -1,0 +1,39 @@
+# Perfil de worker Codex para construção do próprio lab.
+#
+# `codex exec` é o modo não interativo; o prompt vai por stdin (`-`).
+# Codex não tem equivalente exato do `--bare` do Claude: o que dá para
+# controlar aqui é config estrita e ausência de resume/fork. O LaunchRecord
+# registra essa diferença em vez de fingir paridade entre os dois agentes.
+id: codex-build-worker-v1
+agent: codex
+argv:
+  - codex
+  - exec
+  - --json
+  - --strict-config
+  - '-'
+prompt_delivery: stdin
+timeout_seconds: 1800
+forbidden_flags:
+  - resume
+  - fork
+  - --last
+env_allowlist:
+  - PATH
+  - HOME
+  - LANG
+  - LC_ALL
+  - TERM
+  - USER
+  - SHELL
+  - CODEX_HOME
+  - OPENAI_API_KEY
+env_extra:
+  CI: '1'
+control_markers:
+  strict_config: --strict-config
+  event_stream: --json
+notes:
+  - 'Execução paga: só rodar com autorização explícita do usuário.'
+  - 'Sem equivalente a --bare: instruction files e plugins do usuário podem carregar.'
+  - 'Erro de item no stream não é falha do run — separar erro fatal de erro de item.'

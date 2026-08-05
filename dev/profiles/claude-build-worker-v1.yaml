@@ -1,0 +1,44 @@
+# Perfil de worker Claude Code para construção do próprio lab.
+#
+# `--bare` é o que torna o modo controlado possível: pula hooks, sync de
+# plugins, auto-memory e a auto-descoberta de CLAUDE.md. Sem ele, "processo
+# novo" continuaria carregando instruction files, skills e MCPs pessoais —
+# processo novo não é o mesmo que contexto pequeno.
+id: claude-build-worker-v1
+agent: claude
+argv:
+  - claude
+  - --bare
+  - --print
+  - --permission-mode
+  - acceptEdits
+  - --strict-mcp-config
+  - --no-session-persistence
+prompt_delivery: argv
+timeout_seconds: 1800
+forbidden_flags:
+  - --resume
+  - -r
+  - --continue
+  - -c
+  - --fork-session
+  - --session-id
+env_allowlist:
+  - PATH
+  - HOME
+  - LANG
+  - LC_ALL
+  - TERM
+  - USER
+  - SHELL
+  - ANTHROPIC_API_KEY
+env_extra:
+  CI: '1'
+control_markers:
+  instruction_discovery: --bare
+  mcp_servers: --strict-mcp-config
+  session_persistence: --no-session-persistence
+  non_interactive: --print
+notes:
+  - 'Execução paga: só rodar com autorização explícita do usuário.'
+  - '--bare força auth por ANTHROPIC_API_KEY; OAuth/keychain não são lidos.'
