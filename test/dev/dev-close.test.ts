@@ -292,6 +292,65 @@ describe('dev-close — guardas operacionais (permanecem RUNNING/FINALIZING)', (
   });
 });
 
+describe('dev-close — o handoff selado é do orquestrador', () => {
+  /** Draft cru, com os campos exatamente como um worker mentiroso os escreveria. */
+  async function writeRawDraft(taskId: string, draft: Record<string, unknown>): Promise<void> {
+    await mkdir(paths.handoffsDir, { recursive: true });
+    await writeFile(handoffDraftPath(paths, taskId), JSON.stringify(draft), 'utf8');
+  }
+
+  it('recusa draft que declara outra tarefa, sem tocar no handoff alheio', async () => {
+    await startTask();
+    const candidate = await doWork();
+    await writeWorkerArtifacts({ candidateCommit: candidate, changedFiles: ['src/one.txt'] });
+    await writeRawDraft('T1', {
+      schema_version: 1,
+      task_id: 'T2',
+      result: 'PASS',
+      changed_files: ['src/one.txt'],
+      validations: [],
+      decisions: [],
+      lessons: [],
+      next_relevant_files: [],
+    });
+
+    const result = await closeTask({ paths, loaded, taskId: 'T1' });
+    expect(result.kind).toBe('PENDING');
+    expect(result.reason).toMatch(/pertence a outra tarefa: T2/);
+    expect(await readHandoff(paths, 'T2')).toBeNull();
+    expect(await readHandoff(paths, 'T1')).toBeNull();
+    expect(getTaskState(await readState(paths), 'T2').status).toBe('READY');
+  });
+
+  it('sela arquivos e validações da evidência, não os declarados pelo worker', async () => {
+    await startTask();
+    const candidate = await doWork();
+    await writeWorkerArtifacts({ candidateCommit: candidate, changedFiles: ['src/one.txt'] });
+    await writeRawDraft('T1', {
+      schema_version: 1,
+      task_id: 'T1',
+      result: 'PASS',
+      changed_files: ['src/inventado.txt'],
+      validations: [{ argv: ['mentira'], exit_code: 0, timed_out: false, duration_ms: 1 }],
+      decisions: ['usei tsx'],
+      lessons: ['nada'],
+      next_relevant_files: ['src/one.txt'],
+    });
+
+    const result = await closeTask({ paths, loaded, taskId: 'T1' });
+    expect(result.kind).toBe('PASS');
+
+    const handoff = await readHandoff(paths, 'T1');
+    expect(handoff?.task_id).toBe('T1');
+    expect(handoff?.changed_files).toEqual(['src/one.txt']);
+    expect(handoff?.validations.map((validation) => validation.argv)).toEqual([['true']]);
+    expect(handoff?.accepted_commit).toBe(candidate);
+    // O que é opinião do worker sobrevive: só o que é fato é reescrito.
+    expect(handoff?.decisions).toEqual(['usei tsx']);
+    expect(handoff?.next_relevant_files).toEqual(['src/one.txt']);
+  });
+});
+
 describe('dev-close — CLI', () => {
   it('exit 0 em PASS, 6 em guarda pendente', async () => {
     await startTask();

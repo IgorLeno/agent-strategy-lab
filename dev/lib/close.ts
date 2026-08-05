@@ -103,6 +103,11 @@ export async function closeTask(input: CloseInput): Promise<CloseOutcome> {
 
   const draft = await readHandoffDraft(paths, taskId).catch(() => null);
   if (!draft) return await stayPending(paths, state, taskId, 'HandoffDraft ausente ou inválido');
+  // Draft de outra tarefa nunca é aceito: o task_id do record decide o arquivo
+  // de destino, então um draft mentiroso sobrescreveria o handoff alheio.
+  if (draft.task_id !== taskId) {
+    return await stayPending(paths, state, taskId, `handoff draft pertence a outra tarefa: ${draft.task_id}`);
+  }
 
   const launch = await readLaunchRecord(paths, taskId).catch(() => null);
 
@@ -189,10 +194,19 @@ export async function closeTask(input: CloseInput): Promise<CloseOutcome> {
     discrepancies: [...discrepancies],
     closed_at: timestamp,
   };
+  // Selado campo a campo, nunca por spread do draft: tudo que o orquestrador
+  // sabe de fato (task_id, resultado, commit, arquivos, validações) vem da
+  // evidência; do worker só sobrevive o que é opinião dele — decisões, lições
+  // e sugestão de próximos arquivos.
   const handoff: HandoffRecord = {
-    ...draft,
+    schema_version: DEV_SCHEMA_VERSION,
+    task_id: taskId,
     result: 'PASS',
+    changed_files: [...changed],
     validations: revalidation,
+    decisions: [...draft.decisions],
+    lessons: [...draft.lessons],
+    next_relevant_files: [...draft.next_relevant_files],
     accepted_commit: candidate,
     sealed_at: timestamp,
   };
