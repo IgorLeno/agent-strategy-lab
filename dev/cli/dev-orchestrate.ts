@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 import { closeTask } from '../lib/close.js';
 import { emit, parseArgs, runMain } from '../lib/cli.js';
+import { withHarnessLock } from '../lib/lock.js';
 import { resolveHarnessPaths } from '../lib/paths.js';
 import { loadPlan } from '../lib/plan.js';
 import { ensureRuntimeDirs } from '../lib/state.js';
@@ -35,43 +36,47 @@ async function main(): Promise<void> {
   const iterations: Iteration[] = [];
   let stop = { status: 'ALL_DONE', reason: 'nenhuma tarefa pendente' };
 
-  for (let index = 0; index < maxIterations; index += 1) {
-    const { selection, packet } = await prepareNextTask(paths, loaded);
-    if (!packet || !selection.task) {
-      stop = { status: selection.status, reason: selection.reason };
-      break;
-    }
+  // O lock cobre o loop INTEIRO: um segundo orquestrador não pode selecionar
+  // nem lançar nada enquanto este ciclo estiver em andamento.
+  await withHarnessLock(paths, 'dev-orchestrate', async () => {
+    for (let index = 0; index < maxIterations; index += 1) {
+      const { selection, packet } = await prepareNextTask(paths, loaded);
+      if (!packet || !selection.task) {
+        stop = { status: selection.status, reason: selection.reason };
+        break;
+      }
 
-    const launch = await launchTask(
-      paths,
-      packet,
-      profileId,
-      timeoutOverride === undefined ? undefined : Number(timeoutOverride),
-    );
-    if (launch.classification !== 'FINISHED') {
+      const launch = await launchTask(
+        paths,
+        packet,
+        profileId,
+        timeoutOverride === undefined ? undefined : Number(timeoutOverride),
+      );
+      if (launch.classification !== 'FINISHED') {
+        iterations.push({
+          task_id: packet.task_id,
+          launch: launch.classification,
+          close: null,
+          reason: launch.reason,
+        });
+        stop = { status: launch.classification, reason: launch.reason };
+        break;
+      }
+
+      const close = await closeTask({ paths, loaded, taskId: packet.task_id });
       iterations.push({
         task_id: packet.task_id,
         launch: launch.classification,
-        close: null,
-        reason: launch.reason,
+        close: close.kind,
+        reason: close.reason,
       });
-      stop = { status: launch.classification, reason: launch.reason };
-      break;
+      if (close.kind !== 'PASS') {
+        stop = { status: close.kind, reason: close.reason };
+        break;
+      }
+      stop = { status: 'ALL_DONE', reason: 'nenhuma tarefa pendente' };
     }
-
-    const close = await closeTask({ paths, loaded, taskId: packet.task_id });
-    iterations.push({
-      task_id: packet.task_id,
-      launch: launch.classification,
-      close: close.kind,
-      reason: close.reason,
-    });
-    if (close.kind !== 'PASS') {
-      stop = { status: close.kind, reason: close.reason };
-      break;
-    }
-    stop = { status: 'ALL_DONE', reason: 'nenhuma tarefa pendente' };
-  }
+  });
 
   const halted = stop.status !== 'ALL_DONE';
   emit({ stopped_by: stop.status, reason: stop.reason, iterations });

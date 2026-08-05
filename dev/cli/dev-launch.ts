@@ -1,5 +1,6 @@
 #!/usr/bin/env tsx
 import { emit, fail, parseArgs, runMain } from '../lib/cli.js';
+import { withHarnessLock } from '../lib/lock.js';
 import { resolveHarnessPaths } from '../lib/paths.js';
 import { readPacket } from '../lib/records.js';
 import { ensureRuntimeDirs } from '../lib/state.js';
@@ -25,11 +26,15 @@ async function main(): Promise<void> {
   if (!packet) fail(`task packet ausente para ${taskId} — o orquestrador precisa persisti-lo antes`);
 
   const timeoutOverride = args.options.get('timeout-seconds');
-  const result = await launchTask(
-    paths,
-    packet,
-    args.options.get('profile') ?? DEFAULT_PROFILE,
-    timeoutOverride === undefined ? undefined : Number(timeoutOverride),
+  // O lock cobre a transição READY -> RUNNING e a espera pelo worker: nenhum
+  // outro comando do harness pode mexer no state enquanto a sessão roda.
+  const result = await withHarnessLock(paths, 'dev-launch', () =>
+    launchTask(
+      paths,
+      packet,
+      args.options.get('profile') ?? DEFAULT_PROFILE,
+      timeoutOverride === undefined ? undefined : Number(timeoutOverride),
+    ),
   );
 
   emit({

@@ -1,3 +1,5 @@
+import { LockBusyError } from './lock.js';
+
 /** Parser de argumentos mínimo — o harness é fino de propósito. */
 export interface ParsedArgs {
   readonly flags: ReadonlySet<string>;
@@ -42,10 +44,16 @@ export function fail(message: string, exitCode = 1): never {
   process.exit(exitCode);
 }
 
+/** Exit code reservado para "outro comando do harness está com o lock". */
+export const LOCK_BUSY_EXIT_CODE = 10;
+
 export async function runMain(main: () => Promise<void>): Promise<void> {
   try {
     await main();
   } catch (error) {
+    // Ocupado não é erro de programa: é o harness recusando a segunda sessão
+    // simultânea, e o chamador precisa distinguir isso de qualquer outra falha.
+    if (error instanceof LockBusyError) fail(error.message, LOCK_BUSY_EXIT_CODE);
     fail(error instanceof Error ? `${error.name}: ${error.message}` : String(error));
   }
 }

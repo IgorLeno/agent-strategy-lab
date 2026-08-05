@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 import { access } from 'node:fs/promises';
 import { emit, fail, parseArgs, runMain } from '../lib/cli.js';
+import { withHarnessLock } from '../lib/lock.js';
 import { resolveHarnessPaths } from '../lib/paths.js';
 import { loadPlan } from '../lib/plan.js';
 import { buildInitialState, ensureRuntimeDirs, writeState } from '../lib/state.js';
@@ -23,8 +24,9 @@ async function main(): Promise<void> {
   }
 
   await ensureRuntimeDirs(paths);
-  const state = buildInitialState(plan, planSha256);
-  await writeState(paths, state);
+  await withHarnessLock(paths, 'dev-init', () =>
+    writeState(paths, buildInitialState(plan, planSha256)),
+  );
 
   emit({
     initialized: true,

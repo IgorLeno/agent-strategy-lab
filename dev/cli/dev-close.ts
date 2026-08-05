@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 import { closeTask } from '../lib/close.js';
 import { emit, fail, parseArgs, runMain } from '../lib/cli.js';
+import { withHarnessLock } from '../lib/lock.js';
 import { resolveHarnessPaths } from '../lib/paths.js';
 import { loadPlan } from '../lib/plan.js';
 import { readState } from '../lib/state.js';
@@ -21,7 +22,9 @@ async function main(): Promise<void> {
   const taskId = explicit ?? (await inferRunningTask(paths, loaded));
   if (!taskId) fail('nenhuma tarefa RUNNING para fechar — informe --task <id>');
 
-  const result = await closeTask({ paths, loaded, taskId });
+  const result = await withHarnessLock(paths, 'dev-close', () =>
+    closeTask({ paths, loaded, taskId }),
+  );
   emit({
     task_id: result.taskId,
     result: result.kind,

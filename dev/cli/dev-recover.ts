@@ -1,5 +1,6 @@
 #!/usr/bin/env tsx
 import { emit, parseArgs, runMain } from '../lib/cli.js';
+import { withHarnessLock } from '../lib/lock.js';
 import { resolveHarnessPaths } from '../lib/paths.js';
 import { loadPlan } from '../lib/plan.js';
 import { recover } from '../lib/recover.js';
@@ -15,8 +16,15 @@ async function main(): Promise<void> {
   const loaded = await loadPlan(paths.planFile);
   await ensureRuntimeDirs(paths);
 
-  const result = await recover(paths, loaded);
-  if (!args.flags.has('dry-run')) await writeState(paths, result.state);
+  // --dry-run só relata, então dispensa o lock; aplicar reconciliação muda o
+  // state e precisa da mesma exclusão mútua dos outros comandos.
+  const result = args.flags.has('dry-run')
+    ? await recover(paths, loaded)
+    : await withHarnessLock(paths, 'dev-recover', async () => {
+        const reconciled = await recover(paths, loaded);
+        await writeState(paths, reconciled.state);
+        return reconciled;
+      });
 
   emit({
     dry_run: args.flags.has('dry-run'),

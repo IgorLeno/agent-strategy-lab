@@ -139,7 +139,24 @@ pnpm dev-orchestrate --profile claude-build-worker-v1
 
 Exit codes: `dev-next` 4 = fluxo parado/ocupado · `dev-close` 5 = FAIL, 6 =
 guarda pendente · `dev-launch` 7 = TIMED_OUT, 8 = INFRA_ERROR ·
-`dev-orchestrate` 9 = fluxo parado.
+`dev-orchestrate` 9 = fluxo parado · **10 = harness ocupado** (qualquer
+comando que muda estado).
+
+## Exclusão mútua
+
+`.dev/orchestrator.lock` é criado com `wx` (criação exclusiva) por todo
+comando que **muda estado**: `dev-init`, `dev-launch`, `dev-close`,
+`dev-recover` (sem `--dry-run`) e `dev-orchestrate` — este último segura o
+lock pelo loop inteiro. `dev-next` e `dev-recover --dry-run` são somente
+leitura e não pegam lock.
+
+Sem isso, dois orquestradores podiam ler `READY`, gerar packet e lançar dois
+workers para a mesma tarefa: `state.json` com tmp + rename evita arquivo
+parcial, não evita corrida. O lock cobre a transição `READY -> RUNNING`.
+
+Lock cujo dono morreu (pid + `proc_start_ticks` não conferem) ou cujo arquivo
+está ilegível é órfão: removido e reclamado uma vez. Quem perder essa corrida
+encontra dono vivo e recebe exit 10.
 
 **`dev-orchestrate` com um perfil real gasta dinheiro** — uma sessão de agente
 por microtarefa. Rodar só com autorização explícita.

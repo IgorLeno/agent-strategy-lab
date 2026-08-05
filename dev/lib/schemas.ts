@@ -218,6 +218,21 @@ export const LaunchRecord = z
   .strict();
 export type LaunchRecord = z.infer<typeof LaunchRecord>;
 
+/**
+ * Dono do lock do harness. `pid` sozinho não basta — o kernel reusa PIDs, e um
+ * lock órfão precisa ser distinguível de um lock vivo por coincidência de PID.
+ */
+export const HarnessLock = z
+  .object({
+    schema_version: z.literal(DEV_SCHEMA_VERSION),
+    pid: z.number().int().positive(),
+    proc_start_ticks: z.number().int().nonnegative(),
+    command: nonEmpty,
+    acquired_at: z.string().datetime(),
+  })
+  .strict();
+export type HarnessLock = z.infer<typeof HarnessLock>;
+
 export const OrchestratorEvidence = z
   .object({
     task_id: identifier,
