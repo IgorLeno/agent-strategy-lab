@@ -38,3 +38,35 @@ re-executa no `dev-close`.
 Rule: propriedade sobre dados (todo packet cabe em 12 KiB) se testa na
 biblioteca, com o pior caso construído à mão. Spawn de processo só quando o
 comportamento de processo é o objeto do teste.
+
+[2026-08-05] Contexto: S07 — selagem do HandoffRecord.
+Mistake: montar o record final com `{ ...draft }` do worker. Como o
+`task_id` do record decide o arquivo de destino, um draft mentiroso
+sobrescrevia o handoff de outra tarefa, e `changed_files` do relato virava
+contexto da próxima sessão.
+Rule: record que o orquestrador assina é montado campo a campo, nunca por
+spread da entrada de outro ator. Todo campo que o orquestrador consegue
+derivar (id, resultado, commit, arquivos, validações) vem da evidência; da
+entrada só sobrevive o que é opinião. E identificador que decide caminho de
+arquivo é validado contra o contexto ANTES de qualquer escrita.
+
+[2026-08-05] Contexto: S09 — recuperação de fechamento.
+Mistake: tratar `tmp + rename` como se resolvesse integridade do
+fechamento. Ele garante que cada arquivo não fica pela metade, não que o
+CONJUNTO de arquivos esteja completo: crash entre completion e handoff
+deixava evidência parcial que o recovery aceitava como PASS.
+Rule: fechamento com mais de um arquivo precisa de um marcador escrito por
+último que amarre as peças (hash de cada uma). Recovery exige o marcador;
+bundle incompleto volta a pendente, nunca a aceito.
+
+[2026-08-05] Contexto: S10/S11 — concorrência e limite de iterações.
+Mistake: (a) confiar em escrita atômica como se fosse exclusão mútua — dois
+orquestradores liam READY ao mesmo tempo e lançavam dois workers para a
+mesma tarefa; (b) inicializar o motivo de parada como sucesso e só alterá-lo
+nos `break`, o que fazia o loop esgotado por limite reportar ALL_DONE com
+exit 0.
+Rule: escrita atômica não serializa processos — quem muda estado pega lock
+de criação exclusiva com identidade de processo (pid + starttime) para
+distinguir dono vivo de órfão. E laço com limite trata "esgotou o limite"
+como motivo de parada explícito: o estado inicial de um resumo é o
+pessimista, nunca o de sucesso.
