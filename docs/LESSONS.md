@@ -20,6 +20,17 @@ Rule: classificar timeout por exit 124 **ou** (duração ≥ limite **e** exit
 `null`/137). Exit 125/126/127 são falha de invocação do launcher —
 `INFRA_ERROR`, nunca veredito sobre o agente.
 
+[2026-08-05] Contexto: S04 — autenticação do perfil de worker Claude.
+Mistake: assumir que "processo novo" bastava para contexto limpo e que o
+modo controlado sairia de graça. `--bare` é a única flag que desliga
+auto-descoberta de CLAUDE.md, hooks, plugins e auto-memory — e ela força
+auth por ANTHROPIC_API_KEY, ignorando OAuth e keychain. Sem a chave, o modo
+controlado simplesmente não roda.
+Rule: modo controlado tem pré-requisito de credencial, e isso se verifica
+ANTES de planejar a execução. Perfil sem `--bare` é `real-world`: registrar
+`instruction_discovery`/`plugins` como "não controlado" no LaunchRecord e
+nunca comparar seus resultados com os de um perfil `controlled`.
+
 [2026-08-05] Contexto: S02 — teste de budget dos packets.
 Mistake: verificar o budget rodando o CLI uma vez por tarefa do plano; 33
 spawns de `tsx` levaram 87s e tornariam lento o `pnpm test` que TODA tarefa

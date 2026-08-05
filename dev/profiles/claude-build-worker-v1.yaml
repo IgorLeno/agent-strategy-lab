@@ -1,14 +1,17 @@
 # Perfil de worker Claude Code para construção do próprio lab.
 #
-# `--bare` é o que torna o modo controlado possível: pula hooks, sync de
-# plugins, auto-memory e a auto-descoberta de CLAUDE.md. Sem ele, "processo
-# novo" continuaria carregando instruction files, skills e MCPs pessoais —
-# processo novo não é o mesmo que contexto pequeno.
+# Decisão do usuário (2026-08-05): SEM `--bare`, para usar a sessão OAuth
+# existente. O custo é real e está registrado, não escondido: `--bare` é a
+# única flag que desliga auto-descoberta de CLAUDE.md, hooks, sync de plugins
+# e auto-memory. Sem ela, o processo é novo mas o contexto NÃO é limpo —
+# instruction files e plugins pessoais carregam junto, e o launcher marca
+# `instruction_discovery` e `plugins` como "não controlado" no LaunchRecord.
+#
+# Enquanto isso valer, este perfil é `real-world`, não `controlled`.
 id: claude-build-worker-v1
 agent: claude
 argv:
   - claude
-  - --bare
   - --print
   - --permission-mode
   - acceptEdits
@@ -36,9 +39,13 @@ env_extra:
   CI: '1'
 control_markers:
   instruction_discovery: --bare
+  plugins_and_hooks: --bare
+  auto_memory: --bare
   mcp_servers: --strict-mcp-config
   session_persistence: --no-session-persistence
   non_interactive: --print
 notes:
   - 'Execução paga: só rodar com autorização explícita do usuário.'
-  - '--bare força auth por ANTHROPIC_API_KEY; OAuth/keychain não são lidos.'
+  - 'Sem --bare: CLAUDE.md, hooks, plugins e auto-memory do usuário CARREGAM.'
+  - 'Resultados deste perfil são real-world; não misturar com perfis controlled.'
+  - 'Para modo controlled, adicionar --bare e exportar ANTHROPIC_API_KEY (com --bare, OAuth e keychain nunca são lidos).'
