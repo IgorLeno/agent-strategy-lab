@@ -1,0 +1,13 @@
+node_modules/
+dist/
+coverage/
+
+# Runtime do harness de sessões descartáveis — NÃO versionado.
+# A definição autoritativa das tarefas vive em dev/plan.yaml.
+.dev/
+
+# Evidência de runs (gerada, reconstruível)
+data/
+
+*.log
+.DS_Store
