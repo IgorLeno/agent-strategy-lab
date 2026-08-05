@@ -236,11 +236,19 @@ export const OrchestratorEvidence = z
   .strict();
 export type OrchestratorEvidence = z.infer<typeof OrchestratorEvidence>;
 
+/**
+ * Um fechamento gravado é sempre veredito, nunca estado operacional: `READY`,
+ * `RUNNING` ou `INFRA_ERROR` num CompletionRecord seriam evidência inválida
+ * de que a tarefa foi fechada.
+ */
+export const ClosedStatus = z.enum(['PASS', 'FAIL']);
+export type ClosedStatus = z.infer<typeof ClosedStatus>;
+
 export const CompletionRecord = z
   .object({
     schema_version: z.literal(DEV_SCHEMA_VERSION),
     task_id: identifier,
-    status: TaskStatus,
+    status: ClosedStatus,
     report: AgentCompletionReport.nullable(),
     orchestrator_evidence: OrchestratorEvidence,
     report_matches_evidence: z.boolean(),
@@ -249,6 +257,24 @@ export const CompletionRecord = z
   })
   .strict();
 export type CompletionRecord = z.infer<typeof CompletionRecord>;
+
+/**
+ * Fechamento aceito não é um arquivo, é um conjunto: CompletionRecord +
+ * HandoffRecord selado. O manifesto é escrito por ÚLTIMO e amarra os dois
+ * pelo hash canônico — sua existência é o que prova que o fechamento
+ * terminou, e não parou no meio. Sem ele, o dev-recover não promove PASS.
+ */
+export const CloseManifest = z
+  .object({
+    schema_version: z.literal(DEV_SCHEMA_VERSION),
+    task_id: identifier,
+    accepted_commit: shaHex,
+    completion_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    handoff_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    sealed_at: z.string().datetime(),
+  })
+  .strict();
+export type CloseManifest = z.infer<typeof CloseManifest>;
 
 // ---------------------------------------------------------------------------
 // Estado de runtime (.dev/state.json) — NÃO versionado

@@ -9,10 +9,14 @@ import { loadPlan, type LoadedPlan } from '../../dev/lib/plan.js';
 import {
   ensureTaskInbox,
   handoffDraftPath,
+  readCloseManifest,
+  readCompletion,
   readHandoff,
   reportPath,
   writePacket,
 } from '../../dev/lib/records.js';
+import { canonicalSha256 } from '../../dev/lib/canonical.js';
+import { verifyCloseBundle } from '../../dev/lib/recover.js';
 import {
   buildInitialState,
   ensureRuntimeDirs,
@@ -130,6 +134,21 @@ describe('dev-close — caminho de aceitação', () => {
     const handoff = await readHandoff(paths, 'T1');
     expect(handoff?.accepted_commit).toBe(candidate);
     expect(handoff?.result).toBe('PASS');
+  });
+
+  it('grava o bundle completo, com o manifesto amarrando completion e handoff', async () => {
+    await startTask();
+    const candidate = await doWork();
+    await writeWorkerArtifacts({ candidateCommit: candidate, changedFiles: ['src/one.txt'] });
+
+    await closeTask({ paths, loaded, taskId: 'T1' });
+
+    const manifest = await readCloseManifest(paths, 'T1');
+    expect(manifest?.accepted_commit).toBe(candidate);
+    expect(manifest?.completion_sha256).toBe(canonicalSha256(await readCompletion(paths, 'T1')));
+    expect(manifest?.handoff_sha256).toBe(canonicalSha256(await readHandoff(paths, 'T1')));
+    // O bundle completo é o que o dev-recover exige para reconstruir o PASS.
+    expect((await verifyCloseBundle(paths, 'T1')).status).toBe('VALID');
   });
 
   it('é idempotente: fechar de novo não revalida nem reescreve', async () => {

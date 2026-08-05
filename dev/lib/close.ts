@@ -25,9 +25,11 @@ import {
   readPacket,
   readReport,
   readCompletion,
+  writeCloseManifest,
   writeCompletion,
   writeHandoff,
 } from './records.js';
+import { canonicalSha256 } from './canonical.js';
 import { getTaskState, readState, withTaskState, writeState } from './state.js';
 
 /**
@@ -211,8 +213,19 @@ export async function closeTask(input: CloseInput): Promise<CloseOutcome> {
     sealed_at: timestamp,
   };
 
+  // Ordem deliberada: os dois records primeiro, o manifesto por último. Um
+  // crash antes do manifesto deixa o fechamento visivelmente incompleto, e o
+  // dev-recover se recusa a promover PASS — em vez de aceitar meia evidência.
   await writeCompletion(paths, completion);
   await writeHandoff(paths, handoff);
+  await writeCloseManifest(paths, {
+    schema_version: DEV_SCHEMA_VERSION,
+    task_id: taskId,
+    accepted_commit: candidate,
+    completion_sha256: canonicalSha256(completion),
+    handoff_sha256: canonicalSha256(handoff),
+    sealed_at: timestamp,
+  });
   state = withTaskState(state, taskId, {
     status: 'PASS',
     phase: null,

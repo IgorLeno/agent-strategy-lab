@@ -1,5 +1,5 @@
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import path from 'node:path';
+import { mkdir, readFile } from 'node:fs/promises';
+import { writeJsonAtomic } from './atomic.js';
 import {
   DEV_SCHEMA_VERSION,
   DevelopmentState,
@@ -42,13 +42,9 @@ export async function readState(paths: HarnessPaths): Promise<DevelopmentState> 
   return DevelopmentState.parse(JSON.parse(await readFile(paths.stateFile, 'utf8')));
 }
 
-/** Escrita atômica: tmp + rename no mesmo diretório, para não deixar state parcial. */
 export async function writeState(paths: HarnessPaths, state: DevelopmentState): Promise<void> {
   const validated = DevelopmentState.parse({ ...state, updated_at: new Date().toISOString() });
-  await mkdir(path.dirname(paths.stateFile), { recursive: true });
-  const temporary = `${paths.stateFile}.tmp-${process.pid}`;
-  await writeFile(temporary, `${JSON.stringify(validated, null, 2)}\n`, 'utf8');
-  await rename(temporary, paths.stateFile);
+  await writeJsonAtomic(paths.stateFile, validated);
 }
 
 export function getTaskState(state: DevelopmentState, id: string): TaskState {

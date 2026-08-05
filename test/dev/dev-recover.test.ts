@@ -3,7 +3,14 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { resolveHarnessPaths, type HarnessPaths } from '../../dev/lib/paths.js';
 import { loadPlan, type LoadedPlan } from '../../dev/lib/plan.js';
 import { recover } from '../../dev/lib/recover.js';
-import { writeCompletion } from '../../dev/lib/records.js';
+import { canonicalSha256 } from '../../dev/lib/canonical.js';
+import type { CompletionRecord, HandoffRecord } from '../../dev/lib/schemas.js';
+import {
+  readHandoff,
+  writeCloseManifest,
+  writeCompletion,
+  writeHandoff,
+} from '../../dev/lib/records.js';
 import {
   buildInitialState,
   ensureRuntimeDirs,
@@ -97,31 +104,8 @@ describe('dev-recover', () => {
     expect(result.reconciliations).toHaveLength(0);
   });
 
-  it('CompletionRecord aceito reconstrói o PASS perdido do state', async () => {
-    const accepted = await commitAll(sandbox.root, 'trabalho aceito');
-    await writeCompletion(paths, {
-      schema_version: 1,
-      task_id: 'T1',
-      status: 'PASS',
-      report: null,
-      orchestrator_evidence: {
-        task_id: 'T1',
-        base_sha: 'b'.repeat(40),
-        candidate_commit: accepted,
-        accepted_commit: accepted,
-        changed_files: [],
-        working_tree_clean: true,
-        process: null,
-        duration_ms: 10,
-        exit_code: 0,
-        timed_out: false,
-        revalidation: [],
-        observed_at: '2026-08-05T12:00:00.000Z',
-      },
-      report_matches_evidence: true,
-      discrepancies: [],
-      closed_at: '2026-08-05T12:00:00.000Z',
-    });
+  it('fechamento completo reconstrói o PASS perdido do state', async () => {
+    const accepted = await sealBundle();
 
     const result = await recover(paths, loaded);
     expect(result.state.tasks[0]?.status).toBe('PASS');
@@ -189,6 +173,117 @@ describe('dev-recover', () => {
     expect((await readState(paths)).tasks[0]?.status).toBe('INFRA_ERROR');
   });
 });
+
+describe('dev-recover — fechamento pela metade não vira PASS', () => {
+  it('completion sem handoff selado nem manifesto', async () => {
+    await sealBundle({ handoff: false, manifest: false });
+
+    const result = await recover(paths, loaded);
+    expect(result.state.tasks[0]?.status).toBe('READY');
+    expect(result.reconciliations[0]?.reason).toMatch(/handoff selado ausente/);
+  });
+
+  it('completion e handoff sem manifesto — crash entre as escritas', async () => {
+    await sealBundle({ manifest: false });
+
+    const result = await recover(paths, loaded);
+    expect(result.state.tasks[0]?.status).toBe('READY');
+    expect(result.reconciliations[0]?.reason).toMatch(/manifesto de fechamento ausente/);
+  });
+
+  it('handoff selado de outra tarefa não fecha a atual', async () => {
+    await sealBundle({ handoffTaskId: 'T2' });
+
+    const result = await recover(paths, loaded);
+    expect(result.state.tasks[0]?.status).toBe('READY');
+    expect(result.reconciliations[0]?.reason).toMatch(/handoff selado ausente|pertence a/);
+  });
+
+  it('handoff adulterado depois do fechamento é detectado pelo manifesto', async () => {
+    const accepted = await sealBundle();
+    const handoff = (await readHandoff(paths, 'T1'))!;
+    await writeHandoff(paths, { ...handoff, lessons: ['linha injetada depois do selo'] });
+
+    const result = await recover(paths, loaded);
+    expect(result.state.tasks[0]?.status).toBe('READY');
+    expect(result.reconciliations[0]?.reason).toMatch(/handoff foi alterado/);
+    expect(accepted).toMatch(/^[0-9a-f]{40}$/);
+  });
+
+  it('accepted_commit inexistente no repositório não fecha', async () => {
+    await sealBundle({ acceptedCommit: 'e'.repeat(40) });
+
+    const result = await recover(paths, loaded);
+    expect(result.state.tasks[0]?.status).toBe('READY');
+    expect(result.reconciliations[0]?.reason).toMatch(/não existe no repositório/);
+  });
+});
+
+/**
+ * Escreve um fechamento aceito como o dev-close escreveria, com controle de
+ * qual peça falta — é assim que se simula crash entre as escritas.
+ */
+async function sealBundle(
+  options: {
+    handoff?: boolean;
+    manifest?: boolean;
+    handoffTaskId?: string;
+    acceptedCommit?: string;
+  } = {},
+): Promise<string> {
+  const accepted = options.acceptedCommit ?? (await commitAll(sandbox.root, 'trabalho aceito'));
+  const closedAt = '2026-08-05T12:00:00.000Z';
+  const completion = {
+    schema_version: 1,
+    task_id: 'T1',
+    status: 'PASS',
+    report: null,
+    orchestrator_evidence: {
+      task_id: 'T1',
+      base_sha: 'b'.repeat(40),
+      candidate_commit: accepted,
+      accepted_commit: accepted,
+      changed_files: [],
+      working_tree_clean: true,
+      process: null,
+      duration_ms: 10,
+      exit_code: 0,
+      timed_out: false,
+      revalidation: [],
+      observed_at: closedAt,
+    },
+    report_matches_evidence: true,
+    discrepancies: [],
+    closed_at: closedAt,
+  } satisfies CompletionRecord;
+  await writeCompletion(paths, completion);
+
+  const handoff = {
+    schema_version: 1,
+    task_id: options.handoffTaskId ?? 'T1',
+    result: 'PASS',
+    changed_files: [],
+    validations: [],
+    decisions: [],
+    lessons: [],
+    next_relevant_files: [],
+    accepted_commit: accepted,
+    sealed_at: closedAt,
+  } satisfies HandoffRecord;
+  if (options.handoff !== false) await writeHandoff(paths, handoff);
+
+  if (options.manifest !== false) {
+    await writeCloseManifest(paths, {
+      schema_version: 1,
+      task_id: 'T1',
+      accepted_commit: accepted,
+      completion_sha256: canonicalSha256(completion),
+      handoff_sha256: canonicalSha256(handoff),
+      sealed_at: closedAt,
+    });
+  }
+  return accepted;
+}
 
 async function readPlan(): Promise<string> {
   const { readFile } = await import('node:fs/promises');

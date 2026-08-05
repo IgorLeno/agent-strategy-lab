@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  CompletionRecord,
   MAXIMUM_HANDOFF_BYTES,
   MAXIMUM_TASK_PACKET_BYTES,
   TaskState,
@@ -126,5 +127,39 @@ describe('TaskState', () => {
 
   it('não admite estado fora dos 7 do harness', () => {
     expect(() => TaskState.parse({ ...base, status: 'BLOCKED' })).toThrow();
+  });
+});
+
+describe('CompletionRecord', () => {
+  const completion = {
+    schema_version: 1,
+    task_id: 'T1',
+    status: 'PASS',
+    report: null,
+    orchestrator_evidence: {
+      task_id: 'T1',
+      base_sha: SHA,
+      candidate_commit: SHA,
+      accepted_commit: SHA,
+      changed_files: [],
+      working_tree_clean: true,
+      process: null,
+      duration_ms: 1,
+      exit_code: 0,
+      timed_out: false,
+      revalidation: [],
+      observed_at: '2026-08-05T12:00:00.000Z',
+    },
+    report_matches_evidence: true,
+    discrepancies: [],
+    closed_at: '2026-08-05T12:00:00.000Z',
+  };
+
+  it('só admite veredito: PASS ou FAIL', () => {
+    expect(CompletionRecord.parse(completion).status).toBe('PASS');
+    expect(CompletionRecord.parse({ ...completion, status: 'FAIL' }).status).toBe('FAIL');
+    for (const status of ['READY', 'RUNNING', 'TIMED_OUT', 'MISSCOPED', 'INFRA_ERROR']) {
+      expect(() => CompletionRecord.parse({ ...completion, status })).toThrow();
+    }
   });
 });

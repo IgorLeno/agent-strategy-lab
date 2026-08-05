@@ -1,8 +1,10 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
+import { writeJsonAtomic } from './atomic.js';
 import type { HarnessPaths } from './paths.js';
 import {
   AgentCompletionReport,
+  CloseManifest,
   CompletionRecord,
   LaunchRecord,
   type HandoffDraft,
@@ -47,14 +49,16 @@ export function completionPath(paths: HarnessPaths, taskId: string): string {
   return path.join(paths.completionsDir, `${taskId}.completion.json`);
 }
 
+/** Escrito por último num fechamento aceito: existir = o bundle está completo. */
+export function closeManifestPath(paths: HarnessPaths, taskId: string): string {
+  return path.join(paths.completionsDir, `${taskId}.close-manifest.json`);
+}
+
 async function readJson(file: string): Promise<unknown> {
   return JSON.parse(await readFile(file, 'utf8'));
 }
 
-async function writeJson(file: string, value: unknown): Promise<void> {
-  await mkdir(path.dirname(file), { recursive: true });
-  await writeFile(file, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
-}
+const writeJson = writeJsonAtomic;
 
 export async function readOptional<T>(
   file: string,
@@ -111,3 +115,15 @@ export const readCompletion = (
   taskId: string,
 ): Promise<CompletionRecord | null> =>
   readOptional(completionPath(paths, taskId), (input) => CompletionRecord.parse(input));
+
+export const readCloseManifest = (
+  paths: HarnessPaths,
+  taskId: string,
+): Promise<CloseManifest | null> =>
+  readOptional(closeManifestPath(paths, taskId), (input) => CloseManifest.parse(input));
+
+export const writeCloseManifest = (
+  paths: HarnessPaths,
+  manifest: CloseManifest,
+): Promise<void> =>
+  writeJson(closeManifestPath(paths, manifest.task_id), CloseManifest.parse(manifest));
