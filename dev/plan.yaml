@@ -1,0 +1,995 @@
+# Definição VERSIONADA e autoritativa das microtarefas do agent-strategy-lab.
+# Fonte de verdade operacional — `.dev/` é apenas runtime, `docs/BACKLOG.md` é
+# apenas visão humana derivada. Fase S (S01A–S06) não aparece aqui: é o
+# bootstrap manual do próprio harness, executado antes de ele existir.
+schema_version: 1
+
+tasks:
+  # -------------------------------------------------------------------------
+  # Marco 0 — Contratos (antes de storage/runner)
+  # -------------------------------------------------------------------------
+  - id: M01
+    title: Scaffold do produto
+    blocked_by: []
+    objective: >-
+      Criar o layout src/<área> do produto (core, schemas, envelope, storage,
+      workspace, runner, adapters, strategies, evaluator, scorer, reporting,
+      project, cli), garantir os scripts build/test/typecheck e escrever
+      docs/ARCHITECTURE.md, docs/BACKLOG.md, docs/LESSONS.md e
+      docs/adr/ADR-0001-stack.md com o texto corrigido do SQLite
+      (better-sqlite3 escolhido por maturidade e API síncrona, não por flag;
+      node:sqlite dispensa flag desde 22.13.0 mas segue experimental na linha
+      22; risco de addon nativo registrado).
+    initial_files:
+      - package.json
+      - tsconfig.json
+      - src/core/version.ts
+    acceptance:
+      - Diretórios de src/ criados com um index.ts ou módulo inicial cada.
+      - docs/ARCHITECTURE.md descreve o modelo de dados e o layout de evidência.
+      - docs/adr/ADR-0001-stack.md registra a escolha do better-sqlite3 e o risco de addon nativo.
+      - docs/BACKLOG.md espelha dev/plan.yaml para leitura humana.
+      - pnpm typecheck, pnpm build e pnpm test verdes.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, build]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 600
+
+  - id: M02
+    title: Enums separados das 3 dimensões
+    blocked_by: [M01]
+    objective: >-
+      Definir em src/core os enums de execução (COMPLETED/TIMED_OUT/CRASHED/
+      CANCELLED/INFRA_ERROR), avaliação (PASS/FAIL/PARTIAL/NOT_EVALUATED) e
+      qualificação (QUALIFIED/UNSCORABLE/MISSCOPED/CONTAMINATED/
+      INVALID_ENVIRONMENT/HISTORICAL_ONLY), mais os tipos core e a hierarquia
+      de erros. Nenhum enum único combinando dimensões.
+    initial_files:
+      - src/core/version.ts
+    acceptance:
+      - As três dimensões são tipos independentes; nenhum valor aparece em dois enums.
+      - Erros do lab têm classe base própria com código estável.
+      - Testes de parse cobrem valores válidos e inválidos de cada dimensão.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/core/enums.test.ts]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 600
+
+  - id: M03
+    title: TaskSpec mínimo (público, com budgets)
+    blocked_by: [M02]
+    objective: >-
+      Schema zod do TaskSpec público: id, descrição, critérios visíveis,
+      classe, dificuldade, stack, graders públicos e budgets
+      (expected/maximum de duração, tokens e arquivos alterados). É o material
+      que PODE ir ao workspace do agente.
+    initial_files:
+      - src/core/index.ts
+    acceptance:
+      - TaskSpec valida entrada correta e rejeita budgets incoerentes (expected > maximum).
+      - Nenhum campo de grader oculto ou rubrica no TaskSpec.
+      - Testes de parse válido/inválido.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/schemas/task-spec.test.ts]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 600
+
+  - id: M03B
+    title: EvaluationPlan mínimo (privado)
+    blocked_by: [M03]
+    objective: >-
+      Schema zod do EvaluationPlan privado: graders ocultos, rubrica, pesos.
+      Vive só no lab; entra apenas no evaluation envelope e NUNCA no envelope
+      de execução nem no workspace do agente.
+    initial_files:
+      - src/schemas/task-spec.ts
+    acceptance:
+      - EvaluationPlan é um tipo separado de TaskSpec, sem herança nem reuso que vaze campos ocultos.
+      - Teste garante que serializar um TaskSpec nunca inclui campos de EvaluationPlan.
+      - Testes de parse válido/inválido.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/schemas/evaluation-plan.test.ts]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 600
+
+  - id: M04
+    title: AgentProfile e EnvironmentProfile
+    blocked_by: [M03B]
+    objective: >-
+      Schemas do AgentProfile (CLI, versão, modelo, flags) e do
+      EnvironmentProfile (modo controlled|real-world, allowlist de env,
+      fingerprint dos instruction files, plugins/skills/MCPs registrados).
+      Resultados de modos diferentes nunca se misturam.
+    initial_files:
+      - src/schemas/evaluation-plan.ts
+    acceptance:
+      - EnvironmentProfile exige allowlist explícita e HOME sanitizado no modo controlled.
+      - Modo real-world registra o que NÃO foi controlado, em vez de omitir.
+      - Testes de parse válido/inválido.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/schemas/profiles.test.ts]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 600
+
+  - id: M05
+    title: StrategyDef e receita direct@1
+    blocked_by: [M04]
+    objective: >-
+      Schema StrategyDef para receitas declarativas versionadas em
+      strategies/<nome>/<versão>/strategy.yaml, mais a receita direct@1
+      (prompt único, sem etapas intermediárias).
+    initial_files:
+      - src/schemas/profiles.ts
+    acceptance:
+      - StrategyDef carrega strategies/direct/1/strategy.yaml e valida.
+      - Nome e versão da estratégia são materiais para o envelope de execução.
+      - Testes de parse válido/inválido.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/schemas/strategy.test.ts]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 600
+
+  - id: M06
+    title: Trial e ExecutionRequest
+    blocked_by: [M05]
+    objective: >-
+      Trial = tentativa planejada (Agent + Model + Strategy +
+      EnvironmentProfile + status do trial: PLANNED/EXECUTED/CANCELLED/
+      REPEATED). ExecutionRequest = tudo que o runner precisa para materializar
+      um run a partir de um Trial.
+    initial_files:
+      - src/schemas/strategy.ts
+    acceptance:
+      - Trial separa falha de infra (trial repetido) de falha do agente (run FAIL).
+      - ExecutionRequest referencia trial, base SHA, budgets e timeout.
+      - Testes de parse válido/inválido.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/schemas/trial.test.ts]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 600
+
+  - id: M07
+    title: ExecutionRecord
+    blocked_by: [M06]
+    objective: >-
+      Schema do ExecutionRecord: status de execução (enum da dimensão de
+      execução), exit code, duração, execution_envelope_sha256, métricas com
+      provenance POR CAMPO (campo ausente = null + origem registrada).
+    initial_files:
+      - src/schemas/trial.ts
+    acceptance:
+      - Métrica ausente é null com origem registrada, nunca zero silencioso.
+      - Status de execução aceita apenas valores da dimensão de execução.
+      - Testes de parse válido/inválido.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/schemas/execution-record.test.ts]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 600
+
+  - id: M08
+    title: EvaluationRecord
+    blocked_by: [M07]
+    objective: >-
+      Schema do EvaluationRecord: evaluation_id, outcome da dimensão de
+      avaliação, resultado por grader, versões dos graders e
+      evaluation_envelope_sha256.
+    initial_files:
+      - src/schemas/execution-record.ts
+    acceptance:
+      - Um run pode ter N EvaluationRecords; cada um com id e envelope próprios.
+      - Grader obrigatório falho força outcome FAIL.
+      - Testes de parse válido/inválido.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/schemas/evaluation-record.test.ts]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 600
+
+  - id: M09
+    title: ScoreRecord e QualificationRecord
+    blocked_by: [M08]
+    objective: >-
+      Schemas do ScoreRecord (score_profile_id + versão, sub-scores, budgets
+      usados, coverage) e do QualificationRecord (status da dimensão de
+      qualificação + justificativa). Regra de métrica ausente - obrigatória
+      resulta em UNSCORABLE; opcional resulta em sub-score null e coverage
+      reduzida, SEM redistribuir peso.
+    initial_files:
+      - src/schemas/evaluation-record.ts
+    acceptance:
+      - Peso de sub-score ausente nunca é redistribuído; coverage cai.
+      - QualificationRecord exige justificativa quando o status não é QUALIFIED.
+      - Testes de parse válido/inválido cobrindo as duas regras.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/schemas/score-record.test.ts]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 600
+
+  - id: M10
+    title: Envelope hashes (execução e avaliação separados)
+    blocked_by: [M09]
+    objective: >-
+      src/envelope/ com execution_envelope_sha256 (TaskSpec + Strategy + prompt
+      compilado + base SHA + AgentProfile + EnvironmentProfile + modelo + flags
+      CLI + adapter/versão + budgets + timeout) e evaluation_envelope_sha256
+      (digest do execution manifest + EvaluationPlan + versões dos graders +
+      ambiente do evaluator + comandos de avaliação), via serialização canônica.
+    initial_files:
+      - src/schemas/score-record.ts
+    acceptance:
+      - Mesma configuração produz o mesmo execution_envelope_sha256.
+      - Mudar uma flag CLI muda o envelope de execução.
+      - Mudar hidden grader muda SÓ o evaluation_envelope_sha256.
+      - Ordem de chaves na entrada não afeta o hash.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/envelope/envelope.test.ts]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 600
+
+  # -------------------------------------------------------------------------
+  # Evidência
+  # -------------------------------------------------------------------------
+  - id: M11
+    title: Run directory create e metadata inicial
+    blocked_by: [M10]
+    objective: >-
+      src/storage/: criar data/runs/<run-id>/ com execution/, metadata inicial
+      e run-id ULID. Data dir default <lab>/data/, sobrescrevível por
+      AGENTLAB_DATA_DIR ou config.
+    initial_files:
+      - src/envelope/index.ts
+    acceptance:
+      - Run dir criado com estrutura esperada e run-id ULID ordenável.
+      - AGENTLAB_DATA_DIR sobrescreve o default.
+      - Criar duas vezes o mesmo run-id falha em vez de sobrescrever.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/storage/run-dir.test.ts]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 600
+
+  - id: M12
+    title: JSONL append seguro
+    blocked_by: [M11]
+    objective: >-
+      Append de eventos em JSONL sem corromper linhas: uma linha por evento,
+      escrita completa, newline garantida, sem interleaving parcial.
+    initial_files:
+      - src/storage/run-dir.ts
+    acceptance:
+      - Appends concorrentes produzem linhas íntegras e parseáveis.
+      - Objeto com newline embutida não quebra o formato.
+      - Arquivo termina sempre com newline.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/storage/jsonl.test.ts]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 600
+
+  - id: M13
+    title: Primitives de manifest e ledger
+    blocked_by: [M12]
+    objective: >-
+      Manifest de hashes por seção (sha256 por artifact + digest agregado) e
+      append no ledger.jsonl da raiz do run. Cada seção (execution,
+      evaluations/<id>, scores/<id>) tem manifest próprio e independente.
+    initial_files:
+      - src/storage/jsonl.ts
+    acceptance:
+      - Manifest lista cada artifact com caminho relativo, tamanho e sha256.
+      - Digest agregado é determinístico e independente da ordem de leitura do diretório.
+      - Ledger registra cada adição sem reescrever entradas anteriores.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/storage/manifest.test.ts]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 600
+
+  - id: M14
+    title: Finalização da execução (selar execution/)
+    blocked_by: [M13]
+    objective: >-
+      Selar execution/ exatamente uma vez com manifest próprio e entrada no
+      ledger; evaluations/ e scores/ passam a ser adições posteriores. Nenhum
+      manifest raiz sobrescrito.
+    initial_files:
+      - src/storage/manifest.ts
+    acceptance:
+      - Selar duas vezes a mesma execução falha explicitamente.
+      - Após selar, adicionar evaluation cria entrada nova no ledger sem tocar em execution/manifest.json.
+      - Ledger é logicamente append-only.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/storage/finalize.test.ts]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 600
+
+  - id: M15
+    title: Integrity verification
+    blocked_by: [M14]
+    objective: >-
+      Verificação de integridade que detecta alteração de conteúdo (inclusive
+      valor válido em schema), remoção de artifact, reordenação de linhas de
+      JSONL e adulteração do ledger.
+    initial_files:
+      - src/storage/finalize.ts
+    acceptance:
+      - Alterar um valor válido em schema é detectado pelo manifest.
+      - Remover um artifact listado é detectado.
+      - Reordenar linhas de events.jsonl é detectado.
+      - Editar uma entrada antiga do ledger é detectado.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/storage/integrity.test.ts]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 600
+
+  - id: M16
+    title: Redaction de strings
+    blocked_by: [M15]
+    objective: >-
+      Redaction de secrets em strings antes de qualquer persistência - tokens
+      de provider, chaves de API, bearer tokens, padrões de env sensível.
+      Aplicada a stdout, stderr e stream do provider.
+    initial_files:
+      - src/storage/integrity.ts
+    acceptance:
+      - Tokens falsos de formato conhecido são substituídos por placeholder estável.
+      - Redaction preserva o restante da linha (a linha sanitizada continua útil).
+      - Nenhum secret sobrevive em round-trip de escrita e leitura.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/storage/redaction.test.ts]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 600
+
+  - id: M17
+    title: Redaction estruturada e de environment
+    blocked_by: [M16]
+    objective: >-
+      Redaction recursiva em objetos e em mapas de variáveis de ambiente,
+      preservando forma e chaves, redigindo apenas valores sensíveis.
+    initial_files:
+      - src/storage/redaction.ts
+    acceptance:
+      - Objetos aninhados são redigidos sem perder estrutura.
+      - Env vars fora da allowlist do EnvironmentProfile são redigidas ou omitidas de forma registrada.
+      - Chaves sensíveis por nome são redigidas mesmo com valor de formato desconhecido.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/storage/redaction-structured.test.ts]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 600
+
+  # -------------------------------------------------------------------------
+  # Execução
+  # -------------------------------------------------------------------------
+  - id: M18
+    title: Disposable clone create a partir de base SHA
+    blocked_by: [M17]
+    objective: >-
+      src/workspace/: clone descartável INDEPENDENTE do repo-alvo no base SHA.
+      Não usar linked worktree - worktree compartilha objects, refs e config
+      com o repo do usuário e o agente pode alcançá-los.
+    initial_files:
+      - src/storage/redaction-structured.ts
+    acceptance:
+      - O clone tem objects próprios; nenhum alternates apontando para o repo-alvo.
+      - O clone está exatamente no base SHA pedido.
+      - Nenhum remote com credencial é herdado.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/workspace/clone.test.ts]
+        timeout_seconds: 600
+      - argv: [pnpm, test]
+        timeout_seconds: 600
+
+  - id: M19
+    title: Clone cleanup garantido e proteção do repo-alvo
+    blocked_by: [M18]
+    objective: >-
+      Descarte do clone efêmero ao fim do run, inclusive em caminho de erro, e
+      guarda que impede qualquer escrita no repo-alvo original.
+    initial_files:
+      - src/workspace/clone.ts
+    acceptance:
+      - Clone é removido mesmo quando o run falha.
+      - Tentativa de operar no repo-alvo original é rejeitada por guarda explícita.
+      - Cleanup não confirmado é reportado como erro, não silenciado.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/workspace/cleanup.test.ts]
+        timeout_seconds: 600
+      - argv: [pnpm, test]
+        timeout_seconds: 600
+
+  - id: M20
+    title: Git state e change bundle capture
+    blocked_by: [M19]
+    objective: >-
+      Capturar o resultado do agente como change bundle - changes.patch,
+      changes-manifest.json (arquivos, hashes) e material_tree_sha256.
+    initial_files:
+      - src/workspace/cleanup.ts
+    acceptance:
+      - changes.patch reaplica sobre o base SHA e reproduz a árvore do agente.
+      - material_tree_sha256 é estável para a mesma árvore.
+      - Arquivos novos, removidos e renomeados aparecem no manifest.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/workspace/change-bundle.test.ts]
+        timeout_seconds: 600
+      - argv: [pnpm, test]
+        timeout_seconds: 600
+
+  - id: M21
+    title: Basic process runner
+    blocked_by: [M20]
+    objective: 'src/runner/: spawn de processo com argv (sem shell), coleta de exit code e sinal.'
+    initial_files:
+      - src/workspace/change-bundle.ts
+    acceptance:
+      - Exit code de sucesso e de falha são reportados corretamente.
+      - Comando inexistente vira erro de infra, não exit code inventado.
+      - Nenhuma interpolação de shell em nenhum caminho.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/runner/spawn.test.ts]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 600
+
+  - id: M22
+    title: Captura incremental de stdout e stderr
+    blocked_by: [M21]
+    objective: >-
+      Captura incremental para stdout.log e stderr.log, com redaction aplicada
+      antes de persistir, sem bufferizar o processo inteiro em memória.
+    initial_files:
+      - src/runner/spawn.ts
+    acceptance:
+      - Saída volumosa é persistida incrementalmente, sem estourar memória.
+      - Linha parcial no fim do stream é tratada sem perder bytes.
+      - Redaction acontece antes da escrita em disco.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/runner/capture.test.ts]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 600
+
+  - id: M23
+    title: Timeout com SIGTERM e escalada SIGKILL
+    blocked_by: [M22]
+    objective: >-
+      Timeout externo - SIGTERM, período de graça, SIGKILL. Processo que ignora
+      SIGTERM ainda assim é encerrado.
+    initial_files:
+      - src/runner/capture.ts
+    acceptance:
+      - Processo que ignora SIGTERM é morto por SIGKILL após a graça.
+      - Execução que estoura o limite é marcada TIMED_OUT (dimensão de execução).
+      - Evidência parcial é preservada.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/runner/timeout.test.ts]
+        timeout_seconds: 600
+      - argv: [pnpm, test]
+        timeout_seconds: 600
+
+  - id: M24A
+    title: Process-group - spawn em grupo próprio e sinais no grupo
+    blocked_by: [M23]
+    objective: >-
+      Spawn em process group próprio (setsid) e envio de sinais ao GRUPO -
+      SIGTERM, graça, SIGKILL. execa sozinho não mata a árvore.
+    initial_files:
+      - src/runner/timeout.ts
+    acceptance:
+      - Descendente do processo alvo recebe o sinal.
+      - Sinal nunca escapa para fora do grupo criado.
+      - PGID é registrado na evidência do run.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/runner/process-group.test.ts]
+        timeout_seconds: 600
+      - argv: [pnpm, test]
+        timeout_seconds: 600
+
+  - id: M24B
+    title: Verificação de sobreviventes pós-kill
+    blocked_by: [M24A]
+    objective: >-
+      Após o kill do grupo, verificar sobreviventes. Cleanup não confirmado
+      resulta em INFRA_ERROR, nunca em COMPLETED silencioso.
+    initial_files:
+      - src/runner/process-group.ts
+    acceptance:
+      - Descendente que sobrevive ao pai é detectado.
+      - Cleanup não confirmável marca o run como INFRA_ERROR.
+      - A verificação não depende de sleep fixo arbitrário para dar veredito.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/runner/survivors.test.ts]
+        timeout_seconds: 600
+      - argv: [pnpm, test]
+        timeout_seconds: 600
+
+  - id: M25
+    title: Fake adapter success
+    blocked_by: [M24B]
+    objective: >-
+      fixtures/fake-agent/ falando a INTERFACE INTERNA do lab (não formato de
+      provider) e src/adapters/fake/ consumindo-a - variante success.
+    initial_files:
+      - src/runner/survivors.ts
+    acceptance:
+      - Um run fake completo produz ExecutionRecord COMPLETED.
+      - O fake agent não depende de nenhum formato de provider real.
+      - Eventos normalizados são emitidos pela interface interna.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/adapters/fake-success.test.ts]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 600
+
+  - id: M26
+    title: Fake adapter failure, timeout, malformed-stream, child-process-leak
+    blocked_by: [M25]
+    objective: >-
+      Variantes restantes do fake agent, cada uma normalizada para o estado
+      correto da dimensão de execução. malformed-stream não pode ser fatal -
+      linha bruta sanitizada preservada, evento desconhecido armazenado.
+    initial_files:
+      - src/adapters/fake/index.ts
+    acceptance:
+      - failure produz COMPLETED com resultado de falha, não CRASHED.
+      - timeout produz TIMED_OUT.
+      - malformed-stream não derruba o run; a linha sanitizada é preservada.
+      - child-process-leak deixa descendente detectável pela verificação do M24B.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/adapters/fake-variants.test.ts]
+        timeout_seconds: 600
+      - argv: [pnpm, test]
+        timeout_seconds: 600
+
+  # -------------------------------------------------------------------------
+  # Avaliação e score
+  # -------------------------------------------------------------------------
+  - id: M27A
+    title: Evaluator workspace separado
+    blocked_by: [M26]
+    objective: >-
+      Workspace do evaluator - novo clone do mesmo base SHA, apply do
+      changes.patch e injeção do EvaluationPlan SÓ ali. Registra os componentes
+      do evaluation envelope; descarta o workspace ao fim.
+    initial_files:
+      - src/adapters/fake/variants.ts
+    acceptance:
+      - EvaluationPlan nunca aparece no workspace do agente.
+      - Patch aplica sobre o base SHA e reproduz a árvore avaliada.
+      - Workspace do evaluator é descartado inclusive em erro.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/evaluator/workspace.test.ts]
+        timeout_seconds: 600
+      - argv: [pnpm, test]
+        timeout_seconds: 600
+
+  - id: M27B
+    title: Command grader
+    blocked_by: [M27A]
+    objective: >-
+      Grader que executa um comando (argv, sem shell) no workspace do evaluator
+      e converte exit code e saída em resultado de grader, com timeout próprio.
+    initial_files:
+      - src/evaluator/workspace.ts
+    acceptance:
+      - Exit code 0 vira grader PASS; não-zero vira FAIL.
+      - Timeout do grader é distinto de falha do grader.
+      - Saída do grader é persistida em grader-artifacts com redaction.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/evaluator/command-grader.test.ts]
+        timeout_seconds: 600
+      - argv: [pnpm, test]
+        timeout_seconds: 600
+
+  - id: M28
+    title: Evaluator com um grader
+    blocked_by: [M27B]
+    objective: >-
+      Orquestração da avaliação - roda os graders do EvaluationPlan, calcula o
+      outcome (grader obrigatório falho resulta em FAIL) e produz
+      EvaluationRecord com evaluation_envelope_sha256 e manifest próprio.
+    initial_files:
+      - src/evaluator/command-grader.ts
+    acceptance:
+      - Grader obrigatório falho força outcome FAIL.
+      - Grader opcional falho permite PARTIAL, registrado.
+      - Reavaliar cria evaluations/<novo-id>/ sem tocar na anterior.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/evaluator/evaluate.test.ts]
+        timeout_seconds: 600
+      - argv: [pnpm, test]
+        timeout_seconds: 600
+
+  - id: M29
+    title: Score profile v1
+    blocked_by: [M28]
+    objective: >-
+      Perfil de score versionado v1 - sub-scores de tempo, tokens e escopo
+      relativos aos budgets do TaskSpec, teto por outcome. Score é de um run
+      individual; estatística agregada NÃO entra aqui (fica no compare, fase C).
+    initial_files:
+      - src/evaluator/evaluate.ts
+    acceptance:
+      - Sub-scores usam budgets expected/maximum, não constantes mágicas.
+      - Outcome FAIL impõe teto de score.
+      - Métrica obrigatória ausente resulta em UNSCORABLE; opcional ausente resulta em sub-score null sem redistribuir peso.
+      - Nenhuma variância ou intervalo de confiança é calculado aqui.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/scorer/score-profile.test.ts]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 600
+
+  - id: M30
+    title: SQLite run index
+    blocked_by: [M29]
+    objective: >-
+      Índice SQLite (better-sqlite3) com tabelas de runs, trials e tasks -
+      insert e query. O índice é derivado e descartável; a evidência em disco é
+      a fonte de verdade.
+    initial_files:
+      - src/scorer/score-profile.ts
+    acceptance:
+      - Insert e query de run, trial e task funcionam.
+      - Schema do índice tem versão própria.
+      - Nenhum dado existe apenas no índice.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/storage/sqlite-index.test.ts]
+        timeout_seconds: 600
+      - argv: [pnpm, test]
+        timeout_seconds: 600
+
+  - id: M31
+    title: SQLite rebuild a partir dos artifacts
+    blocked_by: [M30]
+    objective: 'Reconstrução completa do índice varrendo data/runs/ - apagar o db e reconstruir dá paridade.'
+    initial_files:
+      - src/storage/sqlite-index.ts
+    acceptance:
+      - Apagar o db e reconstruir produz o mesmo conteúdo lógico.
+      - Run com integridade quebrada é reportado no rebuild, não ignorado.
+      - Rebuild é idempotente.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/storage/sqlite-rebuild.test.ts]
+        timeout_seconds: 600
+      - argv: [pnpm, test]
+        timeout_seconds: 600
+
+  # -------------------------------------------------------------------------
+  # CLI e vertical slice
+  # -------------------------------------------------------------------------
+  - id: M32
+    title: agentlab doctor
+    blocked_by: [M31]
+    objective: >-
+      CLI base com commander e o comando doctor - verifica versões de node, git,
+      CLIs de agente disponíveis, data dir gravável e integridade básica.
+    initial_files:
+      - src/storage/sqlite-rebuild.ts
+    acceptance:
+      - doctor reporta cada checagem com status próprio.
+      - Ausência de CLI de agente é aviso, não crash.
+      - Exit code reflete a existência de problemas bloqueantes.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/cli/doctor.test.ts]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 600
+
+  - id: M33
+    title: agentlab init --repo
+    blocked_by: [M32]
+    objective: >-
+      Comando init que cria SOMENTE .agentlab/project.yaml no repo-alvo -
+      arquivo fino, sem tocar em nada mais do projeto.
+    initial_files:
+      - src/cli/index.ts
+    acceptance:
+      - Apenas .agentlab/project.yaml é criado no repo-alvo.
+      - Rodar duas vezes não sobrescreve config existente sem flag explícita.
+      - Smoke em repo git temporário.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/cli/init.test.ts]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 600
+
+  - id: M34
+    title: agentlab task create (não interativo)
+    blocked_by: [M33]
+    objective: >-
+      Criação não interativa de Task - TaskSpec público e EvaluationPlan privado
+      em arquivos separados, nunca no mesmo arquivo.
+    initial_files:
+      - src/cli/init.ts
+    acceptance:
+      - TaskSpec e EvaluationPlan são gravados em caminhos separados.
+      - Entrada inválida falha com mensagem acionável, sem criar arquivo parcial.
+      - Nenhum prompt interativo.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/cli/task-create.test.ts]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 600
+
+  - id: M35A
+    title: agentlab run - preparação
+    blocked_by: [M34]
+    objective: >-
+      Preparação do run - ExecutionRequest a partir do trial, clone descartável,
+      run dir e execution_envelope_sha256, tudo em disco SEM executar o agente.
+    initial_files:
+      - src/cli/task-create.ts
+    acceptance:
+      - Preparação materializa clone, run dir e envelope sem spawn do agente.
+      - Falha de preparação limpa o que criou.
+      - Envelope gravado bate com o recalculado a partir dos componentes.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/cli/run-prepare.test.ts]
+        timeout_seconds: 600
+      - argv: [pnpm, test]
+        timeout_seconds: 600
+
+  - id: M35B
+    title: agentlab run - execução
+    blocked_by: [M35A]
+    objective: >-
+      Execução via fake adapter no runner - captura, change bundle e
+      finalização (selagem) de execution/.
+    initial_files:
+      - src/cli/run-prepare.ts
+    acceptance:
+      - Run fake completo grava execution/ selado com todos os artifacts.
+      - provider-sanitized.jsonl existe e passou por redaction.
+      - changes/ contém patch e manifest coerentes.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/cli/run-execute.test.ts]
+        timeout_seconds: 600
+      - argv: [pnpm, test]
+        timeout_seconds: 600
+
+  - id: M35C
+    title: agentlab run - indexação e cleanup
+    blocked_by: [M35B]
+    objective: 'Indexar o run no SQLite e descartar o clone efêmero, inclusive em caminho de erro.'
+    initial_files:
+      - src/cli/run-execute.ts
+    acceptance:
+      - Linha correspondente aparece no índice.
+      - Clone é removido ao fim.
+      - Falha na indexação não deixa clone órfão.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/cli/run-index.test.ts]
+        timeout_seconds: 600
+      - argv: [pnpm, test]
+        timeout_seconds: 600
+
+  - id: M36
+    title: agentlab evaluate
+    blocked_by: [M35C]
+    objective: 'Comando evaluate sobre um run existente, produzindo evaluations/<id>/ com manifest próprio e entrada no ledger.'
+    initial_files:
+      - src/cli/run-index.ts
+    acceptance:
+      - EvaluationRecord criado para o run do M35.
+      - Rodar de novo cria segundo diretório, sem sobrescrever o primeiro.
+      - Ledger ganha uma entrada por avaliação.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/cli/evaluate.test.ts]
+        timeout_seconds: 600
+      - argv: [pnpm, test]
+        timeout_seconds: 600
+
+  - id: M37
+    title: agentlab score
+    blocked_by: [M36]
+    objective: 'Comando score sobre uma avaliação existente, produzindo scores/<score-id>/ com manifest próprio e entrada no ledger.'
+    initial_files:
+      - src/cli/evaluate.ts
+    acceptance:
+      - ScoreRecord criado a partir de um EvaluationRecord específico.
+      - Perfil de score diferente cria diretório novo, sem sobrescrever.
+      - QualificationRecord acompanha o score.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/cli/score.test.ts]
+        timeout_seconds: 600
+      - argv: [pnpm, test]
+        timeout_seconds: 600
+
+  - id: M38
+    title: agentlab report
+    blocked_by: [M37]
+    objective: 'Relatório de run em terminal e em --json, mostrando as três dimensões separadamente.'
+    initial_files:
+      - src/cli/score.ts
+    acceptance:
+      - Saída de terminal mostra execução, avaliação e qualificação separadas.
+      - --json produz saída estável e parseável.
+      - Métrica ausente aparece como null com origem, nunca como zero.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/cli/report.test.ts]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 600
+
+  - id: M39A
+    title: E2E vertical slice - caminho feliz
+    blocked_by: [M38]
+    objective: >-
+      Teste ponta a ponta - init, task, trial, clone, fake agent, captura,
+      evaluate em workspace separado, score, SQLite e report.
+    initial_files:
+      - src/cli/report.ts
+    acceptance:
+      - Slice completo verde em fixture repo.
+      - Layout de evidência conferido - execution/ com provider-sanitized.jsonl e changes/, evaluations/, scores/, ledger.jsonl.
+      - EvaluationPlan ausente do workspace do agente, verificado por busca no snapshot.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/e2e/happy-path.test.ts]
+        timeout_seconds: 900
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+
+  - id: M39B
+    title: E2E - caminhos de falha
+    blocked_by: [M39A]
+    objective: 'Ponta a ponta dos caminhos de falha - timeout (TIMED_OUT), fake failure e child-process-leak.'
+    initial_files:
+      - test/e2e/happy-path.test.ts
+    acceptance:
+      - Timeout resulta em execution TIMED_OUT com evidência parcial preservada.
+      - Fake failure resulta em COMPLETED com avaliação FAIL.
+      - child-process-leak não deixa sobreviventes; cleanup não confirmado resulta em INFRA_ERROR.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/e2e/failure-paths.test.ts]
+        timeout_seconds: 900
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+
+  - id: M40A
+    title: Hardening do Marco 1
+    blocked_by: [M39B]
+    objective: >-
+      Revisitar integridade, redaction e rebuild com os caminhos reais do slice
+      - adulteração detectada, zero vazamento de secrets em data/, paridade
+      após rebuild, envelopes estáveis.
+    initial_files:
+      - test/e2e/failure-paths.test.ts
+    acceptance:
+      - Adulterar artifact do slice real é detectado.
+      - Busca por secrets falsos em data/ após run contaminado retorna zero ocorrências.
+      - Dois runs com mesma config produzem o mesmo execution_envelope_sha256; mudar hidden grader muda só o de avaliação.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/e2e/hardening.test.ts]
+        timeout_seconds: 900
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+
+  - id: M40B
+    title: Revisão do Marco 1
+    blocked_by: [M40A]
+    objective: >-
+      Fechar o Marco 1 - docs/LESSONS.md atualizado, docs/BACKLOG.md espelhando
+      o estado real, docs/ARCHITECTURE.md conferido contra o código e commit de
+      marco. PARADA OBRIGATÓRIA para revisão do usuário depois desta tarefa.
+    initial_files:
+      - docs/LESSONS.md
+      - docs/BACKLOG.md
+    acceptance:
+      - LESSONS.md contém as correções acumuladas no formato datado.
+      - BACKLOG.md reflete o estado real de M01 a M40A.
+      - ARCHITECTURE.md descreve o que existe, não o que se pretendia.
+      - Gates completos verdes.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, build]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
