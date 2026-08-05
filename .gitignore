@@ -6,6 +6,10 @@ coverage/
 # A definição autoritativa das tarefas vive em dev/plan.yaml.
 .dev/
 
+# Inbox do worker (report + handoff draft). Separado do runtime do
+# orquestrador de propósito: entrada do worker não é evidência.
+.dev-inbox/
+
 # Evidência de runs (gerada, reconstruível)
 data/
 

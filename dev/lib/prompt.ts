@@ -21,7 +21,8 @@ export function buildWorkerPrompt(packet: TaskPacket, io: PromptIo): string {
 Regras:
 1. Execute SOMENTE a tarefa deste packet. Nada além do escopo.
 2. Repositório: ${io.repoRoot}. Trabalhe a partir do base SHA do packet.
-3. Nunca altere .dev/ nem dev/plan.yaml.
+3. Não altere o runtime do orquestrador nem dev/plan.yaml. Fora do repositório,
+   escreva SOMENTE nos dois caminhos de inbox indicados na regra 6.
 4. Ao terminar, crie EXATAMENTE UM commit local com todo o trabalho. Sem push.
 5. Rode as validações do packet você mesmo antes de commitar.
 6. Escreva o AgentCompletionReport em ${io.reportPath}

@@ -1,4 +1,5 @@
-import { readFile, rm, writeFile } from 'node:fs/promises';
+import { readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buildTaskPacket } from '../../dev/lib/packet.js';
 import { headSha } from '../../dev/lib/git.js';
@@ -13,7 +14,14 @@ import {
   loadProfile,
   type LauncherProfile,
 } from '../../dev/lib/profile.js';
-import { readLaunchRecord, writePacket } from '../../dev/lib/records.js';
+import {
+  handoffDraftPath,
+  readHandoffDraft,
+  readLaunchRecord,
+  readReport,
+  reportPath,
+  writePacket,
+} from '../../dev/lib/records.js';
 import { isSameProcessAlive } from '../../dev/lib/process-identity.js';
 import {
   buildInitialState,
@@ -128,6 +136,27 @@ describe('launchWorker', () => {
 
     const status = await runGit(sandbox.root, ['log', '--oneline', '-1']);
     expect(status.stdout).toMatch(/T1/);
+  });
+
+  it('o worker escreve no inbox, não no runtime do orquestrador', async () => {
+    await persistPacket();
+    const packet = buildTaskPacket({
+      task: loaded.byId.get('T1')!,
+      baseSha: await headSha(paths.repoRoot),
+      previousHandoff: null,
+    });
+    await launchWorker({ paths, profile, packet });
+
+    // Inbox e runtime são diretórios diferentes, e é o inbox que recebe o
+    // que o worker produziu.
+    expect(paths.inboxDir.startsWith(paths.devDir + path.sep)).toBe(false);
+    expect(reportPath(paths, 'T1').startsWith(paths.inboxDir + path.sep)).toBe(true);
+    expect(handoffDraftPath(paths, 'T1').startsWith(paths.inboxDir + path.sep)).toBe(true);
+    expect(await readReport(paths, 'T1')).not.toBeNull();
+    expect(await readHandoffDraft(paths, 'T1')).not.toBeNull();
+
+    const runtimeFiles = await readdir(paths.devDir, { recursive: true });
+    expect(runtimeFiles.filter((file) => /report|draft/.test(String(file)))).toEqual([]);
   });
 
   it('timeout externo mata worker que ignora SIGTERM', async () => {

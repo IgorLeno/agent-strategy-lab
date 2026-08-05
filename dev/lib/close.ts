@@ -31,11 +31,11 @@ import {
 import { getTaskState, readState, withTaskState, writeState } from './state.js';
 
 /**
- * Caminhos que um worker nunca pode alterar: o runtime do harness (fora do Git
- * de qualquer forma) e a definição autoritativa das tarefas — um worker que
- * reescreve o próprio plano invalida o protocolo.
+ * Caminhos que nunca entram num commit aceito: o runtime do harness e o inbox
+ * do worker (ambos fora do Git de qualquer forma) e a definição autoritativa
+ * das tarefas — um worker que reescreve o próprio plano invalida o protocolo.
  */
-const OUT_OF_SCOPE_PATHS = ['.dev/', 'dev/plan.yaml'];
+const OUT_OF_SCOPE_PATHS = ['.dev/', '.dev-inbox/', 'dev/plan.yaml'];
 
 export type CloseKind = 'PASS' | 'FAIL' | 'PENDING';
 

@@ -7,6 +7,7 @@ import { headSha } from '../../dev/lib/git.js';
 import { resolveHarnessPaths, type HarnessPaths } from '../../dev/lib/paths.js';
 import { loadPlan, type LoadedPlan } from '../../dev/lib/plan.js';
 import {
+  ensureTaskInbox,
   handoffDraftPath,
   readHandoff,
   reportPath,
@@ -67,8 +68,7 @@ async function writeWorkerArtifacts(options: {
   withDraft?: boolean;
 }): Promise<void> {
   const taskId = options.taskId ?? 'T1';
-  await mkdir(paths.completionsDir, { recursive: true });
-  await mkdir(paths.handoffsDir, { recursive: true });
+  await ensureTaskInbox(paths, taskId);
   await writeFile(
     reportPath(paths, taskId),
     JSON.stringify({
@@ -295,7 +295,7 @@ describe('dev-close — guardas operacionais (permanecem RUNNING/FINALIZING)', (
 describe('dev-close — o handoff selado é do orquestrador', () => {
   /** Draft cru, com os campos exatamente como um worker mentiroso os escreveria. */
   async function writeRawDraft(taskId: string, draft: Record<string, unknown>): Promise<void> {
-    await mkdir(paths.handoffsDir, { recursive: true });
+    await ensureTaskInbox(paths, taskId);
     await writeFile(handoffDraftPath(paths, taskId), JSON.stringify(draft), 'utf8');
   }
 

@@ -11,7 +11,13 @@ import {
   type LauncherProfile,
 } from './profile.js';
 import { buildWorkerPrompt } from './prompt.js';
-import { handoffDraftPath, packetPath, reportPath, writeLaunchRecord } from './records.js';
+import {
+  ensureTaskInbox,
+  handoffDraftPath,
+  packetPath,
+  reportPath,
+  writeLaunchRecord,
+} from './records.js';
 import {
   DEV_SCHEMA_VERSION,
   type LaunchRecord,
@@ -62,6 +68,7 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
     handoffDraftPath: handoffDraftPath(paths, packet.task_id),
   };
   const prompt = buildWorkerPrompt(packet, io);
+  await ensureTaskInbox(paths, packet.task_id);
 
   const agentArgv =
     profile.prompt_delivery === 'argv' ? [...profile.argv, prompt] : [...profile.argv];

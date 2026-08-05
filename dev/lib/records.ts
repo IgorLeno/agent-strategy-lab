@@ -21,8 +21,18 @@ export function handoffPath(paths: HarnessPaths, taskId: string): string {
   return path.join(paths.handoffsDir, `${taskId}.json`);
 }
 
+/** Inbox da tarefa: o único diretório que o worker recebe para escrita. */
+export function taskInboxDir(paths: HarnessPaths, taskId: string): string {
+  return path.join(paths.inboxDir, taskId);
+}
+
 export function handoffDraftPath(paths: HarnessPaths, taskId: string): string {
-  return path.join(paths.handoffsDir, `${taskId}.draft.json`);
+  return path.join(taskInboxDir(paths, taskId), 'handoff-draft.json');
+}
+
+/** O worker escreve nesses caminhos, então eles precisam existir antes do launch. */
+export async function ensureTaskInbox(paths: HarnessPaths, taskId: string): Promise<void> {
+  await mkdir(taskInboxDir(paths, taskId), { recursive: true });
 }
 
 export function launchRecordPath(paths: HarnessPaths, taskId: string): string {
@@ -30,7 +40,7 @@ export function launchRecordPath(paths: HarnessPaths, taskId: string): string {
 }
 
 export function reportPath(paths: HarnessPaths, taskId: string): string {
-  return path.join(paths.completionsDir, `${taskId}.report.json`);
+  return path.join(taskInboxDir(paths, taskId), 'report.json');
 }
 
 export function completionPath(paths: HarnessPaths, taskId: string): string {

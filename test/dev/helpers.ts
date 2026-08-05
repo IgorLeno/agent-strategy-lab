@@ -90,7 +90,7 @@ export async function makeSandboxRepo(plan: string = SANDBOX_PLAN): Promise<Sand
     path.join(root, 'dev', 'profiles', 'fake-worker-v1.yaml'),
   );
   await writeFile(path.join(root, 'README.md'), '# sandbox\n', 'utf8');
-  await writeFile(path.join(root, '.gitignore'), '.dev/\n', 'utf8');
+  await writeFile(path.join(root, '.gitignore'), '.dev/\n.dev-inbox/\n', 'utf8');
 
   await runGit(root, ['init', '-q', '-b', 'main']);
   await runGit(root, ['config', 'user.email', 'harness@example.invalid']);

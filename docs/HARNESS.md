@@ -13,11 +13,25 @@ de verdade é M21–M24, dentro de `src/runner/`.
 | --- | --- | --- |
 | `dev/plan.yaml` | definição autoritativa das microtarefas | sim |
 | `dev/profiles/*.yaml` | perfis de launcher | sim |
-| `.dev/` | state, packets, completions, handoffs, logs | **não** (`.gitignore`) |
+| `.dev/` | runtime do orquestrador: state, packets, completions, handoffs, logs | **não** (`.gitignore`) |
+| `.dev-inbox/<task>/` | inbox do worker: `report.json` e `handoff-draft.json` | **não** (`.gitignore`) |
 | `docs/BACKLOG.md` | visão humana derivada | sim, nunca operacional |
 
 Como `.dev/` está fora do Git, o accepted_commit contém só a implementação e o
 `dev-close` grava estado sem sujar a working tree.
+
+### O que a separação inbox/runtime garante — e o que não garante
+
+O worker recebe exatamente dois caminhos de escrita (`report.json` e
+`handoff-draft.json`, dentro do inbox da tarefa) e nenhum caminho do runtime do
+orquestrador. Isso torna a fronteira **explícita e auditável**: o que é entrada
+do worker e o que é evidência derivada não moram no mesmo diretório.
+
+Não é uma fronteira de segurança. O worker roda com o mesmo usuário, no mesmo
+repositório, sem sandbox ou isolamento de permissões — nada impede
+tecnicamente que ele escreva em `.dev/`. A evidência é **derivada pelo
+orquestrador, não protegida contra worker malicioso**. O modelo de ameaça
+coberto é agente confuso ou desalinhado, não agente adversário.
 
 ## Ciclo
 
@@ -81,8 +95,14 @@ O `dev-close` recusa promover commit que:
 
 1. não seja exatamente **um** commit sobre o `base_sha` do packet;
 2. não seja o HEAD, ou divirja do commit declarado no report;
-3. toque `.dev/` ou `dev/plan.yaml` — worker que reescreve o próprio plano
-   invalida o protocolo.
+3. toque `.dev/`, `.dev-inbox/` ou `dev/plan.yaml` — worker que reescreve o
+   próprio plano invalida o protocolo.
+
+O `HandoffRecord` selado é montado campo a campo pelo orquestrador: `task_id`,
+`result`, `changed_files`, `validations` e `accepted_commit` vêm da evidência.
+Do draft do worker sobrevive apenas o que é opinião dele — `decisions`,
+`lessons`, `next_relevant_files`. Draft cujo `task_id` diverge da tarefa em
+fechamento é recusado antes de qualquer escrita.
 
 ## Perfis de launcher
 
