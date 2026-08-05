@@ -196,6 +196,28 @@ export const ProcessIdentity = z
   .strict();
 export type ProcessIdentity = z.infer<typeof ProcessIdentity>;
 
+/**
+ * O que o launcher observou do processo do worker. Escrito pelo dev-launch e
+ * lido pelo dev-close — o worker não tem acesso a esses fatos sobre si mesmo.
+ */
+export const LaunchRecord = z
+  .object({
+    schema_version: z.literal(DEV_SCHEMA_VERSION),
+    task_id: identifier,
+    profile_id: nonEmpty,
+    argv: z.array(nonEmpty).min(1),
+    process: ProcessIdentity,
+    started_at: z.string().datetime(),
+    finished_at: z.string().datetime().nullable(),
+    duration_ms: z.number().int().nonnegative().nullable(),
+    exit_code: z.number().int().nullable(),
+    timed_out: z.boolean(),
+    /** O que o perfil conseguiu de fato controlar — não o que pretendia. */
+    controlled: z.record(z.union([z.boolean(), z.string(), z.number()])),
+  })
+  .strict();
+export type LaunchRecord = z.infer<typeof LaunchRecord>;
+
 export const OrchestratorEvidence = z
   .object({
     task_id: identifier,

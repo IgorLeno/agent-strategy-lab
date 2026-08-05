@@ -4,6 +4,7 @@ import type { HarnessPaths } from './paths.js';
 import {
   AgentCompletionReport,
   CompletionRecord,
+  LaunchRecord,
   type HandoffDraft,
   type HandoffRecord,
   type TaskPacket,
@@ -22,6 +23,10 @@ export function handoffPath(paths: HarnessPaths, taskId: string): string {
 
 export function handoffDraftPath(paths: HarnessPaths, taskId: string): string {
   return path.join(paths.handoffsDir, `${taskId}.draft.json`);
+}
+
+export function launchRecordPath(paths: HarnessPaths, taskId: string): string {
+  return path.join(paths.logsDir, `${taskId}.launch.json`);
 }
 
 export function reportPath(paths: HarnessPaths, taskId: string): string {
@@ -81,6 +86,15 @@ export const writeCompletion = (
   record: CompletionRecord,
 ): Promise<void> =>
   writeJson(completionPath(paths, record.task_id), CompletionRecord.parse(record));
+
+export const readLaunchRecord = (
+  paths: HarnessPaths,
+  taskId: string,
+): Promise<LaunchRecord | null> =>
+  readOptional(launchRecordPath(paths, taskId), (input) => LaunchRecord.parse(input));
+
+export const writeLaunchRecord = (paths: HarnessPaths, record: LaunchRecord): Promise<void> =>
+  writeJson(launchRecordPath(paths, record.task_id), LaunchRecord.parse(record));
 
 export const readCompletion = (
   paths: HarnessPaths,
