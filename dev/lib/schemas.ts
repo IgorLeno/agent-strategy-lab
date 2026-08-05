@@ -85,6 +85,43 @@ export const PlanTask = z
   .strict();
 export type PlanTask = z.infer<typeof PlanTask>;
 
+/**
+ * O plano precisa ser um DAG. Um ciclo não gera erro em lugar nenhum: o
+ * seletor simplesmente nunca encontra tarefa elegível e o harness fica
+ * `BLOCKED` para sempre, sem dizer por quê. Melhor recusar no carregamento.
+ *
+ * DFS com marcação em progresso; devolve o caminho do primeiro ciclo achado,
+ * que é o que torna a mensagem acionável.
+ */
+function findDependencyCycle(tasks: readonly PlanTask[]): string[] | null {
+  const byId = new Map(tasks.map((task) => [task.id, task]));
+  const settled = new Set<string>();
+  const inProgress: string[] = [];
+
+  function visit(id: string): string[] | null {
+    const position = inProgress.indexOf(id);
+    if (position >= 0) return [...inProgress.slice(position), id];
+    if (settled.has(id)) return null;
+
+    inProgress.push(id);
+    for (const dependency of byId.get(id)?.blocked_by ?? []) {
+      // Dependência inexistente já vira issue própria; aqui só não se navega.
+      if (!byId.has(dependency)) continue;
+      const cycle = visit(dependency);
+      if (cycle) return cycle;
+    }
+    inProgress.pop();
+    settled.add(id);
+    return null;
+  }
+
+  for (const task of tasks) {
+    const cycle = visit(task.id);
+    if (cycle) return cycle;
+  }
+  return null;
+}
+
 export const PlanFile = z
   .object({
     schema_version: z.literal(DEV_SCHEMA_VERSION),
@@ -114,6 +151,13 @@ export const PlanFile = z
           });
         }
       }
+    }
+    const cycle = findDependencyCycle(plan.tasks);
+    if (cycle) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `ciclo de dependências no plano: ${cycle.join(' -> ')}`,
+      });
     }
   });
 export type PlanFile = z.infer<typeof PlanFile>;

@@ -1,10 +1,11 @@
 #!/usr/bin/env tsx
 import { closeTask } from '../lib/close.js';
-import { emit, parseArgs, runMain } from '../lib/cli.js';
+import { emit, fail, parseArgs, runMain } from '../lib/cli.js';
 import { withHarnessLock } from '../lib/lock.js';
 import { resolveHarnessPaths } from '../lib/paths.js';
 import { loadPlan } from '../lib/plan.js';
-import { ensureRuntimeDirs } from '../lib/state.js';
+import { selectNextTask } from '../lib/select.js';
+import { ensureRuntimeDirs, readState } from '../lib/state.js';
 import { launchTask, prepareNextTask } from '../lib/steps.js';
 
 const DEFAULT_PROFILE = 'claude-build-worker-v1';
@@ -21,7 +22,8 @@ interface Iteration {
  * close -> PASS? continua : para. O worker nunca executa este loop; ele encerra
  * e o orquestrador decide o que vem depois.
  *
- * Exit codes: 0 fluxo terminou sem pendência | 9 fluxo parado.
+ * Exit codes: 0 fluxo terminou sem pendência | 9 fluxo parado (inclui
+ * LIMIT_REACHED) | 10 harness ocupado.
  */
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
@@ -32,12 +34,17 @@ async function main(): Promise<void> {
   const profileId = args.options.get('profile') ?? DEFAULT_PROFILE;
   const timeoutOverride = args.options.get('timeout-seconds');
   const maxIterations = Number(args.options.get('max-iterations') ?? '100');
+  if (!Number.isInteger(maxIterations) || maxIterations < 1) {
+    fail(`--max-iterations precisa ser inteiro positivo: ${args.options.get('max-iterations')}`);
+  }
 
   const iterations: Iteration[] = [];
   let stop = { status: 'ALL_DONE', reason: 'nenhuma tarefa pendente' };
 
   // O lock cobre o loop INTEIRO: um segundo orquestrador não pode selecionar
   // nem lançar nada enquanto este ciclo estiver em andamento.
+  let exhausted = false;
+
   await withHarnessLock(paths, 'dev-orchestrate', async () => {
     for (let index = 0; index < maxIterations; index += 1) {
       const { selection, packet } = await prepareNextTask(paths, loaded);
@@ -75,6 +82,20 @@ async function main(): Promise<void> {
         break;
       }
       stop = { status: 'ALL_DONE', reason: 'nenhuma tarefa pendente' };
+      exhausted = index === maxIterations - 1;
+    }
+
+    // Sair do `for` por esgotar o limite NÃO é fluxo concluído. Sem esta
+    // checagem, `--max-iterations 1` com duas tarefas pendentes reportava
+    // ALL_DONE e exit 0, escondendo trabalho que ninguém fez.
+    if (exhausted) {
+      const selection = selectNextTask(loaded, await readState(paths));
+      if (selection.status !== 'ALL_DONE') {
+        stop = {
+          status: 'LIMIT_REACHED',
+          reason: `limite de ${maxIterations} iteração(ões) atingido; ${selection.reason}`,
+        };
+      }
     }
   });
 

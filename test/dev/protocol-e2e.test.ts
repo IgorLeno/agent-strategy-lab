@@ -122,6 +122,37 @@ describe('protocolo de sessões descartáveis — duas tarefas em sequência', (
   }, 60_000);
 });
 
+describe('protocolo — limite de iterações', () => {
+  it('para em LIMIT_REACHED com exit 9 quando ainda há tarefa pendente', async () => {
+    const result = await orchestrate('success', ['--max-iterations', '1']);
+
+    // Sucesso com trabalho não feito seria a pior saída possível: exit 0 e
+    // ALL_DONE esconderiam a T2 intocada.
+    expect(result.exitCode).toBe(9);
+    const summary = JSON.parse(result.stdout) as {
+      stopped_by: string;
+      iterations: { task_id: string }[];
+    };
+    expect(summary.stopped_by).toBe('LIMIT_REACHED');
+    expect(summary.iterations.map((iteration) => iteration.task_id)).toEqual(['T1']);
+
+    const state = await readState(paths);
+    expect(state.tasks.map((task) => task.status)).toEqual(['PASS', 'READY']);
+  }, 60_000);
+
+  it('limite suficiente para o plano inteiro continua ALL_DONE com exit 0', async () => {
+    const result = await orchestrate('success', ['--max-iterations', '2']);
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect((JSON.parse(result.stdout) as { stopped_by: string }).stopped_by).toBe('ALL_DONE');
+  }, 60_000);
+
+  it('recusa --max-iterations inválido em vez de rodar zero iterações', async () => {
+    const result = await orchestrate('success', ['--max-iterations', 'abc']);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toMatch(/inteiro positivo/);
+  });
+});
+
 describe('protocolo — o fluxo para', () => {
   it('FAIL do worker interrompe antes da T2', async () => {
     const result = await orchestrate('failure');

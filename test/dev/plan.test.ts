@@ -69,6 +69,69 @@ tasks:
     );
   });
 
+  it('rejeita ciclo de dependências', () => {
+    const cyclic = `
+schema_version: 1
+tasks:
+  - id: T1
+    title: primeira
+    blocked_by: [T2]
+    objective: fazer algo
+    acceptance: [ok]
+    validation: [{ argv: [pnpm, test], timeout_seconds: 60 }]
+  - id: T2
+    title: segunda
+    blocked_by: [T1]
+    objective: fazer outra coisa
+    acceptance: [ok]
+    validation: [{ argv: [pnpm, test], timeout_seconds: 60 }]
+`;
+    // Sem essa validação o seletor ficaria BLOCKED para sempre, sem explicar.
+    expect(() => parsePlan(cyclic)).toThrow(/ciclo de dependências/);
+  });
+
+  it('rejeita ciclo indireto de três tarefas', () => {
+    const task = (id: string, dependency: string) => `
+  - id: ${id}
+    title: ${id}
+    blocked_by: [${dependency}]
+    objective: fazer algo
+    acceptance: [ok]
+    validation: [{ argv: [pnpm, test], timeout_seconds: 60 }]`;
+    const cyclic = `schema_version: 1\ntasks:${task('T1', 'T3')}${task('T2', 'T1')}${task('T3', 'T2')}\n`;
+    expect(() => parsePlan(cyclic)).toThrow(/ciclo de dependências/);
+  });
+
+  it('aceita losango: dependência compartilhada não é ciclo', () => {
+    const diamond = `schema_version: 1
+tasks:
+  - id: T1
+    title: base
+    objective: fazer algo
+    acceptance: [ok]
+    validation: [{ argv: [pnpm, test], timeout_seconds: 60 }]
+  - id: T2
+    title: esquerda
+    blocked_by: [T1]
+    objective: fazer algo
+    acceptance: [ok]
+    validation: [{ argv: [pnpm, test], timeout_seconds: 60 }]
+  - id: T3
+    title: direita
+    blocked_by: [T1]
+    objective: fazer algo
+    acceptance: [ok]
+    validation: [{ argv: [pnpm, test], timeout_seconds: 60 }]
+  - id: T4
+    title: junção
+    blocked_by: [T2, T3]
+    objective: fazer algo
+    acceptance: [ok]
+    validation: [{ argv: [pnpm, test], timeout_seconds: 60 }]
+`;
+    expect(parsePlan(diamond).plan.tasks).toHaveLength(4);
+  });
+
   it('rejeita id duplicado', () => {
     expect(() => parsePlan(`${minimal}${minimal.split('tasks:')[1]}`)).toThrow();
   });

@@ -68,6 +68,13 @@ dev-recover      reconcilia plano + commits + completions + runtime
 
 `FAIL`, `TIMED_OUT`, `MISSCOPED` e `INFRA_ERROR` **param o fluxo**.
 
+`dev-orchestrate` também para em `LIMIT_REACHED` (exit 9) quando esgota
+`--max-iterations` com tarefa ainda pendente — sair com 0 e `ALL_DONE` ali
+esconderia trabalho que ninguém fez.
+
+O plano precisa ser um DAG: ciclo de dependências é recusado no carregamento,
+porque um ciclo deixaria o seletor `BLOCKED` para sempre sem explicar por quê.
+
 ## Divisão de autoria
 
 | Quem | Produz |
