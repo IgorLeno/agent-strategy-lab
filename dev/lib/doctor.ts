@@ -1,8 +1,20 @@
 import { spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
+import {
+  UNVERIFIABLE_CREDENTIAL_MESSAGE,
+  apiCredentialNamesIn,
+  expectedSubscriptionSource,
+  probeCredentialSource,
+  type CommandRunner,
+} from './billing.js';
 import type { LoadedPlan } from './plan.js';
-import { assertNoForbiddenFlags, loadProfile, type LauncherProfile } from './profile.js';
+import {
+  assertNoForbiddenFlags,
+  buildEnvironment,
+  loadProfile,
+  type LauncherProfile,
+} from './profile.js';
 
 /**
  * Verificação PRÉ-EXECUÇÃO de um perfil, sem gastar um tostão.
@@ -24,6 +36,9 @@ export interface Check {
 export interface DoctorReport {
   readonly profile_id: string;
   readonly agent: string;
+  /** Cobrança e ambiente são dimensões separadas, e ambas ficam no relatório. */
+  readonly billing_mode: string;
+  readonly environment_mode: string;
   readonly ok: boolean;
   readonly checks: readonly Check[];
 }
@@ -32,9 +47,14 @@ function check(name: string, status: CheckStatus, detail: string): Check {
   return { name, status, detail };
 }
 
-function run(command: string, args: readonly string[]): Promise<{ code: number | null; out: string }> {
+/** Sempre com o ambiente RECEBIDO: o doctor diagnostica o ambiente que lhe deram. */
+function run(
+  command: string,
+  args: readonly string[],
+  env: NodeJS.ProcessEnv,
+): Promise<{ code: number | null; out: string }> {
   return new Promise((resolve) => {
-    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(command, args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
     child.stdout.on('data', (chunk: Buffer) => {
       out += chunk.toString('utf8');
@@ -65,18 +85,18 @@ export function helpInvocation(argv: readonly string[]): { command: string; args
   return { command, args: [...rest, '--help'] };
 }
 
-async function checkBinary(profile: LauncherProfile): Promise<Check> {
+async function checkBinary(profile: LauncherProfile, env: NodeJS.ProcessEnv): Promise<Check> {
   const binary = profile.argv[0] as string;
-  const found = await run('sh', ['-c', `command -v ${JSON.stringify(binary)}`]);
+  const found = await run('sh', ['-c', `command -v ${JSON.stringify(binary)}`], env);
   if (found.code !== 0 || found.out.trim() === '') {
     return check('binário', 'FAIL', `${binary} não está no PATH`);
   }
   return check('binário', 'PASS', found.out.trim());
 }
 
-async function checkFlags(profile: LauncherProfile): Promise<Check[]> {
+async function checkFlags(profile: LauncherProfile, env: NodeJS.ProcessEnv): Promise<Check[]> {
   const invocation = helpInvocation(profile.argv);
-  const help = await run(invocation.command, invocation.args);
+  const help = await run(invocation.command, invocation.args, env);
   if (help.code === null || help.out.trim() === '') {
     return [check('flags', 'SKIP', `${invocation.command} não respondeu a --help`)];
   }
@@ -219,23 +239,89 @@ async function checkValidationCoverage(
     : check('validações do plano', 'FAIL', `sem regra allow: ${uncovered.join('; ')}`);
 }
 
-function checkCredentials(profile: LauncherProfile, env: NodeJS.ProcessEnv): Check {
-  if (profile.agent === 'fake') return check('credencial', 'SKIP', 'worker falso não autentica');
-  const bare = profile.argv.includes('--bare');
-  const variable = profile.agent === 'codex' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY';
-  if (!bare) {
+function checkBillingMode(profile: LauncherProfile): Check {
+  if (profile.agent === 'fake') {
+    return check('modo de cobrança', 'SKIP', 'worker falso não fala com provider nenhum');
+  }
+  if (profile.billing_mode === 'subscription_only') {
     return check(
-      'credencial',
-      'WARN',
-      `perfil real-world: usa a sessão interativa da máquina, não ${variable}`,
+      'modo de cobrança',
+      'PASS',
+      `subscription_only · ambiente ${profile.environment_mode}`,
     );
   }
-  if (!profile.env_allowlist.includes(variable)) {
-    return check('credencial', 'FAIL', `--bare exige ${variable} na env_allowlist`);
+  return check(
+    'modo de cobrança',
+    'FAIL',
+    `billing_mode=${profile.billing_mode}: run pago por API exige autorização manual explícita`,
+  );
+}
+
+/**
+ * Uma variável de API não precisa estar definida hoje para ser perigosa: se ela
+ * está na allowlist, basta o usuário exportá-la no shell para o run inteiro
+ * mudar de fonte de cobrança sem ninguém perceber. Só NOMES são reportados.
+ */
+function checkApiVariables(profile: LauncherProfile, env: NodeJS.ProcessEnv): Check {
+  const declared = apiCredentialNamesIn([
+    ...profile.env_allowlist,
+    ...Object.keys(profile.env_extra),
+  ]);
+  if (declared.length > 0) {
+    return check(
+      'variáveis de API',
+      'FAIL',
+      `o perfil deixaria passar ao worker: ${declared.join(', ')}`,
+    );
   }
-  return env[variable]
-    ? check('credencial', 'PASS', `${variable} presente no ambiente`)
-    : check('credencial', 'FAIL', `--bare exige ${variable}, ausente no ambiente`);
+  const leaked = apiCredentialNamesIn(Object.keys(buildEnvironment(profile, env)));
+  if (leaked.length > 0) {
+    return check('variáveis de API', 'FAIL', `chegariam ao worker: ${leaked.join(', ')}`);
+  }
+  const inShell = apiCredentialNamesIn(Object.keys(env));
+  const detail =
+    inShell.length > 0
+      ? `nenhuma chega ao worker (${inShell.length} definida(s) no shell ficam de fora)`
+      : 'nenhuma no perfil nem no ambiente';
+  return check('variáveis de API', 'PASS', detail);
+}
+
+/**
+ * Prova POSITIVA da fonte da credencial, com comando local e não pago da CLI
+ * que o perfil vai lançar. Ausência de chave de API não é prova de assinatura:
+ * sem resposta reconhecível, o veredito é FAIL.
+ */
+async function checkCredentialSource(
+  profile: LauncherProfile,
+  env: NodeJS.ProcessEnv,
+  runner: CommandRunner | undefined,
+): Promise<Check> {
+  if (profile.agent === 'fake') {
+    return check('fonte da credencial', 'SKIP', 'worker falso não autentica');
+  }
+  const probe = await probeCredentialSource({
+    agent: profile.agent,
+    binary: profile.argv[0] as string,
+    env: buildEnvironment(profile, env),
+    ...(runner ? { runner } : {}),
+  });
+  const expected = expectedSubscriptionSource(profile.agent);
+
+  if (probe.source === 'api') {
+    return check(
+      'fonte da credencial',
+      'FAIL',
+      `autenticação efetiva é API (${probe.detail}) — a política exige assinatura`,
+    );
+  }
+  if (probe.source !== expected || !probe.verified) {
+    return check(
+      'fonte da credencial',
+      'FAIL',
+      `${UNVERIFIABLE_CREDENTIAL_MESSAGE} — ${probe.command}: ${probe.detail}`,
+    );
+  }
+  return check('fonte da credencial', 'PASS', `${probe.source} · ${probe.detail}`);
 }
 
 export interface DoctorInput {
@@ -243,25 +329,32 @@ export interface DoctorInput {
   readonly profileId: string;
   readonly loaded?: LoadedPlan | null;
   readonly env?: NodeJS.ProcessEnv;
+  /** Injetado pelos testes: prova a credencial sem chamar CLI de verdade. */
+  readonly credentialRunner?: CommandRunner;
 }
 
 export async function diagnose(input: DoctorInput): Promise<DoctorReport> {
   const profile = await loadProfile(input.repoRoot, input.profileId);
+  const env = input.env ?? process.env;
   const checks: Check[] = [
     check('perfil', 'PASS', `${profile.id} (${profile.agent}) carregado e válido`),
-    await checkBinary(profile),
-    ...(await checkFlags(profile)),
+    await checkBinary(profile, env),
+    ...(await checkFlags(profile, env)),
     checkForbidden(profile),
     checkModelPinned(profile),
     await checkPolicy(input.repoRoot, profile),
     checkPersonalSettings(profile),
     await checkValidationCoverage(input.repoRoot, profile, input.loaded ?? null),
-    checkCredentials(profile, input.env ?? process.env),
+    checkBillingMode(profile),
+    checkApiVariables(profile, env),
+    await checkCredentialSource(profile, env, input.credentialRunner),
   ];
 
   return {
     profile_id: profile.id,
     agent: profile.agent,
+    billing_mode: profile.billing_mode,
+    environment_mode: profile.environment_mode,
     ok: checks.every((entry) => entry.status !== 'FAIL'),
     checks,
   };

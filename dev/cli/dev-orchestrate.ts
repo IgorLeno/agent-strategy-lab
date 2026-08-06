@@ -1,20 +1,24 @@
 #!/usr/bin/env tsx
+import { ESTIMATED_COST_LABEL } from '../lib/billing.js';
 import { closeTask } from '../lib/close.js';
 import { emit, fail, parseArgs, runMain } from '../lib/cli.js';
+import { DEFAULT_WORKER_PROFILE_ID } from '../lib/defaults.js';
 import { withHarnessLock } from '../lib/lock.js';
 import { resolveHarnessPaths } from '../lib/paths.js';
 import { loadPlan } from '../lib/plan.js';
 import { selectNextTask } from '../lib/select.js';
 import { ensureRuntimeDirs, readState } from '../lib/state.js';
-import { launchTask, prepareNextTask } from '../lib/steps.js';
+import { launchTask, prepareNextTask, type LaunchStepResult } from '../lib/steps.js';
 
-const DEFAULT_PROFILE = 'claude-build-worker-v2';
+const DEFAULT_PROFILE = DEFAULT_WORKER_PROFILE_ID;
 
 interface Iteration {
   readonly task_id: string;
   readonly launch: string;
   readonly close: string | null;
   readonly reason: string;
+  /** Equivalência estimada em preço de API. NÃO é valor cobrado. */
+  readonly provider_estimated_api_equivalent_usd: number | null;
 }
 
 /**
@@ -25,6 +29,10 @@ interface Iteration {
  * Exit codes: 0 fluxo terminou sem pendência | 9 fluxo parado (inclui
  * LIMIT_REACHED) | 10 harness ocupado.
  */
+function estimateOf(launch: LaunchStepResult): number | null {
+  return launch.outcome?.record.billing?.provider_estimated_api_equivalent_usd ?? null;
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const paths = resolveHarnessPaths(args.options.get('repo') ?? process.cwd());
@@ -71,6 +79,7 @@ async function main(): Promise<void> {
           launch: launch.classification,
           close: null,
           reason: launch.reason,
+          provider_estimated_api_equivalent_usd: estimateOf(launch),
         });
         stop = { status: launch.classification, reason: launch.reason };
         break;
@@ -82,6 +91,7 @@ async function main(): Promise<void> {
         launch: launch.classification,
         close: close.kind,
         reason: close.reason,
+        provider_estimated_api_equivalent_usd: estimateOf(launch),
       });
       if (close.kind !== 'PASS') {
         stop = { status: close.kind, reason: close.reason };
@@ -106,7 +116,20 @@ async function main(): Promise<void> {
   });
 
   const halted = stop.status !== 'ALL_DONE';
-  emit({ stopped_by: stop.status, reason: stop.reason, iterations });
+  const estimates = iterations
+    .map((iteration) => iteration.provider_estimated_api_equivalent_usd)
+    .filter((value): value is number => value !== null);
+  emit({
+    stopped_by: stop.status,
+    reason: stop.reason,
+    iterations,
+    // Soma das equivalências que as CLIs estimaram; `null` quando nenhuma
+    // sessão reportou número. Continua não sendo cobrança.
+    total_provider_estimated_api_equivalent_usd: estimates.length
+      ? estimates.reduce((total, value) => total + value, 0)
+      : null,
+    billing_note: ESTIMATED_COST_LABEL,
+  });
   process.exit(halted ? 9 : 0);
 }
 

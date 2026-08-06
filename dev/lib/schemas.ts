@@ -254,6 +254,41 @@ export const SurvivorProcess = z
   .strict();
 export type SurvivorProcess = z.infer<typeof SurvivorProcess>;
 
+/**
+ * Cobrança do run. Os campos são separados de propósito: um único `cost_usd`
+ * misturaria "o que a CLI estimou em preço de API" com "o que foi cobrado", e
+ * são coisas diferentes. Com assinatura, o run consome a franquia incluída e
+ * NÃO gera cobrança adicional — a estimativa continua sendo emitida.
+ */
+export const BillingRecord = z
+  .object({
+    mode: z.enum(['subscription_only', 'api', 'not_applicable']),
+    credential_source: z.enum([
+      'claude_subscription_oauth',
+      'chatgpt_subscription',
+      'api',
+      'unknown',
+      'not_applicable',
+    ]),
+    included_allowance_consumed: z.boolean(),
+    /** Equivalência estimada por preço de API sobre tokens. NÃO é cobrança. */
+    provider_estimated_api_equivalent_usd: z.number().nullable(),
+    /** Só deixa de ser `null` com fonte de faturamento autoritativa. */
+    actual_incremental_charge_usd: z.number().nullable(),
+    authoritative_billing_verified: z.boolean(),
+  })
+  .strict()
+  .superRefine((billing, ctx) => {
+    if (billing.actual_incremental_charge_usd !== null && !billing.authoritative_billing_verified) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          'actual_incremental_charge_usd exige authoritative_billing_verified: estimativa da CLI não é cobrança',
+      });
+    }
+  });
+export type BillingRecord = z.infer<typeof BillingRecord>;
+
 export const LaunchRecord = z
   .object({
     schema_version: z.literal(DEV_SCHEMA_VERSION),
@@ -274,6 +309,8 @@ export const LaunchRecord = z
     timed_out: z.boolean(),
     /** O que o perfil conseguiu de fato controlar — não o que pretendia. */
     controlled: z.record(z.union([z.boolean(), z.string(), z.number()])),
+    /** `null` só em LaunchRecord gravado antes da política de cobrança. */
+    billing: BillingRecord.nullable().default(null),
   })
   .strict();
 export type LaunchRecord = z.infer<typeof LaunchRecord>;

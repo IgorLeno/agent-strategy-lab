@@ -1,0 +1,54 @@
+#!/usr/bin/env node
+// CLI Claude FALSA — existe para que os testes exercitem o caminho real de
+// spawn do doctor e do preflight sem gastar um tostão e sem depender da conta
+// da máquina. O cenário vem de AGENTLAB_FAKE_AUTH.
+//
+// Ela NUNCA roda um modelo: qualquer invocação que não seja `--help` ou
+// `auth status` sai com erro, para que um teste que "quase" fez um run pago
+// falhe de forma visível.
+const args = process.argv.slice(2);
+const scenario = process.env.AGENTLAB_FAKE_AUTH ?? 'subscription';
+
+const FLAGS = [
+  '--print',
+  '--output-format',
+  '--model',
+  '--settings',
+  '--setting-sources',
+  '--permission-mode',
+  '--strict-mcp-config',
+  '--no-session-persistence',
+  '--bare',
+];
+
+if (args.includes('--help') || args[0] === 'help') {
+  process.stdout.write(`fake claude 9.9.9\nOptions:\n${FLAGS.join('\n')}\n`);
+  process.exit(0);
+}
+
+if (args[0] === 'auth' && args[1] === 'status') {
+  const body = {
+    subscription: {
+      loggedIn: true,
+      authMethod: 'claude.ai',
+      apiProvider: 'firstParty',
+      email: 'nao-deve-vazar@example.invalid',
+      orgId: '00000000-0000-0000-0000-000000000000',
+      subscriptionType: 'pro',
+    },
+    api: { loggedIn: true, authMethod: 'apiKey', apiProvider: 'console' },
+    unknown: { loggedIn: true, authMethod: 'algo-novo', apiProvider: 'algo-novo' },
+    logged_out: { loggedIn: false },
+  }[scenario];
+
+  if (body === undefined) {
+    // Cenário `garbage`: resposta que não é JSON — a CLI mudou de formato.
+    process.stdout.write('Authentication status: unavailable\n');
+    process.exit(0);
+  }
+  process.stdout.write(`${JSON.stringify(body, null, 2)}\n`);
+  process.exit(0);
+}
+
+process.stderr.write('fake claude: run pago não é permitido em teste\n');
+process.exit(70);

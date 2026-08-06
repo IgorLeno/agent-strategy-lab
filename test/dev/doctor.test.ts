@@ -71,7 +71,8 @@ describe('dev-doctor', () => {
     const report = await diagnose({ repoRoot: sandbox.root, profileId: 'fake-worker-v1', loaded });
     expect(report.ok).toBe(true);
     expect(find(report.checks, 'modelo').status).toBe('SKIP');
-    expect(find(report.checks, 'credencial').status).toBe('SKIP');
+    expect(find(report.checks, 'fonte da credencial').status).toBe('SKIP');
+    expect(find(report.checks, 'modo de cobrança').status).toBe('SKIP');
   });
 
   it('flag que a CLI instalada não reconhece reprova antes de qualquer gasto', async () => {
@@ -100,6 +101,7 @@ describe('dev-doctor', () => {
       [
         'id: claude-sem-policy-v1',
         'agent: claude',
+        'billing_mode: subscription_only',
         "argv: [node, '--print']",
         'prompt_delivery: argv',
         'timeout_seconds: 30',
@@ -126,6 +128,7 @@ describe('dev-doctor', () => {
       [
         'id: claude-policy-curta-v1',
         'agent: claude',
+        'billing_mode: subscription_only',
         "argv: [node, '--print', '--settings', 'dev/profiles/curta.settings.json', '--model', 'x']",
         'prompt_delivery: argv',
         'timeout_seconds: 30',
@@ -148,12 +151,13 @@ describe('dev-doctor', () => {
     expect(find(report.checks, 'validações do plano').detail).toMatch(/sem regra allow: true/);
   });
 
-  it('--bare sem credencial reprova, porque OAuth não é lido nesse modo', async () => {
+  it('--bare é recusado em perfil de assinatura: a flag força auth por API', async () => {
     await writeProfile(
       'claude-bare-v1',
       [
         'id: claude-bare-v1',
         'agent: claude',
+        'billing_mode: subscription_only',
         "argv: [node, '--print', '--bare', '--settings', 'dev/profiles/curta.settings.json', '--model', 'x']",
         'prompt_delivery: argv',
         'timeout_seconds: 30',
@@ -167,14 +171,31 @@ describe('dev-doctor', () => {
       'utf8',
     );
 
-    const report = await diagnose({
-      repoRoot: sandbox.root,
-      profileId: 'claude-bare-v1',
-      loaded,
-      env: { PATH: process.env['PATH'] as string },
-    });
-    expect(find(report.checks, 'credencial').status).toBe('FAIL');
-    expect(find(report.checks, 'credencial').detail).toMatch(/ANTHROPIC_API_KEY/);
+    // Recusa no carregamento, não no relatório: perfil assim não deveria nem
+    // chegar a ser diagnosticado.
+    await expect(
+      diagnose({ repoRoot: sandbox.root, profileId: 'claude-bare-v1', loaded }),
+    ).rejects.toThrow(/força autenticação por API/);
+  });
+
+  it('perfil de assinatura com chave de API na allowlist é recusado no carregamento', async () => {
+    await writeProfile(
+      'claude-com-chave-v1',
+      [
+        'id: claude-com-chave-v1',
+        'agent: claude',
+        'billing_mode: subscription_only',
+        "argv: [node, '--print', '--model', 'x']",
+        'prompt_delivery: argv',
+        'timeout_seconds: 30',
+        'forbidden_flags: []',
+        'env_allowlist: [PATH, ANTHROPIC_API_KEY]',
+      ].join('\n'),
+    );
+
+    await expect(
+      diagnose({ repoRoot: sandbox.root, profileId: 'claude-com-chave-v1', loaded }),
+    ).rejects.toThrow(/ANTHROPIC_API_KEY/);
   });
 });
 
@@ -189,6 +210,7 @@ describe('dev-doctor CLI', () => {
       [
         'id: quebrado-v1',
         'agent: claude',
+        'billing_mode: subscription_only',
         "argv: [node, '--print']",
         'prompt_delivery: argv',
         'timeout_seconds: 30',

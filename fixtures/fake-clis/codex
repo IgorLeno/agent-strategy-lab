@@ -1,0 +1,27 @@
+#!/usr/bin/env node
+// CLI Codex FALSA — mesma função da `claude` falsa ao lado: exercitar o spawn
+// real do doctor e do preflight sem custo e sem depender da conta da máquina.
+// O cenário vem de AGENTLAB_FAKE_AUTH. Nunca roda um modelo.
+const args = process.argv.slice(2);
+const scenario = process.env.AGENTLAB_FAKE_AUTH ?? 'subscription';
+
+const FLAGS = ['--json', '--strict-config', '--model', '--with-api-key', '--with-access-token'];
+
+if (args.includes('--help') || args[0] === 'help') {
+  process.stdout.write(`fake codex-cli 9.9.9\nOptions:\n${FLAGS.join('\n')}\n`);
+  process.exit(0);
+}
+
+if (args[0] === 'login' && args[1] === 'status') {
+  const line = {
+    subscription: 'Logged in using ChatGPT',
+    api: 'Logged in using an API key',
+    unknown: 'Logged in using something the harness does not know',
+    logged_out: 'Not logged in',
+  }[scenario];
+  process.stdout.write(`${line ?? ''}\n`);
+  process.exit(0);
+}
+
+process.stderr.write('fake codex: run pago não é permitido em teste\n');
+process.exit(70);

@@ -88,11 +88,12 @@ describe('perfil do launcher', () => {
   });
 
   it('registra o que foi de fato controlado, não o que se pretendia', async () => {
-    const claude = await loadProfile(process.cwd(), 'claude-build-worker-v1');
+    const claude = await loadProfile(process.cwd(), 'claude-build-worker-subscription-v1');
     const controlled = deriveControlledFacts(claude, [...claude.argv], { PATH: '/usr/bin' });
 
-    // O perfil atual não usa --bare (decisão do usuário: sessão OAuth), então
-    // instruction files e plugins carregam. Isso fica REGISTRADO, não omitido.
+    // O perfil de assinatura NÃO PODE usar --bare (a flag força auth por
+    // ANTHROPIC_API_KEY), então instruction files e plugins carregam. Isso fica
+    // REGISTRADO, não omitido.
     expect(controlled['instruction_discovery']).toBe('não controlado');
     expect(controlled['plugins_and_hooks']).toBe('não controlado');
     // O que a flag garante de fato continua marcado como controlado.
@@ -101,6 +102,10 @@ describe('perfil do launcher', () => {
 
     const comBare = deriveControlledFacts(claude, [...claude.argv, '--bare'], {});
     expect(comBare['instruction_discovery']).toMatch(/--bare/);
+
+    // Cobrança e ambiente ficam registrados como dimensões separadas.
+    expect(controlled['billing_mode']).toBe('subscription_only');
+    expect(controlled['environment_mode']).toBe('real-world');
   });
 });
 

@@ -163,30 +163,57 @@ Estado atual dos perfis:
 
 - `fake-worker-v1` — worker falso, fala só a interface interna do harness.
   Nenhum custo, nenhuma rede. É o que os testes usam.
-- `claude-build-worker-v2` — **padrão**. Real-world, com política de
-  permissões versionada (`--settings dev/profiles/claude-build-worker.settings.json`),
-  modelo fixo (`--model`) e `--setting-sources project`, que exclui os
-  settings pessoais (`user`, `local`). Sem `--bare`: CLAUDE.md, hooks e
-  plugins do projeto ainda carregam.
-- `claude-build-worker-v1` — anterior, mantido como registro. Sem política
-  versionada nem modelo fixo: funcionava por causa das permissões pessoais da
-  máquina, e em `--print` não há ninguém para responder a um pedido de
-  permissão. `dev-doctor` reprova esse perfil.
-- `codex-build-worker-v1` — sem equivalente ao `--bare`; parcialmente não
+- `claude-build-worker-subscription-v1` — **padrão**. Pago pela assinatura
+  Claude Pro (login/OAuth), com política de permissões versionada
+  (`--settings dev/profiles/claude-build-worker.settings.json`), modelo fixo
+  (`--model`) e `--setting-sources project`, que exclui os settings pessoais
+  (`user`, `local`).
+- `codex-build-worker-subscription-v1` — pago pela assinatura ChatGPT Plus
+  ("Sign in with ChatGPT"). Sem equivalente ao `--bare`; parcialmente não
   controlado por natureza.
 
-Nunca compare resultados de perfis `controlled` com `real-world`.
+Os dois são `real-world`, e não por preguiça: `--bare` é a única flag que
+desliga instruction files, hooks, plugins e auto-memory, e ela força
+autenticação por `ANTHROPIC_API_KEY`. **Com assinatura não existe modo
+`controlled` para o Claude** — a flag é proibida nos perfis de assinatura.
+
+`claude-build-worker-v1`, `claude-build-worker-v2` e `codex-build-worker-v1`
+foram removidos: mantinham chave de API na `env_allowlist`, e bastava a
+variável existir no shell para o run trocar de fonte de cobrança sem ninguém
+perceber. O git guarda o histórico.
+
+## Cobrança: assinatura, nunca API
+
+Detalhes em [BILLING.md](BILLING.md). O resumo operacional:
+
+- perfil de agente real declara `billing_mode` (`subscription_only` | `api`) e
+  `environment_mode` (`real-world` | `controlled`) — cobrança e ambiente são
+  dimensões separadas;
+- perfil `subscription_only` é recusado no carregamento se tiver variável de
+  API na allowlist ou flag que troca a credencial (`--bare`, `--with-api-key`,
+  `--with-access-token`);
+- `dev-doctor` e o preflight de CADA lançamento provam a fonte da credencial
+  com comando local e gratuito (`claude auth status --json`,
+  `codex login status`). Ausência de chave não é prova de assinatura: sem
+  resposta reconhecível, `FAIL: credential source could not be verified`;
+- a recusa acontece antes do spawn e classifica `INFRA_ERROR` — nunca `FAIL`,
+  porque não é veredito sobre o worker;
+- o `total_cost_usd` que a CLI emite é **equivalência estimada em preço de
+  API**, gravada em `billing.provider_estimated_api_equivalent_usd`.
+  `actual_incremental_charge_usd` fica `null`: não há fonte de faturamento
+  autoritativa, e inferir `0` seria mentir na direção oposta.
+
 
 ## Comandos
 
 ```bash
-pnpm dev-doctor               # confere o perfil ANTES de gastar: flags, política, modelo
+pnpm dev-doctor               # confere ANTES de gastar: flags, política, modelo, credencial
 pnpm dev-init                 # cria .dev/ a partir de dev/plan.yaml
 pnpm dev-next                 # imprime o packet da próxima tarefa (não grava)
 pnpm dev-launch --task M01    # um processo novo para uma tarefa
 pnpm dev-close                # valida e fecha a tarefa RUNNING
 pnpm dev-recover --dry-run    # relata reconciliações sem gravar
-pnpm dev-orchestrate --profile claude-build-worker-v1
+pnpm dev-orchestrate --profile claude-build-worker-subscription-v1
 ```
 
 Exit codes: `dev-doctor` 3 = algum check FAIL · `dev-next` 4 = fluxo

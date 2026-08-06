@@ -1,7 +1,16 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import path from 'node:path';
+import {
+  assertNoApiCredentials,
+  buildBillingRecord,
+  extractUsageEstimate,
+  runBillingPreflight,
+  type CommandRunner,
+  type CredentialProbe,
+} from './billing.js';
 import { TIMEOUT_EXIT_CODE } from './exec.js';
 import type { HarnessPaths } from './paths.js';
 import { killSurvivors } from './process-audit.js';
@@ -35,6 +44,8 @@ export interface LaunchInput {
   readonly timeoutSecondsOverride?: number;
   /** Chamado assim que a identidade do processo é conhecida, antes da espera. */
   readonly onStarted?: (identity: ProcessIdentity) => Promise<void>;
+  /** Injetado pelos testes para provar a credencial sem chamar CLI de verdade. */
+  readonly credentialRunner?: CommandRunner;
 }
 
 export interface LaunchOutcome {
@@ -48,6 +59,17 @@ export class LaunchError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'LaunchError';
+  }
+}
+
+/**
+ * Recusa de PREFLIGHT: nada foi lançado, nenhum token foi gasto. Não é veredito
+ * sobre o worker — a tarefa não pode ir para FAIL por causa disto.
+ */
+export class BillingPreflightError extends LaunchError {
+  constructor(reason: string) {
+    super(`preflight de cobrança recusou o lançamento — ${reason}`);
+    this.name = 'BillingPreflightError';
   }
 }
 
@@ -69,6 +91,34 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
     reportPath: reportPath(paths, packet.task_id),
     handoffDraftPath: handoffDraftPath(paths, packet.task_id),
   };
+
+  // Tag única por lançamento: filhos herdam o environment, então ela permite
+  // reconhecer descendente que escapou do process group via setsid.
+  const launchId = randomUUID();
+  const env: NodeJS.ProcessEnv = {
+    ...buildEnvironment(profile),
+    AGENTLAB_LAUNCH_ID: launchId,
+    AGENTLAB_TASK_ID: packet.task_id,
+    AGENTLAB_REPO_ROOT: paths.repoRoot,
+    AGENTLAB_TASK_PACKET_PATH: io.packetPath,
+    AGENTLAB_REPORT_PATH: io.reportPath,
+    AGENTLAB_HANDOFF_DRAFT_PATH: io.handoffDraftPath,
+  };
+
+  // Guarda crítica de cobrança ANTES de qualquer efeito: nenhum processo nasce,
+  // nenhum arquivo do inbox é criado, nenhum token é gasto se a fonte da
+  // credencial não for a assinatura do usuário.
+  assertNoApiCredentials('ambiente do worker', env);
+  const preflight = await runBillingPreflight({
+    agent: profile.agent,
+    billingMode: profile.billing_mode,
+    binary: profile.argv[0] as string,
+    env,
+    orchestratorEnv: process.env,
+    ...(input.credentialRunner ? { runner: input.credentialRunner } : {}),
+  });
+  if (!preflight.ok) throw new BillingPreflightError(preflight.refusal ?? 'motivo não informado');
+
   const prompt = buildWorkerPrompt(packet, io);
   await ensureTaskInbox(paths, packet.task_id);
 
@@ -83,19 +133,6 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
     `${timeoutSeconds}s`,
     ...agentArgv,
   ];
-
-  // Tag única por lançamento: filhos herdam o environment, então ela permite
-  // reconhecer descendente que escapou do process group via setsid.
-  const launchId = randomUUID();
-  const env: NodeJS.ProcessEnv = {
-    ...buildEnvironment(profile),
-    AGENTLAB_LAUNCH_ID: launchId,
-    AGENTLAB_TASK_ID: packet.task_id,
-    AGENTLAB_REPO_ROOT: paths.repoRoot,
-    AGENTLAB_TASK_PACKET_PATH: io.packetPath,
-    AGENTLAB_REPORT_PATH: io.reportPath,
-    AGENTLAB_HANDOFF_DRAFT_PATH: io.handoffDraftPath,
-  };
 
   const stdoutLog = createWriteStream(path.join(paths.logsDir, `${packet.task_id}.stdout.log`));
   const stderrLog = createWriteStream(path.join(paths.logsDir, `${packet.task_id}.stderr.log`));
@@ -134,6 +171,7 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
     | 'timed_out'
     | 'survivors_killed'
     | 'survivors_remaining'
+    | 'billing'
   > = {
     schema_version: DEV_SCHEMA_VERSION,
     task_id: packet.task_id,
@@ -155,6 +193,7 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
     timed_out: false,
     survivors_killed: [],
     survivors_remaining: [],
+    billing: billingOf(profile, preflight.credential, ''),
   });
   await input.onStarted?.(identity);
 
@@ -187,6 +226,11 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
     timed_out: timedOut,
     survivors_killed: [...cleanup.killed],
     survivors_remaining: [...cleanup.remaining],
+    billing: billingOf(
+      profile,
+      preflight.credential,
+      await readLogTail(path.join(paths.logsDir, `${packet.task_id}.stdout.log`)),
+    ),
   };
   await writeLaunchRecord(paths, record);
 
@@ -216,6 +260,36 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
     };
   }
   return { record, classification: 'FINISHED', reason: `worker saiu com exit ${exitCode}` };
+}
+
+/**
+ * A estimativa de custo vem no stdout da própria CLI; só o fim do arquivo
+ * interessa (Claude emite um objeto JSON final, Codex um stream JSONL). Ler o
+ * arquivo inteiro seria caro num run longo e não acrescenta nada.
+ */
+const USAGE_TAIL_BYTES = 256 * 1024;
+
+async function readLogTail(file: string): Promise<string> {
+  try {
+    const content = await readFile(file, 'utf8');
+    return content.length > USAGE_TAIL_BYTES ? content.slice(-USAGE_TAIL_BYTES) : content;
+  } catch {
+    // Log ausente ou ilegível não invalida o lançamento: fica sem estimativa.
+    return '';
+  }
+}
+
+function billingOf(
+  profile: LauncherProfile,
+  credential: CredentialProbe,
+  stdout: string,
+): ReturnType<typeof buildBillingRecord> {
+  return buildBillingRecord({
+    mode: profile.billing_mode,
+    credentialSource: credential.source,
+    consumedAllowance: profile.billing_mode === 'subscription_only',
+    estimate: extractUsageEstimate(stdout),
+  });
 }
 
 /**

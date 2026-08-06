@@ -128,3 +128,37 @@ como falha intermitente de um teste vizinho na suíte paralela.
 Rule: matar só o que a tag única do lançamento confirma. Sinal fraco
 (coincidência de identificador reciclado) serve para DETECTAR e relatar,
 nunca para agir destrutivamente.
+
+[2026-08-06] Contexto: S16 — política de cobrança dos perfis de worker.
+Mistake: os perfis reais mantinham `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` na
+`env_allowlist` "por precaução". Isso não é neutro: bastava a variável existir
+no shell para o run inteiro trocar de fonte de cobrança — de assinatura para
+API — sem nenhum sinal no LaunchRecord. O doctor ainda tratava ausência de
+chave como se fosse prova de assinatura.
+Rule: fonte de credencial se PROVA com comando local e gratuito da CLI
+(`claude auth status --json`, `codex login status`), a cada lançamento e não só
+no doctor. Ausência de chave não prova nada; sem resposta reconhecível o run é
+bloqueado (`FAIL: credential source could not be verified`). Variável que a CLI
+reconhece para autenticar nunca entra em allowlist de perfil de assinatura, e
+só o NOME dela aparece em mensagem de erro.
+
+[2026-08-06] Contexto: S16 — registro de custo dos runs.
+Mistake: chamar de "custo" o `total_cost_usd` que a CLI emite. Ele é preço de
+API calculado sobre tokens; com assinatura o run consome a franquia incluída e
+não gera cobrança adicional nenhuma. Um campo único `cost_usd` misturava
+estimativa com valor cobrado, e os números do S15 (US$ 1,6238) já estavam sendo
+lidos como se tivessem sido pagos.
+Rule: separar `provider_estimated_api_equivalent_usd` (estimativa da CLI) de
+`actual_incremental_charge_usd` (só com fonte de faturamento autoritativa; na
+falta dela, `null`, nunca `0`). Relatório de terminal escreve "custo
+equivalente estimado", não "custo pago".
+
+[2026-08-06] Contexto: S16 — `--bare` e assinatura.
+Mistake: manter no plano a ideia de um perfil `controlled` para o Claude. A
+própria CLI documenta que `--bare` força auth por `ANTHROPIC_API_KEY` e nunca lê
+OAuth nem keychain — ou seja, modo controlado e assinatura são mutuamente
+exclusivos, e não é uma questão de configuração.
+Rule: enquanto a política for assinatura, `--bare` é flag proibida e todo perfil
+real é `real-world`. `billing_mode` e `environment_mode` são campos separados:
+um perfil `controlled` não seria "de graça", e um perfil de assinatura não vira
+controlado por vontade.

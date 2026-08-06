@@ -1,10 +1,11 @@
 #!/usr/bin/env tsx
 import { emit, parseArgs, runMain } from '../lib/cli.js';
+import { DEFAULT_WORKER_PROFILE_ID } from '../lib/defaults.js';
 import { diagnose } from '../lib/doctor.js';
 import { resolveHarnessPaths } from '../lib/paths.js';
 import { loadPlan } from '../lib/plan.js';
 
-const DEFAULT_PROFILE = 'claude-build-worker-v2';
+const DEFAULT_PROFILE = DEFAULT_WORKER_PROFILE_ID;
 
 /**
  * Confere um perfil ANTES de gastar dinheiro: binário no PATH, flags que a CLI

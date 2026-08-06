@@ -1,0 +1,58 @@
+# Perfil de worker Codex pago pela ASSINATURA ChatGPT do usuário.
+#
+# Substitui `codex-build-worker-v1`, que mantinha `OPENAI_API_KEY` na
+# env_allowlist. O login "Sign in with ChatGPT" e uma chave de API convivem no
+# mesmo `~/.codex/auth.json`: deixar a variável passar era um caminho silencioso
+# para cobrança por chave. A fonte efetiva é verificada com `codex login status`
+# (local e gratuito), que precisa reportar conta ChatGPT — resposta não
+# reconhecida BLOQUEIA o run.
+#
+# `codex exec` é o modo não interativo; o prompt vai por stdin (`-`). Codex não
+# tem equivalente ao `--bare` do Claude: o que dá para controlar é config
+# estrita e ausência de resume/fork. O LaunchRecord registra essa diferença em
+# vez de fingir paridade entre os dois agentes.
+id: codex-build-worker-subscription-v1
+agent: codex
+billing_mode: subscription_only
+environment_mode: real-world
+argv:
+  - codex
+  - exec
+  - --json
+  - --strict-config
+  - --model
+  - gpt-5.6-sol
+  - '-'
+prompt_delivery: stdin
+timeout_seconds: 1800
+forbidden_flags:
+  - resume
+  - fork
+  - --last
+  - --session-id
+  # Trocariam a assinatura por credencial de API — recusadas antes do spawn.
+  - --with-api-key
+  - --with-access-token
+env_allowlist:
+  - PATH
+  - HOME
+  - LANG
+  - LC_ALL
+  - TERM
+  - USER
+  - SHELL
+  - CODEX_HOME
+env_extra:
+  CI: '1'
+control_markers:
+  strict_config: --strict-config
+  event_stream: --json
+  model_pinned: --model
+notes:
+  - 'Cobrança: assinatura ChatGPT Plus (Sign in with ChatGPT). Nenhuma chave de API na allowlist.'
+  - 'Execução consome a franquia da assinatura: só rodar com autorização explícita do usuário.'
+  - 'Verificado contra codex-cli 0.146.0: `exec --json --strict-config --model` e `login status` existem nessa versão.'
+  - 'CODEX_HOME é diretório de configuração, não credencial — por isso continua na allowlist.'
+  - 'Sem equivalente a --bare: instruction files e plugins do usuário podem carregar; ambiente real-world.'
+  - 'Erro de item no stream não é falha do run — separar erro fatal de erro de item.'
+  - 'O stream JSONL não traz estimativa de custo: provider_estimated_api_equivalent_usd fica null.'
