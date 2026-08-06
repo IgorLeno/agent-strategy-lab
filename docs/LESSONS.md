@@ -162,3 +162,12 @@ Rule: enquanto a política for assinatura, `--bare` é flag proibida e todo perf
 real é `real-world`. `billing_mode` e `environment_mode` são campos separados:
 um perfil `controlled` não seria "de graça", e um perfil de assinatura não vira
 controlado por vontade.
+
+[2026-08-06] Contexto: testes do harness executados dentro de um worker real.
+Mistake: o helper de subprocessos espalhava `process.env`, permitindo que um
+`dev-doctor --help` entregasse ao fake worker o packet, o repositório e os
+caminhos reais do worker pai; o fixture interpretou a introspecção como tarefa e
+criou commit.
+Rule: subprocesso de teste parte de allowlist operacional mínima e recebe
+`AGENTLAB_*` ou credencial somente por override explícito do cenário. Fixtures
+que alteram Git tratam `--help`/`-h` antes de ler ambiente ou produzir efeitos.

@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { copyFile, mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { API_CREDENTIAL_VARIABLES } from '../../dev/lib/billing.js';
 
 export const REPO_ROOT = path.resolve(import.meta.dirname, '../..');
 
@@ -9,6 +10,37 @@ export interface CliResult {
   readonly exitCode: number | null;
   readonly stdout: string;
   readonly stderr: string;
+}
+
+const TEST_PROCESS_PARENT_ALLOWLIST = [
+  'PATH',
+  'HOME',
+  'LANG',
+  'LC_ALL',
+  'TERM',
+  'USER',
+  'SHELL',
+  'CI',
+] as const;
+
+const API_CREDENTIAL_VARIABLE_SET = new Set(API_CREDENTIAL_VARIABLES);
+
+/**
+ * Ambiente mínimo e previsível para subprocessos da suíte. Variáveis do
+ * protocolo e credenciais nunca atravessam a fronteira por herança; cenários
+ * específicos ainda podem injetar valores falsos pelos overrides.
+ */
+export function buildTestProcessEnvironment(
+  overrides: Readonly<Record<string, string>> = {},
+  source: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const inherited: NodeJS.ProcessEnv = {};
+  for (const name of TEST_PROCESS_PARENT_ALLOWLIST) {
+    if (name.startsWith('AGENTLAB_') || API_CREDENTIAL_VARIABLE_SET.has(name)) continue;
+    const value = source[name];
+    if (value !== undefined) inherited[name] = value;
+  }
+  return { ...inherited, ...overrides };
 }
 
 /**
@@ -19,12 +51,17 @@ export function runDevCli(
   script: string,
   args: readonly string[],
   env: Record<string, string> = {},
+  sourceEnvironment: NodeJS.ProcessEnv = process.env,
 ): Promise<CliResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(
       process.execPath,
       [path.join(REPO_ROOT, 'node_modules', 'tsx', 'dist', 'cli.mjs'), path.join(REPO_ROOT, 'dev', 'cli', script), ...args],
-      { cwd: REPO_ROOT, env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] },
+      {
+        cwd: REPO_ROOT,
+        env: buildTestProcessEnvironment(env, sourceEnvironment),
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
     );
     let stdout = '';
     let stderr = '';

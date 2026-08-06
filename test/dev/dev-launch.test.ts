@@ -171,15 +171,19 @@ describe('launchWorker', () => {
       baseSha: await headSha(paths.repoRoot),
       previousHandoff: null,
     });
-    process.env['AGENTLAB_FAKE_MODE'] = 'timeout';
-    try {
-      const outcome = await launchWorker({ paths, profile, packet, timeoutSecondsOverride: 1 });
-      expect(outcome.classification).toBe('TIMED_OUT');
-      expect(outcome.record.timed_out).toBe(true);
-      expect(await isSameProcessAlive(outcome.record.process)).toBe(false);
-    } finally {
-      delete process.env['AGENTLAB_FAKE_MODE'];
-    }
+    const timeoutProfile = {
+      ...profile,
+      env_extra: { ...profile.env_extra, AGENTLAB_FAKE_MODE: 'timeout' },
+    };
+    const outcome = await launchWorker({
+      paths,
+      profile: timeoutProfile,
+      packet,
+      timeoutSecondsOverride: 1,
+    });
+    expect(outcome.classification).toBe('TIMED_OUT');
+    expect(outcome.record.timed_out).toBe(true);
+    expect(await isSameProcessAlive(outcome.record.process)).toBe(false);
   }, 30_000);
 });
 

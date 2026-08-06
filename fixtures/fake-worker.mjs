@@ -16,6 +16,11 @@ import { execFileSync, spawn } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
+if (process.argv.slice(2).some((argument) => argument === '--help' || argument === '-h')) {
+  console.log('fake-worker: uso interno do harness (packet -> commit -> report + handoff)');
+  process.exit(0);
+}
+
 const mode = process.env.AGENTLAB_FAKE_MODE ?? 'success';
 const repoRoot = process.env.AGENTLAB_REPO_ROOT;
 const packetPath = process.env.AGENTLAB_TASK_PACKET_PATH;

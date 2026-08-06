@@ -33,7 +33,6 @@ let loaded: LoadedPlan;
 
 beforeEach(async () => {
   sandbox = await makeSandboxRepo();
-  process.env['AGENTLAB_DEV_DIR'] = sandbox.devDir;
   paths = resolveHarnessPaths(sandbox.root);
   loaded = await loadPlan(paths.planFile);
   await ensureRuntimeDirs(paths);
@@ -41,7 +40,6 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  delete process.env['AGENTLAB_DEV_DIR'];
   await rm(sandbox.root, { recursive: true, force: true });
 });
 
