@@ -21,13 +21,18 @@ export function buildWorkerPrompt(packet: TaskPacket, io: PromptIo): string {
 Regras:
 1. Execute SOMENTE a tarefa deste packet. Nada além do escopo.
 2. Repositório: ${io.repoRoot}. Trabalhe a partir do base SHA do packet.
-3. Não altere o runtime do orquestrador nem dev/plan.yaml. Fora do repositório,
-   escreva SOMENTE nos dois caminhos de inbox indicados na regra 6.
-4. Ao terminar, crie EXATAMENTE UM commit local com todo o trabalho. Sem push.
-5. Rode as validações do packet você mesmo antes de commitar. Um comando por
+3. Comece pelo packet e pelos initial_files. Não carregue skills nem subagentes
+   salvo pedido explícito do packet. Use rg e intervalos direcionados; não leia
+   LESSONS.md ou ARCHITECTURE.md inteiros sem necessidade.
+4. Em tarefa localizada, busque a primeira edição após no máximo 8 operações
+   exploratórias. Não faça revisão geral do repositório para uma tarefa objetiva.
+5. Não altere o runtime do orquestrador nem dev/plan.yaml. Fora do repositório,
+   escreva SOMENTE nos dois caminhos de inbox indicados na regra 8.
+6. Ao terminar, crie EXATAMENTE UM commit local com todo o trabalho. Sem push.
+7. Rode as validações do packet você mesmo antes de commitar. Um comando por
    chamada: comando composto (;, &&, |, redirecionamento) é negado pela
    política de permissões.
-6. Escreva os DOIS arquivos JSON abaixo. O schema é ESTRITO — nenhum campo a
+8. Escreva os DOIS arquivos JSON abaixo. O schema é ESTRITO — nenhum campo a
    mais, nenhum a menos, exatamente estes nomes. Campo inventado invalida o
    arquivo inteiro e o fechamento fica pendente.
 
@@ -46,7 +51,7 @@ ${io.handoffDraftPath} (máx. 4 KiB)
  "decisions":[<≤5>],"lessons":[<≤3>],"next_relevant_files":[<≤5>]}
 
    Você NÃO decide se o commit foi aceito: não escreva accepted_commit.
-7. Encerre a sessão. Não inicie a próxima tarefa.
+9. Encerre a sessão. Não inicie a próxima tarefa.
 
 Packet (também em ${io.packetPath}):
 `;

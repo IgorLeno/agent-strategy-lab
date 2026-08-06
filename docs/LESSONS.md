@@ -186,3 +186,19 @@ ocorrência duplicada e malformada da mesma opção.
 Rule: validação fail-closed contabiliza também ocorrências malformadas e exige
 exatamente uma ocorrência válida; entrada inválida nunca é descartada antes da
 decisão de unicidade.
+
+[2026-08-06] Contexto: abandono de tentativa bloqueada enquanto uma correção do
+harness precisava virar commit de manutenção.
+Mistake: exigir sempre `HEAD == base_sha` tornava o retry impossível depois que
+a própria correção necessária fosse commitada.
+Rule: retry com manutenção pendente é modo explícito e aceita somente um commit
+filho direto da base ainda autorizada, com allowlist de arquivos; não avança a
+base, e a guarda continua bloqueando workers até a adoção separada.
+
+[2026-08-06] Contexto: HOME sanitizado para impedir descoberta de contexto
+pessoal num worker que precisa criar commit.
+Mistake: remover o HOME pessoal também remove a identidade de `~/.gitconfig`,
+fazendo o worker falhar tarde no commit.
+Rule: HOME sanitizado nunca copia gitconfig; perfis de build fornecem identidade
+determinística por `GIT_AUTHOR_*`/`GIT_COMMITTER_*`, e o doctor prova autor e
+committer no ambiente exato do worker antes do run.

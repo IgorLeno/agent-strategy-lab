@@ -20,7 +20,12 @@ async function main(): Promise<void> {
   const profileId = args.options.get('profile') ?? args.positionals[0] ?? DEFAULT_PROFILE;
   const loaded = await loadPlan(paths.planFile).catch(() => null);
 
-  const report = await diagnose({ repoRoot: paths.repoRoot, profileId, loaded });
+  const report = await diagnose({
+    repoRoot: paths.repoRoot,
+    runtimeDir: paths.devDir,
+    profileId,
+    loaded,
+  });
   emit(report);
   process.exit(report.ok ? 0 : 3);
 }

@@ -96,7 +96,9 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
   // reconhecer descendente que escapou do process group via setsid.
   const launchId = randomUUID();
   const env: NodeJS.ProcessEnv = {
-    ...buildEnvironment(profile),
+    ...buildEnvironment(profile, process.env, {
+      sanitizedHome: path.join(paths.devDir, 'homes', profile.id),
+    }),
     AGENTLAB_LAUNCH_ID: launchId,
     AGENTLAB_TASK_ID: packet.task_id,
     AGENTLAB_REPO_ROOT: paths.repoRoot,

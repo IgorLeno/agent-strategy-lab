@@ -4,6 +4,7 @@ import { writeJsonAtomic } from './atomic.js';
 import type { HarnessPaths } from './paths.js';
 import {
   AgentCompletionReport,
+  AttemptAbandonmentRecord,
   CloseManifest,
   CompletionRecord,
   LaunchRecord,
@@ -57,6 +58,14 @@ export function closeManifestPath(paths: HarnessPaths, taskId: string): string {
 
 export function maintenanceRecordPath(paths: HarnessPaths, adoptedHeadSha: string): string {
   return path.join(paths.maintenanceDir, `${adoptedHeadSha}.json`);
+}
+
+export function attemptAbandonmentPath(
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+): string {
+  return path.join(paths.attemptsDir, taskId, `${attempt}-abandoned.json`);
 }
 
 async function readJson(file: string): Promise<unknown> {
@@ -146,3 +155,21 @@ export const writeMaintenanceRecord = (
   record: MaintenanceRecord,
 ): Promise<void> =>
   writeJson(maintenanceRecordPath(paths, record.adopted_head_sha), MaintenanceRecord.parse(record));
+
+export const readAttemptAbandonment = (
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+): Promise<AttemptAbandonmentRecord | null> =>
+  readOptional(attemptAbandonmentPath(paths, taskId, attempt), (input) =>
+    AttemptAbandonmentRecord.parse(input),
+  );
+
+export const writeAttemptAbandonment = (
+  paths: HarnessPaths,
+  record: AttemptAbandonmentRecord,
+): Promise<void> =>
+  writeJson(
+    attemptAbandonmentPath(paths, record.task_id, record.attempt),
+    AttemptAbandonmentRecord.parse(record),
+  );

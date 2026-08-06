@@ -103,6 +103,7 @@ export async function ensureRuntimeDirs(paths: HarnessPaths): Promise<void> {
     paths.handoffsDir,
     paths.logsDir,
     paths.maintenanceDir,
+    paths.attemptsDir,
   ]) {
     await mkdir(dir, { recursive: true });
   }

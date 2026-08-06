@@ -1,0 +1,204 @@
+import { access } from 'node:fs/promises';
+import { canonicalJson } from './canonical.js';
+import {
+  changedFiles,
+  gitOrThrow,
+  headSha,
+  isWorkingTreeClean,
+  parentShas,
+} from './git.js';
+import { assertAllowedMaintenanceFiles } from './maintenance.js';
+import type { HarnessPaths } from './paths.js';
+import { isSameProcessAlive } from './process-identity.js';
+import {
+  handoffDraftPath,
+  readAttemptAbandonment,
+  readLaunchRecord,
+  reportPath,
+  writeAttemptAbandonment,
+} from './records.js';
+import {
+  AttemptAbandonmentRecord,
+  DEV_SCHEMA_VERSION,
+  type DevelopmentState,
+  type LaunchRecord,
+} from './schemas.js';
+import { getTaskState, readState, withTaskState, writeState } from './state.js';
+
+export class RetryError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RetryError';
+  }
+}
+
+export interface RetryInput {
+  readonly paths: HarnessPaths;
+  readonly taskId: string;
+  readonly reason: string;
+  readonly allowPendingMaintenance?: boolean;
+  readonly now?: () => string;
+  /** Teste da fronteira transacional: record existe, state ainda não mudou. */
+  readonly afterRecordWritten?: () => Promise<void>;
+}
+
+export interface RetryResult {
+  readonly record: AttemptAbandonmentRecord;
+  readonly state: DevelopmentState;
+  readonly alreadyRetried: boolean;
+}
+
+async function exists(file: string): Promise<boolean> {
+  try {
+    await access(file);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+function classifyLaunch(launch: LaunchRecord): AttemptAbandonmentRecord['launch_classification'] {
+  if (launch.timed_out) return 'TIMED_OUT';
+  if (
+    launch.exit_code === null ||
+    [125, 126, 127].includes(launch.exit_code) ||
+    launch.survivors_remaining.length > 0
+  ) {
+    return 'INFRA_ERROR';
+  }
+  return 'FINISHED';
+}
+
+async function assertHead(
+  input: RetryInput,
+  state: DevelopmentState,
+  baseSha: string,
+): Promise<string> {
+  const head = await headSha(input.paths.repoRoot);
+  if (!(await isWorkingTreeClean(input.paths.repoRoot))) {
+    throw new RetryError('working tree suja; retry recusado');
+  }
+
+  if (!input.allowPendingMaintenance) {
+    if (head !== baseSha) throw new RetryError(`HEAD ${head} diverge do base_sha ${baseSha}`);
+    const count = Number(
+      (await gitOrThrow(input.paths.repoRoot, ['rev-list', '--count', `${baseSha}..HEAD`])).trim(),
+    );
+    if (count !== 0) throw new RetryError('existe commit sobre o base_sha');
+    return head;
+  }
+
+  if (state.authorized_head_sha !== baseSha) {
+    throw new RetryError('base_sha da tentativa diverge de authorized_head_sha');
+  }
+  const count = Number(
+    (await gitOrThrow(input.paths.repoRoot, ['rev-list', '--count', `${baseSha}..HEAD`])).trim(),
+  );
+  if (count !== 1) {
+    throw new RetryError(`--allow-pending-maintenance exige exatamente um commit; encontrados ${count}`);
+  }
+  const parents = await parentShas(input.paths.repoRoot, head);
+  if (parents.length !== 1 || parents[0] !== baseSha) {
+    throw new RetryError('commit de manutenção não é filho direto do base_sha e authorized_head_sha');
+  }
+  try {
+    assertAllowedMaintenanceFiles(await changedFiles(input.paths.repoRoot, head));
+  } catch (error) {
+    throw new RetryError(error instanceof Error ? error.message : String(error));
+  }
+  return head;
+}
+
+function sameRecord(
+  existing: AttemptAbandonmentRecord,
+  expected: AttemptAbandonmentRecord,
+): boolean {
+  return canonicalJson(existing) === canonicalJson(expected);
+}
+
+export async function retryAbandonedAttempt(input: RetryInput): Promise<RetryResult> {
+  const reason = input.reason.trim();
+  if (reason === '') throw new RetryError('--reason é obrigatório');
+
+  let state = await readState(input.paths);
+  const task = getTaskState(state, input.taskId);
+  const existing = await readAttemptAbandonment(input.paths, input.taskId, task.attempts);
+
+  if (task.status === 'READY') {
+    if (!existing || existing.reason !== reason) {
+      throw new RetryError('tarefa READY sem AttemptAbandonmentRecord correspondente');
+    }
+    return { record: existing, state, alreadyRetried: true };
+  }
+  if (task.status !== 'RUNNING' || task.phase !== 'FINALIZING') {
+    throw new RetryError('retry exige tarefa RUNNING/FINALIZING');
+  }
+  if (task.attempts < 1) throw new RetryError('tentativa RUNNING sem número de attempt');
+  if (!task.process) throw new RetryError('processo registrado ausente');
+  if (await isSameProcessAlive(task.process)) throw new RetryError('processo registrado ainda está vivo');
+  if (task.candidate_commit !== null) throw new RetryError('candidate_commit precisa ser null');
+  if (task.accepted_commit !== null) throw new RetryError('accepted_commit precisa ser null');
+  const otherRunning = state.tasks.find(
+    (candidate) => candidate.id !== input.taskId && candidate.status === 'RUNNING',
+  );
+  if (otherRunning) throw new RetryError(`outra tarefa RUNNING: ${otherRunning.id}`);
+
+  const launch = await readLaunchRecord(input.paths, input.taskId).catch(() => null);
+  if (!launch) throw new RetryError('LaunchRecord ausente ou inválido');
+  if (launch.finished_at === null) throw new RetryError('LaunchRecord ainda não foi finalizado');
+  if (canonicalJson(launch.process) !== canonicalJson(task.process)) {
+    throw new RetryError('processo do LaunchRecord diverge do state');
+  }
+
+  const reportPresent = await exists(reportPath(input.paths, input.taskId));
+  if (reportPresent) throw new RetryError('AgentCompletionReport presente; retry recusado');
+  const handoffPresent = await exists(handoffDraftPath(input.paths, input.taskId));
+  if (handoffPresent) throw new RetryError('HandoffDraft presente; retry recusado');
+  if (!task.base_sha) throw new RetryError('base_sha ausente na tentativa');
+
+  const head = await assertHead(input, state, task.base_sha);
+  const abandonedAt = existing?.abandoned_at ?? (input.now ?? (() => new Date().toISOString()))();
+  const record = AttemptAbandonmentRecord.parse({
+    schema_version: DEV_SCHEMA_VERSION,
+    task_id: input.taskId,
+    attempt: task.attempts,
+    base_sha: task.base_sha,
+    process: task.process,
+    launch_classification: classifyLaunch(launch),
+    exit_code: launch.exit_code,
+    started_at: launch.started_at,
+    finished_at: launch.finished_at,
+    reason,
+    previous_diagnostics: task.diagnostics,
+    candidate_commit: null,
+    working_tree_clean: true,
+    head_sha: head,
+    report_present: false,
+    handoff_present: false,
+    abandoned_at: abandonedAt,
+  });
+
+  if (existing) {
+    if (!sameRecord(existing, record)) {
+      throw new RetryError('AttemptAbandonmentRecord existente diverge da solicitação');
+    }
+  } else {
+    await writeAttemptAbandonment(input.paths, record);
+    await input.afterRecordWritten?.();
+  }
+
+  state = withTaskState(state, input.taskId, {
+    status: 'READY',
+    phase: null,
+    process: null,
+    candidate_commit: null,
+    accepted_commit: null,
+    diagnostics: `attempt ${task.attempts} abandonado: ${reason}`,
+    started_at: null,
+    finished_at: null,
+  });
+  await writeState(input.paths, state);
+  state = await readState(input.paths);
+  return { record, state, alreadyRetried: false };
+}

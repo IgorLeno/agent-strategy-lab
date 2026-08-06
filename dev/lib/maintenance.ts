@@ -80,8 +80,9 @@ export function assertLinearCommitChain(
   }
 }
 
-function isAllowedMaintenancePath(file: string): boolean {
+export function isAllowedMaintenancePath(file: string): boolean {
   if (file === 'dev/plan.yaml') return false;
+  if (/^docs\/S\d+-run-real\.md$/.test(file)) return false;
   if (
     file === 'package.json' ||
     file === 'pnpm-lock.yaml' ||
@@ -92,13 +93,17 @@ function isAllowedMaintenancePath(file: string): boolean {
   return ['test/', 'fixtures/', 'docs/', 'dev/'].some((prefix) => file.startsWith(prefix));
 }
 
+export function assertAllowedMaintenanceFiles(files: readonly string[]): void {
+  for (const file of files) {
+    if (!isAllowedMaintenancePath(file)) {
+      throw new MaintenanceError(`arquivo fora do escopo de manutenção: ${file}`);
+    }
+  }
+}
+
 function assertAllowedFiles(commits: readonly MaintenanceCommit[]): string[] {
   for (const commit of commits) {
-    for (const file of commit.changed_files) {
-      if (!isAllowedMaintenancePath(file)) {
-        throw new MaintenanceError(`arquivo fora do escopo de manutenção: ${file}`);
-      }
-    }
+    assertAllowedMaintenanceFiles(commit.changed_files);
   }
   return [...new Set(commits.flatMap((commit) => commit.changed_files))].sort();
 }
@@ -245,11 +250,23 @@ export async function adoptMaintenance(input: AdoptionInput): Promise<AdoptionRe
   const previous = state.authorized_head_sha;
   if (previous === null) throw new MaintenanceError('authorized_head_sha ausente');
   const adopted = await headSha(input.paths.repoRoot);
+  const existing = await readMaintenanceRecord(input.paths, adopted);
 
   if (adopted === previous) {
-    const existing = await readMaintenanceRecord(input.paths, adopted);
     if (!existing) throw new MaintenanceError('HEAD já autorizado; nenhuma manutenção a adotar');
     await verifyMaintenanceRecord(input.paths, existing);
+    return { record: existing, alreadyAdopted: true };
+  }
+
+  // Crash depois do record e antes do state: a evidência imutável vence. Não
+  // reexecutar validações nem reescrever timestamps/reason; apenas concluir a
+  // atualização que ficou pendente, depois de verificar o record contra Git.
+  if (existing) {
+    await verifyMaintenanceRecord(input.paths, existing);
+    if (existing.previous_authorized_head_sha !== previous) {
+      throw new MaintenanceError('MaintenanceRecord existente não começa no authorized_head_sha');
+    }
+    await writeState(input.paths, { ...state, authorized_head_sha: adopted });
     return { record: existing, alreadyAdopted: true };
   }
 

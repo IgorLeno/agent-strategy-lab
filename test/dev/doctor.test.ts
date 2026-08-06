@@ -55,6 +55,8 @@ async function writeProfile(id: string, body: string): Promise<void> {
 function fakeCodexEnv(): NodeJS.ProcessEnv {
   return {
     PATH: `${FAKE_CLI_DIR}:${process.env['PATH'] ?? ''}`,
+    HOME: '/home/test-user',
+    CODEX_HOME: '/home/test-user/.codex-real',
     OPENAI_API_KEY: FAKE_API_SECRET,
     CODEX_API_KEY: FAKE_API_SECRET,
   };
@@ -67,6 +69,10 @@ function codexProfile(id: string, reasoning?: string, ignoreUserConfig = true): 
     '  - --json',
     '  - --strict-config',
     ...(ignoreUserConfig ? ['  - --ignore-user-config'] : []),
+    '  - --sandbox',
+    '  - workspace-write',
+    '  - --ephemeral',
+    '  - --ignore-rules',
     '  - --model',
     '  - gpt-5.6-sol',
     ...(reasoning === undefined
@@ -79,12 +85,18 @@ function codexProfile(id: string, reasoning?: string, ignoreUserConfig = true): 
     'agent: codex',
     'billing_mode: subscription_only',
     'environment_mode: real-world',
+    'instruction_environment: sanitized_user_home',
     'argv:',
     ...argv,
     'prompt_delivery: stdin',
     'timeout_seconds: 1800',
     'forbidden_flags: [resume, fork, --last, --session-id]',
-    'env_allowlist: [PATH, HOME, CODEX_HOME]',
+    'env_allowlist: [PATH, CODEX_HOME]',
+    'env_extra:',
+    "  GIT_AUTHOR_NAME: 'Agent Strategy Lab Worker'",
+    "  GIT_AUTHOR_EMAIL: 'agent-strategy-lab@localhost'",
+    "  GIT_COMMITTER_NAME: 'Agent Strategy Lab Worker'",
+    "  GIT_COMMITTER_EMAIL: 'agent-strategy-lab@localhost'",
   ].join('\n');
 }
 
@@ -406,13 +418,179 @@ describe('perfil Codex Sol High por assinatura', () => {
       reasoning_effort: 'high',
       billing_mode: 'subscription_only',
       credential_source: 'chatgpt_subscription',
+      environment_mode: 'real-world',
+      instruction_environment: 'sanitized_user_home',
+      sandbox: 'workspace-write',
+      session_persistence: 'ephemeral',
+      user_config_ignored: true,
+      execpolicy_rules_ignored: true,
       ok: true,
     });
     expect(find(report.checks, 'flags').status).toBe('PASS');
     expect(find(report.checks, 'modelo').detail).toBe('gpt-5.6-sol');
     expect(find(report.checks, 'reasoning effort').detail).toMatch(/high/);
+    expect(find(report.checks, 'sandbox').status).toBe('PASS');
+    expect(find(report.checks, 'persistência da sessão').status).toBe('PASS');
+    expect(find(report.checks, 'HOME de instruções').status).toBe('PASS');
+    expect(find(report.checks, 'identidade Git').status).toBe('PASS');
     expect(find(report.checks, 'variáveis de API').status).toBe('PASS');
     expect(find(report.checks, 'binário').detail).toContain('fake-clis');
+  });
+
+  it('perfil build-worker Codex sem sandbox explícito falha no doctor', async () => {
+    const id = 'codex-build-worker-sem-sandbox-v1';
+    await writeProfile(
+      id,
+      codexProfile(id, 'high').replace('  - --sandbox\n  - workspace-write\n', ''),
+    );
+
+    const report = await diagnose({
+      repoRoot: sandbox.root,
+      profileId: id,
+      loaded,
+      env: fakeCodexEnv(),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.sandbox).toBe('unknown');
+    expect(find(report.checks, 'sandbox').status).toBe('FAIL');
+  });
+
+  it('sandbox read-only é recusado para build-worker Codex', async () => {
+    const id = 'codex-build-worker-read-only-v1';
+    await writeProfile(id, codexProfile(id, 'high').replace('workspace-write', 'read-only'));
+
+    const report = await diagnose({
+      repoRoot: sandbox.root,
+      profileId: id,
+      loaded,
+      env: fakeCodexEnv(),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.sandbox).toBe('read-only');
+    expect(find(report.checks, 'sandbox').detail).toMatch(/workspace-write/);
+  });
+
+  it('sandbox full access é recusado para build-worker Codex', async () => {
+    const id = 'codex-build-worker-full-access-v1';
+    await writeProfile(
+      id,
+      codexProfile(id, 'high').replace('workspace-write', 'danger-full-access'),
+    );
+
+    const report = await diagnose({
+      repoRoot: sandbox.root,
+      profileId: id,
+      loaded,
+      env: fakeCodexEnv(),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.sandbox).toBe('danger-full-access');
+    expect(find(report.checks, 'sandbox').status).toBe('FAIL');
+  });
+
+  it('--dangerously-bypass-approvals-and-sandbox é recusado no carregamento', async () => {
+    const id = 'codex-build-worker-bypass-v1';
+    await writeProfile(
+      id,
+      codexProfile(id, 'high').replace(
+        "  - '-'",
+        "  - --dangerously-bypass-approvals-and-sandbox\n  - '-'",
+      ),
+    );
+
+    await expect(loadProfile(sandbox.root, id)).rejects.toThrow(/dangerously-bypass/);
+  });
+
+  it('--ephemeral é obrigatório para build-worker Codex', async () => {
+    const id = 'codex-build-worker-persistente-v1';
+    await writeProfile(id, codexProfile(id, 'high').replace('  - --ephemeral\n', ''));
+
+    const report = await diagnose({
+      repoRoot: sandbox.root,
+      profileId: id,
+      loaded,
+      env: fakeCodexEnv(),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.session_persistence).toBe('persistent');
+    expect(find(report.checks, 'persistência da sessão').status).toBe('FAIL');
+  });
+
+  it('--ignore-rules é obrigatório no perfil lean', async () => {
+    const id = 'codex-build-worker-com-rules-v1';
+    await writeProfile(id, codexProfile(id, 'high').replace('  - --ignore-rules\n', ''));
+
+    const report = await diagnose({
+      repoRoot: sandbox.root,
+      profileId: id,
+      loaded,
+      env: fakeCodexEnv(),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.execpolicy_rules_ignored).toBe(false);
+    expect(find(report.checks, 'regras de execpolicy').status).toBe('FAIL');
+  });
+
+  it('HOME sanitizado não herda ~/.agents e CODEX_HOME preserva a autenticação', async () => {
+    const profile = await loadProfile(REPO_ROOT, 'codex-build-worker-subscription-high-v1');
+    const sanitizedHome = '/runtime/homes/codex-high';
+    const env = buildEnvironment(profile, fakeCodexEnv(), { sanitizedHome });
+
+    expect(env['HOME']).toBe(sanitizedHome);
+    expect(env['HOME']).not.toBe(fakeCodexEnv()['HOME']);
+    expect(env['CODEX_HOME']).toBe('/home/test-user/.codex-real');
+    expect(env['GIT_AUTHOR_NAME']).toBe('Agent Strategy Lab Worker');
+    expect(env['GIT_COMMITTER_EMAIL']).toBe('agent-strategy-lab@localhost');
+  });
+
+  it('CODEX_HOME efetivo deriva do HOME real sem copiar configuração', async () => {
+    const profile = await loadProfile(REPO_ROOT, 'codex-build-worker-subscription-high-v1');
+    const env = buildEnvironment(
+      profile,
+      { PATH: '/bin', HOME: '/home/real-user' },
+      { sanitizedHome: '/runtime/sanitized' },
+    );
+
+    expect(env['HOME']).toBe('/runtime/sanitized');
+    expect(env['CODEX_HOME']).toBe('/home/real-user/.codex');
+  });
+
+  it('doctor falha fechado quando não pode separar HOME e CODEX_HOME', async () => {
+    const report = await diagnose({
+      repoRoot: REPO_ROOT,
+      profileId: 'codex-build-worker-subscription-high-v1',
+      loaded,
+      env: { PATH: `${FAKE_CLI_DIR}:${process.env['PATH'] ?? ''}` },
+    });
+
+    expect(report.ok).toBe(false);
+    expect(find(report.checks, 'HOME de instruções').status).toBe('FAIL');
+    expect(find(report.checks, 'fonte da credencial').status).toBe('FAIL');
+  });
+
+  it('doctor bloqueia build-worker sem identidade Git determinística', async () => {
+    const id = 'codex-build-worker-sem-identidade-v1';
+    const withoutIdentity = codexProfile(id, 'high')
+      .split('\n')
+      .filter((line) => !line.includes('GIT_'))
+      .join('\n')
+      .replace(/env_extra:\s*$/, 'env_extra: {}');
+    await writeProfile(id, withoutIdentity);
+
+    const report = await diagnose({
+      repoRoot: sandbox.root,
+      profileId: id,
+      loaded,
+      env: fakeCodexEnv(),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(find(report.checks, 'identidade Git').status).toBe('FAIL');
   });
 
   it('reasoning ausente falha fechado no doctor', async () => {
@@ -498,7 +676,9 @@ describe('perfil Codex Sol High por assinatura', () => {
 
   it('OPENAI_API_KEY e CODEX_API_KEY não chegam ao ambiente do perfil High', async () => {
     const profile = await loadProfile(REPO_ROOT, 'codex-build-worker-subscription-high-v1');
-    const env = buildEnvironment(profile, fakeCodexEnv());
+    const env = buildEnvironment(profile, fakeCodexEnv(), {
+      sanitizedHome: '/runtime/homes/codex-high',
+    });
 
     expect(env).not.toHaveProperty('OPENAI_API_KEY');
     expect(env).not.toHaveProperty('CODEX_API_KEY');

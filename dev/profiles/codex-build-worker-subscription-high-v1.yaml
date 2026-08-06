@@ -10,12 +10,17 @@ id: codex-build-worker-subscription-high-v1
 agent: codex
 billing_mode: subscription_only
 environment_mode: real-world
+instruction_environment: sanitized_user_home
 argv:
   - codex
   - exec
   - --json
   - --strict-config
   - --ignore-user-config
+  - --sandbox
+  - workspace-write
+  - --ephemeral
+  - --ignore-rules
   - --model
   - gpt-5.6-sol
   - --config
@@ -32,7 +37,6 @@ forbidden_flags:
   - --with-access-token
 env_allowlist:
   - PATH
-  - HOME
   - LANG
   - LC_ALL
   - TERM
@@ -41,17 +45,23 @@ env_allowlist:
   - CODEX_HOME
 env_extra:
   CI: '1'
+  GIT_AUTHOR_NAME: 'Agent Strategy Lab Worker'
+  GIT_AUTHOR_EMAIL: 'agent-strategy-lab@localhost'
+  GIT_COMMITTER_NAME: 'Agent Strategy Lab Worker'
+  GIT_COMMITTER_EMAIL: 'agent-strategy-lab@localhost'
 control_markers:
   strict_config: --strict-config
   user_config_ignored: --ignore-user-config
   event_stream: --json
   model_pinned: --model
   reasoning_pinned: --config
+  session_persistence: --ephemeral
+  execpolicy_rules_ignored: --ignore-rules
 notes:
   - 'Modelo: gpt-5.6-sol; reasoning effort: high, ambos fixados no argv.'
   - 'Cobrança: assinatura ChatGPT Plus (Sign in with ChatGPT). Nenhuma chave de API na allowlist.'
   - 'Execução consome a franquia da assinatura: só rodar com autorização explícita do usuário.'
-  - 'Verificado contra codex-cli 0.146.1: exec reconhece --config, --ignore-user-config, --json, --strict-config e --model.'
-  - 'Sem equivalente a --bare: instruction files e plugins podem carregar; ambiente real-world.'
-  - 'CODEX_HOME é diretório de configuração/autenticação, não uma credencial de API.'
+  - 'Verificado contra codex exec --help: --config, --ignore-user-config, --sandbox, --ephemeral, --ignore-rules, --json, --strict-config e --model.'
+  - 'HOME é sanitizado; ~/.agents e skills pessoais ficam fora. --ignore-rules trata somente execpolicy .rules.'
+  - 'CODEX_HOME preserva autenticação sem copiar configuração ou secrets para o HOME sanitizado.'
   - 'O stream JSONL não traz estimativa de custo: provider_estimated_api_equivalent_usd fica null.'

@@ -43,6 +43,11 @@ export interface DoctorReport {
   readonly billing_mode: string;
   readonly credential_source: CredentialSource;
   readonly environment_mode: string;
+  readonly instruction_environment: string;
+  readonly sandbox: string;
+  readonly session_persistence: string;
+  readonly user_config_ignored: boolean;
+  readonly execpolicy_rules_ignored: boolean;
   readonly ok: boolean;
   readonly checks: readonly Check[];
 }
@@ -56,9 +61,10 @@ function run(
   command: string,
   args: readonly string[],
   env: NodeJS.ProcessEnv,
+  cwd?: string,
 ): Promise<{ code: number | null; out: string }> {
   return new Promise((resolve) => {
-    const child = spawn(command, args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(command, args, { env, cwd, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
     child.stdout.on('data', (chunk: Buffer) => {
       out += chunk.toString('utf8');
@@ -203,6 +209,100 @@ function optionValues(argv: readonly string[], flag: string): string[] {
     if (token.startsWith(`${flag}=`)) values.push(token.slice(flag.length + 1));
   }
   return values;
+}
+
+function uniqueOptionValue(argv: readonly string[], flag: string): string {
+  const values = optionValues(argv, flag);
+  return values.length === 1 ? (values[0] as string) : 'unknown';
+}
+
+function isCodexBuildWorker(profile: LauncherProfile): boolean {
+  return profile.agent === 'codex' && profile.id.includes('build-worker');
+}
+
+function checkSandbox(profile: LauncherProfile, sandbox: string): Check {
+  if (!isCodexBuildWorker(profile)) {
+    return check('sandbox', 'SKIP', `não se aplica ao perfil ${profile.id}`);
+  }
+  return sandbox === 'workspace-write'
+    ? check('sandbox', 'PASS', 'workspace-write explícito')
+    : check('sandbox', 'FAIL', `build-worker exige workspace-write; recebido ${sandbox}`);
+}
+
+function checkSessionPersistence(profile: LauncherProfile, persistence: string): Check {
+  if (!isCodexBuildWorker(profile)) {
+    return check('persistência da sessão', 'SKIP', `não se aplica ao perfil ${profile.id}`);
+  }
+  return persistence === 'ephemeral'
+    ? check('persistência da sessão', 'PASS', 'ephemeral por --ephemeral')
+    : check('persistência da sessão', 'FAIL', 'build-worker Codex exige --ephemeral');
+}
+
+function checkUserConfig(profile: LauncherProfile, ignored: boolean): Check {
+  if (!isCodexBuildWorker(profile)) {
+    return check('config do usuário', 'SKIP', `não se aplica ao perfil ${profile.id}`);
+  }
+  return ignored
+    ? check('config do usuário', 'PASS', 'ignorada por --ignore-user-config')
+    : check('config do usuário', 'FAIL', 'build-worker Codex exige --ignore-user-config');
+}
+
+function checkExecpolicyRules(profile: LauncherProfile, ignored: boolean): Check {
+  if (profile.instruction_environment !== 'sanitized_user_home') {
+    return check('regras de execpolicy', 'SKIP', 'perfil não declara HOME lean');
+  }
+  return ignored
+    ? check('regras de execpolicy', 'PASS', 'execpolicy .rules ignoradas por --ignore-rules')
+    : check('regras de execpolicy', 'FAIL', 'perfil lean exige --ignore-rules');
+}
+
+function checkInstructionHome(
+  profile: LauncherProfile,
+  workerEnv: NodeJS.ProcessEnv | null,
+  environmentError: string | null,
+  sanitizedHome: string,
+): Check {
+  if (profile.instruction_environment !== 'sanitized_user_home') {
+    return check('HOME de instruções', 'WARN', 'HOME real do usuário; ~/.agents pode ser descoberto');
+  }
+  if (!workerEnv) return check('HOME de instruções', 'FAIL', environmentError ?? 'ambiente inválido');
+  const home = workerEnv['HOME'];
+  const codexHome = workerEnv['CODEX_HOME'];
+  if (home !== sanitizedHome || !codexHome || codexHome === home) {
+    return check('HOME de instruções', 'FAIL', 'HOME sanitizado e CODEX_HOME não estão separados');
+  }
+  return check(
+    'HOME de instruções',
+    'PASS',
+    'sanitized_user_home; ~/.agents pessoal fora do HOME; CODEX_HOME preservado para auth',
+  );
+}
+
+const GIT_IDENTITY_VARIABLES = [
+  'GIT_AUTHOR_NAME',
+  'GIT_AUTHOR_EMAIL',
+  'GIT_COMMITTER_NAME',
+  'GIT_COMMITTER_EMAIL',
+] as const;
+
+async function checkGitIdentity(
+  repoRoot: string,
+  profile: LauncherProfile,
+  workerEnv: NodeJS.ProcessEnv | null,
+): Promise<Check> {
+  if (!isCodexBuildWorker(profile)) {
+    return check('identidade Git', 'SKIP', `não se aplica ao perfil ${profile.id}`);
+  }
+  if (!workerEnv) return check('identidade Git', 'FAIL', 'ambiente do worker inválido');
+  const missing = GIT_IDENTITY_VARIABLES.filter((name) => !workerEnv[name]);
+  if (missing.length > 0) {
+    return check('identidade Git', 'FAIL', `variáveis ausentes: ${missing.join(', ')}`);
+  }
+  const author = await run('git', ['var', 'GIT_AUTHOR_IDENT'], workerEnv, repoRoot);
+  const committer = await run('git', ['var', 'GIT_COMMITTER_IDENT'], workerEnv, repoRoot);
+  return author.code === 0 && committer.code === 0
+    ? check('identidade Git', 'PASS', 'autor e committer resolvidos no ambiente do worker')
+    : check('identidade Git', 'FAIL', 'git commit não resolveria autor e committer');
 }
 
 function modelOf(profile: LauncherProfile): string {
@@ -365,7 +465,11 @@ function checkBillingMode(profile: LauncherProfile): Check {
  * está na allowlist, basta o usuário exportá-la no shell para o run inteiro
  * mudar de fonte de cobrança sem ninguém perceber. Só NOMES são reportados.
  */
-function checkApiVariables(profile: LauncherProfile, env: NodeJS.ProcessEnv): Check {
+function checkApiVariables(
+  profile: LauncherProfile,
+  workerEnv: NodeJS.ProcessEnv,
+  env: NodeJS.ProcessEnv,
+): Check {
   const declared = apiCredentialNamesIn([
     ...profile.env_allowlist,
     ...Object.keys(profile.env_extra),
@@ -377,7 +481,7 @@ function checkApiVariables(profile: LauncherProfile, env: NodeJS.ProcessEnv): Ch
       `o perfil deixaria passar ao worker: ${declared.join(', ')}`,
     );
   }
-  const leaked = apiCredentialNamesIn(Object.keys(buildEnvironment(profile, env)));
+  const leaked = apiCredentialNamesIn(Object.keys(workerEnv));
   if (leaked.length > 0) {
     return check('variáveis de API', 'FAIL', `chegariam ao worker: ${leaked.join(', ')}`);
   }
@@ -396,7 +500,7 @@ function checkApiVariables(profile: LauncherProfile, env: NodeJS.ProcessEnv): Ch
  */
 async function checkCredentialSource(
   profile: LauncherProfile,
-  env: NodeJS.ProcessEnv,
+  workerEnv: NodeJS.ProcessEnv | null,
   runner: CommandRunner | undefined,
 ): Promise<{ check: Check; source: CredentialSource }> {
   if (profile.agent === 'fake') {
@@ -405,10 +509,16 @@ async function checkCredentialSource(
       source: 'not_applicable',
     };
   }
+  if (!workerEnv) {
+    return {
+      check: check('fonte da credencial', 'FAIL', UNVERIFIABLE_CREDENTIAL_MESSAGE),
+      source: 'unknown',
+    };
+  }
   const probe = await probeCredentialSource({
     agent: profile.agent,
     binary: profile.argv[0] as string,
-    env: buildEnvironment(profile, env),
+    env: workerEnv,
     ...(runner ? { runner } : {}),
   });
   const expected = expectedSubscriptionSource(profile.agent);
@@ -444,6 +554,7 @@ export interface DoctorInput {
   readonly profileId: string;
   readonly loaded?: LoadedPlan | null;
   readonly env?: NodeJS.ProcessEnv;
+  readonly runtimeDir?: string;
   /** Injetado pelos testes: prova a credencial sem chamar CLI de verdade. */
   readonly credentialRunner?: CommandRunner;
 }
@@ -451,21 +562,40 @@ export interface DoctorInput {
 export async function diagnose(input: DoctorInput): Promise<DoctorReport> {
   const profile = await loadProfile(input.repoRoot, input.profileId);
   const env = input.env ?? process.env;
+  const runtimeDir = input.runtimeDir ?? path.join(input.repoRoot, '.dev');
+  const sanitizedHome = path.join(runtimeDir, 'homes', profile.id);
+  let workerEnv: NodeJS.ProcessEnv | null = null;
+  let environmentError: string | null = null;
+  try {
+    workerEnv = buildEnvironment(profile, env, { sanitizedHome });
+  } catch (error) {
+    environmentError = error instanceof Error ? error.message : String(error);
+  }
   const model = modelOf(profile);
   const reasoningEffort = reasoningEffortOf(profile);
-  const credential = await checkCredentialSource(profile, env, input.credentialRunner);
+  const sandbox = uniqueOptionValue(profile.argv, '--sandbox');
+  const sessionPersistence = profile.argv.includes('--ephemeral') ? 'ephemeral' : 'persistent';
+  const userConfigIgnored = profile.argv.includes('--ignore-user-config');
+  const rulesIgnored = profile.argv.includes('--ignore-rules');
+  const credential = await checkCredentialSource(profile, workerEnv, input.credentialRunner);
   const checks: Check[] = [
     check('perfil', 'PASS', `${profile.id} (${profile.agent}) carregado e válido`),
-    await checkBinary(profile, env),
-    ...(await checkFlags(profile, env)),
+    await checkBinary(profile, workerEnv ?? env),
+    ...(await checkFlags(profile, workerEnv ?? env)),
     checkForbidden(profile),
+    checkSandbox(profile, sandbox),
+    checkSessionPersistence(profile, sessionPersistence),
+    checkUserConfig(profile, userConfigIgnored),
+    checkExecpolicyRules(profile, rulesIgnored),
+    checkInstructionHome(profile, workerEnv, environmentError, sanitizedHome),
+    await checkGitIdentity(input.repoRoot, profile, workerEnv),
     checkModelPinned(profile, model),
     checkReasoningEffort(profile, reasoningEffort),
     await checkPolicy(input.repoRoot, profile),
     checkPersonalSettings(profile),
     await checkValidationCoverage(input.repoRoot, profile, input.loaded ?? null),
     checkBillingMode(profile),
-    checkApiVariables(profile, env),
+    checkApiVariables(profile, workerEnv ?? {}, env),
     credential.check,
   ];
 
@@ -477,6 +607,11 @@ export async function diagnose(input: DoctorInput): Promise<DoctorReport> {
     billing_mode: profile.billing_mode,
     credential_source: credential.source,
     environment_mode: profile.environment_mode,
+    instruction_environment: profile.instruction_environment,
+    sandbox,
+    session_persistence: sessionPersistence,
+    user_config_ignored: userConfigIgnored,
+    execpolicy_rules_ignored: rulesIgnored,
     ok: checks.every((entry) => entry.status !== 'FAIL'),
     checks,
   };

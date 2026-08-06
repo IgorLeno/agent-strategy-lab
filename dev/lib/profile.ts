@@ -16,6 +16,10 @@ const nonEmpty = z.string().min(1);
  * read)". Modo controlado por `--bare` é incompatível com assinatura.
  */
 const API_FORCING_FLAGS = ['--bare', '--with-api-key', '--with-access-token'];
+const ALWAYS_FORBIDDEN_FLAGS = [
+  '--dangerously-bypass-approvals-and-sandbox',
+  '--approve-for-me',
+] as const;
 
 /**
  * Perfil do launcher. Declara a INTENÇÃO; o que foi de fato controlado é
@@ -33,6 +37,10 @@ export const LauncherProfile = z
     billing_mode: z.enum(['subscription_only', 'api', 'not_applicable']).default('not_applicable'),
     /** AMBIENTE — `real-world` carrega contexto do usuário; `controlled` não. */
     environment_mode: z.enum(['real-world', 'controlled']).default('real-world'),
+    /** Descoberta pelo HOME é uma dimensão separada do ambiente experimental. */
+    instruction_environment: z
+      .enum(['real_world_user_home', 'sanitized_user_home'])
+      .default('real_world_user_home'),
     /** argv base; o prompt entra conforme prompt_delivery. */
     argv: z.array(nonEmpty).min(1),
     prompt_delivery: z.enum(['argv', 'stdin']),
@@ -82,6 +90,12 @@ export const LauncherProfile = z
     if (forcing.length > 0) {
       reject(`flag que força autenticação por API em perfil de assinatura: ${forcing.join(', ')}`);
     }
+    const unsafe = ALWAYS_FORBIDDEN_FLAGS.filter((flag) =>
+      profile.argv.some((token) => token === flag || token.startsWith(`${flag}=`)),
+    );
+    if (unsafe.length > 0) {
+      reject(`flag insegura proibida no harness: ${unsafe.join(', ')}`);
+    }
   });
 export type LauncherProfile = z.infer<typeof LauncherProfile>;
 
@@ -107,7 +121,7 @@ export class ForbiddenFlagError extends Error {
  * o argv é verificado antes do spawn.
  */
 export function assertNoForbiddenFlags(profile: LauncherProfile, argv: readonly string[]): void {
-  const found = profile.forbidden_flags.filter((flag) =>
+  const found = [...profile.forbidden_flags, ...ALWAYS_FORBIDDEN_FLAGS].filter((flag) =>
     argv.some((token) => token === flag || token.startsWith(`${flag}=`)),
   );
   if (found.length > 0) throw new ForbiddenFlagError(found);
@@ -116,13 +130,30 @@ export function assertNoForbiddenFlags(profile: LauncherProfile, argv: readonly 
 export function buildEnvironment(
   profile: LauncherProfile,
   source: NodeJS.ProcessEnv = process.env,
+  options: { readonly sanitizedHome?: string } = {},
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const name of profile.env_allowlist) {
+    if (profile.instruction_environment === 'sanitized_user_home' && name === 'HOME') continue;
     const value = source[name];
     if (value !== undefined) env[name] = value;
   }
-  return { ...env, ...profile.env_extra };
+  const built = { ...env, ...profile.env_extra };
+  if (profile.instruction_environment !== 'sanitized_user_home') return built;
+
+  const sanitizedHome = options.sanitizedHome;
+  if (!sanitizedHome) throw new Error(`${profile.id}: HOME sanitizado não foi fornecido`);
+  const codexHome =
+    source['CODEX_HOME'] ?? (source['HOME'] ? path.join(source['HOME'], '.codex') : undefined);
+  if (profile.agent === 'codex' && !codexHome) {
+    throw new Error(`${profile.id}: CODEX_HOME não pode ser separado sem HOME real`);
+  }
+  if (codexHome === sanitizedHome) {
+    throw new Error(`${profile.id}: CODEX_HOME não pode ser o HOME sanitizado`);
+  }
+  built['HOME'] = sanitizedHome;
+  if (codexHome) built['CODEX_HOME'] = codexHome;
+  return built;
 }
 
 /**
@@ -144,12 +175,20 @@ export function deriveControlledFacts(
     // Ambiente e cobrança são dimensões DIFERENTES: um perfil de assinatura
     // pode ser real-world, e um perfil controlled não vira "de graça".
     environment_mode: profile.environment_mode,
+    instruction_environment: profile.instruction_environment,
     billing_mode: profile.billing_mode,
     env_vars_passed: Object.keys(env).length,
     env_allowlist_size: profile.env_allowlist.length,
   };
   for (const [capability, flag] of Object.entries(profile.control_markers)) {
     controlled[capability] = argv.includes(flag) ? `controlado por ${flag}` : 'não controlado';
+  }
+  if (profile.agent === 'codex') {
+    const sandboxIndex = argv.indexOf('--sandbox');
+    controlled['sandbox'] = sandboxIndex >= 0 ? (argv[sandboxIndex + 1] ?? 'unknown') : 'unknown';
+    controlled['session_persistence'] = argv.includes('--ephemeral') ? 'ephemeral' : 'persistent';
+    controlled['user_config_ignored'] = argv.includes('--ignore-user-config');
+    controlled['execpolicy_rules_ignored'] = argv.includes('--ignore-rules');
   }
   return controlled;
 }

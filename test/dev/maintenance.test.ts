@@ -154,6 +154,32 @@ describe('adoção normal de manutenção', () => {
     expect(repeated.record.adopted_head_sha).toBe(adopted);
     expect(validationCalls).toEqual([]);
   });
+
+  it('reconcilia record escrito antes do state sem reescrever evidência', async () => {
+    const adopted = await createCommit('docs/maintenance.md', 'ok\n', 'manutenção permitida');
+    const record: MaintenanceRecord = {
+      schema_version: 1,
+      previous_authorized_head_sha: authorized,
+      adopted_head_sha: adopted,
+      commits: [{ sha: adopted, parent_sha: authorized, changed_files: ['docs/maintenance.md'] }],
+      changed_files: ['docs/maintenance.md'],
+      validation_results: successfulResults(authorized, adopted),
+      working_tree_clean: true,
+      bootstrap_range: false,
+      reason: 'record persistido antes do state',
+      adopted_at: '2026-08-06T14:00:00.000Z',
+    };
+    await writeMaintenanceRecord(paths, record);
+    const before = await readFile(maintenanceRecordPath(paths, adopted), 'utf8');
+
+    const repeated = await adoptMaintenance(adoptionInput());
+
+    expect(repeated.alreadyAdopted).toBe(true);
+    expect(repeated.record).toEqual(record);
+    expect(validationCalls).toEqual([]);
+    expect((await readState(paths)).authorized_head_sha).toBe(adopted);
+    expect(await readFile(maintenanceRecordPath(paths, adopted), 'utf8')).toBe(before);
+  });
 });
 
 describe('bootstrap de faixa de manutenção', () => {

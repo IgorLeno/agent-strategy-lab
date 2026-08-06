@@ -315,6 +315,29 @@ export const LaunchRecord = z
   .strict();
 export type LaunchRecord = z.infer<typeof LaunchRecord>;
 
+export const AttemptAbandonmentRecord = z
+  .object({
+    schema_version: z.literal(DEV_SCHEMA_VERSION),
+    task_id: identifier,
+    attempt: z.number().int().positive(),
+    base_sha: shaHex,
+    process: ProcessIdentity,
+    launch_classification: z.enum(['FINISHED', 'TIMED_OUT', 'INFRA_ERROR']),
+    exit_code: z.number().int().nullable(),
+    started_at: z.string().datetime(),
+    finished_at: z.string().datetime(),
+    reason: nonEmpty,
+    previous_diagnostics: z.string().nullable(),
+    candidate_commit: z.literal(null),
+    working_tree_clean: z.literal(true),
+    head_sha: shaHex,
+    report_present: z.literal(false),
+    handoff_present: z.literal(false),
+    abandoned_at: z.string().datetime(),
+  })
+  .strict();
+export type AttemptAbandonmentRecord = z.infer<typeof AttemptAbandonmentRecord>;
+
 /**
  * Dono do lock do harness. `pid` sozinho não basta — o kernel reusa PIDs, e um
  * lock órfão precisa ser distinguível de um lock vivo por coincidência de PID.
