@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 import { access } from 'node:fs/promises';
 import { emit, fail, parseArgs, runMain } from '../lib/cli.js';
+import { headSha } from '../lib/git.js';
 import { withHarnessLock } from '../lib/lock.js';
 import { resolveHarnessPaths } from '../lib/paths.js';
 import { loadPlan } from '../lib/plan.js';
@@ -24,8 +25,11 @@ async function main(): Promise<void> {
   }
 
   await ensureRuntimeDirs(paths);
+  // O HEAD do init é a base legítima da primeira tarefa: sem esse registro,
+  // não há como distinguir "nada aconteceu ainda" de "alguém commitou fora".
+  const baselineSha = await headSha(paths.repoRoot);
   await withHarnessLock(paths, 'dev-init', () =>
-    writeState(paths, buildInitialState(plan, planSha256)),
+    writeState(paths, buildInitialState(plan, planSha256, { baselineSha })),
   );
 
   emit({

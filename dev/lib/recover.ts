@@ -1,5 +1,5 @@
 import { canonicalSha256 } from './canonical.js';
-import { commitExists } from './git.js';
+import { commitExists, headSha } from './git.js';
 import type { HarnessPaths } from './paths.js';
 import type { LoadedPlan } from './plan.js';
 import { isSameProcessAlive } from './process-identity.js';
@@ -72,10 +72,15 @@ export async function recover(
     }
   }
 
+  // State reconstruído do zero (ou vindo de antes do campo existir) precisa de
+  // baseline: sem ele, a guarda de progressão não tem contra o que comparar o
+  // HEAD antes da primeira tarefa aceita.
   const base = existing ?? buildInitialState(loaded.plan, loaded.planSha256);
+  const baselineSha = base.baseline_sha ?? (await headSha(paths.repoRoot).catch(() => null));
   const state = DevelopmentState.parse({
     ...base,
     plan_sha256: loaded.planSha256,
+    baseline_sha: baselineSha,
     tasks,
   });
   return { state, reconciliations, planChanged, stateWasMissing };

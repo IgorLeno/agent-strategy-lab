@@ -383,6 +383,12 @@ export const DevelopmentState = z
   .object({
     schema_version: z.literal(DEV_SCHEMA_VERSION),
     plan_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    /**
+     * HEAD no momento do dev-init: a base legítima da PRIMEIRA tarefa, antes
+     * de existir qualquer accepted_commit. `null` só em state construído fora
+     * de um repositório (testes de unidade).
+     */
+    baseline_sha: shaHex.nullable().default(null),
     created_at: z.string().datetime(),
     updated_at: z.string().datetime(),
     tasks: z.array(TaskState).min(1),

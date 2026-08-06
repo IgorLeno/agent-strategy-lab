@@ -1,3 +1,4 @@
+import { checkProgressionBase } from './base-guard.js';
 import { headSha } from './git.js';
 import { LaunchError, launchWorker, type LaunchOutcome } from './launch.js';
 import { buildTaskPacket } from './packet.js';
@@ -18,6 +19,8 @@ import type { TaskPacket } from './schemas.js';
 export interface PrepareResult {
   readonly selection: Selection;
   readonly packet: TaskPacket | null;
+  /** Motivo do bloqueio de base; `null` quando a progressão está liberada. */
+  readonly baseViolation: string | null;
 }
 
 /** Seleciona a próxima tarefa e PERSISTE o packet (dev-next só imprime). */
@@ -27,7 +30,14 @@ export async function prepareNextTask(
 ): Promise<PrepareResult> {
   const state = await readState(paths);
   const selection = selectNextTask(loaded, state);
-  if (selection.status !== 'SELECTED' || !selection.task) return { selection, packet: null };
+  if (selection.status !== 'SELECTED' || !selection.task) {
+    return { selection, packet: null, baseViolation: null };
+  }
+
+  // A base é conferida ANTES de gerar o packet: base_sha capturado de um HEAD
+  // divergente contaminaria a evidência da tarefa inteira.
+  const baseViolation = await checkProgressionBase(paths, state);
+  if (baseViolation) return { selection, packet: null, baseViolation };
 
   const previousHandoff = selection.handoffSourceTaskId
     ? await readHandoff(paths, selection.handoffSourceTaskId)
@@ -38,7 +48,7 @@ export async function prepareNextTask(
     previousHandoff,
   });
   await writePacket(paths, packet);
-  return { selection, packet };
+  return { selection, packet, baseViolation: null };
 }
 
 export interface LaunchStepResult {
@@ -60,9 +70,20 @@ export async function launchTask(
 ): Promise<LaunchStepResult> {
   const taskId = packet.task_id;
   const profile = await loadProfile(paths.repoRoot, profileId);
-  const before = getTaskState(await readState(paths), taskId);
+  const stateBefore = await readState(paths);
+  const before = getTaskState(stateBefore, taskId);
   if (before.status !== 'READY') {
     throw new LaunchError(`tarefa ${taskId} está ${before.status}; só READY pode ser lançada`);
+  }
+  // Também aqui, e não só no prepare: o dev-launch aceita packet persistido
+  // antes, e o repositório pode ter mudado nesse intervalo. Bloquear não muda
+  // o status da tarefa — divergência de base não é falha do worker.
+  const baseViolation = await checkProgressionBase(paths, stateBefore);
+  if (baseViolation) throw new LaunchError(`base inválida para ${taskId}: ${baseViolation}`);
+  if (packet.base_sha !== (await headSha(paths.repoRoot))) {
+    throw new LaunchError(
+      `packet de ${taskId} tem base_sha ${packet.base_sha}, diferente do HEAD atual — gere o packet de novo`,
+    );
   }
   const startedAt = new Date().toISOString();
 

@@ -32,7 +32,7 @@ tasks:
 const loaded = parsePlan(PLAN_SOURCE);
 
 function stateWith(overrides: Record<string, Partial<{ status: TaskStatus; phase: string | null; accepted_commit: string | null }>>) {
-  const base = buildInitialState(loaded.plan, loaded.planSha256, '2026-08-05T12:00:00.000Z');
+  const base = buildInitialState(loaded.plan, loaded.planSha256, { now: '2026-08-05T12:00:00.000Z' });
   return DevelopmentState.parse({
     ...base,
     tasks: base.tasks.map((task) => ({ ...task, ...(overrides[task.id] ?? {}) })),

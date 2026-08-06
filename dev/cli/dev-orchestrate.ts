@@ -47,7 +47,13 @@ async function main(): Promise<void> {
 
   await withHarnessLock(paths, 'dev-orchestrate', async () => {
     for (let index = 0; index < maxIterations; index += 1) {
-      const { selection, packet } = await prepareNextTask(paths, loaded);
+      const { selection, packet, baseViolation } = await prepareNextTask(paths, loaded);
+      if (baseViolation) {
+        // A tarefa continua READY: base divergente é problema do repositório,
+        // não veredito sobre a tarefa.
+        stop = { status: 'BASE_DIVERGED', reason: baseViolation };
+        break;
+      }
       if (!packet || !selection.task) {
         stop = { status: selection.status, reason: selection.reason };
         break;

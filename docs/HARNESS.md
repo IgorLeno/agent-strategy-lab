@@ -75,6 +75,25 @@ esconderia trabalho que ninguém fez.
 O plano precisa ser um DAG: ciclo de dependências é recusado no carregamento,
 porque um ciclo deixaria o seletor `BLOCKED` para sempre sem explicar por quê.
 
+## Guarda da base (progressão ≠ recuperação)
+
+Antes de gerar o packet e antes de lançar, o harness exige:
+
+1. working tree limpa;
+2. `HEAD` igual ao último `accepted_commit` — ou ao `baseline_sha` registrado
+   no `dev-init`, quando nenhuma tarefa passou ainda;
+3. `base_sha` do packet persistido igual ao `HEAD` atual.
+
+Sem isso, trabalho externo entre duas sessões (commit manual, merge, arquivo
+solto) entrava na base da tarefa seguinte: como o `dev-close` exige exatamente
+um commit sobre o `base_sha`, tudo o que veio antes passaria como trabalho do
+worker. Divergência para o fluxo em `BASE_DIVERGED` (exit 9) e **não** muda o
+status da tarefa — não é veredito sobre o worker.
+
+O `dev-recover` continua sem exigir árvore limpa: reconciliar fechamento
+histórico não pode depender do estado atual do checkout. A progressão exige;
+a recuperação, não.
+
 ## Divisão de autoria
 
 | Quem | Produz |

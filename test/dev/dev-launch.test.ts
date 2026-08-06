@@ -30,7 +30,7 @@ import {
   readState,
   writeState,
 } from '../../dev/lib/state.js';
-import { makeSandboxRepo, runDevCli, runGit, type Sandbox } from './helpers.js';
+import { commitAll, makeSandboxRepo, runDevCli, runGit, type Sandbox } from './helpers.js';
 
 let sandbox: Sandbox;
 let paths: HarnessPaths;
@@ -210,7 +210,6 @@ describe('dev-launch CLI', () => {
   }, 30_000);
 
   it('exit 8 e INFRA_ERROR quando o comando do perfil não existe', async () => {
-    await persistPacket();
     await writeFile(
       `${sandbox.root}/dev/profiles/inexistente-v1.yaml`,
       [
@@ -224,6 +223,10 @@ describe('dev-launch CLI', () => {
       ].join('\n'),
       'utf8',
     );
+    // O perfil é arquivo versionado: commitar antes deixa a árvore limpa, que
+    // é o que a guarda de base exige para lançar.
+    await commitAll(sandbox.root, 'perfil de teste');
+    await persistPacket();
 
     const result = await runDevCli(
       'dev-launch.ts',

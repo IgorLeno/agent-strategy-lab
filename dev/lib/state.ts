@@ -27,11 +27,13 @@ export function initialTaskState(id: string): TaskState {
 export function buildInitialState(
   plan: PlanFile,
   planSha256: string,
-  now: string = new Date().toISOString(),
+  options: { baselineSha?: string; now?: string } = {},
 ): DevelopmentState {
+  const now = options.now ?? new Date().toISOString();
   return DevelopmentState.parse({
     schema_version: DEV_SCHEMA_VERSION,
     plan_sha256: planSha256,
+    baseline_sha: options.baselineSha ?? null,
     created_at: now,
     updated_at: now,
     tasks: plan.tasks.map((task) => initialTaskState(task.id)),
