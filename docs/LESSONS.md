@@ -70,3 +70,34 @@ de criação exclusiva com identidade de processo (pid + starttime) para
 distinguir dono vivo de órfão. E laço com limite trata "esgotou o limite"
 como motivo de parada explícito: o estado inicial de um resumo é o
 pessimista, nunca o de sucesso.
+
+[2026-08-05] Contexto: S11B — base da tarefa seguinte.
+Mistake: capturar `base_sha` direto do HEAD, tratando "o harness fechou a
+tarefa anterior" como se garantisse que nada mais mexeu no repositório.
+Commit manual entre sessões entrava na base da tarefa seguinte e, como o
+dev-close exige exatamente um commit sobre o base_sha, viraria trabalho do
+worker na evidência.
+Rule: progressão exige base provada (árvore limpa + HEAD igual ao último
+accepted_commit ou ao baseline registrado); recuperação NÃO exige, porque
+reconciliar fechamento histórico não pode depender do checkout atual.
+Divergência de base para o fluxo sem virar veredito sobre a tarefa.
+
+[2026-08-05] Contexto: S14 — auditoria de descendentes.
+Mistake: aceitar "o processo pai morreu" como prova de sessão encerrada. O
+descendente do modo leak nascia com setsid, saía do process group e
+sobrevivia — invisível para qualquer verificação baseada em pgid.
+Rule: auditar sobrevivente por DOIS sinais — process group e tag única de
+ambiente por lançamento, que o filho herda mesmo depois do setsid. Quando o
+mecanismo tem furo conhecido (processo que troca o próprio environment),
+documentar o furo em vez de anunciar garantia completa.
+
+[2026-08-05] Contexto: S12 — perfil de agente real.
+Mistake: escrever perfil com flags e permissões plausíveis sem conferir a
+CLI instalada. `--permission-mode acceptEdits` aprova edições e não autoriza
+Bash; em `--print` não existe quem responda a pedido de permissão, então o
+perfil funcionaria só na máquina de quem o escreveu.
+Rule: perfil de agente pago se valida ANTES de rodar, de graça: binário no
+PATH, flags conferidas contra o `--help` da versão instalada, política de
+permissões versionada no repositório, modelo fixo e cobertura dos comandos
+de validação do plano. Permissão pessoal da máquina não é parte do
+experimento.
