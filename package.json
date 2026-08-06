@@ -16,6 +16,7 @@
     "dev-next": "tsx dev/cli/dev-next.ts",
     "dev-launch": "tsx dev/cli/dev-launch.ts",
     "dev-close": "tsx dev/cli/dev-close.ts",
+    "dev-doctor": "tsx dev/cli/dev-doctor.ts",
     "dev-recover": "tsx dev/cli/dev-recover.ts",
     "dev-orchestrate": "tsx dev/cli/dev-orchestrate.ts"
   },
@@ -30,6 +31,8 @@
     "zod": "^3.24.1"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["esbuild"]
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
   }
 }

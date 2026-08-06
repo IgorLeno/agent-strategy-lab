@@ -8,7 +8,7 @@ import { selectNextTask } from '../lib/select.js';
 import { ensureRuntimeDirs, readState } from '../lib/state.js';
 import { launchTask, prepareNextTask } from '../lib/steps.js';
 
-const DEFAULT_PROFILE = 'claude-build-worker-v1';
+const DEFAULT_PROFILE = 'claude-build-worker-v2';
 
 interface Iteration {
   readonly task_id: string;

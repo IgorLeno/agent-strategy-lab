@@ -163,10 +163,15 @@ Estado atual dos perfis:
 
 - `fake-worker-v1` — worker falso, fala só a interface interna do harness.
   Nenhum custo, nenhuma rede. É o que os testes usam.
-- `claude-build-worker-v1` — **real-world**, não controlled: sem `--bare`,
-  CLAUDE.md, hooks, plugins e auto-memory do usuário carregam. Para modo
-  controlado, adicionar `--bare` e exportar `ANTHROPIC_API_KEY` (com `--bare`,
-  OAuth e keychain nunca são lidos).
+- `claude-build-worker-v2` — **padrão**. Real-world, com política de
+  permissões versionada (`--settings dev/profiles/claude-build-worker.settings.json`),
+  modelo fixo (`--model`) e `--setting-sources project`, que exclui os
+  settings pessoais (`user`, `local`). Sem `--bare`: CLAUDE.md, hooks e
+  plugins do projeto ainda carregam.
+- `claude-build-worker-v1` — anterior, mantido como registro. Sem política
+  versionada nem modelo fixo: funcionava por causa das permissões pessoais da
+  máquina, e em `--print` não há ninguém para responder a um pedido de
+  permissão. `dev-doctor` reprova esse perfil.
 - `codex-build-worker-v1` — sem equivalente ao `--bare`; parcialmente não
   controlado por natureza.
 
@@ -175,6 +180,7 @@ Nunca compare resultados de perfis `controlled` com `real-world`.
 ## Comandos
 
 ```bash
+pnpm dev-doctor               # confere o perfil ANTES de gastar: flags, política, modelo
 pnpm dev-init                 # cria .dev/ a partir de dev/plan.yaml
 pnpm dev-next                 # imprime o packet da próxima tarefa (não grava)
 pnpm dev-launch --task M01    # um processo novo para uma tarefa
@@ -183,8 +189,8 @@ pnpm dev-recover --dry-run    # relata reconciliações sem gravar
 pnpm dev-orchestrate --profile claude-build-worker-v1
 ```
 
-Exit codes: `dev-next` 4 = fluxo parado/ocupado · `dev-close` 5 = FAIL, 6 =
-guarda pendente · `dev-launch` 7 = TIMED_OUT, 8 = INFRA_ERROR ·
+Exit codes: `dev-doctor` 3 = algum check FAIL · `dev-next` 4 = fluxo
+parado/ocupado · `dev-close` 5 = FAIL, 6 = guarda pendente · `dev-launch` 7 = TIMED_OUT, 8 = INFRA_ERROR ·
 `dev-orchestrate` 9 = fluxo parado · **10 = harness ocupado** (qualquer
 comando que muda estado).
 

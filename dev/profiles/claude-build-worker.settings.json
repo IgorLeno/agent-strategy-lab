@@ -1,0 +1,51 @@
+{
+  "$comment": "Política de permissões do worker Claude — VERSIONADA. Sem ela, o funcionamento dependia das permissões pessoais do usuário, que não entram no experimento nem sobrevivem a outra máquina. Passada via --settings; --setting-sources project exclui user e local.",
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "Read",
+      "Edit",
+      "Write",
+      "Glob",
+      "Grep",
+      "Bash(pnpm install)",
+      "Bash(pnpm test)",
+      "Bash(pnpm test:*)",
+      "Bash(pnpm typecheck)",
+      "Bash(pnpm build)",
+      "Bash(pnpm exec vitest:*)",
+      "Bash(pnpm exec tsc:*)",
+      "Bash(node:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git rev-parse:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(mkdir:*)"
+    ],
+    "deny": [
+      "Bash(git push:*)",
+      "Bash(git remote:*)",
+      "Bash(git reset:*)",
+      "Bash(git clean:*)",
+      "Bash(git checkout:*)",
+      "Bash(git rebase:*)",
+      "Bash(git merge:*)",
+      "Bash(git tag:*)",
+      "Bash(gh:*)",
+      "Bash(sudo:*)",
+      "Bash(curl:*)",
+      "Bash(wget:*)",
+      "Bash(ssh:*)",
+      "Bash(npm publish:*)",
+      "Bash(pnpm publish:*)",
+      "Bash(rm -rf:*)",
+      "WebFetch",
+      "WebSearch"
+    ]
+  }
+}

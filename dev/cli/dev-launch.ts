@@ -6,7 +6,7 @@ import { readPacket } from '../lib/records.js';
 import { ensureRuntimeDirs } from '../lib/state.js';
 import { launchTask } from '../lib/steps.js';
 
-const DEFAULT_PROFILE = 'claude-build-worker-v1';
+const DEFAULT_PROFILE = 'claude-build-worker-v2';
 
 /**
  * Lança UM processo novo para UMA tarefa e espera o término. Não fecha a
