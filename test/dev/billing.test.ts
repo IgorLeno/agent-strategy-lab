@@ -101,7 +101,7 @@ async function writeFakeCodexProfile(id = 'codex-fixture-v1'): Promise<string> {
     'agent: codex',
     'billing_mode: subscription_only',
     'environment_mode: real-world',
-    "argv: [codex, exec, '--json', '--strict-config', '--model', 'modelo-fixo', '-']",
+    "argv: [codex, exec, '--json', '--strict-config', '--ignore-user-config', '--model', 'gpt-5.6-sol', '--config', 'model_reasoning_effort=\"high\"', '-']",
     'prompt_delivery: stdin',
     'timeout_seconds: 30',
     'forbidden_flags: []',
@@ -177,7 +177,11 @@ describe('perfis subscription-only', () => {
   });
 
   it('os perfis versionados de assinatura não deixam passar variável de API', async () => {
-    for (const id of ['claude-build-worker-subscription-v1', 'codex-build-worker-subscription-v1']) {
+    for (const id of [
+      'claude-build-worker-subscription-v1',
+      'codex-build-worker-subscription-v1',
+      'codex-build-worker-subscription-high-v1',
+    ]) {
       const profile = await loadProfile(REPO_ROOT, id);
       expect(profile.billing_mode).toBe('subscription_only');
       expect(apiCredentialNamesIn(profile.env_allowlist)).toEqual([]);

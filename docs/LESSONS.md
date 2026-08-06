@@ -179,3 +179,10 @@ historicamente à tarefa anterior ou bloquear a progressão.
 Rule: a base operacional da próxima tarefa é um campo explícito e só avança por
 fechamento PASS ou por MaintenanceRecord atômico que prova cadeia linear,
 escopo permitido e validações; manutenção nunca reescreve artifacts de tarefa.
+
+[2026-08-06] Contexto: doctor de configuração explícita por argv.
+Mistake: contar apenas overrides válidos fazia um valor correto esconder outra
+ocorrência duplicada e malformada da mesma opção.
+Rule: validação fail-closed contabiliza também ocorrências malformadas e exige
+exatamente uma ocorrência válida; entrada inválida nunca é descartada antes da
+decisão de unicidade.

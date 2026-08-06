@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { API_CREDENTIAL_VARIABLES } from '../../dev/lib/billing.js';
 import {
+  codexReasoningEffort,
   diagnose,
   flagsOf,
   helpInvocation,
@@ -12,6 +13,7 @@ import {
 } from '../../dev/lib/doctor.js';
 import { loadPlan, type LoadedPlan } from '../../dev/lib/plan.js';
 import { resolveHarnessPaths, type HarnessPaths } from '../../dev/lib/paths.js';
+import { buildEnvironment, loadProfile } from '../../dev/lib/profile.js';
 import {
   REPO_ROOT,
   buildTestProcessEnvironment,
@@ -25,6 +27,9 @@ import {
 let sandbox: Sandbox;
 let paths: HarnessPaths;
 let loaded: LoadedPlan;
+
+const FAKE_CLI_DIR = path.join(REPO_ROOT, 'fixtures', 'fake-clis');
+const FAKE_API_SECRET = 'sk-test-nao-deve-chegar-ao-worker';
 
 beforeEach(async () => {
   sandbox = await makeSandboxRepo();
@@ -45,6 +50,42 @@ function find(checks: readonly Check[], name: string): Check {
 /** Escreve um perfil no sandbox — o doctor lê do repositório, como em produção. */
 async function writeProfile(id: string, body: string): Promise<void> {
   await writeFile(path.join(sandbox.root, 'dev', 'profiles', `${id}.yaml`), body, 'utf8');
+}
+
+function fakeCodexEnv(): NodeJS.ProcessEnv {
+  return {
+    PATH: `${FAKE_CLI_DIR}:${process.env['PATH'] ?? ''}`,
+    OPENAI_API_KEY: FAKE_API_SECRET,
+    CODEX_API_KEY: FAKE_API_SECRET,
+  };
+}
+
+function codexProfile(id: string, reasoning?: string, ignoreUserConfig = true): string {
+  const argv = [
+    '  - codex',
+    '  - exec',
+    '  - --json',
+    '  - --strict-config',
+    ...(ignoreUserConfig ? ['  - --ignore-user-config'] : []),
+    '  - --model',
+    '  - gpt-5.6-sol',
+    ...(reasoning === undefined
+      ? []
+      : ['  - --config', `  - 'model_reasoning_effort="${reasoning}"'`]),
+    "  - '-'",
+  ];
+  return [
+    `id: ${id}`,
+    'agent: codex',
+    'billing_mode: subscription_only',
+    'environment_mode: real-world',
+    'argv:',
+    ...argv,
+    'prompt_delivery: stdin',
+    'timeout_seconds: 1800',
+    'forbidden_flags: [resume, fork, --last, --session-id]',
+    'env_allowlist: [PATH, HOME, CODEX_HOME]',
+  ].join('\n');
 }
 
 function exists(file: string): Promise<boolean> {
@@ -187,6 +228,23 @@ describe('leitura do argv do perfil', () => {
       args: ['exec', '--help'],
     });
     expect(helpInvocation(['claude', '--print'])).toEqual({ command: 'claude', args: ['--help'] });
+  });
+
+  it('reasoning só é comprovado com exatamente um override válido', () => {
+    const high = 'model_reasoning_effort="high"';
+    expect(codexReasoningEffort(['codex', '--config', high])).toBe('high');
+    expect(codexReasoningEffort(['codex'])).toBeNull();
+    expect(codexReasoningEffort(['codex', '--config', high, '--config', high])).toBeNull();
+    expect(
+      codexReasoningEffort([
+        'codex',
+        '--config',
+        high,
+        '--config',
+        'model_reasoning_effort="high',
+      ]),
+    ).toBeNull();
+    expect(codexReasoningEffort(['codex', '--config', 'model_reasoning_effort'])).toBeNull();
   });
 });
 
@@ -331,6 +389,135 @@ describe('dev-doctor', () => {
     await expect(
       diagnose({ repoRoot: sandbox.root, profileId: 'claude-com-chave-v1', loaded }),
     ).rejects.toThrow(/ANTHROPIC_API_KEY/);
+  });
+});
+
+describe('perfil Codex Sol High por assinatura', () => {
+  it('prova modelo, reasoning, cobrança, credencial e opções pela CLI falsa', async () => {
+    const report = await diagnose({
+      repoRoot: REPO_ROOT,
+      profileId: 'codex-build-worker-subscription-high-v1',
+      loaded,
+      env: fakeCodexEnv(),
+    });
+
+    expect(report).toMatchObject({
+      model: 'gpt-5.6-sol',
+      reasoning_effort: 'high',
+      billing_mode: 'subscription_only',
+      credential_source: 'chatgpt_subscription',
+      ok: true,
+    });
+    expect(find(report.checks, 'flags').status).toBe('PASS');
+    expect(find(report.checks, 'modelo').detail).toBe('gpt-5.6-sol');
+    expect(find(report.checks, 'reasoning effort').detail).toMatch(/high/);
+    expect(find(report.checks, 'variáveis de API').status).toBe('PASS');
+    expect(find(report.checks, 'binário').detail).toContain('fake-clis');
+  });
+
+  it('reasoning ausente falha fechado no doctor', async () => {
+    await writeProfile('codex-sem-reasoning-v1', codexProfile('codex-sem-reasoning-v1'));
+
+    const report = await diagnose({
+      repoRoot: sandbox.root,
+      profileId: 'codex-sem-reasoning-v1',
+      loaded,
+      env: fakeCodexEnv(),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.reasoning_effort).toBe('unknown');
+    expect(find(report.checks, 'reasoning effort').status).toBe('FAIL');
+  });
+
+  it.each(['medium', 'xhigh'])('reasoning %s não é aceito como high', async (reasoning) => {
+    const id = `codex-${reasoning}-v1`;
+    await writeProfile(id, codexProfile(id, reasoning));
+
+    const report = await diagnose({
+      repoRoot: sandbox.root,
+      profileId: id,
+      loaded,
+      env: fakeCodexEnv(),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.reasoning_effort).toBe(reasoning);
+    expect(find(report.checks, 'reasoning effort').status).toBe('FAIL');
+  });
+
+  it('high sem --ignore-user-config falha por depender de configuração implícita', async () => {
+    const id = 'codex-high-config-implicita-v1';
+    await writeProfile(id, codexProfile(id, 'high', false));
+
+    const report = await diagnose({
+      repoRoot: sandbox.root,
+      profileId: id,
+      loaded,
+      env: fakeCodexEnv(),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.reasoning_effort).toBe('high');
+    expect(find(report.checks, 'reasoning effort').detail).toMatch(/--ignore-user-config/);
+  });
+
+  it('high válido junto de override malformado falha como reasoning não comprovado', async () => {
+    const id = 'codex-high-duplicado-malformado-v1';
+    const body = codexProfile(id, 'high').replace(
+      "  - '-'",
+      "  - --config\n  - 'model_reasoning_effort=\"high'\n  - '-'",
+    );
+    await writeProfile(id, body);
+
+    const report = await diagnose({
+      repoRoot: sandbox.root,
+      profileId: id,
+      loaded,
+      env: fakeCodexEnv(),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.reasoning_effort).toBe('unknown');
+    expect(find(report.checks, 'reasoning effort').status).toBe('FAIL');
+  });
+
+  it('autenticação por API continua bloqueada sem chamar Codex real', async () => {
+    const report = await diagnose({
+      repoRoot: REPO_ROOT,
+      profileId: 'codex-build-worker-subscription-high-v1',
+      loaded,
+      env: fakeCodexEnv(),
+      credentialRunner: async () => ({ code: 0, output: 'Logged in using an API key\n' }),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.credential_source).toBe('api');
+    expect(find(report.checks, 'fonte da credencial').status).toBe('FAIL');
+  });
+
+  it('OPENAI_API_KEY e CODEX_API_KEY não chegam ao ambiente do perfil High', async () => {
+    const profile = await loadProfile(REPO_ROOT, 'codex-build-worker-subscription-high-v1');
+    const env = buildEnvironment(profile, fakeCodexEnv());
+
+    expect(env).not.toHaveProperty('OPENAI_API_KEY');
+    expect(env).not.toHaveProperty('CODEX_API_KEY');
+    expect(JSON.stringify(env)).not.toContain(FAKE_API_SECRET);
+  });
+
+  it('perfil legado segue válido, mas não é classificado como High', async () => {
+    const legacy = await loadProfile(REPO_ROOT, 'codex-build-worker-subscription-v1');
+    expect(legacy.id).toBe('codex-build-worker-subscription-v1');
+
+    const report = await diagnose({
+      repoRoot: REPO_ROOT,
+      profileId: legacy.id,
+      loaded,
+      env: fakeCodexEnv(),
+    });
+    expect(report.ok).toBe(false);
+    expect(report.reasoning_effort).toBe('unknown');
+    expect(find(report.checks, 'reasoning effort').status).toBe('FAIL');
   });
 });
 

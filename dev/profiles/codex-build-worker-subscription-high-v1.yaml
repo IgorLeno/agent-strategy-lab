@@ -1,0 +1,57 @@
+# Perfil Codex Sol com reasoning High, pago somente pela assinatura ChatGPT.
+#
+# A CLI instalada não expõe uma flag própria de reasoning. O argv usa o
+# override genérico documentado por `codex exec --help`, e `--strict-config`
+# faz um run futuro recusar a chave se ela deixar de ser reconhecida.
+# `--ignore-user-config` impede que config.toml ou uma seleção anterior da UI
+# participe da escolha do esforço. Autenticação continua sendo provada pelo
+# comando local e gratuito `codex login status` antes de qualquer lançamento.
+id: codex-build-worker-subscription-high-v1
+agent: codex
+billing_mode: subscription_only
+environment_mode: real-world
+argv:
+  - codex
+  - exec
+  - --json
+  - --strict-config
+  - --ignore-user-config
+  - --model
+  - gpt-5.6-sol
+  - --config
+  - 'model_reasoning_effort="high"'
+  - '-'
+prompt_delivery: stdin
+timeout_seconds: 1800
+forbidden_flags:
+  - resume
+  - fork
+  - --last
+  - --session-id
+  - --with-api-key
+  - --with-access-token
+env_allowlist:
+  - PATH
+  - HOME
+  - LANG
+  - LC_ALL
+  - TERM
+  - USER
+  - SHELL
+  - CODEX_HOME
+env_extra:
+  CI: '1'
+control_markers:
+  strict_config: --strict-config
+  user_config_ignored: --ignore-user-config
+  event_stream: --json
+  model_pinned: --model
+  reasoning_pinned: --config
+notes:
+  - 'Modelo: gpt-5.6-sol; reasoning effort: high, ambos fixados no argv.'
+  - 'Cobrança: assinatura ChatGPT Plus (Sign in with ChatGPT). Nenhuma chave de API na allowlist.'
+  - 'Execução consome a franquia da assinatura: só rodar com autorização explícita do usuário.'
+  - 'Verificado contra codex-cli 0.146.1: exec reconhece --config, --ignore-user-config, --json, --strict-config e --model.'
+  - 'Sem equivalente a --bare: instruction files e plugins podem carregar; ambiente real-world.'
+  - 'CODEX_HOME é diretório de configuração/autenticação, não uma credencial de API.'
+  - 'O stream JSONL não traz estimativa de custo: provider_estimated_api_equivalent_usd fica null.'

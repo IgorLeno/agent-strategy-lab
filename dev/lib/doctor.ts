@@ -7,6 +7,7 @@ import {
   expectedSubscriptionSource,
   probeCredentialSource,
   type CommandRunner,
+  type CredentialSource,
 } from './billing.js';
 import type { LoadedPlan } from './plan.js';
 import {
@@ -36,8 +37,11 @@ export interface Check {
 export interface DoctorReport {
   readonly profile_id: string;
   readonly agent: string;
+  readonly model: string;
+  readonly reasoning_effort: string;
   /** Cobrança e ambiente são dimensões separadas, e ambas ficam no relatório. */
   readonly billing_mode: string;
+  readonly credential_source: CredentialSource;
   readonly environment_mode: string;
   readonly ok: boolean;
   readonly checks: readonly Check[];
@@ -187,14 +191,113 @@ function checkPersonalSettings(profile: LauncherProfile): Check {
     : check('settings pessoais', 'WARN', `inclui fonte pessoal: ${personal.join(', ')}`);
 }
 
-function checkModelPinned(profile: LauncherProfile): Check {
-  const flag = profile.agent === 'codex' ? '--model' : '--model';
-  const index = profile.argv.indexOf(flag);
-  const model = index >= 0 ? profile.argv[index + 1] : undefined;
+function optionValues(argv: readonly string[], flag: string): string[] {
+  const values: string[] = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index] as string;
+    if (token === flag) {
+      const value = argv[index + 1];
+      if (value !== undefined && !value.startsWith('-')) values.push(value);
+      continue;
+    }
+    if (token.startsWith(`${flag}=`)) values.push(token.slice(flag.length + 1));
+  }
+  return values;
+}
+
+function modelOf(profile: LauncherProfile): string {
+  if (profile.agent === 'fake') return 'not_applicable';
+  const values = optionValues(profile.argv, '--model');
+  return values.length === 1 ? (values[0] as string) : 'unknown';
+}
+
+function unquoteTomlString(value: string): string | null {
+  const trimmed = value.trim();
+  if (trimmed === '') return null;
+  const first = trimmed[0];
+  const last = trimmed.at(-1);
+  if ((first === '"' || first === "'") && last === first) return trimmed.slice(1, -1);
+  if (first === '"' || first === "'" || last === '"' || last === "'") return null;
+  return trimmed;
+}
+
+function configArguments(argv: readonly string[]): Array<string | null> {
+  const arguments_: Array<string | null> = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index] as string;
+    if (token === '--config') {
+      const value = argv[index + 1];
+      arguments_.push(value === undefined || value.startsWith('-') ? null : value);
+      continue;
+    }
+    if (token.startsWith('--config=')) {
+      const value = token.slice('--config='.length);
+      arguments_.push(value === '' ? null : value);
+    }
+  }
+  return arguments_;
+}
+
+function configOverrideValues(argv: readonly string[], key: string): Array<string | null> {
+  const values: Array<string | null> = [];
+  for (const override of configArguments(argv)) {
+    if (override === null) return [null];
+    const separator = override.indexOf('=');
+    if (separator <= 0) return [null];
+    if (override.slice(0, separator).trim() !== key) continue;
+    values.push(unquoteTomlString(override.slice(separator + 1)));
+  }
+  return values;
+}
+
+export function codexReasoningEffort(argv: readonly string[]): string | null {
+  const values = configOverrideValues(argv, 'model_reasoning_effort');
+  const [value] = values;
+  return values.length === 1 && value !== null && value !== undefined ? value : null;
+}
+
+function reasoningEffortOf(profile: LauncherProfile): string {
+  if (profile.agent !== 'codex') return 'not_applicable';
+  return codexReasoningEffort(profile.argv) ?? 'unknown';
+}
+
+function checkModelPinned(profile: LauncherProfile, model: string): Check {
   if (profile.agent === 'fake') return check('modelo', 'SKIP', 'worker falso não tem modelo');
-  return model === undefined
-    ? check('modelo', 'FAIL', 'modelo não fixado: o run dependeria do default da CLI')
-    : check('modelo', 'PASS', model);
+  if (model === 'unknown') {
+    return check('modelo', 'FAIL', 'modelo não fixado de forma única no argv');
+  }
+  if (profile.agent === 'codex' && model !== 'gpt-5.6-sol') {
+    return check('modelo', 'FAIL', `esperado gpt-5.6-sol, recebido ${model}`);
+  }
+  return check('modelo', 'PASS', model);
+}
+
+function checkReasoningEffort(profile: LauncherProfile, reasoningEffort: string): Check {
+  if (profile.agent !== 'codex') {
+    return check('reasoning effort', 'SKIP', `não se aplica ao agente ${profile.agent}`);
+  }
+  if (reasoningEffort === 'unknown') {
+    return check(
+      'reasoning effort',
+      'FAIL',
+      'model_reasoning_effort não está fixado de forma explícita e única no argv',
+    );
+  }
+  if (reasoningEffort !== 'high') {
+    return check('reasoning effort', 'FAIL', `esperado high, recebido ${reasoningEffort}`);
+  }
+  if (!profile.argv.includes('--ignore-user-config')) {
+    return check(
+      'reasoning effort',
+      'FAIL',
+      'high explícito, mas sem --ignore-user-config o config.toml pessoal ainda seria carregado',
+    );
+  }
+  return check(
+    'reasoning effort',
+    'PASS',
+    'high · override explícito no argv · --ignore-user-config',
+  );
 }
 
 /**
@@ -295,9 +398,12 @@ async function checkCredentialSource(
   profile: LauncherProfile,
   env: NodeJS.ProcessEnv,
   runner: CommandRunner | undefined,
-): Promise<Check> {
+): Promise<{ check: Check; source: CredentialSource }> {
   if (profile.agent === 'fake') {
-    return check('fonte da credencial', 'SKIP', 'worker falso não autentica');
+    return {
+      check: check('fonte da credencial', 'SKIP', 'worker falso não autentica'),
+      source: 'not_applicable',
+    };
   }
   const probe = await probeCredentialSource({
     agent: profile.agent,
@@ -308,20 +414,29 @@ async function checkCredentialSource(
   const expected = expectedSubscriptionSource(profile.agent);
 
   if (probe.source === 'api') {
-    return check(
-      'fonte da credencial',
-      'FAIL',
-      `autenticação efetiva é API (${probe.detail}) — a política exige assinatura`,
-    );
+    return {
+      check: check(
+        'fonte da credencial',
+        'FAIL',
+        `autenticação efetiva é API (${probe.detail}) — a política exige assinatura`,
+      ),
+      source: probe.source,
+    };
   }
   if (probe.source !== expected || !probe.verified) {
-    return check(
-      'fonte da credencial',
-      'FAIL',
-      `${UNVERIFIABLE_CREDENTIAL_MESSAGE} — ${probe.command}: ${probe.detail}`,
-    );
+    return {
+      check: check(
+        'fonte da credencial',
+        'FAIL',
+        `${UNVERIFIABLE_CREDENTIAL_MESSAGE} — ${probe.command}: ${probe.detail}`,
+      ),
+      source: probe.source,
+    };
   }
-  return check('fonte da credencial', 'PASS', `${probe.source} · ${probe.detail}`);
+  return {
+    check: check('fonte da credencial', 'PASS', `${probe.source} · ${probe.detail}`),
+    source: probe.source,
+  };
 }
 
 export interface DoctorInput {
@@ -336,24 +451,31 @@ export interface DoctorInput {
 export async function diagnose(input: DoctorInput): Promise<DoctorReport> {
   const profile = await loadProfile(input.repoRoot, input.profileId);
   const env = input.env ?? process.env;
+  const model = modelOf(profile);
+  const reasoningEffort = reasoningEffortOf(profile);
+  const credential = await checkCredentialSource(profile, env, input.credentialRunner);
   const checks: Check[] = [
     check('perfil', 'PASS', `${profile.id} (${profile.agent}) carregado e válido`),
     await checkBinary(profile, env),
     ...(await checkFlags(profile, env)),
     checkForbidden(profile),
-    checkModelPinned(profile),
+    checkModelPinned(profile, model),
+    checkReasoningEffort(profile, reasoningEffort),
     await checkPolicy(input.repoRoot, profile),
     checkPersonalSettings(profile),
     await checkValidationCoverage(input.repoRoot, profile, input.loaded ?? null),
     checkBillingMode(profile),
     checkApiVariables(profile, env),
-    await checkCredentialSource(profile, env, input.credentialRunner),
+    credential.check,
   ];
 
   return {
     profile_id: profile.id,
     agent: profile.agent,
+    model,
+    reasoning_effort: reasoningEffort,
     billing_mode: profile.billing_mode,
+    credential_source: credential.source,
     environment_mode: profile.environment_mode,
     ok: checks.every((entry) => entry.status !== 'FAIL'),
     checks,

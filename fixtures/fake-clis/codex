@@ -5,7 +5,15 @@
 const args = process.argv.slice(2);
 const scenario = process.env.AGENTLAB_FAKE_AUTH ?? 'subscription';
 
-const FLAGS = ['--json', '--strict-config', '--model', '--with-api-key', '--with-access-token'];
+const FLAGS = [
+  '--config',
+  '--json',
+  '--strict-config',
+  '--ignore-user-config',
+  '--model',
+  '--with-api-key',
+  '--with-access-token',
+];
 
 if (args.includes('--help') || args[0] === 'help') {
   process.stdout.write(`fake codex-cli 9.9.9\nOptions:\n${FLAGS.join('\n')}\n`);
