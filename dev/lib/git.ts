@@ -62,6 +62,12 @@ export async function parentSha(repoRoot: string, sha: string): Promise<string |
   return result.exitCode === 0 ? result.stdout.trim() : null;
 }
 
+/** Todos os parents do commit, preservando a ordem gravada pelo Git. */
+export async function parentShas(repoRoot: string, sha: string): Promise<string[]> {
+  const output = await gitOrThrow(repoRoot, ['show', '-s', '--format=%P', sha]);
+  return output.trim() === '' ? [] : output.trim().split(/\s+/);
+}
+
 export async function changedFiles(repoRoot: string, sha: string): Promise<string[]> {
   const output = await gitOrThrow(repoRoot, [
     'diff-tree',

@@ -1,5 +1,6 @@
 import { canonicalSha256 } from './canonical.js';
 import { commitExists, headSha } from './git.js';
+import { reconcileMaintenanceRecords } from './maintenance.js';
 import type { HarnessPaths } from './paths.js';
 import type { LoadedPlan } from './plan.js';
 import { isSameProcessAlive } from './process-identity.js';
@@ -8,7 +9,12 @@ import {
   DevelopmentState,
   type TaskState,
 } from './schemas.js';
-import { buildInitialState, initialTaskState, readState } from './state.js';
+import {
+  buildInitialState,
+  deriveAuthorizedHead,
+  initialTaskState,
+  readState,
+} from './state.js';
 
 export interface Reconciliation {
   readonly task_id: string;
@@ -77,10 +83,18 @@ export async function recover(
   // HEAD antes da primeira tarefa aceita.
   const base = existing ?? buildInitialState(loaded.plan, loaded.planSha256);
   const baselineSha = base.baseline_sha ?? (await headSha(paths.repoRoot).catch(() => null));
+  const previousTaskBase = deriveAuthorizedHead(base.tasks, baselineSha);
+  const reconciledTaskBase = deriveAuthorizedHead(tasks, baselineSha);
+  let authorizedHead = base.authorized_head_sha ?? previousTaskBase;
+  if (authorizedHead === previousTaskBase && reconciledTaskBase !== previousTaskBase) {
+    authorizedHead = reconciledTaskBase;
+  }
+  authorizedHead = await reconcileMaintenanceRecords(paths, authorizedHead);
   const state = DevelopmentState.parse({
     ...base,
     plan_sha256: loaded.planSha256,
     baseline_sha: baselineSha,
+    authorized_head_sha: authorizedHead,
     tasks,
   });
   return { state, reconciliations, planChanged, stateWasMissing };

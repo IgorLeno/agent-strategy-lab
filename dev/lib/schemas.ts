@@ -442,12 +442,102 @@ export const DevelopmentState = z
      * de um repositório (testes de unidade).
      */
     baseline_sha: shaHex.nullable().default(null),
+    /** Único HEAD autorizado a servir de base para a próxima tarefa. */
+    authorized_head_sha: shaHex.nullable().default(null),
     created_at: z.string().datetime(),
     updated_at: z.string().datetime(),
     tasks: z.array(TaskState).min(1),
   })
   .strict();
 export type DevelopmentState = z.infer<typeof DevelopmentState>;
+
+// ---------------------------------------------------------------------------
+// Checkpoint de manutenção (.dev/maintenance/*.json) — NÃO versionado
+// ---------------------------------------------------------------------------
+
+export const MaintenanceCommit = z
+  .object({
+    sha: shaHex,
+    parent_sha: shaHex,
+    changed_files: z.array(nonEmpty),
+  })
+  .strict();
+export type MaintenanceCommit = z.infer<typeof MaintenanceCommit>;
+
+export const MaintenanceRecord = z
+  .object({
+    schema_version: z.literal(DEV_SCHEMA_VERSION),
+    previous_authorized_head_sha: shaHex,
+    adopted_head_sha: shaHex,
+    commits: z.array(MaintenanceCommit).min(1),
+    changed_files: z.array(nonEmpty),
+    validation_results: z.array(ValidationResult).length(4),
+    working_tree_clean: z.literal(true),
+    bootstrap_range: z.boolean(),
+    reason: nonEmpty,
+    adopted_at: z.string().datetime(),
+  })
+  .strict()
+  .superRefine((record, ctx) => {
+    if (!record.bootstrap_range && record.commits.length !== 1) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'MaintenanceRecord normal exige exatamente um commit',
+      });
+    }
+    let expectedParent = record.previous_authorized_head_sha;
+    for (const commit of record.commits) {
+      if (commit.parent_sha !== expectedParent) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `cadeia de manutenção divergente em ${commit.sha}`,
+        });
+      }
+      expectedParent = commit.sha;
+    }
+    if (record.adopted_head_sha !== expectedParent) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'adopted_head_sha não é o último commit da cadeia',
+      });
+    }
+    const aggregate = [...new Set(record.commits.flatMap((commit) => commit.changed_files))].sort();
+    if (JSON.stringify(record.changed_files) !== JSON.stringify(aggregate)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'changed_files agregado não corresponde aos commits',
+      });
+    }
+    if (record.validation_results.some((result) => result.exit_code !== 0 || result.timed_out)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'MaintenanceRecord contém validação malsucedida',
+      });
+    }
+    const expectedValidations = [
+      ['pnpm', 'typecheck'],
+      ['pnpm', 'build'],
+      ['pnpm', 'test'],
+      [
+        'git',
+        'diff',
+        '--check',
+        `${record.previous_authorized_head_sha}..${record.adopted_head_sha}`,
+      ],
+    ];
+    if (
+      record.validation_results.some(
+        (result, index) =>
+          JSON.stringify(result.argv) !== JSON.stringify(expectedValidations[index]),
+      )
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'MaintenanceRecord não contém as validações obrigatórias na ordem esperada',
+      });
+    }
+  });
+export type MaintenanceRecord = z.infer<typeof MaintenanceRecord>;
 
 // ---------------------------------------------------------------------------
 // Parsers com budget — schema válido mas acima do budget também é rejeição.

@@ -31,6 +31,7 @@ async function main(): Promise<void> {
     state_was_missing: result.stateWasMissing,
     plan_changed: result.planChanged,
     reconciliations: result.reconciliations,
+    authorized_head_sha: result.state.authorized_head_sha,
     statuses: Object.fromEntries(result.state.tasks.map((task) => [task.id, task.status])),
   });
 }

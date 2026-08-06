@@ -261,6 +261,7 @@ export async function closeTask(input: CloseInput): Promise<CloseOutcome> {
     diagnostics: null,
     finished_at: timestamp,
   });
+  state = { ...state, authorized_head_sha: candidate };
   await writeState(paths, state);
 
   return outcome('PASS', taskId, 'aceita', completion, handoff, discrepancies);

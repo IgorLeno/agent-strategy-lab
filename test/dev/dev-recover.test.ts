@@ -1,6 +1,7 @@
-import { rm, writeFile } from 'node:fs/promises';
+import { readFile, rm, writeFile } from 'node:fs/promises';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { resolveHarnessPaths, type HarnessPaths } from '../../dev/lib/paths.js';
+import { headSha } from '../../dev/lib/git.js';
 import { loadPlan, type LoadedPlan } from '../../dev/lib/plan.js';
 import { recover } from '../../dev/lib/recover.js';
 import { canonicalSha256 } from '../../dev/lib/canonical.js';
@@ -45,6 +46,48 @@ const DEAD_PROCESS = {
 };
 
 describe('dev-recover', () => {
+  it('runtime antigo sem authorized_head_sha deriva o último accepted_commit', async () => {
+    const accepted = await commitAll(sandbox.root, 'trabalho já aceito');
+    const legacy = {
+      ...withTaskState(await readState(paths), 'T1', {
+        status: 'PASS',
+        phase: null,
+        accepted_commit: accepted,
+        candidate_commit: accepted,
+        finished_at: '2026-08-05T12:00:00.000Z',
+      }),
+    } as Record<string, unknown>;
+    delete legacy['authorized_head_sha'];
+    await writeFile(paths.stateFile, JSON.stringify(legacy), 'utf8');
+
+    expect((await readState(paths)).authorized_head_sha).toBe(accepted);
+  });
+
+  it('runtime antigo sem tarefa PASS deriva authorized_head_sha do baseline', async () => {
+    const baseline = await headSha(sandbox.root);
+    const legacy = JSON.parse(await readFile(paths.stateFile, 'utf8')) as Record<string, unknown>;
+    legacy['baseline_sha'] = baseline;
+    delete legacy['authorized_head_sha'];
+    await writeFile(paths.stateFile, JSON.stringify(legacy), 'utf8');
+
+    expect((await readState(paths)).authorized_head_sha).toBe(baseline);
+  });
+
+  it('preserva authorized_head_sha explícito em vez de inferi-lo novamente', async () => {
+    const accepted = await headSha(sandbox.root);
+    await writeFile(`${sandbox.root}/README.md`, '# manutenção\n', 'utf8');
+    const authorized = await commitAll(sandbox.root, 'manutenção já autorizada');
+    const state = withTaskState(await readState(paths), 'T1', {
+      status: 'PASS',
+      accepted_commit: accepted,
+      candidate_commit: accepted,
+      finished_at: '2026-08-05T12:00:00.000Z',
+    });
+    await writeState(paths, { ...state, authorized_head_sha: authorized });
+
+    expect((await recover(paths, loaded)).state.authorized_head_sha).toBe(authorized);
+  });
+
   it('RUNNING/EXECUTING com processo inexistente vira INFRA_ERROR', async () => {
     const state = await readState(paths);
     await writeState(
@@ -110,6 +153,7 @@ describe('dev-recover', () => {
     const result = await recover(paths, loaded);
     expect(result.state.tasks[0]?.status).toBe('PASS');
     expect(result.state.tasks[0]?.accepted_commit).toBe(accepted);
+    expect(result.state.authorized_head_sha).toBe(accepted);
   });
 
   it('reconstrói o runtime inteiro a partir do plano quando o state some', async () => {

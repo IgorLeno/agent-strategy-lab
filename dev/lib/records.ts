@@ -7,6 +7,7 @@ import {
   CloseManifest,
   CompletionRecord,
   LaunchRecord,
+  MaintenanceRecord,
   type HandoffDraft,
   type HandoffRecord,
   type TaskPacket,
@@ -52,6 +53,10 @@ export function completionPath(paths: HarnessPaths, taskId: string): string {
 /** Escrito por último num fechamento aceito: existir = o bundle está completo. */
 export function closeManifestPath(paths: HarnessPaths, taskId: string): string {
   return path.join(paths.completionsDir, `${taskId}.close-manifest.json`);
+}
+
+export function maintenanceRecordPath(paths: HarnessPaths, adoptedHeadSha: string): string {
+  return path.join(paths.maintenanceDir, `${adoptedHeadSha}.json`);
 }
 
 async function readJson(file: string): Promise<unknown> {
@@ -127,3 +132,17 @@ export const writeCloseManifest = (
   manifest: CloseManifest,
 ): Promise<void> =>
   writeJson(closeManifestPath(paths, manifest.task_id), CloseManifest.parse(manifest));
+
+export const readMaintenanceRecord = (
+  paths: HarnessPaths,
+  adoptedHeadSha: string,
+): Promise<MaintenanceRecord | null> =>
+  readOptional(maintenanceRecordPath(paths, adoptedHeadSha), (input) =>
+    MaintenanceRecord.parse(input),
+  );
+
+export const writeMaintenanceRecord = (
+  paths: HarnessPaths,
+  record: MaintenanceRecord,
+): Promise<void> =>
+  writeJson(maintenanceRecordPath(paths, record.adopted_head_sha), MaintenanceRecord.parse(record));

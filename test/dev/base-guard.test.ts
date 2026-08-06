@@ -1,4 +1,4 @@
-import { rm, writeFile } from 'node:fs/promises';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { checkProgressionBase, expectedBaseSha } from '../../dev/lib/base-guard.js';
@@ -64,17 +64,40 @@ describe('base da próxima tarefa', () => {
 
   it('depois de uma tarefa aceita, a base esperada é o último accepted_commit', async () => {
     const accepted = await commitAll(sandbox.root, 'trabalho da T1');
-    const state = withTaskState(await readState(paths), 'T1', {
-      status: 'PASS',
-      phase: null,
-      accepted_commit: accepted,
-      candidate_commit: accepted,
-      finished_at: '2026-08-05T12:00:00.000Z',
-    });
+    const state = {
+      ...withTaskState(await readState(paths), 'T1', {
+        status: 'PASS',
+        phase: null,
+        accepted_commit: accepted,
+        candidate_commit: accepted,
+        finished_at: '2026-08-05T12:00:00.000Z',
+      }),
+      authorized_head_sha: accepted,
+    };
 
     expect(expectedBaseSha(state)).toBe(accepted);
     await writeState(paths, state);
     expect(await checkProgressionBase(paths, await readState(paths))).toBeNull();
+  });
+
+  it('usa authorized_head_sha sem inferir novamente a base pelas tarefas', async () => {
+    const authorized = (await readState(paths)).authorized_head_sha;
+    await mkdir(path.join(sandbox.root, 'docs'), { recursive: true });
+    await writeFile(path.join(sandbox.root, 'docs', 'maintenance.md'), 'checkpoint pendente\n');
+    const accepted = await commitAll(sandbox.root, 'commit ainda não autorizado');
+    const state = {
+      ...withTaskState(await readState(paths), 'T1', {
+        status: 'PASS',
+        phase: null,
+        accepted_commit: accepted,
+        candidate_commit: accepted,
+        finished_at: '2026-08-05T12:00:00.000Z',
+      }),
+      authorized_head_sha: authorized,
+    };
+
+    expect(expectedBaseSha(state)).toBe(authorized);
+    expect(await checkProgressionBase(paths, state)).toMatch(/não é a base esperada/);
   });
 
   it('state sem baseline não inventa base: só exige árvore limpa', async () => {

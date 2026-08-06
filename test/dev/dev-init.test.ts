@@ -2,7 +2,8 @@ import { readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { DevelopmentState } from '../../dev/lib/schemas.js';
-import { makeTempDevDir, runDevCli } from './helpers.js';
+import { headSha } from '../../dev/lib/git.js';
+import { makeTempDevDir, REPO_ROOT, runDevCli } from './helpers.js';
 
 const created: string[] = [];
 
@@ -29,6 +30,7 @@ describe('dev-init', () => {
       JSON.parse(await readFile(path.join(devDir, 'state.json'), 'utf8')),
     );
     expect(state.plan_sha256).toBe(summary.plan_sha256);
+    expect(state.authorized_head_sha).toBe(await headSha(REPO_ROOT));
     expect(state.tasks.every((task) => task.status === 'READY')).toBe(true);
     expect(state.tasks.every((task) => task.accepted_commit === null)).toBe(true);
   });

@@ -171,3 +171,11 @@ criou commit.
 Rule: subprocesso de teste parte de allowlist operacional mínima e recebe
 `AGENTLAB_*` ou credencial somente por override explícito do cenário. Fixtures
 que alteram Git tratam `--help`/`-h` antes de ler ambiente ou produzir efeitos.
+
+[2026-08-06] Contexto: correção de harness necessária entre duas tarefas do plano.
+Mistake: a guarda derivava a próxima base diretamente do `accepted_commit`,
+então um commit legítimo de manutenção só podia ser ignorado, atribuído
+historicamente à tarefa anterior ou bloquear a progressão.
+Rule: a base operacional da próxima tarefa é um campo explícito e só avança por
+fechamento PASS ou por MaintenanceRecord atômico que prova cadeia linear,
+escopo permitido e validações; manutenção nunca reescreve artifacts de tarefa.

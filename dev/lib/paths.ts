@@ -17,6 +17,7 @@ export interface HarnessPaths {
   readonly completionsDir: string;
   readonly handoffsDir: string;
   readonly logsDir: string;
+  readonly maintenanceDir: string;
 }
 
 /**
@@ -39,5 +40,6 @@ export function resolveHarnessPaths(repoRoot: string = process.cwd()): HarnessPa
     completionsDir: path.join(devDir, 'completions'),
     handoffsDir: path.join(devDir, 'handoffs'),
     logsDir: path.join(devDir, 'logs'),
+    maintenanceDir: path.join(devDir, 'maintenance'),
   };
 }

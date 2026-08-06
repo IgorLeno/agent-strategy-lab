@@ -18,6 +18,7 @@
     "dev-close": "tsx dev/cli/dev-close.ts",
     "dev-doctor": "tsx dev/cli/dev-doctor.ts",
     "dev-recover": "tsx dev/cli/dev-recover.ts",
+    "dev-adopt-maintenance": "tsx dev/cli/dev-adopt-maintenance.ts",
     "dev-orchestrate": "tsx dev/cli/dev-orchestrate.ts"
   },
   "devDependencies": {

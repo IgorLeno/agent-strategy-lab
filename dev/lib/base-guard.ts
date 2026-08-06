@@ -17,13 +17,7 @@ import type { DevelopmentState } from './schemas.js';
  * depender do estado atual do checkout.
  */
 export function expectedBaseSha(state: DevelopmentState): string | null {
-  const accepted = state.tasks
-    .filter((task) => task.status === 'PASS' && task.accepted_commit !== null)
-    .sort((a, b) => (a.finished_at ?? '').localeCompare(b.finished_at ?? ''));
-  const last = accepted[accepted.length - 1];
-  // Sem nenhuma tarefa aceita, a base legítima é o baseline registrado no
-  // dev-init. `null` só acontece em state construído fora de um repositório.
-  return last?.accepted_commit ?? state.baseline_sha;
+  return state.authorized_head_sha;
 }
 
 /** Devolve o motivo do bloqueio, ou `null` quando a base está íntegra. */

@@ -124,10 +124,12 @@ describe('dev-close — caminho de aceitação', () => {
     expect(result.completion?.orchestrator_evidence.revalidation).toHaveLength(1);
     expect(result.completion?.orchestrator_evidence.revalidation[0]?.exit_code).toBe(0);
 
-    const task = getTaskState(await readState(paths), 'T1');
+    const state = await readState(paths);
+    const task = getTaskState(state, 'T1');
     expect(task.status).toBe('PASS');
     expect(task.phase).toBeNull();
     expect(task.accepted_commit).toBe(candidate);
+    expect(state.authorized_head_sha).toBe(candidate);
 
     const handoff = await readHandoff(paths, 'T1');
     expect(handoff?.accepted_commit).toBe(candidate);

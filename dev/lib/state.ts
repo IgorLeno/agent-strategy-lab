@@ -8,6 +8,30 @@ import {
 } from './schemas.js';
 import type { HarnessPaths } from './paths.js';
 
+export function deriveAuthorizedHead(
+  tasks: readonly TaskState[],
+  baselineSha: string | null,
+): string | null {
+  const accepted = tasks
+    .filter((task) => task.status === 'PASS' && task.accepted_commit !== null)
+    .sort((left, right) => (left.finished_at ?? '').localeCompare(right.finished_at ?? ''));
+  return accepted.at(-1)?.accepted_commit ?? baselineSha;
+}
+
+/** Runtime anterior ao campo é migrado em memória; valor explícito é preservado. */
+export function parseDevelopmentState(input: unknown): DevelopmentState {
+  const hasAuthorizedHead =
+    typeof input === 'object' &&
+    input !== null &&
+    Object.prototype.hasOwnProperty.call(input, 'authorized_head_sha');
+  const parsed = DevelopmentState.parse(input);
+  if (hasAuthorizedHead) return parsed;
+  return {
+    ...parsed,
+    authorized_head_sha: deriveAuthorizedHead(parsed.tasks, parsed.baseline_sha),
+  };
+}
+
 export function initialTaskState(id: string): TaskState {
   return {
     id,
@@ -34,6 +58,7 @@ export function buildInitialState(
     schema_version: DEV_SCHEMA_VERSION,
     plan_sha256: planSha256,
     baseline_sha: options.baselineSha ?? null,
+    authorized_head_sha: options.baselineSha ?? null,
     created_at: now,
     updated_at: now,
     tasks: plan.tasks.map((task) => initialTaskState(task.id)),
@@ -41,7 +66,7 @@ export function buildInitialState(
 }
 
 export async function readState(paths: HarnessPaths): Promise<DevelopmentState> {
-  return DevelopmentState.parse(JSON.parse(await readFile(paths.stateFile, 'utf8')));
+  return parseDevelopmentState(JSON.parse(await readFile(paths.stateFile, 'utf8')));
 }
 
 export async function writeState(paths: HarnessPaths, state: DevelopmentState): Promise<void> {
@@ -77,6 +102,7 @@ export async function ensureRuntimeDirs(paths: HarnessPaths): Promise<void> {
     paths.completionsDir,
     paths.handoffsDir,
     paths.logsDir,
+    paths.maintenanceDir,
   ]) {
     await mkdir(dir, { recursive: true });
   }
