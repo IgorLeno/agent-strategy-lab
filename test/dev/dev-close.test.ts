@@ -254,7 +254,36 @@ describe('dev-close — guardas operacionais (permanecem RUNNING/FINALIZING)', (
   it('report ausente', async () => {
     await startTask();
     await doWork();
-    await expectPending(/AgentCompletionReport/);
+    await expectPending(/AgentCompletionReport ausente/);
+  });
+
+  it('report fora do schema nomeia o campo, em vez de dizer só "inválido"', async () => {
+    await startTask();
+    const candidate = await doWork();
+    await writeWorkerArtifacts({ candidateCommit: candidate, changedFiles: ['src/one.txt'] });
+    // Foi assim que um agente real errou: campos inventados e sha abreviado.
+    await writeFile(
+      reportPath(paths, 'T1'),
+      JSON.stringify({
+        schema_version: 1,
+        task_id: 'T1',
+        self_reported_result: 'SUCCESS',
+        summary: 'feito',
+        candidate_commit: candidate.slice(0, 7),
+        changed_files: ['src/one.txt'],
+        validations: [],
+        decisions: [],
+        lessons: [],
+        relevant_files: [],
+        acceptance: [{ criterion: 'inventado', met: true }],
+      }),
+      'utf8',
+    );
+
+    const result = await closeTask({ paths, loaded, taskId: 'T1' });
+    expect(result.kind).toBe('PENDING');
+    expect(result.reason).toMatch(/candidate_commit|acceptance/);
+    expect(result.reason).not.toMatch(/ausente ou inválido/);
   });
 
   it('working tree suja', async () => {

@@ -7,6 +7,7 @@
 # permissões pessoais, que não entram no experimento.
 #
 # O que mudou em relação ao v1:
+#   --output-format json custo, modelo e duração do run ficam no log, não em estimativa
 #   --model              modelo FIXO: run comparável não pode depender do default da CLI
 #   --settings           política de Bash/Git versionada em claude-build-worker.settings.json
 #   --setting-sources    somente `project`; user e local (pessoais) ficam de fora
@@ -19,6 +20,8 @@ agent: claude
 argv:
   - claude
   - --print
+  - --output-format
+  - json
   - --model
   - claude-opus-5
   - --settings

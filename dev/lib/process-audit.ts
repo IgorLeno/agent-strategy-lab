@@ -107,9 +107,16 @@ export interface CleanupResult {
  * SIGKILL direto, sem SIGTERM: o worker já terminou e o timeout externo já
  * sinalizou o grupo. O que sobrevive a isso é vazamento, não trabalho em
  * andamento — e não pode atravessar para a próxima sessão.
+ *
+ * Mata apenas o que a TAG confirma. Pgid é sinal de detecção, não de posse: o
+ * kernel recicla PIDs, e um processo alheio pode acabar num grupo cujo id
+ * coincide com o do worker já encerrado. Matar por coincidência derrubaria
+ * processo de terceiro. Sobrevivente identificado só pelo grupo é relatado —
+ * e relatar já basta para classificar a sessão como contaminada.
  */
 export async function killSurvivors(input: AuditInput): Promise<CleanupResult> {
-  const killed = await findSurvivors(input);
+  const found = await findSurvivors(input);
+  const killed = found.filter((survivor) => survivor.matched_by === 'launch_tag');
   for (const survivor of killed) {
     try {
       process.kill(survivor.pid, 'SIGKILL');
@@ -117,9 +124,10 @@ export async function killSurvivors(input: AuditInput): Promise<CleanupResult> {
       // ESRCH: morreu entre a auditoria e o sinal. Fim desejado do mesmo jeito.
     }
   }
-  if (killed.length === 0) return { killed, remaining: [] };
+  const unkillable = found.filter((survivor) => survivor.matched_by === 'process_group');
+  if (killed.length === 0) return { killed, remaining: unkillable };
 
-  // O kernel remove o processo da tabela só depois do reap; algumas iterações
+  // O kernel só remove o processo da tabela depois do reap; algumas iterações
   // curtas evitam relatar zumbi transitório como sobrevivente.
   let remaining = killed;
   for (let attempt = 0; attempt < 10 && remaining.length > 0; attempt += 1) {

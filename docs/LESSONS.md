@@ -101,3 +101,30 @@ PATH, flags conferidas contra o `--help` da versão instalada, política de
 permissões versionada no repositório, modelo fixo e cobertura dos comandos
 de validação do plano. Permissão pessoal da máquina não é parte do
 experimento.
+
+[2026-08-05] Contexto: S15 — primeiro run com agente real.
+Mistake: descrever o contrato dos arquivos de saída (report e handoff draft)
+em prosa, com o schema validado de forma estrita do outro lado. O agente
+escreveu um JSON plausível e errado — campos inventados, `candidate_commit`
+abreviado — e o fechamento ficou pendente com o trabalho pronto e correto.
+Rule: contrato validado estritamente é comunicado por esqueleto, não por
+descrição: o prompt carrega o JSON exato, com nomes, tipos, enums e limites.
+E toda rejeição por schema nomeia campo e problema — a sessão que escreveu o
+arquivo já morreu e não pode ser perguntada.
+
+[2026-08-05] Contexto: S15 — política de permissões em modo não interativo.
+Mistake: montar allow list pensando em comandos isolados. `node --test test/
+2>&1; echo "EXIT=$?"` foi negado porque `echo` não estava na lista: comando
+composto exige que TODA parte esteja liberada.
+Rule: allow list cobre os utilitários de leitura óbvios, e o prompt manda um
+comando por chamada. Nunca alargar uma regra para consertar isso quando o
+alargamento libera o perigoso junto (`Bash(git -C:*)` liberaria `push`).
+
+[2026-08-05] Contexto: S14/S15 — matar sobrevivente por process group.
+Mistake: usar pgid como sinal de POSSE e mandar SIGKILL. O kernel recicla
+PIDs; um processo alheio pode cair num grupo cujo id coincide com o do
+worker já encerrado, e o harness derrubaria processo de terceiro. Apareceu
+como falha intermitente de um teste vizinho na suíte paralela.
+Rule: matar só o que a tag única do lançamento confirma. Sinal fraco
+(coincidência de identificador reciclado) serve para DETECTAR e relatar,
+nunca para agir destrutivamente.

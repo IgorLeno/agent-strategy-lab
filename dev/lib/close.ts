@@ -30,6 +30,7 @@ import {
   writeHandoff,
 } from './records.js';
 import { canonicalSha256 } from './canonical.js';
+import { ZodError } from 'zod';
 import { getTaskState, readState, withTaskState, writeState } from './state.js';
 
 /**
@@ -66,6 +67,28 @@ function pending(reason: string): Guard {
   return { reason };
 }
 
+/**
+ * "ausente ou inválido" não diz nada a quem precisa corrigir — e a sessão que
+ * escreveu o arquivo já morreu. O motivo do rejeito precisa nomear o campo.
+ */
+async function describeRead<T>(
+  read: () => Promise<T | null>,
+): Promise<{ value: T | null; problem: string }> {
+  try {
+    const value = await read();
+    return { value, problem: value === null ? 'ausente' : 'ok' };
+  } catch (error) {
+    if (error instanceof ZodError) {
+      const detail = error.issues
+        .slice(0, 5)
+        .map((issue) => `${issue.path.join('.') || '(raiz)'}: ${issue.message}`)
+        .join('; ');
+      return { value: null, problem: `inválido — ${detail}` };
+    }
+    return { value: null, problem: `ilegível — ${error instanceof Error ? error.message : String(error)}` };
+  }
+}
+
 export async function closeTask(input: CloseInput): Promise<CloseOutcome> {
   const { paths, loaded, taskId } = input;
   const now = input.now ?? (() => new Date().toISOString());
@@ -97,14 +120,18 @@ export async function closeTask(input: CloseInput): Promise<CloseOutcome> {
   const packet = await readPacket(paths, taskId).catch(() => null);
   if (!packet) return await stayPending(paths, state, taskId, 'task packet ausente ou inválido');
 
-  const report = await readReport(paths, taskId).catch(() => null);
-  if (!report) return await stayPending(paths, state, taskId, 'AgentCompletionReport ausente ou inválido');
+  const reportRead = await describeRead(() => readReport(paths, taskId));
+  const report = reportRead.value;
+  if (!report) {
+    return await stayPending(paths, state, taskId, `AgentCompletionReport ${reportRead.problem}`);
+  }
   if (report.task_id !== taskId) {
     return await stayPending(paths, state, taskId, `report pertence a outra tarefa: ${report.task_id}`);
   }
 
-  const draft = await readHandoffDraft(paths, taskId).catch(() => null);
-  if (!draft) return await stayPending(paths, state, taskId, 'HandoffDraft ausente ou inválido');
+  const draftRead = await describeRead(() => readHandoffDraft(paths, taskId));
+  const draft = draftRead.value;
+  if (!draft) return await stayPending(paths, state, taskId, `HandoffDraft ${draftRead.problem}`);
   // Draft de outra tarefa nunca é aceito: o task_id do record decide o arquivo
   // de destino, então um draft mentiroso sobrescreveria o handoff alheio.
   if (draft.task_id !== taskId) {

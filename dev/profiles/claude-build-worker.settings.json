@@ -1,5 +1,5 @@
 {
-  "$comment": "Política de permissões do worker Claude — VERSIONADA. Sem ela, o funcionamento dependia das permissões pessoais do usuário, que não entram no experimento nem sobrevivem a outra máquina. Passada via --settings; --setting-sources project exclui user e local.",
+  "$comment": "Política de permissões do worker Claude — VERSIONADA. Sem ela, o funcionamento dependia das permissões pessoais do usuário, que não entram no experimento nem sobrevivem a outra máquina. Passada via --settings; --setting-sources project exclui user e local. Comando composto (';', '&&', pipe) exige que TODA parte esteja na allow list: o run S15 teve `node --test test/ 2>&1; echo EXIT=$?` negado por causa do echo. Por isso entram utilitários de leitura óbvios, e o prompt manda usar um comando por chamada.",
   "permissions": {
     "defaultMode": "acceptEdits",
     "allow": [
@@ -25,7 +25,16 @@
       "Bash(git commit:*)",
       "Bash(ls:*)",
       "Bash(cat:*)",
-      "Bash(mkdir:*)"
+      "Bash(mkdir:*)",
+      "Bash(echo:*)",
+      "Bash(pwd)",
+      "Bash(which:*)",
+      "Bash(env)",
+      "Bash(grep:*)",
+      "Bash(find:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(wc:*)"
     ],
     "deny": [
       "Bash(git push:*)",
