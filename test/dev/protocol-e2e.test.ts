@@ -13,6 +13,7 @@ import {
   readLaunchRecord,
   readPacket,
 } from '../../dev/lib/records.js';
+import { findSurvivors } from '../../dev/lib/process-audit.js';
 import { isSameProcessAlive } from '../../dev/lib/process-identity.js';
 import { buildInitialState, ensureRuntimeDirs, readState, writeState } from '../../dev/lib/state.js';
 import { makeSandboxRepo, runDevCli, runGit, type Sandbox } from './helpers.js';
@@ -210,14 +211,33 @@ describe('protocolo — o fluxo para', () => {
 });
 
 describe('protocolo — descendente vazado', () => {
-  it('detecta descendente que sobrevive ao worker', async () => {
+  it('mata o descendente que escapou do process group antes da próxima sessão', async () => {
     await orchestrate('leak');
+
     const record = await readLaunchRecord(paths, 'T1');
     expect(record).not.toBeNull();
-    // O worker morreu; o descendente vazado é o que a verificação do M24B
-    // precisará pegar no produto. Aqui basta provar que o pai não sobrevive.
     expect(await isSameProcessAlive(record!.process)).toBe(false);
+
+    // O `sleep` do modo leak nasce com setsid: sai do process group e só é
+    // reconhecível pela tag de ambiente do lançamento.
+    expect(record!.survivors_killed.length).toBeGreaterThan(0);
+    const leaked = record!.survivors_killed.find((survivor) => /sleep/.test(survivor.command));
+    expect(leaked?.matched_by).toBe('launch_tag');
+    expect(record!.survivors_remaining).toEqual([]);
+
+    // Nenhum sobrevivente atravessa para a sessão seguinte.
+    expect(await findSurvivors({ launchId: record!.launch_id, pgid: record!.process.pgid })).toEqual(
+      [],
+    );
+
     const stdout = await readFile(`${sandbox.devDir}/logs/T1.stdout.log`, 'utf8');
     expect(stdout).toBeTypeOf('string');
+  }, 60_000);
+
+  it('run limpo não reporta sobrevivente', async () => {
+    await orchestrate('success', ['--max-iterations', '1']);
+    const record = await readLaunchRecord(paths, 'T1');
+    expect(record!.survivors_killed).toEqual([]);
+    expect(record!.survivors_remaining).toEqual([]);
   }, 60_000);
 });

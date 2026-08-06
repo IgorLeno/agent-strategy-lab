@@ -244,6 +244,16 @@ export type ProcessIdentity = z.infer<typeof ProcessIdentity>;
  * O que o launcher observou do processo do worker. Escrito pelo dev-launch e
  * lido pelo dev-close — o worker não tem acesso a esses fatos sobre si mesmo.
  */
+/** Descendente do worker que ainda estava vivo quando a sessão terminou. */
+export const SurvivorProcess = z
+  .object({
+    pid: z.number().int().positive(),
+    command: nonEmpty,
+    matched_by: z.enum(['process_group', 'launch_tag']),
+  })
+  .strict();
+export type SurvivorProcess = z.infer<typeof SurvivorProcess>;
+
 export const LaunchRecord = z
   .object({
     schema_version: z.literal(DEV_SCHEMA_VERSION),
@@ -251,6 +261,12 @@ export const LaunchRecord = z
     profile_id: nonEmpty,
     argv: z.array(nonEmpty).min(1),
     process: ProcessIdentity,
+    /** Identificador único do lançamento, propagado no env para a auditoria. */
+    launch_id: z.string().uuid(),
+    /** Descendentes vivos encontrados e mortos no fim da sessão. */
+    survivors_killed: z.array(SurvivorProcess).default([]),
+    /** Descendentes que resistiram ao SIGKILL: sessão contaminada. */
+    survivors_remaining: z.array(SurvivorProcess).default([]),
     started_at: z.string().datetime(),
     finished_at: z.string().datetime().nullable(),
     duration_ms: z.number().int().nonnegative().nullable(),

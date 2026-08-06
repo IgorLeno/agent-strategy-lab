@@ -130,6 +130,26 @@ Do draft do worker sobrevive apenas o que é opinião dele — `decisions`,
 `lessons`, `next_relevant_files`. Draft cujo `task_id` diverge da tarefa em
 fechamento é recusado antes de qualquer escrita.
 
+## Auditoria de descendentes
+
+O pai ter morrido não prova sessão encerrada: filho vivo continua mexendo no
+repositório enquanto a próxima tarefa roda. Ao fim de cada lançamento o
+harness procura sobreviventes por **dois** sinais:
+
+1. **process group** — o worker roda `detached`, então `pgid = pid` e filhos
+   comuns herdam esse grupo;
+2. **tag de ambiente** — `AGENTLAB_LAUNCH_ID`, único por lançamento, aparece
+   em `/proc/<pid>/environ` de qualquer descendente, inclusive o que chamou
+   `setsid` e escapou do grupo.
+
+Sobreviventes levam SIGKILL e ficam registrados em `survivors_killed` no
+LaunchRecord. O que resistir vira `survivors_remaining` e classifica o
+lançamento como `INFRA_ERROR` — sessão contaminada não avança.
+
+**Limite conhecido:** processo que troca o próprio environment (exec com env
+limpo, daemon que sanitiza) escapa dos dois sinais. Garantia completa exige
+cgroup ou PID namespace, fora do escopo da Fase S.
+
 ## Perfis de launcher
 
 O perfil declara **intenção**; o `LaunchRecord` registra o que foi de fato

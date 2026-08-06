@@ -1,8 +1,10 @@
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
 import path from 'node:path';
 import { TIMEOUT_EXIT_CODE } from './exec.js';
 import type { HarnessPaths } from './paths.js';
+import { killSurvivors } from './process-audit.js';
 import { captureProcessIdentity } from './process-identity.js';
 import {
   assertNoForbiddenFlags,
@@ -82,8 +84,12 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
     ...agentArgv,
   ];
 
+  // Tag única por lançamento: filhos herdam o environment, então ela permite
+  // reconhecer descendente que escapou do process group via setsid.
+  const launchId = randomUUID();
   const env: NodeJS.ProcessEnv = {
     ...buildEnvironment(profile),
+    AGENTLAB_LAUNCH_ID: launchId,
     AGENTLAB_TASK_ID: packet.task_id,
     AGENTLAB_REPO_ROOT: paths.repoRoot,
     AGENTLAB_TASK_PACKET_PATH: io.packetPath,
@@ -120,12 +126,21 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
     child.stdin.end(prompt, 'utf8');
   }
 
-  const base: Omit<LaunchRecord, 'finished_at' | 'duration_ms' | 'exit_code' | 'timed_out'> = {
+  const base: Omit<
+    LaunchRecord,
+    | 'finished_at'
+    | 'duration_ms'
+    | 'exit_code'
+    | 'timed_out'
+    | 'survivors_killed'
+    | 'survivors_remaining'
+  > = {
     schema_version: DEV_SCHEMA_VERSION,
     task_id: packet.task_id,
     profile_id: profile.id,
     argv,
     process: identity,
+    launch_id: launchId,
     started_at: startedAt,
     controlled: deriveControlledFacts(profile, agentArgv, env),
   };
@@ -138,6 +153,8 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
     duration_ms: null,
     exit_code: null,
     timed_out: false,
+    survivors_killed: [],
+    survivors_remaining: [],
   });
   await input.onStarted?.(identity);
 
@@ -153,15 +170,34 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
   const finishedAtMs = Date.now();
   const durationMs = finishedAtMs - startedAtMs;
   const timedOut = classifyTimeout(exitCode, durationMs, timeoutSeconds);
+
+  // O pai ter morrido não prova sessão encerrada: filho vivo continua mexendo
+  // no repositório enquanto a próxima tarefa roda.
+  const cleanup = await killSurvivors({
+    launchId,
+    pgid: identity.pgid,
+    ignorePids: [process.pid, process.ppid],
+  });
+
   const record: LaunchRecord = {
     ...base,
     finished_at: new Date(finishedAtMs).toISOString(),
     duration_ms: durationMs,
     exit_code: exitCode,
     timed_out: timedOut,
+    survivors_killed: [...cleanup.killed],
+    survivors_remaining: [...cleanup.remaining],
   };
   await writeLaunchRecord(paths, record);
 
+  if (cleanup.remaining.length > 0) {
+    const detail = cleanup.remaining.map((survivor) => `${survivor.pid} (${survivor.command})`);
+    return {
+      record,
+      classification: 'INFRA_ERROR',
+      reason: `descendente do worker sobreviveu ao SIGKILL: ${detail.join(', ')}`,
+    };
+  }
   if (timedOut) {
     return { record, classification: 'TIMED_OUT', reason: `worker excedeu ${timeoutSeconds}s` };
   }
