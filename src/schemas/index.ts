@@ -17,3 +17,4 @@ export {
   InstructionFileFingerprint,
 } from './profiles.js';
 export { StrategyDef } from './strategy.js';
+export { ExecutionRequest, Trial, TrialStatus } from './trial.js';
