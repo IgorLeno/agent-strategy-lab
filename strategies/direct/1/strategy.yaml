@@ -1,0 +1,4 @@
+name: direct
+version: 1
+prompt: |-
+  Implemente diretamente a tarefa fornecida e verifique o resultado.

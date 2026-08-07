@@ -16,3 +16,4 @@ export {
   EnvironmentProfile,
   InstructionFileFingerprint,
 } from './profiles.js';
+export { StrategyDef } from './strategy.js';
