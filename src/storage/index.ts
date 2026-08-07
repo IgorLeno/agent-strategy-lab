@@ -7,6 +7,8 @@ import {
   type DataDirectoryConfig,
 } from '../project/index.js';
 
+export { appendJsonLine } from './jsonl.js';
+
 const CROCKFORD_BASE32 = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 const MAX_ULID_TIMESTAMP = 2 ** 48 - 1;
 const RUN_ID_PATTERN = /^[0-7][0-9A-HJKMNP-TV-Z]{25}$/;
