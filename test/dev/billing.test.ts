@@ -181,6 +181,7 @@ describe('perfis subscription-only', () => {
       'claude-build-worker-subscription-v1',
       'codex-build-worker-subscription-v1',
       'codex-build-worker-subscription-high-v1',
+      'codex-build-worker-subscription-high-v2',
     ]) {
       const profile = await loadProfile(REPO_ROOT, id);
       expect(profile.billing_mode).toBe('subscription_only');
@@ -190,6 +191,48 @@ describe('perfis subscription-only', () => {
       expect(profile.argv).toContain('--model');
       expect(profile.forbidden_flags.length).toBeGreaterThan(0);
     }
+  });
+
+  it('preserva v1 como worker/full e declara v2 como orchestrator/targeted', async () => {
+    const v1 = await loadProfile(REPO_ROOT, 'codex-build-worker-subscription-high-v1');
+    const v2 = await loadProfile(REPO_ROOT, 'codex-build-worker-subscription-high-v2');
+
+    expect(v1).toMatchObject({
+      commit_owner: 'worker',
+      official_validation_owner: 'worker',
+      worker_validation_policy: 'full',
+    });
+    expect(v2).toMatchObject({
+      commit_owner: 'orchestrator',
+      official_validation_owner: 'orchestrator',
+      worker_validation_policy: 'targeted',
+      agent: 'codex',
+      billing_mode: 'subscription_only',
+      instruction_environment: 'sanitized_user_home',
+    });
+    expect(v2.argv).toEqual(v1.argv);
+    expect(v2.env_allowlist).toEqual(v1.env_allowlist);
+    expect(Object.keys(v2.env_extra).filter((name) => name.startsWith('GIT_'))).toEqual([]);
+  });
+
+  it('rejeita profile com combinação de execution policy não implementada', async () => {
+    await writeProfile('codex-policy-mista-v1', [
+      'id: codex-policy-mista-v1',
+      'agent: codex',
+      'billing_mode: subscription_only',
+      'commit_owner: orchestrator',
+      'official_validation_owner: worker',
+      'worker_validation_policy: targeted',
+      "argv: [codex, exec, '--model', 'gpt-5.6-sol', '-']",
+      'prompt_delivery: stdin',
+      'timeout_seconds: 30',
+      'forbidden_flags: [resume]',
+      'env_allowlist: [PATH]',
+    ]);
+
+    await expect(loadProfile(sandbox.root, 'codex-policy-mista-v1')).rejects.toThrow(
+      /combinação.*não suportada/i,
+    );
   });
 
   it('os perfis de assinatura são o padrão de dev-launch, dev-orchestrate e dev-doctor', async () => {

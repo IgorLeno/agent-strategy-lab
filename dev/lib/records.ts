@@ -9,9 +9,11 @@ import {
   CompletionRecord,
   LaunchRecord,
   MaintenanceRecord,
+  OrchestratedFinalizationRecord,
   RecoveredFinalizationRecord,
   type HandoffDraft,
   type HandoffRecord,
+  type LaunchRecordInput,
   type TaskPacket,
   parseHandoffDraft,
   parseHandoffRecord,
@@ -77,6 +79,14 @@ export function recoveryRecordPath(
   return path.join(paths.recoveriesDir, taskId, `attempt-${sourceAttempt}.json`);
 }
 
+export function orchestratedFinalizationPath(
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+): string {
+  return path.join(paths.finalizationsDir, taskId, `attempt-${attempt}.json`);
+}
+
 async function readJson(file: string): Promise<unknown> {
   return JSON.parse(await readFile(file, 'utf8'));
 }
@@ -130,7 +140,7 @@ export const readLaunchRecord = (
 ): Promise<LaunchRecord | null> =>
   readOptional(launchRecordPath(paths, taskId), (input) => LaunchRecord.parse(input));
 
-export const writeLaunchRecord = (paths: HarnessPaths, record: LaunchRecord): Promise<void> =>
+export const writeLaunchRecord = (paths: HarnessPaths, record: LaunchRecordInput): Promise<void> =>
   writeJson(launchRecordPath(paths, record.task_id), LaunchRecord.parse(record));
 
 export const readCompletion = (
@@ -199,4 +209,22 @@ export const writeRecoveredFinalization = (
   writeJson(
     recoveryRecordPath(paths, record.task_id, record.source_attempt),
     RecoveredFinalizationRecord.parse(record),
+  );
+
+export const readOrchestratedFinalization = (
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+): Promise<OrchestratedFinalizationRecord | null> =>
+  readOptional(orchestratedFinalizationPath(paths, taskId, attempt), (input) =>
+    OrchestratedFinalizationRecord.parse(input),
+  );
+
+export const writeOrchestratedFinalization = (
+  paths: HarnessPaths,
+  record: OrchestratedFinalizationRecord,
+): Promise<void> =>
+  writeJson(
+    orchestratedFinalizationPath(paths, record.task_id, record.attempt),
+    OrchestratedFinalizationRecord.parse(record),
   );

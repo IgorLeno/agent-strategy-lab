@@ -110,6 +110,33 @@ describe('perfil do launcher', () => {
 });
 
 describe('launchWorker', () => {
+  it('registra no LaunchRecord a policy efetiva do profile orquestrado', async () => {
+    await persistPacket();
+    const packet = buildTaskPacket({
+      task: loaded.byId.get('T1')!,
+      baseSha: await headSha(paths.repoRoot),
+      previousHandoff: null,
+    });
+    const orchestratedProfile: LauncherProfile = {
+      ...profile,
+      commit_owner: 'orchestrator',
+      official_validation_owner: 'orchestrator',
+      worker_validation_policy: 'targeted',
+      env_extra: { ...profile.env_extra, AGENTLAB_FAKE_MODE: 'no-commit' },
+    };
+
+    const outcome = await launchWorker({ paths, profile: orchestratedProfile, packet });
+    const persisted = await readLaunchRecord(paths, 'T1');
+    const expected = {
+      commit_owner: 'orchestrator',
+      official_validation_owner: 'orchestrator',
+      worker_validation_policy: 'targeted',
+    };
+
+    expect(outcome.record.execution_policy).toEqual(expected);
+    expect(persisted?.execution_policy).toEqual(expected);
+  });
+
   it('lança processo novo, registra identidade e o worker faz o trabalho', async () => {
     await persistPacket();
     const packet = buildTaskPacket({
@@ -205,6 +232,11 @@ describe('dev-launch CLI', () => {
 
     const record = await readLaunchRecord(paths, 'T1');
     expect(record?.profile_id).toBe('fake-worker-v1');
+    expect(record?.execution_policy).toEqual({
+      commit_owner: 'worker',
+      official_validation_owner: 'worker',
+      worker_validation_policy: 'full',
+    });
     expect(record?.duration_ms).toBeGreaterThanOrEqual(0);
   });
 

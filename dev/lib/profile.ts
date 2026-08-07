@@ -3,6 +3,12 @@ import path from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { z } from 'zod';
 import { apiCredentialNamesIn } from './billing.js';
+import {
+  CommitOwner,
+  ExecutionPolicy,
+  OfficialValidationOwner,
+  WorkerValidationPolicy,
+} from './execution-policy.js';
 
 const nonEmpty = z.string().min(1);
 
@@ -41,6 +47,9 @@ export const LauncherProfile = z
     instruction_environment: z
       .enum(['real_world_user_home', 'sanitized_user_home'])
       .default('real_world_user_home'),
+    commit_owner: CommitOwner.default('worker'),
+    official_validation_owner: OfficialValidationOwner.default('worker'),
+    worker_validation_policy: WorkerValidationPolicy.default('full'),
     /** argv base; o prompt entra conforme prompt_delivery. */
     argv: z.array(nonEmpty).min(1),
     prompt_delivery: z.enum(['argv', 'stdin']),
@@ -60,6 +69,15 @@ export const LauncherProfile = z
   .superRefine((profile, ctx) => {
     const reject = (message: string) =>
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${profile.id}: ${message}` });
+
+    const executionPolicy = ExecutionPolicy.safeParse({
+      commit_owner: profile.commit_owner,
+      official_validation_owner: profile.official_validation_owner,
+      worker_validation_policy: profile.worker_validation_policy,
+    });
+    if (!executionPolicy.success) {
+      reject('combinação de execution policy não suportada');
+    }
 
     if (profile.agent === 'fake') {
       if (profile.billing_mode !== 'not_applicable') {

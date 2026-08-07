@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 import { ESTIMATED_COST_LABEL } from '../lib/billing.js';
-import { closeTask } from '../lib/close.js';
+import { closeTaskByLaunchPolicy } from '../lib/close-dispatch.js';
 import { emit, fail, parseArgs, runMain } from '../lib/cli.js';
 import { DEFAULT_WORKER_PROFILE_ID } from '../lib/defaults.js';
 import { withHarnessLock } from '../lib/lock.js';
@@ -85,7 +85,7 @@ async function main(): Promise<void> {
         break;
       }
 
-      const close = await closeTask({ paths, loaded, taskId: packet.task_id });
+      const close = await closeTaskByLaunchPolicy({ paths, loaded, taskId: packet.task_id });
       iterations.push({
         task_id: packet.task_id,
         launch: launch.classification,

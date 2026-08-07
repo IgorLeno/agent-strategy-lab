@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   CompletionRecord,
+  LaunchRecord,
   MAXIMUM_HANDOFF_BYTES,
   MAXIMUM_TASK_PACKET_BYTES,
   TaskState,
+  OrchestratedFinalizationRecord,
   byteSize,
   parseHandoffDraft,
   parseHandoffRecord,
@@ -13,6 +15,70 @@ import { BudgetExceededError } from '../../dev/lib/budget.js';
 
 const SHA = 'a'.repeat(40);
 const NOW = '2026-08-05T12:00:00.000Z';
+
+const PROCESS = {
+  pid: 123,
+  pgid: 123,
+  started_at: NOW,
+  proc_start_ticks: 456,
+  command_sha256: 'b'.repeat(64),
+};
+
+function validLaunchRecord(overrides: Record<string, unknown> = {}) {
+  return {
+    schema_version: 1,
+    task_id: 'M01',
+    profile_id: 'legacy-worker-v1',
+    argv: ['worker'],
+    process: PROCESS,
+    launch_id: '123e4567-e89b-42d3-a456-426614174000',
+    survivors_killed: [],
+    survivors_remaining: [],
+    started_at: NOW,
+    finished_at: NOW,
+    duration_ms: 1,
+    exit_code: 0,
+    timed_out: false,
+    controlled: {},
+    billing: null,
+    ...overrides,
+  };
+}
+
+describe('ExecutionPolicy no LaunchRecord', () => {
+  it('interpreta LaunchRecord legado como worker/worker/full', () => {
+    expect(LaunchRecord.parse(validLaunchRecord()).execution_policy).toEqual({
+      commit_owner: 'worker',
+      official_validation_owner: 'worker',
+      worker_validation_policy: 'full',
+    });
+  });
+
+  it('aceita somente a combinação orchestrator/orchestrator/targeted', () => {
+    const executionPolicy = {
+      commit_owner: 'orchestrator',
+      official_validation_owner: 'orchestrator',
+      worker_validation_policy: 'targeted',
+    } as const;
+    expect(
+      LaunchRecord.parse(validLaunchRecord({ execution_policy: executionPolicy })).execution_policy,
+    ).toEqual(executionPolicy);
+  });
+
+  it('rejeita combinação sintaticamente válida sem semântica implementada', () => {
+    expect(() =>
+      LaunchRecord.parse(
+        validLaunchRecord({
+          execution_policy: {
+            commit_owner: 'orchestrator',
+            official_validation_owner: 'worker',
+            worker_validation_policy: 'targeted',
+          },
+        }),
+      ),
+    ).toThrow(/combinação.*não suportada/i);
+  });
+});
 
 function validPacket(overrides: Record<string, unknown> = {}) {
   return {
@@ -161,5 +227,79 @@ describe('CompletionRecord', () => {
     for (const status of ['READY', 'RUNNING', 'TIMED_OUT', 'MISSCOPED', 'INFRA_ERROR']) {
       expect(() => CompletionRecord.parse({ ...completion, status })).toThrow();
     }
+  });
+
+  it('preserva records legados e recovered, e amarra normal orchestrator ao finalization record', () => {
+    expect(CompletionRecord.parse(completion).commit_origin).toBeUndefined();
+    expect(
+      CompletionRecord.parse({
+        ...completion,
+        finalization_mode: 'recovered',
+        commit_origin: 'orchestrator_recovery',
+        recovery_source_attempt: 2,
+        recovery_record_sha256: 'c'.repeat(64),
+      }).commit_origin,
+    ).toBe('orchestrator_recovery');
+
+    const orchestrated = {
+      ...completion,
+      finalization_mode: 'normal',
+      commit_origin: 'orchestrator',
+      orchestrated_finalization_attempt: 1,
+      orchestrated_finalization_record_sha256: 'd'.repeat(64),
+    };
+    expect(CompletionRecord.parse(orchestrated).commit_origin).toBe('orchestrator');
+    expect(() =>
+      CompletionRecord.parse({
+        ...orchestrated,
+        orchestrated_finalization_record_sha256: undefined,
+      }),
+    ).toThrow(/finalization record/i);
+  });
+});
+
+describe('OrchestratedFinalizationRecord', () => {
+  const record = {
+    schema_version: 1,
+    task_id: 'T1',
+    attempt: 1,
+    base_sha: SHA,
+    profile_id: 'orchestrator-v2',
+    execution_policy: {
+      commit_owner: 'orchestrator',
+      official_validation_owner: 'orchestrator',
+      worker_validation_policy: 'targeted',
+    },
+    report_sha256: 'b'.repeat(64),
+    handoff_draft_sha256: 'c'.repeat(64),
+    report_result: 'SUCCESS',
+    report_candidate_commit: null,
+    commit_message: 'feat(T1): tarefa',
+    changed_files: ['src/a.ts'],
+    validation_results: [
+      { argv: ['pnpm', 'test'], exit_code: 0, timed_out: false, duration_ms: 1 },
+    ],
+    patch_fingerprint: 'd'.repeat(64),
+    candidate_commit: SHA,
+    commit_origin: 'orchestrator',
+    finalized_at: NOW,
+  };
+
+  it('aceita o record completo e recusa policy ou resultado de validação divergente', () => {
+    expect(OrchestratedFinalizationRecord.parse(record).report_candidate_commit).toBeNull();
+    expect(() =>
+      OrchestratedFinalizationRecord.parse({
+        ...record,
+        validation_results: [
+          { argv: ['pnpm', 'test'], exit_code: 1, timed_out: false, duration_ms: 1 },
+        ],
+      }),
+    ).toThrow(/validação malsucedida/i);
+    expect(() =>
+      OrchestratedFinalizationRecord.parse({
+        ...record,
+        changed_files: ['src/b.ts', 'src/a.ts', 'src/a.ts'],
+      }),
+    ).toThrow(/único e ordenado/i);
   });
 });

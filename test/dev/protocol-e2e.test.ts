@@ -1,4 +1,4 @@
-import { readFile, rm } from 'node:fs/promises';
+import { readFile, rm, writeFile } from 'node:fs/promises';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   MAXIMUM_HANDOFF_BYTES,
@@ -16,7 +16,7 @@ import {
 import { findSurvivors } from '../../dev/lib/process-audit.js';
 import { isSameProcessAlive } from '../../dev/lib/process-identity.js';
 import { buildInitialState, ensureRuntimeDirs, readState, writeState } from '../../dev/lib/state.js';
-import { makeSandboxRepo, runDevCli, runGit, type Sandbox } from './helpers.js';
+import { commitAll, makeSandboxRepo, runDevCli, runGit, type Sandbox } from './helpers.js';
 
 let sandbox: Sandbox;
 let paths: HarnessPaths;
@@ -43,6 +43,42 @@ function orchestrate(mode: string, extra: readonly string[] = []) {
 }
 
 describe('protocolo de sessões descartáveis — duas tarefas em sequência', () => {
+  it('dev-orchestrate fecha profile orchestrator-owned sem commit do fake worker', async () => {
+    await writeFile(
+      `${sandbox.root}/dev/profiles/fake-orchestrator-v2.yaml`,
+      [
+        'id: fake-orchestrator-v2',
+        'agent: fake',
+        'commit_owner: orchestrator',
+        'official_validation_owner: orchestrator',
+        'worker_validation_policy: targeted',
+        'argv: [node, fixtures/fake-worker.mjs]',
+        'prompt_delivery: argv',
+        'timeout_seconds: 60',
+        'forbidden_flags: []',
+        'env_allowlist: [PATH, HOME, AGENTLAB_FAKE_MODE]',
+      ].join('\n'),
+      'utf8',
+    );
+    const baseline = await commitAll(sandbox.root, 'fake orchestrator profile');
+    await writeState(
+      paths,
+      buildInitialState(loaded.plan, loaded.planSha256, { baselineSha: baseline }),
+    );
+    const result = await runDevCli(
+      'dev-orchestrate.ts',
+      ['--repo', sandbox.root, '--profile', 'fake-orchestrator-v2', '--max-iterations', '1'],
+      { AGENTLAB_DEV_DIR: sandbox.devDir, AGENTLAB_FAKE_MODE: 'orchestrator-success' },
+    );
+    expect(result.exitCode, result.stderr).toBe(9);
+    expect(JSON.parse(result.stdout).iterations[0].close).toBe('PASS');
+    expect((await readCompletion(paths, 'T1'))?.commit_origin).toBe('orchestrator');
+    expect((await readLaunchRecord(paths, 'T1'))?.execution_policy.commit_owner).toBe(
+      'orchestrator',
+    );
+    expect((await readState(paths)).tasks.map((task) => task.status)).toEqual(['PASS', 'READY']);
+  }, 60_000);
+
   it('roda T1 e T2, cada uma em processo próprio, e para em ALL_DONE', async () => {
     const result = await orchestrate('success');
     expect(result.exitCode, result.stderr).toBe(0);

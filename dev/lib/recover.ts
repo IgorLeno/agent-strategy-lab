@@ -1,5 +1,9 @@
 import { canonicalSha256 } from './canonical.js';
 import {
+  sealOrchestratedFinalization,
+  verifyOrchestratedFinalizationRecord,
+} from './finalize-orchestrated.js';
+import {
   sealRecoveredFinalization,
   verifyRecoveredFinalizationRecord,
 } from './finalize-recovered.js';
@@ -7,11 +11,13 @@ import { commitExists, headSha } from './git.js';
 import { reconcileMaintenanceRecords } from './maintenance.js';
 import type { HarnessPaths } from './paths.js';
 import type { LoadedPlan } from './plan.js';
+import { loadPlan } from './plan.js';
 import { isSameProcessAlive } from './process-identity.js';
 import {
   readCloseManifest,
   readCompletion,
   readHandoff,
+  readOrchestratedFinalization,
   readRecoveredFinalization,
 } from './records.js';
 import {
@@ -77,7 +83,7 @@ export async function recover(
       }
       continue;
     }
-    const { task, reconciliation } = await reconcileTask(paths, before, options);
+    const { task, reconciliation } = await reconcileTask(paths, loaded, before, options);
     tasks.push(task);
     if (reconciliation) reconciliations.push(reconciliation);
   }
@@ -184,6 +190,42 @@ export async function verifyCloseBundle(
     }
   }
 
+  if (completion.commit_origin === 'orchestrator') {
+    if (
+      completion.finalization_mode !== 'normal' ||
+      completion.orchestrated_finalization_attempt === undefined ||
+      completion.orchestrated_finalization_record_sha256 === undefined
+    ) {
+      return bundle('INCOMPLETE', 'completion orchestrator sem metadados de finalization');
+    }
+    const finalization = await readOrchestratedFinalization(
+      paths,
+      taskId,
+      completion.orchestrated_finalization_attempt,
+    ).catch(() => null);
+    if (!finalization) {
+      return bundle('INCOMPLETE', 'OrchestratedFinalizationRecord ausente ou inválido');
+    }
+    if (completion.orchestrated_finalization_record_sha256 !== canonicalSha256(finalization)) {
+      return bundle('INCOMPLETE', 'OrchestratedFinalizationRecord foi alterado depois do fechamento');
+    }
+    try {
+      const loaded = await loadPlan(paths.planFile);
+      await verifyOrchestratedFinalizationRecord(
+        { paths, loaded, taskId },
+        finalization,
+      );
+    } catch (error) {
+      return bundle(
+        'INCOMPLETE',
+        `OrchestratedFinalizationRecord divergente: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    if (finalization.candidate_commit !== accepted) {
+      return bundle('INCOMPLETE', 'finalization record discorda do accepted_commit');
+    }
+  }
+
   const handoff = await readHandoff(paths, taskId).catch(() => null);
   if (!handoff) return bundle('INCOMPLETE', 'handoff selado ausente ou inválido');
   if (handoff.task_id !== taskId) {
@@ -219,6 +261,7 @@ export async function verifyCloseBundle(
 
 async function reconcileTask(
   paths: HarnessPaths,
+  loaded: LoadedPlan,
   before: TaskState,
   options: RecoveryOptions,
 ): Promise<{ task: TaskState; reconciliation: Reconciliation | null }> {
@@ -246,6 +289,81 @@ async function reconcileTask(
   }
 
   if (before.status !== 'PASS') {
+    let orchestrated = null;
+    let orchestratedReadError: unknown = null;
+    try {
+      orchestrated = await readOrchestratedFinalization(paths, before.id, before.attempts);
+    } catch (error) {
+      orchestratedReadError = error;
+    }
+    if (orchestratedReadError) {
+      const diagnostics = `orchestrated finalization inválida: ${
+        orchestratedReadError instanceof Error
+          ? orchestratedReadError.message
+          : String(orchestratedReadError)
+      }`;
+      return {
+        task: { ...before, diagnostics },
+        reconciliation: {
+          task_id: before.id,
+          from: before.status,
+          to: before.status,
+          reason: diagnostics,
+        },
+      };
+    }
+    if (orchestrated) {
+      try {
+        const finalizeInput = { paths, loaded, taskId: before.id };
+        await verifyOrchestratedFinalizationRecord(finalizeInput, orchestrated);
+        if (!options.applyRecovered) {
+          const diagnostics = 'orchestrated finalization válida aguarda dev-recover sem --dry-run';
+          return {
+            task: { ...before, diagnostics },
+            reconciliation: {
+              task_id: before.id,
+              from: before.status,
+              to: before.status,
+              reason: diagnostics,
+            },
+          };
+        }
+        await sealOrchestratedFinalization(finalizeInput, orchestrated);
+        closeBundle = await verifyCloseBundle(paths, before.id);
+        if (closeBundle.status !== 'VALID') throw new Error(closeBundle.reason);
+        return {
+          task: {
+            ...before,
+            status: 'PASS',
+            phase: null,
+            accepted_commit: closeBundle.acceptedCommit,
+            candidate_commit: closeBundle.acceptedCommit,
+            diagnostics: null,
+            finished_at: closeBundle.closedAt,
+          },
+          reconciliation: {
+            task_id: before.id,
+            from: before.status,
+            to: 'PASS',
+            reason: 'orchestrated finalization reconciliada sem novo commit',
+          },
+        };
+      } catch (error) {
+        const diagnostics = `orchestrated finalization incompleta: ${
+          error instanceof Error ? error.message : String(error)
+        }`;
+        return {
+          task: { ...before, diagnostics },
+          reconciliation: {
+            task_id: before.id,
+            from: before.status,
+            to: before.status,
+            reason: diagnostics,
+          },
+        };
+      }
+    }
+
     let recovered = null;
     let recoveryReadError: unknown = null;
     try {

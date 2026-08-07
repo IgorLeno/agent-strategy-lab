@@ -10,6 +10,7 @@ import {
   type CredentialSource,
 } from './billing.js';
 import type { LoadedPlan } from './plan.js';
+import { executionPolicyOf } from './execution-policy.js';
 import {
   assertNoForbiddenFlags,
   buildEnvironment,
@@ -44,6 +45,9 @@ export interface DoctorReport {
   readonly credential_source: CredentialSource;
   readonly environment_mode: string;
   readonly instruction_environment: string;
+  readonly commit_owner: string;
+  readonly official_validation_owner: string;
+  readonly worker_validation_policy: string;
   readonly sandbox: string;
   readonly session_persistence: string;
   readonly user_config_ignored: boolean;
@@ -293,6 +297,13 @@ async function checkGitIdentity(
   if (!isCodexBuildWorker(profile)) {
     return check('identidade Git', 'SKIP', `não se aplica ao perfil ${profile.id}`);
   }
+  if (profile.commit_owner === 'orchestrator') {
+    return check(
+      'identidade Git',
+      'SKIP',
+      'identidade do commit pertence ao harness fora do sandbox do provider',
+    );
+  }
   if (!workerEnv) return check('identidade Git', 'FAIL', 'ambiente do worker inválido');
   const missing = GIT_IDENTITY_VARIABLES.filter((name) => !workerEnv[name]);
   if (missing.length > 0) {
@@ -303,6 +314,15 @@ async function checkGitIdentity(
   return author.code === 0 && committer.code === 0
     ? check('identidade Git', 'PASS', 'autor e committer resolvidos no ambiente do worker')
     : check('identidade Git', 'FAIL', 'git commit não resolveria autor e committer');
+}
+
+function checkExecutionPolicy(profile: LauncherProfile): Check {
+  const policy = executionPolicyOf(profile);
+  return check(
+    'execution policy',
+    'PASS',
+    `${policy.commit_owner}/${policy.official_validation_owner}/${policy.worker_validation_policy}`,
+  );
 }
 
 function modelOf(profile: LauncherProfile): string {
@@ -583,6 +603,7 @@ export async function diagnose(input: DoctorInput): Promise<DoctorReport> {
     await checkBinary(profile, workerEnv ?? env),
     ...(await checkFlags(profile, workerEnv ?? env)),
     checkForbidden(profile),
+    checkExecutionPolicy(profile),
     checkSandbox(profile, sandbox),
     checkSessionPersistence(profile, sessionPersistence),
     checkUserConfig(profile, userConfigIgnored),
@@ -608,6 +629,9 @@ export async function diagnose(input: DoctorInput): Promise<DoctorReport> {
     credential_source: credential.source,
     environment_mode: profile.environment_mode,
     instruction_environment: profile.instruction_environment,
+    commit_owner: profile.commit_owner,
+    official_validation_owner: profile.official_validation_owner,
+    worker_validation_policy: profile.worker_validation_policy,
     sandbox,
     session_persistence: sessionPersistence,
     user_config_ignored: userConfigIgnored,

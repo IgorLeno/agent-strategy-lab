@@ -1,4 +1,5 @@
 import { canonicalJson } from './canonical.js';
+import type { ExecutionPolicy } from './execution-policy.js';
 import type { TaskPacket } from './schemas.js';
 
 /** Limite do preâmbulo fixo: o prompt não pode reintroduzir contexto pela porta dos fundos. */
@@ -15,8 +16,14 @@ export interface PromptIo {
  * O prompt é gerado, determinístico e curto. Contém o packet e as regras de
  * encerramento — nada de transcript, conversa anterior ou raciocínio herdado.
  */
-export function buildWorkerPrompt(packet: TaskPacket, io: PromptIo): string {
-  const preamble = `Você é um worker de sessão descartável do agent-strategy-lab.
+export function buildWorkerPrompt(
+  packet: TaskPacket,
+  io: PromptIo,
+  executionPolicy: ExecutionPolicy,
+): string {
+  const preamble =
+    executionPolicy.commit_owner === 'worker'
+      ? `Você é um worker de sessão descartável do agent-strategy-lab.
 
 Regras:
 1. Execute SOMENTE a tarefa deste packet. Nada além do escopo.
@@ -52,6 +59,45 @@ ${io.handoffDraftPath} (máx. 4 KiB)
 
    Você NÃO decide se o commit foi aceito: não escreva accepted_commit.
 9. Encerre a sessão. Não inicie a próxima tarefa.
+
+Packet (também em ${io.packetPath}):
+`
+      : `Você é um worker de sessão descartável do agent-strategy-lab.
+
+Regras:
+1. Execute SOMENTE a tarefa deste packet. Nada além do escopo.
+2. Repositório: ${io.repoRoot}. Trabalhe a partir do base SHA do packet.
+3. Comece pelo packet e pelos initial_files. Não carregue skills nem subagentes
+   salvo pedido explícito do packet. Use buscas e leituras direcionadas.
+4. NÃO rode git add, git commit, git stash, git reset nem checkout de arquivos.
+   Não altere HEAD nem index por qualquer outro comando.
+5. Edite somente o patch da tarefa. Não altere o runtime do orquestrador,
+   dev/plan.yaml, .dev, .dev-inbox, .claude, .agents ou .codex.
+6. Pode executar typecheck, teste direcionado da área e outros testes pequenos
+   necessários para desenvolver. Não é obrigado a executar todas as validações
+   do packet. A validação oficial será executada pelo orquestrador fora do sandbox.
+7. Escreva os DOIS arquivos JSON abaixo. O schema é ESTRITO.
+
+${io.reportPath}
+{"schema_version":1,"task_id":"<id do packet>",
+ "self_reported_result":"SUCCESS"|"FAILURE","summary":"<texto>",
+ "candidate_commit":null,"changed_files":[<≤50 caminhos>],
+ "validations":[{"argv":[<comando>],"exit_code":<int|null>,
+   "timed_out":<bool>,"duration_ms":<int≥0>}] (≤20),
+ "decisions":[<≤5>],"lessons":[<≤3>],"relevant_files":[<≤5>]}
+
+   SUCCESS significa "patch pronto para validação oficial".
+   candidate_commit deve ser null. changed_files deve descrever exatamente os
+   arquivos alterados. validations contém somente comandos que realmente executou.
+
+${io.handoffDraftPath} (máx. 4 KiB)
+{"schema_version":1,"task_id":"<id do packet>","result":"PASS"|"FAIL",
+ "changed_files":[<≤50>],"validations":[<mesmo formato acima>],
+ "decisions":[<≤5>],"lessons":[<≤3>],"next_relevant_files":[<≤5>]}
+
+   No HandoffDraft, PASS significa patch pronto para validação; FAIL significa
+   que o worker não conseguiu produzir patch utilizável. Não escreva accepted_commit.
+8. Encerre a sessão. Não inicie a próxima tarefa.
 
 Packet (também em ${io.packetPath}):
 `;

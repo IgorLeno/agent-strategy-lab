@@ -211,3 +211,11 @@ ausência do campo.
 Rule: quando o valor opcional não existe, omitir a propriedade com spread
 condicional; `undefined` explícito só entra no tipo quando é parte deliberada
 do contrato.
+
+[2026-08-07] Contexto: finalização normal com commit ownership do orquestrador.
+Mistake: tratar campos de policy como opções independentes e validar whitespace
+somente no diff não staged deixaria combinações sem semântica e arquivos novos
+fora da prova oficial.
+Rule: policies multifield aceitam somente tuples implementados; a finalização
+amarra o patch por fingerprint antes/depois das validações, stageia paths exatos
+e exige `git diff --cached --check` sobre o conteúdo que será commitado.

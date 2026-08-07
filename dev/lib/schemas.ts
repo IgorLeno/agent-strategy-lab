@@ -5,6 +5,7 @@ import {
   assertByteBudget,
   byteSize,
 } from './budget.js';
+import { ExecutionPolicy, LEGACY_EXECUTION_POLICY } from './execution-policy.js';
 
 export const DEV_SCHEMA_VERSION = 1;
 
@@ -294,6 +295,8 @@ export const LaunchRecord = z
     schema_version: z.literal(DEV_SCHEMA_VERSION),
     task_id: identifier,
     profile_id: nonEmpty,
+    /** Evidência efetiva do run; ausente em records legados worker/full. */
+    execution_policy: ExecutionPolicy.default(LEGACY_EXECUTION_POLICY),
     argv: z.array(nonEmpty).min(1),
     process: ProcessIdentity,
     /** Identificador único do lançamento, propagado no env para a auditoria. */
@@ -314,6 +317,7 @@ export const LaunchRecord = z
   })
   .strict();
 export type LaunchRecord = z.infer<typeof LaunchRecord>;
+export type LaunchRecordInput = z.input<typeof LaunchRecord>;
 
 export const ATTEMPT_ABANDONMENT_REASON_CODES = [
   'WORKER_ENVIRONMENT_BLOCKED',
@@ -422,9 +426,11 @@ export const CompletionRecord = z
     /** Ausente apenas em records legados, que equivalem a normal/worker. */
     finalization_mode: z.enum(['normal', 'recovered']).optional(),
     /** Ausente apenas em records legados, que equivalem a worker. */
-    commit_origin: z.enum(['worker', 'orchestrator_recovery']).optional(),
+    commit_origin: z.enum(['worker', 'orchestrator', 'orchestrator_recovery']).optional(),
     recovery_source_attempt: z.number().int().positive().optional(),
     recovery_record_sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+    orchestrated_finalization_attempt: z.number().int().positive().optional(),
+    orchestrated_finalization_record_sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
     closed_at: z.string().datetime(),
   })
   .strict()
@@ -459,6 +465,33 @@ export const CompletionRecord = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: 'metadados de recovery só existem em recovered finalization',
+      });
+    }
+    const orchestrated = record.commit_origin === 'orchestrator';
+    if (orchestrated && record.finalization_mode !== 'normal') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'commit_origin orchestrator exige finalization_mode normal',
+      });
+    }
+    if (
+      orchestrated &&
+      (record.orchestrated_finalization_attempt === undefined ||
+        record.orchestrated_finalization_record_sha256 === undefined)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'normal orchestrator exige finalization record e attempt',
+      });
+    }
+    if (
+      !orchestrated &&
+      (record.orchestrated_finalization_attempt !== undefined ||
+        record.orchestrated_finalization_record_sha256 !== undefined)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'metadados de orchestrated finalization exigem commit_origin orchestrator',
       });
     }
   });
@@ -633,10 +666,6 @@ export const MaintenanceRecord = z
   });
 export type MaintenanceRecord = z.infer<typeof MaintenanceRecord>;
 
-// ---------------------------------------------------------------------------
-// Finalização recuperada (.dev/recoveries/<task>/attempt-<n>.json)
-// ---------------------------------------------------------------------------
-
 export const CommitMessage = z.string().superRefine((message, ctx) => {
   if (message.trim() === '') {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'commit-message não pode ser vazio' });
@@ -648,6 +677,59 @@ export const CommitMessage = z.string().superRefine((message, ctx) => {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'commit-message excede 200 bytes' });
   }
 });
+
+// ---------------------------------------------------------------------------
+// Finalização normal do orquestrador (.dev/finalizations/<task>/attempt-N.json)
+// ---------------------------------------------------------------------------
+
+export const OrchestratedFinalizationRecord = z
+  .object({
+    schema_version: z.literal(DEV_SCHEMA_VERSION),
+    task_id: identifier,
+    attempt: z.number().int().positive(),
+    base_sha: shaHex,
+    profile_id: nonEmpty,
+    execution_policy: ExecutionPolicy,
+    report_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    handoff_draft_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    report_result: z.literal('SUCCESS'),
+    /** O candidate não pertence ao conhecimento nem ao report do worker. */
+    report_candidate_commit: z.literal(null),
+    commit_message: CommitMessage,
+    changed_files: z.array(nonEmpty).min(1),
+    validation_results: z.array(ValidationResult).min(1),
+    patch_fingerprint: z.string().regex(/^[0-9a-f]{64}$/),
+    candidate_commit: shaHex,
+    commit_origin: z.literal('orchestrator'),
+    finalized_at: z.string().datetime(),
+  })
+  .strict()
+  .superRefine((record, ctx) => {
+    if (record.execution_policy.commit_owner !== 'orchestrator') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'OrchestratedFinalizationRecord exige policy orchestrator',
+      });
+    }
+    if (record.validation_results.some((result) => result.exit_code !== 0 || result.timed_out)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'OrchestratedFinalizationRecord contém validação malsucedida',
+      });
+    }
+    const sorted = [...new Set(record.changed_files)].sort();
+    if (JSON.stringify(sorted) !== JSON.stringify(record.changed_files)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'changed_files deve ser único e ordenado',
+      });
+    }
+  });
+export type OrchestratedFinalizationRecord = z.infer<typeof OrchestratedFinalizationRecord>;
+
+// ---------------------------------------------------------------------------
+// Finalização recuperada (.dev/recoveries/<task>/attempt-<n>.json)
+// ---------------------------------------------------------------------------
 
 export const RecoveredFinalizationRecord = z
   .object({

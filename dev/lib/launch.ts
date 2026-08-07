@@ -12,6 +12,7 @@ import {
   type CredentialProbe,
 } from './billing.js';
 import { TIMEOUT_EXIT_CODE } from './exec.js';
+import { executionPolicyOf } from './execution-policy.js';
 import type { HarnessPaths } from './paths.js';
 import { killSurvivors } from './process-audit.js';
 import { captureProcessIdentity } from './process-identity.js';
@@ -84,6 +85,7 @@ export class BillingPreflightError extends LaunchError {
 export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
   const { paths, profile, packet } = input;
   const timeoutSeconds = input.timeoutSecondsOverride ?? profile.timeout_seconds;
+  const executionPolicy = executionPolicyOf(profile);
 
   const io = {
     repoRoot: paths.repoRoot,
@@ -121,7 +123,7 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
   });
   if (!preflight.ok) throw new BillingPreflightError(preflight.refusal ?? 'motivo não informado');
 
-  const prompt = buildWorkerPrompt(packet, io);
+  const prompt = buildWorkerPrompt(packet, io, executionPolicy);
   await ensureTaskInbox(paths, packet.task_id);
 
   const agentArgv =
@@ -178,6 +180,7 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
     schema_version: DEV_SCHEMA_VERSION,
     task_id: packet.task_id,
     profile_id: profile.id,
+    execution_policy: executionPolicy,
     argv,
     process: identity,
     launch_id: launchId,

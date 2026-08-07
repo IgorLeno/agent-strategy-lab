@@ -437,6 +437,31 @@ describe('perfil Codex Sol High por assinatura', () => {
     expect(find(report.checks, 'binário').detail).toContain('fake-clis');
   });
 
+  it('v2 prova policy orchestrator e não exige identidade Git no worker', async () => {
+    const report = await diagnose({
+      repoRoot: REPO_ROOT,
+      profileId: 'codex-build-worker-subscription-high-v2',
+      loaded,
+      env: fakeCodexEnv(),
+    });
+
+    expect(report).toMatchObject({
+      commit_owner: 'orchestrator',
+      official_validation_owner: 'orchestrator',
+      worker_validation_policy: 'targeted',
+      sandbox: 'workspace-write',
+      session_persistence: 'ephemeral',
+      reasoning_effort: 'high',
+      credential_source: 'chatgpt_subscription',
+      ok: true,
+    });
+    expect(find(report.checks, 'execution policy')).toMatchObject({ status: 'PASS' });
+    expect(find(report.checks, 'identidade Git')).toMatchObject({
+      status: 'SKIP',
+      detail: expect.stringMatching(/harness.*fora do sandbox/i),
+    });
+  });
+
   it('perfil build-worker Codex sem sandbox explícito falha no doctor', async () => {
     const id = 'codex-build-worker-sem-sandbox-v1';
     await writeProfile(

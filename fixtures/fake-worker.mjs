@@ -7,6 +7,7 @@
  *   success    (default) trabalha, commita, reporta SUCCESS
  *   failure    trabalha, commita, reporta FAILURE
  *   no-commit  reporta SUCCESS sem criar commit
+ *   orchestrator-success  produz patch e SUCCESS com candidate null, sem tocar no Git
  *   dirty      commita e ainda deixa arquivo não rastreado na árvore
  *   out-of-scope  commita alterando dev/plan.yaml
  *   timeout    ignora SIGTERM e nunca termina
@@ -68,7 +69,7 @@ function main() {
     changedFiles = [relative];
   }
 
-  if (mode !== 'no-commit') {
+  if (mode !== 'no-commit' && mode !== 'orchestrator-success') {
     git(['add', '-A']);
     git(['commit', '-q', '-m', `${packet.task_id}: ${packet.title}`]);
     candidateCommit = git(['rev-parse', 'HEAD']);
