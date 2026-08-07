@@ -42,6 +42,15 @@ export {
   type WrittenSectionManifest,
 } from './manifest.js';
 export {
+  redactEnvironment,
+  redactJsonValue,
+  type EnvironmentDisposition,
+  type EnvironmentRedactionOptions,
+  type EnvironmentRedactionReason,
+  type EnvironmentVariableRecord,
+  type RedactedEnvironment,
+} from './redaction-structured.js';
+export {
   containsSecret,
   isRedactionPlaceholder,
   isSensitiveKeyName,
