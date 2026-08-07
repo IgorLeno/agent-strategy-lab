@@ -24,3 +24,8 @@ export {
   ExecutionRecord,
   GraderResult,
 } from './execution-record.js';
+export {
+  QualificationRecord,
+  ScoreRecord,
+  SubScore,
+} from './evaluation-record.js';
