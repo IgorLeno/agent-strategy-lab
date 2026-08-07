@@ -18,3 +18,4 @@ export {
 } from './profiles.js';
 export { StrategyDef } from './strategy.js';
 export { ExecutionRequest, Trial, TrialStatus } from './trial.js';
+export { ExecutionMetrics, ExecutionRecord } from './execution-record.js';
