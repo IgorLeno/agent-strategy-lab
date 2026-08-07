@@ -8,6 +8,19 @@ import {
 } from '../project/index.js';
 
 export { appendJsonLine } from './jsonl.js';
+export {
+  appendLedgerEntry,
+  buildSectionManifest,
+  ledgerLineSha256,
+  writeSectionManifest,
+  LEDGER_FILE_NAME,
+  MANIFEST_FILE_NAME,
+  type LedgerEntry,
+  type ManifestArtifact,
+  type SectionManifest,
+  type SectionManifestOptions,
+  type WrittenSectionManifest,
+} from './manifest.js';
 
 const CROCKFORD_BASE32 = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 const MAX_ULID_TIMESTAMP = 2 ** 48 - 1;
