@@ -41,6 +41,15 @@ export {
   type SectionManifestOptions,
   type WrittenSectionManifest,
 } from './manifest.js';
+export {
+  containsSecret,
+  isRedactionPlaceholder,
+  isSensitiveKeyName,
+  redactString,
+  redactionPlaceholder,
+  REDACTED_PLACEHOLDER,
+  type RedactionKind,
+} from './redaction.js';
 
 const CROCKFORD_BASE32 = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 const MAX_ULID_TIMESTAMP = 2 ** 48 - 1;
