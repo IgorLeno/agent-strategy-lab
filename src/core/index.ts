@@ -6,6 +6,21 @@
  * Fronteira: nada aqui faz I/O. Uma área de núcleo que lê disco vira
  * dependência circular de `storage` na primeira refatoração.
  *
- * Preenchido por M02.
  */
+export {
+  EvaluationOutcome,
+  ExecutionStatus,
+  QualificationStatus,
+  parseEvaluationOutcome,
+  parseExecutionStatus,
+  parseQualificationStatus,
+} from './enums.js';
+export {
+  InvalidEnumValueError,
+  LAB_ERROR_CODES,
+  LabError,
+  LabValidationError,
+  type LabErrorCode,
+} from './errors.js';
+export type { Brand, IsoDateTime, JsonPrimitive, JsonValue, Sha256 } from './types.js';
 export { LAB_CORE_VERSION } from './version.js';
