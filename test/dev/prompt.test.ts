@@ -47,13 +47,14 @@ describe('prompt lean do worker', () => {
     expect(Buffer.byteLength(preamble, 'utf8')).toBeLessThanOrEqual(MAXIMUM_PREAMBLE_BYTES);
   });
 
-  it('preserva ownership de commit no modo worker legacy', () => {
+  it('mantém validações oficiais no profile full e preserva ownership de commit', () => {
     const prompt = buildWorkerPrompt(PACKET, IO, LEGACY_EXECUTION_POLICY);
     expect(prompt).toMatch(/crie EXATAMENTE UM commit local/i);
     expect(prompt).toMatch(/rode as validações do packet você mesmo antes de commitar/i);
+    expect(prompt).not.toMatch(/NÃO execute o `pnpm (?:test|build)`/i);
   });
 
-  it('limita o worker orchestrator-owned ao patch e ao handoff draft', () => {
+  it('torna a validação targeted focal e exclusiva do orquestrador', () => {
     const prompt = buildWorkerPrompt(PACKET, IO, ORCHESTRATED_EXECUTION_POLICY);
 
     expect(prompt).toMatch(/execute SOMENTE a tarefa deste packet/i);
@@ -64,9 +65,19 @@ describe('prompt lean do worker', () => {
     }
     expect(prompt).toMatch(/checkout de arquivos/i);
     expect(prompt).toMatch(/não altere HEAD nem index/i);
-    expect(prompt).toMatch(/typecheck|teste direcionado/i);
-    expect(prompt).toMatch(/não é obrigado a executar todas as validações\s+do packet/i);
-    expect(prompt).toMatch(/validação oficial.*orquestrador.*fora do sandbox/is);
+    expect(prompt).toMatch(/execute somente checks pequenos necessários para desenvolver o patch/i);
+    expect(prompt).toMatch(
+      /pode executar\s+typecheck, o teste direcionado da tarefa e testes adicionais pequenos e diretamente\s+relacionados/i,
+    );
+    expect(prompt).toMatch(/NÃO execute o `pnpm test` completo/i);
+    expect(prompt).toMatch(/NÃO execute o `pnpm build` global/i);
+    expect(prompt).toMatch(/NÃO execute novamente toda a lista `packet\.validation`/i);
+    expect(prompt).toMatch(
+      /validações oficiais completas\s+pertencem exclusivamente ao orquestrador\s+e serão executadas fora do sandbox do provider/i,
+    );
+    expect(prompt).toMatch(
+      /falha ambiental de uma validação global que o worker não deveria executar\s+não deve ser investigada pelo worker/i,
+    );
     expect(prompt).toMatch(/SUCCESS significa "patch pronto para validação oficial"/i);
     expect(prompt).toMatch(/candidate_commit deve ser null/i);
     expect(prompt).toMatch(/changed_files.*exatamente os\s+arquivos alterados/is);

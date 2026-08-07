@@ -21,6 +21,18 @@ export function buildWorkerPrompt(
   io: PromptIo,
   executionPolicy: ExecutionPolicy,
 ): string {
+  const validationInstructions =
+    executionPolicy.worker_validation_policy === 'full'
+      ? `Rode as validações do packet você mesmo antes de commitar. Um comando por
+   chamada: comando composto (;, &&, |, redirecionamento) é negado pela
+   política de permissões.`
+      : `Execute SOMENTE checks pequenos necessários para desenvolver o patch.
+   Pode executar typecheck, o teste direcionado da tarefa e testes adicionais pequenos e diretamente
+   relacionados. NÃO execute o \`pnpm test\` completo. NÃO execute o \`pnpm build\` global.
+   NÃO execute novamente toda a lista \`packet.validation\`. As validações oficiais completas
+   pertencem exclusivamente ao orquestrador e serão executadas fora do sandbox do provider.
+   Uma falha ambiental de uma validação global que o worker não deveria executar
+   não deve ser investigada pelo worker.`;
   const preamble =
     executionPolicy.commit_owner === 'worker'
       ? `Você é um worker de sessão descartável do agent-strategy-lab.
@@ -36,9 +48,7 @@ Regras:
 5. Não altere o runtime do orquestrador nem dev/plan.yaml. Fora do repositório,
    escreva SOMENTE nos dois caminhos de inbox indicados na regra 8.
 6. Ao terminar, crie EXATAMENTE UM commit local com todo o trabalho. Sem push.
-7. Rode as validações do packet você mesmo antes de commitar. Um comando por
-   chamada: comando composto (;, &&, |, redirecionamento) é negado pela
-   política de permissões.
+7. ${validationInstructions}
 8. Escreva os DOIS arquivos JSON abaixo. O schema é ESTRITO — nenhum campo a
    mais, nenhum a menos, exatamente estes nomes. Campo inventado invalida o
    arquivo inteiro e o fechamento fica pendente.
@@ -73,9 +83,7 @@ Regras:
    Não altere HEAD nem index por qualquer outro comando.
 5. Edite somente o patch da tarefa. Não altere o runtime do orquestrador,
    dev/plan.yaml, .dev, .dev-inbox, .claude, .agents ou .codex.
-6. Pode executar typecheck, teste direcionado da área e outros testes pequenos
-   necessários para desenvolver. Não é obrigado a executar todas as validações
-   do packet. A validação oficial será executada pelo orquestrador fora do sandbox.
+6. ${validationInstructions}
 7. Escreva os DOIS arquivos JSON abaixo. O schema é ESTRITO.
 
 ${io.reportPath}
