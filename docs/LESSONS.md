@@ -202,3 +202,12 @@ fazendo o worker falhar tarde no commit.
 Rule: HOME sanitizado nunca copia gitconfig; perfis de build fornecem identidade
 determinística por `GIT_AUTHOR_*`/`GIT_COMMITTER_*`, e o doctor prova autor e
 committer no ambiente exato do worker antes do run.
+
+[2026-08-07] Contexto: callbacks e metadados opcionais com
+`exactOptionalPropertyTypes` habilitado.
+Mistake: montar object literals com propriedades opcionais explicitamente
+iguais a `undefined`, o que quebra o typecheck mesmo quando a API aceita a
+ausência do campo.
+Rule: quando o valor opcional não existe, omitir a propriedade com spread
+condicional; `undefined` explícito só entra no tipo quando é parte deliberada
+do contrato.

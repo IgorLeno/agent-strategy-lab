@@ -4,6 +4,7 @@ import { withHarnessLock } from '../lib/lock.js';
 import { resolveHarnessPaths } from '../lib/paths.js';
 import { attemptAbandonmentPath } from '../lib/records.js';
 import { retryAbandonedAttempt } from '../lib/retry.js';
+import { AttemptAbandonmentReasonCode } from '../lib/schemas.js';
 import { ensureRuntimeDirs } from '../lib/state.js';
 
 async function main(): Promise<void> {
@@ -11,6 +12,8 @@ async function main(): Promise<void> {
   const paths = resolveHarnessPaths(args.options.get('repo') ?? process.cwd());
   const taskId = args.options.get('task') ?? '';
   const reason = args.options.get('reason') ?? '';
+  const allowInfraOutput = args.flags.has('allow-infra-output');
+  const rawReasonCode = args.options.get('reason-code');
   if (taskId === '') throw new Error('--task é obrigatório');
 
   await ensureRuntimeDirs(paths);
@@ -20,6 +23,10 @@ async function main(): Promise<void> {
       taskId,
       reason,
       allowPendingMaintenance: args.flags.has('allow-pending-maintenance'),
+      allowInfraOutput,
+      ...(rawReasonCode === undefined
+        ? {}
+        : { reasonCode: AttemptAbandonmentReasonCode.parse(rawReasonCode) }),
     }),
   );
 

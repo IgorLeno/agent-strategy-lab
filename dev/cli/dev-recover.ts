@@ -19,9 +19,9 @@ async function main(): Promise<void> {
   // --dry-run só relata, então dispensa o lock; aplicar reconciliação muda o
   // state e precisa da mesma exclusão mútua dos outros comandos.
   const result = args.flags.has('dry-run')
-    ? await recover(paths, loaded)
+    ? await recover(paths, loaded, { applyRecovered: false })
     : await withHarnessLock(paths, 'dev-recover', async () => {
-        const reconciled = await recover(paths, loaded);
+        const reconciled = await recover(paths, loaded, { applyRecovered: true });
         await writeState(paths, reconciled.state);
         return reconciled;
       });

@@ -9,6 +9,7 @@ import {
   CompletionRecord,
   LaunchRecord,
   MaintenanceRecord,
+  RecoveredFinalizationRecord,
   type HandoffDraft,
   type HandoffRecord,
   type TaskPacket,
@@ -66,6 +67,14 @@ export function attemptAbandonmentPath(
   attempt: number,
 ): string {
   return path.join(paths.attemptsDir, taskId, `${attempt}-abandoned.json`);
+}
+
+export function recoveryRecordPath(
+  paths: HarnessPaths,
+  taskId: string,
+  sourceAttempt: number,
+): string {
+  return path.join(paths.recoveriesDir, taskId, `attempt-${sourceAttempt}.json`);
 }
 
 async function readJson(file: string): Promise<unknown> {
@@ -172,4 +181,22 @@ export const writeAttemptAbandonment = (
   writeJson(
     attemptAbandonmentPath(paths, record.task_id, record.attempt),
     AttemptAbandonmentRecord.parse(record),
+  );
+
+export const readRecoveredFinalization = (
+  paths: HarnessPaths,
+  taskId: string,
+  sourceAttempt: number,
+): Promise<RecoveredFinalizationRecord | null> =>
+  readOptional(recoveryRecordPath(paths, taskId, sourceAttempt), (input) =>
+    RecoveredFinalizationRecord.parse(input),
+  );
+
+export const writeRecoveredFinalization = (
+  paths: HarnessPaths,
+  record: RecoveredFinalizationRecord,
+): Promise<void> =>
+  writeJson(
+    recoveryRecordPath(paths, record.task_id, record.source_attempt),
+    RecoveredFinalizationRecord.parse(record),
   );

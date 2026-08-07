@@ -221,6 +221,8 @@ export async function closeTask(input: CloseInput): Promise<CloseOutcome> {
     orchestrator_evidence: evidence,
     report_matches_evidence: discrepancies.length === 0,
     discrepancies: [...discrepancies],
+    finalization_mode: 'normal',
+    commit_origin: 'worker',
     closed_at: timestamp,
   };
   // Selado campo a campo, nunca por spread do draft: tudo que o orquestrador
@@ -309,6 +311,8 @@ async function finishFail(
     orchestrator_evidence: evidence,
     report_matches_evidence: discrepancies.length === 0,
     discrepancies: [...discrepancies],
+    finalization_mode: 'normal',
+    commit_origin: 'worker',
     closed_at: timestamp,
   };
   await writeCompletion(paths, completion);

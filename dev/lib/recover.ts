@@ -1,10 +1,19 @@
 import { canonicalSha256 } from './canonical.js';
+import {
+  sealRecoveredFinalization,
+  verifyRecoveredFinalizationRecord,
+} from './finalize-recovered.js';
 import { commitExists, headSha } from './git.js';
 import { reconcileMaintenanceRecords } from './maintenance.js';
 import type { HarnessPaths } from './paths.js';
 import type { LoadedPlan } from './plan.js';
 import { isSameProcessAlive } from './process-identity.js';
-import { readCloseManifest, readCompletion, readHandoff } from './records.js';
+import {
+  readCloseManifest,
+  readCompletion,
+  readHandoff,
+  readRecoveredFinalization,
+} from './records.js';
 import {
   DevelopmentState,
   type TaskState,
@@ -30,6 +39,11 @@ export interface RecoveryResult {
   readonly stateWasMissing: boolean;
 }
 
+export interface RecoveryOptions {
+  /** `false` em dry-run: relata bundle recuperável sem escrever records. */
+  readonly applyRecovered?: boolean;
+}
+
 /**
  * Reconcilia plano + commits + completions + runtime existente. O plano é a
  * fonte autoritativa; o runtime é reconstruível. Nenhuma tarefa pode ficar
@@ -39,6 +53,7 @@ export interface RecoveryResult {
 export async function recover(
   paths: HarnessPaths,
   loaded: LoadedPlan,
+  options: RecoveryOptions = {},
 ): Promise<RecoveryResult> {
   const existing = await readState(paths).catch(() => null);
   const stateWasMissing = existing === null;
@@ -62,7 +77,7 @@ export async function recover(
       }
       continue;
     }
-    const { task, reconciliation } = await reconcileTask(paths, before);
+    const { task, reconciliation } = await reconcileTask(paths, before, options);
     tasks.push(task);
     if (reconciliation) reconciliations.push(reconciliation);
   }
@@ -133,6 +148,42 @@ export async function verifyCloseBundle(
   const accepted = completion.orchestrator_evidence.accepted_commit;
   if (!accepted) return bundle('INCOMPLETE', 'completion PASS sem accepted_commit');
 
+  if (completion.finalization_mode === 'recovered') {
+    if (
+      completion.commit_origin !== 'orchestrator_recovery' ||
+      completion.recovery_source_attempt === undefined ||
+      completion.recovery_record_sha256 === undefined
+    ) {
+      return bundle('INCOMPLETE', 'completion recovered sem metadados de recovery');
+    }
+    const recovery = await readRecoveredFinalization(
+      paths,
+      taskId,
+      completion.recovery_source_attempt,
+    ).catch(() => null);
+    if (!recovery) return bundle('INCOMPLETE', 'RecoveredFinalizationRecord ausente ou inválido');
+    if (
+      recovery.task_id !== taskId ||
+      recovery.source_attempt !== completion.recovery_source_attempt
+    ) {
+      return bundle('INCOMPLETE', 'RecoveredFinalizationRecord pertence a outra origem');
+    }
+    if (completion.recovery_record_sha256 !== canonicalSha256(recovery)) {
+      return bundle('INCOMPLETE', 'RecoveredFinalizationRecord foi alterado depois do fechamento');
+    }
+    try {
+      await verifyRecoveredFinalizationRecord(paths, recovery);
+    } catch (error) {
+      return bundle(
+        'INCOMPLETE',
+        `RecoveredFinalizationRecord divergente: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    if (recovery.candidate_commit !== accepted) {
+      return bundle('INCOMPLETE', 'recovery record discorda do accepted_commit');
+    }
+  }
+
   const handoff = await readHandoff(paths, taskId).catch(() => null);
   if (!handoff) return bundle('INCOMPLETE', 'handoff selado ausente ou inválido');
   if (handoff.task_id !== taskId) {
@@ -169,20 +220,21 @@ export async function verifyCloseBundle(
 async function reconcileTask(
   paths: HarnessPaths,
   before: TaskState,
+  options: RecoveryOptions,
 ): Promise<{ task: TaskState; reconciliation: Reconciliation | null }> {
-  const bundle = await verifyCloseBundle(paths, before.id);
+  let closeBundle = await verifyCloseBundle(paths, before.id);
 
   // Fechamento já gravado mas perdido do state: o bundle COMPLETO manda.
-  if (before.status !== 'PASS' && bundle.status === 'VALID') {
+  if (before.status !== 'PASS' && closeBundle.status === 'VALID') {
     return {
       task: {
         ...before,
         status: 'PASS',
         phase: null,
-        accepted_commit: bundle.acceptedCommit,
-        candidate_commit: bundle.acceptedCommit,
+        accepted_commit: closeBundle.acceptedCommit,
+        candidate_commit: closeBundle.acceptedCommit,
         diagnostics: null,
-        finished_at: bundle.closedAt,
+        finished_at: closeBundle.closedAt,
       },
       reconciliation: {
         task_id: before.id,
@@ -193,10 +245,88 @@ async function reconcileTask(
     };
   }
 
+  if (before.status !== 'PASS') {
+    let recovered = null;
+    let recoveryReadError: unknown = null;
+    try {
+      recovered = await readRecoveredFinalization(paths, before.id, before.attempts);
+    } catch (error) {
+      recoveryReadError = error;
+    }
+
+    if (recoveryReadError) {
+      const diagnostics = `recovered finalization inválida: ${
+        recoveryReadError instanceof Error ? recoveryReadError.message : String(recoveryReadError)
+      }`;
+      return {
+        task: { ...before, diagnostics },
+        reconciliation: {
+          task_id: before.id,
+          from: before.status,
+          to: before.status,
+          reason: diagnostics,
+        },
+      };
+    }
+
+    if (recovered) {
+      try {
+        await verifyRecoveredFinalizationRecord(paths, recovered);
+        if (!options.applyRecovered) {
+          const diagnostics = 'recovered finalization válida aguarda dev-recover sem --dry-run';
+          return {
+            task: { ...before, diagnostics },
+            reconciliation: {
+              task_id: before.id,
+              from: before.status,
+              to: before.status,
+              reason: diagnostics,
+            },
+          };
+        }
+        await sealRecoveredFinalization(paths, recovered);
+        closeBundle = await verifyCloseBundle(paths, before.id);
+        if (closeBundle.status !== 'VALID') {
+          throw new Error(closeBundle.reason);
+        }
+        return {
+          task: {
+            ...before,
+            status: 'PASS',
+            phase: null,
+            accepted_commit: closeBundle.acceptedCommit,
+            candidate_commit: closeBundle.acceptedCommit,
+            diagnostics: null,
+            finished_at: closeBundle.closedAt,
+          },
+          reconciliation: {
+            task_id: before.id,
+            from: before.status,
+            to: 'PASS',
+            reason: 'recovered finalization reconciliada sem novo commit',
+          },
+        };
+      } catch (error) {
+        const diagnostics = `recovered finalization incompleta: ${
+          error instanceof Error ? error.message : String(error)
+        }`;
+        return {
+          task: { ...before, diagnostics },
+          reconciliation: {
+            task_id: before.id,
+            from: before.status,
+            to: before.status,
+            reason: diagnostics,
+          },
+        };
+      }
+    }
+  }
+
   // Bundle pela metade nunca vira PASS: falta contexto selado para a próxima
   // sessão. Repetir o dev-close é o caminho, e ele é idempotente.
-  if (before.status !== 'PASS' && bundle.status === 'INCOMPLETE') {
-    const diagnostics = `fechamento incompleto (${bundle.reason}) — repita dev-close`;
+  if (before.status !== 'PASS' && closeBundle.status === 'INCOMPLETE') {
+    const diagnostics = `fechamento incompleto (${closeBundle.reason}) — repita dev-close`;
     return {
       task: { ...before, diagnostics },
       reconciliation: {

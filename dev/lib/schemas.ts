@@ -315,6 +315,13 @@ export const LaunchRecord = z
   .strict();
 export type LaunchRecord = z.infer<typeof LaunchRecord>;
 
+export const ATTEMPT_ABANDONMENT_REASON_CODES = [
+  'WORKER_ENVIRONMENT_BLOCKED',
+  'WORKER_REPORTED_FAILURE',
+] as const;
+export const AttemptAbandonmentReasonCode = z.enum(ATTEMPT_ABANDONMENT_REASON_CODES);
+export type AttemptAbandonmentReasonCode = z.infer<typeof AttemptAbandonmentReasonCode>;
+
 export const AttemptAbandonmentRecord = z
   .object({
     schema_version: z.literal(DEV_SCHEMA_VERSION),
@@ -331,11 +338,35 @@ export const AttemptAbandonmentRecord = z
     candidate_commit: z.literal(null),
     working_tree_clean: z.literal(true),
     head_sha: shaHex,
-    report_present: z.literal(false),
-    handoff_present: z.literal(false),
+    report_present: z.boolean(),
+    handoff_present: z.boolean(),
+    reason_code: AttemptAbandonmentReasonCode.optional(),
+    report_sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+    handoff_draft_sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+    source_report_result: z.literal('FAILURE').optional(),
+    source_base_sha: shaHex.optional(),
     abandoned_at: z.string().datetime(),
   })
-  .strict();
+  .strict()
+  .superRefine((record, ctx) => {
+    const metadata = [
+      record.reason_code,
+      record.report_sha256,
+      record.handoff_draft_sha256,
+      record.source_report_result,
+      record.source_base_sha,
+    ];
+    const hasMetadata = metadata.some((value) => value !== undefined);
+    const hasCompleteMetadata = metadata.every((value) => value !== undefined);
+    if (hasMetadata || record.report_present || record.handoff_present) {
+      if (!record.report_present || !record.handoff_present || !hasCompleteMetadata) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'output de infraestrutura exige report, handoff e metadados completos',
+        });
+      }
+    }
+  });
 export type AttemptAbandonmentRecord = z.infer<typeof AttemptAbandonmentRecord>;
 
 /**
@@ -388,9 +419,49 @@ export const CompletionRecord = z
     orchestrator_evidence: OrchestratorEvidence,
     report_matches_evidence: z.boolean(),
     discrepancies: z.array(nonEmpty),
+    /** Ausente apenas em records legados, que equivalem a normal/worker. */
+    finalization_mode: z.enum(['normal', 'recovered']).optional(),
+    /** Ausente apenas em records legados, que equivalem a worker. */
+    commit_origin: z.enum(['worker', 'orchestrator_recovery']).optional(),
+    recovery_source_attempt: z.number().int().positive().optional(),
+    recovery_record_sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
     closed_at: z.string().datetime(),
   })
-  .strict();
+  .strict()
+  .superRefine((record, ctx) => {
+    const recovered =
+      record.finalization_mode === 'recovered' || record.commit_origin === 'orchestrator_recovery';
+    if (
+      recovered &&
+      (record.finalization_mode !== 'recovered' || record.commit_origin !== 'orchestrator_recovery')
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'recovered exige finalization_mode e commit_origin correspondentes',
+      });
+    }
+    if (recovered && record.recovery_source_attempt === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'recovered exige recovery_source_attempt',
+      });
+    }
+    if (recovered && record.recovery_record_sha256 === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'recovered exige recovery_record_sha256',
+      });
+    }
+    if (
+      !recovered &&
+      (record.recovery_source_attempt !== undefined || record.recovery_record_sha256 !== undefined)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'metadados de recovery só existem em recovered finalization',
+      });
+    }
+  });
 export type CompletionRecord = z.infer<typeof CompletionRecord>;
 
 /**
@@ -561,6 +632,61 @@ export const MaintenanceRecord = z
     }
   });
 export type MaintenanceRecord = z.infer<typeof MaintenanceRecord>;
+
+// ---------------------------------------------------------------------------
+// Finalização recuperada (.dev/recoveries/<task>/attempt-<n>.json)
+// ---------------------------------------------------------------------------
+
+export const CommitMessage = z.string().superRefine((message, ctx) => {
+  if (message.trim() === '') {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'commit-message não pode ser vazio' });
+  }
+  if (/\r|\n/.test(message)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'commit-message deve ter uma linha' });
+  }
+  if (Buffer.byteLength(message, 'utf8') > 200) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'commit-message excede 200 bytes' });
+  }
+});
+
+export const RecoveredFinalizationRecord = z
+  .object({
+    schema_version: z.literal(DEV_SCHEMA_VERSION),
+    task_id: identifier,
+    source_attempt: z.number().int().positive(),
+    source_base_sha: shaHex,
+    finalization_base_sha: shaHex,
+    abandonment_record_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    report_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    handoff_draft_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    source_report_result: z.literal('FAILURE'),
+    reason_code: AttemptAbandonmentReasonCode,
+    reason: nonEmpty,
+    commit_message: CommitMessage,
+    changed_files: z.array(nonEmpty).min(1),
+    validation_results: z.array(ValidationResult).min(1),
+    candidate_commit: shaHex,
+    commit_origin: z.literal('orchestrator_recovery'),
+    working_tree_clean: z.literal(true),
+    finalized_at: z.string().datetime(),
+  })
+  .strict()
+  .superRefine((record, ctx) => {
+    if (record.validation_results.some((result) => result.exit_code !== 0 || result.timed_out)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'RecoveredFinalizationRecord contém validação malsucedida',
+      });
+    }
+    const sorted = [...new Set(record.changed_files)].sort();
+    if (JSON.stringify(sorted) !== JSON.stringify(record.changed_files)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'changed_files deve ser único e ordenado',
+      });
+    }
+  });
+export type RecoveredFinalizationRecord = z.infer<typeof RecoveredFinalizationRecord>;
 
 // ---------------------------------------------------------------------------
 // Parsers com budget — schema válido mas acima do budget também é rejeição.

@@ -17,11 +17,15 @@ export class GitError extends Error {
 }
 
 /** Sempre argv, nunca shell — nenhum caminho do harness interpola string em shell. */
-export function git(repoRoot: string, args: readonly string[]): Promise<GitResult> {
+export function git(
+  repoRoot: string,
+  args: readonly string[],
+  env?: NodeJS.ProcessEnv,
+): Promise<GitResult> {
   return new Promise((resolve, reject) => {
     const child = spawn('git', ['-C', repoRoot, ...args], {
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+      env: { ...process.env, ...env, GIT_TERMINAL_PROMPT: '0' },
     });
     let stdout = '';
     let stderr = '';
@@ -36,10 +40,56 @@ export function git(repoRoot: string, args: readonly string[]): Promise<GitResul
   });
 }
 
-export async function gitOrThrow(repoRoot: string, args: readonly string[]): Promise<string> {
-  const result = await git(repoRoot, args);
+export async function gitOrThrow(
+  repoRoot: string,
+  args: readonly string[],
+  env?: NodeJS.ProcessEnv,
+): Promise<string> {
+  const result = await git(repoRoot, args, env);
   if (result.exitCode !== 0) throw new GitError(args, result);
   return result.stdout;
+}
+
+function nulSeparated(output: string): string[] {
+  return output.split('\0').filter((entry) => entry !== '');
+}
+
+/** Paths staged before an orchestrator-owned transaction. */
+export async function stagedFiles(repoRoot: string): Promise<string[]> {
+  return nulSeparated(await gitOrThrow(repoRoot, ['diff', '--cached', '--name-only', '-z'])).sort();
+}
+
+/** Tracked and untracked working-tree paths, including deletions. */
+export async function workingTreeFiles(repoRoot: string): Promise<string[]> {
+  const entries = nulSeparated(
+    await gitOrThrow(repoRoot, ['status', '--porcelain=v1', '-z', '--untracked-files=all']),
+  );
+  const files = new Set<string>();
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index] as string;
+    const status = entry.slice(0, 2);
+    files.add(entry.slice(3));
+    if (status.includes('R') || status.includes('C')) {
+      const original = entries[index + 1];
+      if (original !== undefined) files.add(original);
+      index += 1;
+    }
+  }
+  return [...files].sort();
+}
+
+export async function stageFiles(repoRoot: string, files: readonly string[]): Promise<void> {
+  await gitOrThrow(repoRoot, ['add', '--', ...files]);
+}
+
+/** Restore only index entries; never discard working-tree contents. */
+export async function restoreStagedFiles(repoRoot: string, files: readonly string[]): Promise<void> {
+  await gitOrThrow(repoRoot, ['restore', '--staged', '--', ...files]);
+}
+
+export async function recordedCommitMessage(repoRoot: string, sha: string): Promise<string> {
+  const output = await gitOrThrow(repoRoot, ['log', '-1', '--format=%B', sha]);
+  return output.replace(/\n+$/, '');
 }
 
 export async function headSha(repoRoot: string): Promise<string> {

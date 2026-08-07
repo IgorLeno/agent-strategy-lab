@@ -1,7 +1,7 @@
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { canonicalSha256 } from '../../dev/lib/canonical.js';
+import { canonicalSha256, sha256Hex } from '../../dev/lib/canonical.js';
 import { checkProgressionBase } from '../../dev/lib/base-guard.js';
 import { headSha } from '../../dev/lib/git.js';
 import { acquireLock } from '../../dev/lib/lock.js';
@@ -15,7 +15,11 @@ import {
   writeLaunchRecord,
 } from '../../dev/lib/records.js';
 import { retryAbandonedAttempt } from '../../dev/lib/retry.js';
-import type { DevelopmentState, ProcessIdentity } from '../../dev/lib/schemas.js';
+import {
+  AttemptAbandonmentRecord,
+  type DevelopmentState,
+  type ProcessIdentity,
+} from '../../dev/lib/schemas.js';
 import {
   buildInitialState,
   ensureRuntimeDirs,
@@ -132,6 +136,40 @@ async function writeArtifact(file: string): Promise<void> {
   await writeFile(file, '{}\n', 'utf8');
 }
 
+async function writeInfraOutput(
+  reportOverrides: Record<string, unknown> = {},
+  handoffOverrides: Record<string, unknown> = {},
+): Promise<{ reportContents: string; handoffContents: string }> {
+  const reportContents = `${JSON.stringify({
+    schema_version: 1,
+    task_id: 'M02',
+    self_reported_result: 'FAILURE',
+    summary: 'worker bloqueado pela infraestrutura',
+    candidate_commit: null,
+    changed_files: ['src/core/index.ts'],
+    validations: [],
+    decisions: [],
+    lessons: [],
+    relevant_files: ['src/core/index.ts'],
+    ...reportOverrides,
+  })}\n`;
+  const handoffContents = `${JSON.stringify({
+    schema_version: 1,
+    task_id: 'M02',
+    result: 'FAIL',
+    changed_files: ['src/core/index.ts'],
+    validations: [],
+    decisions: [],
+    lessons: [],
+    next_relevant_files: ['src/core/index.ts'],
+    ...handoffOverrides,
+  })}\n`;
+  await mkdir(path.dirname(reportPath(paths, 'M02')), { recursive: true });
+  await writeFile(reportPath(paths, 'M02'), reportContents, 'utf8');
+  await writeFile(handoffDraftPath(paths, 'M02'), handoffContents, 'utf8');
+  return { reportContents, handoffContents };
+}
+
 async function commitFile(file: string, contents: string, force = false): Promise<string> {
   const absolute = path.join(sandbox.root, file);
   await mkdir(path.dirname(absolute), { recursive: true });
@@ -208,6 +246,61 @@ describe('retry de tentativa abandonada', () => {
   it('handoff draft presente recusa mesmo quando inválido', async () => {
     await writeArtifact(handoffDraftPath(paths, 'M02'));
     await expect(retry()).rejects.toThrow(/HandoffDraft.*presente/i);
+  });
+
+  it('output de infraestrutura exige opt-in explícito', async () => {
+    await writeInfraOutput();
+
+    await expect(retry()).rejects.toThrow(/AgentCompletionReport.*presente/i);
+  });
+
+  it('output FAILURE válido é preservado com hashes e reason code', async () => {
+    const { reportContents, handoffContents } = await writeInfraOutput();
+
+    const result = await retry({
+      allowInfraOutput: true,
+      reasonCode: 'WORKER_ENVIRONMENT_BLOCKED',
+    });
+
+    expect(result.record).toMatchObject({
+      reason_code: 'WORKER_ENVIRONMENT_BLOCKED',
+      report_present: true,
+      handoff_present: true,
+      report_sha256: sha256Hex(reportContents),
+      handoff_draft_sha256: sha256Hex(handoffContents),
+      source_report_result: 'FAILURE',
+      source_base_sha: baseSha,
+    });
+  });
+
+  it('output de infraestrutura exige reason code fechado', async () => {
+    await writeInfraOutput();
+
+    await expect(retry({ allowInfraOutput: true })).rejects.toThrow(/reason-code/i);
+  });
+
+  it('SUCCESS não pode ser abandonado como output de infraestrutura', async () => {
+    await writeInfraOutput({ self_reported_result: 'SUCCESS' }, { result: 'PASS' });
+
+    await expect(
+      retry({ allowInfraOutput: true, reasonCode: 'WORKER_ENVIRONMENT_BLOCKED' }),
+    ).rejects.toThrow(/FAILURE/i);
+  });
+
+  it('report com candidate não pode ser abandonado como output de infraestrutura', async () => {
+    await writeInfraOutput({ candidate_commit: baseSha });
+
+    await expect(
+      retry({ allowInfraOutput: true, reasonCode: 'WORKER_ENVIRONMENT_BLOCKED' }),
+    ).rejects.toThrow(/candidate_commit.*null/i);
+  });
+
+  it('output de outra tarefa é recusado', async () => {
+    await writeInfraOutput({}, { task_id: 'M03' });
+
+    await expect(
+      retry({ allowInfraOutput: true, reasonCode: 'WORKER_ENVIRONMENT_BLOCKED' }),
+    ).rejects.toThrow(/handoff.*outra tarefa/i);
   });
 
   it('candidate commit presente recusa', async () => {
@@ -298,6 +391,38 @@ describe('retry de tentativa abandonada', () => {
     } finally {
       await lock.release();
     }
+  });
+});
+
+describe('AttemptAbandonmentRecord legado', () => {
+  it('continua aceitando records sem metadados de output', () => {
+    expect(
+      AttemptAbandonmentRecord.parse({
+        schema_version: 1,
+        task_id: 'M02',
+        attempt: 1,
+        base_sha: 'a'.repeat(40),
+        process: {
+          pid: 1,
+          pgid: 1,
+          started_at: STARTED_AT,
+          proc_start_ticks: 1,
+          command_sha256: 'b'.repeat(64),
+        },
+        launch_classification: 'FINISHED',
+        exit_code: 0,
+        started_at: STARTED_AT,
+        finished_at: FINISHED_AT,
+        reason: REASON,
+        previous_diagnostics: null,
+        candidate_commit: null,
+        working_tree_clean: true,
+        head_sha: 'a'.repeat(40),
+        report_present: false,
+        handoff_present: false,
+        abandoned_at: ABANDONED_AT,
+      }).reason_code,
+    ).toBeUndefined();
   });
 });
 
