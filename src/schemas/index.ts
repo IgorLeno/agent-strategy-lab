@@ -11,3 +11,8 @@
  */
 export { TaskBudget, TaskBudgets, TaskSpec } from './task-spec.js';
 export { EvaluationPlan } from './evaluation-plan.js';
+export {
+  AgentProfile,
+  EnvironmentProfile,
+  InstructionFileFingerprint,
+} from './profiles.js';
