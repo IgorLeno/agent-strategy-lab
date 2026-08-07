@@ -1,4 +1,5 @@
-import { mkdir, rename, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { link, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 /**
@@ -20,4 +21,32 @@ export async function writeFileAtomic(file: string, contents: string): Promise<v
 
 export async function writeJsonAtomic(file: string, value: unknown): Promise<void> {
   await writeFileAtomic(file, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+/** Publicação append-only: replay só é válido quando os bytes são idênticos. */
+export async function writeFileOnce(file: string, bytes: Buffer): Promise<void> {
+  await mkdir(path.dirname(file), { recursive: true });
+  try {
+    const existing = await readFile(file);
+    if (existing.equals(bytes)) return;
+    throw new Error(`artifact append-only diverge: ${file}`);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+
+  const temporary = `${file}.tmp-${process.pid}-${randomUUID()}`;
+  await writeFile(temporary, bytes, { flag: 'wx' });
+  try {
+    await link(temporary, file);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    const existing = await readFile(file);
+    if (!existing.equals(bytes)) throw new Error(`artifact append-only diverge: ${file}`);
+  } finally {
+    await unlink(temporary).catch(() => undefined);
+  }
+}
+
+export async function writeJsonOnce(file: string, value: unknown): Promise<void> {
+  await writeFileOnce(file, Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8'));
 }

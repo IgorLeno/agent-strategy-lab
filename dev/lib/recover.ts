@@ -7,6 +7,10 @@ import {
   sealRecoveredFinalization,
   verifyRecoveredFinalizationRecord,
 } from './finalize-recovered.js';
+import {
+  sealOrchestratedRevalidation,
+  verifyOrchestratedRevalidationRecord,
+} from './revalidate.js';
 import { commitExists, headSha } from './git.js';
 import { reconcileMaintenanceRecords } from './maintenance.js';
 import type { HarnessPaths } from './paths.js';
@@ -17,8 +21,10 @@ import {
   readCloseManifest,
   readCompletion,
   readHandoff,
+  listOrchestratedRevalidations,
   readOrchestratedFinalization,
   readRecoveredFinalization,
+  readOrchestratedRevalidation,
 } from './records.js';
 import {
   DevelopmentState,
@@ -190,7 +196,48 @@ export async function verifyCloseBundle(
     }
   }
 
-  if (completion.commit_origin === 'orchestrator') {
+  if (completion.revalidated_after_validation_failure === true) {
+    if (
+      completion.finalization_mode !== 'normal' ||
+      completion.commit_origin !== 'orchestrator' ||
+      completion.revalidation_attempt === undefined ||
+      completion.revalidation_sequence === undefined ||
+      completion.revalidation_record_sha256 === undefined
+    ) {
+      return bundle('INCOMPLETE', 'completion revalidado sem metadados de revalidation');
+    }
+    const revalidation = await readOrchestratedRevalidation(
+      paths,
+      taskId,
+      completion.revalidation_attempt,
+      completion.revalidation_sequence,
+    ).catch(() => null);
+    if (!revalidation) {
+      return bundle('INCOMPLETE', 'OrchestratedRevalidationRecord ausente ou inválido');
+    }
+    if (
+      revalidation.task_id !== taskId ||
+      revalidation.attempt !== completion.revalidation_attempt ||
+      revalidation.sequence !== completion.revalidation_sequence
+    ) {
+      return bundle('INCOMPLETE', 'OrchestratedRevalidationRecord pertence a outra origem');
+    }
+    if (completion.revalidation_record_sha256 !== canonicalSha256(revalidation)) {
+      return bundle('INCOMPLETE', 'OrchestratedRevalidationRecord foi alterado depois do fechamento');
+    }
+    try {
+      const loaded = await loadPlan(paths.planFile);
+      await verifyOrchestratedRevalidationRecord(paths, loaded, revalidation);
+    } catch (error) {
+      return bundle(
+        'INCOMPLETE',
+        `OrchestratedRevalidationRecord divergente: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    if (revalidation.candidate_commit !== accepted) {
+      return bundle('INCOMPLETE', 'revalidation record discorda do accepted_commit');
+    }
+  } else if (completion.commit_origin === 'orchestrator') {
     if (
       completion.finalization_mode !== 'normal' ||
       completion.orchestrated_finalization_attempt === undefined ||
@@ -289,6 +336,81 @@ async function reconcileTask(
   }
 
   if (before.status !== 'PASS') {
+    let revalidations = null;
+    let revalidationReadError: unknown = null;
+    try {
+      revalidations = await listOrchestratedRevalidations(paths, before.id, before.attempts);
+    } catch (error) {
+      revalidationReadError = error;
+    }
+    if (revalidationReadError) {
+      const diagnostics = `revalidation inválida: ${
+        revalidationReadError instanceof Error
+          ? revalidationReadError.message
+          : String(revalidationReadError)
+      }`;
+      return {
+        task: { ...before, diagnostics },
+        reconciliation: {
+          task_id: before.id,
+          from: before.status,
+          to: before.status,
+          reason: diagnostics,
+        },
+      };
+    }
+    const revalidation = revalidations?.findLast((record) => record.outcome === 'PASS');
+    if (revalidation) {
+      try {
+        await verifyOrchestratedRevalidationRecord(paths, loaded, revalidation);
+        if (!options.applyRecovered) {
+          const diagnostics = 'revalidation válida aguarda dev-recover sem --dry-run';
+          return {
+            task: { ...before, diagnostics },
+            reconciliation: {
+              task_id: before.id,
+              from: before.status,
+              to: before.status,
+              reason: diagnostics,
+            },
+          };
+        }
+        await sealOrchestratedRevalidation(paths, loaded, revalidation);
+        closeBundle = await verifyCloseBundle(paths, before.id);
+        if (closeBundle.status !== 'VALID') throw new Error(closeBundle.reason);
+        return {
+          task: {
+            ...before,
+            status: 'PASS',
+            phase: null,
+            accepted_commit: closeBundle.acceptedCommit,
+            candidate_commit: closeBundle.acceptedCommit,
+            diagnostics: null,
+            finished_at: closeBundle.closedAt,
+          },
+          reconciliation: {
+            task_id: before.id,
+            from: before.status,
+            to: 'PASS',
+            reason: 'revalidation reconciliada sem novo commit',
+          },
+        };
+      } catch (error) {
+        const diagnostics = `revalidation incompleta: ${
+          error instanceof Error ? error.message : String(error)
+        }`;
+        return {
+          task: { ...before, diagnostics },
+          reconciliation: {
+            task_id: before.id,
+            from: before.status,
+            to: before.status,
+            reason: diagnostics,
+          },
+        };
+      }
+    }
+
     let orchestrated = null;
     let orchestratedReadError: unknown = null;
     try {

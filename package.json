@@ -20,6 +20,7 @@
     "dev-recover": "tsx dev/cli/dev-recover.ts",
     "dev-retry": "tsx dev/cli/dev-retry.ts",
     "dev-finalize-recovered": "tsx dev/cli/dev-finalize-recovered.ts",
+    "dev-revalidate": "tsx dev/cli/dev-revalidate.ts",
     "dev-adopt-maintenance": "tsx dev/cli/dev-adopt-maintenance.ts",
     "dev-orchestrate": "tsx dev/cli/dev-orchestrate.ts"
   },

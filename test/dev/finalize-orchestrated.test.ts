@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -261,6 +262,32 @@ describe('finalizeOrchestratedTask', () => {
     expect((await readState(paths)).authorized_head_sha).toBe(candidate);
     expect(await workingTreeFiles(root)).toEqual([]);
     expect(await stagedFiles(root)).toEqual([]);
+  });
+
+  it('default runner preserva validation logs com hashes em nova finalização', async () => {
+    await prepareRun(['src/logged.ts']);
+
+    const outcome = await finalizeOrchestratedTask({
+      paths,
+      loaded,
+      taskId: 'T1',
+      now: () => NOW,
+    });
+    const record = await readOrchestratedFinalization(paths, 'T1', 1);
+
+    expect(outcome.kind).toBe('PASS');
+    expect(record?.validation_evidence).toHaveLength(2);
+    expect(outcome.completion?.orchestrator_evidence.validation_evidence).toEqual(
+      record?.validation_evidence,
+    );
+    for (const evidence of record?.validation_evidence ?? []) {
+      const stdout = await readFile(path.join(paths.devDir, evidence.stdout_path));
+      const stderr = await readFile(path.join(paths.devDir, evidence.stderr_path));
+      expect(createHash('sha256').update(stdout).digest('hex')).toBe(evidence.stdout_sha256);
+      expect(createHash('sha256').update(stderr).digest('hex')).toBe(evidence.stderr_sha256);
+      expect(stdout.byteLength).toBe(evidence.stdout_bytes);
+      expect(stderr.byteLength).toBe(evidence.stderr_bytes);
+    }
   });
 
   it('commita exatamente deleção, rename e arquivo novo com espaço', async () => {

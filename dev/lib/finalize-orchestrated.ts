@@ -1,12 +1,10 @@
 import { readFile } from 'node:fs/promises';
 import { canonicalJson, canonicalSha256, sha256Hex } from './canonical.js';
 import type { CloseOutcome } from './close.js';
-import { runValidation, toValidationResult } from './exec.js';
 import {
   changedFiles,
   commitExists,
   commitTree,
-  git,
   gitOrThrow,
   headSha,
   isWorkingTreeClean,
@@ -52,9 +50,11 @@ import {
   type OrchestratorEvidence,
   type TaskPacket,
   type ValidationCommand,
+  type ValidationEvidence,
   type ValidationResult,
 } from './schemas.js';
 import { getTaskState, readState, withTaskState, writeState } from './state.js';
+import { runOfficialValidation } from './validation-evidence.js';
 
 export class OrchestratedFinalizationError extends Error {
   constructor(message: string) {
@@ -97,9 +97,6 @@ const HARNESS_GIT_IDENTITY: NodeJS.ProcessEnv = {
   GIT_COMMITTER_NAME: 'Agent Strategy Lab Harness',
   GIT_COMMITTER_EMAIL: 'harness@agent-strategy-lab.invalid',
 };
-
-const defaultValidationRunner: OrchestratedValidationRunner = async (command, cwd) =>
-  toValidationResult(await runValidation(command, { cwd }));
 
 export function isForbiddenOrchestratedPath(file: string): boolean {
   if (file === 'dev/plan.yaml') return true;
@@ -218,49 +215,59 @@ function commitMessageFor(input: FinalizeOrchestratedInput): string {
 async function runOfficialValidations(
   input: FinalizeOrchestratedInput,
   packet: TaskPacket,
-): Promise<ValidationResult[]> {
-  const runner = input.validationRunner ?? defaultValidationRunner;
+  attempt: number,
+): Promise<{ results: ValidationResult[]; evidence: ValidationEvidence[] }> {
   const commands = input.loaded.byId.get(input.taskId)?.validation;
   if (!commands) throw new OrchestratedFinalizationError(`tarefa ausente no plano: ${input.taskId}`);
   const results: ValidationResult[] = [];
+  const validationEvidence: ValidationEvidence[] = [];
   if (canonicalJson(commands) !== canonicalJson(packet.validation)) {
     throw new OrchestratedFinalizationError('validações do packet não correspondem ao plano');
   }
   for (const command of commands) {
-    const result = await runner(command, input.paths.repoRoot);
+    const execution = input.validationRunner
+      ? { result: await input.validationRunner(command, input.paths.repoRoot), evidence: null }
+      : await runOfficialValidation({
+          paths: input.paths,
+          taskId: input.taskId,
+          attempt,
+          command,
+        });
+    const result = execution.result;
     if (canonicalJson(result.argv) !== canonicalJson(command.argv)) {
       throw new OrchestratedFinalizationError('validation runner retornou argv divergente');
     }
     results.push(result);
+    if (execution.evidence) validationEvidence.push(execution.evidence);
   }
-  return results;
+  return { results, evidence: validationEvidence };
 }
 
-async function cachedDiffCheck(repoRoot: string): Promise<ValidationResult> {
-  const started = Date.now();
-  const result = await git(repoRoot, ['diff', '--cached', '--check']);
-  return {
-    argv: ['git', 'diff', '--cached', '--check'],
-    exit_code: result.exitCode,
-    timed_out: false,
-    duration_ms: Math.max(0, Date.now() - started),
-  };
+async function cachedDiffCheck(
+  input: FinalizeOrchestratedInput,
+  attempt: number,
+) {
+  return runOfficialValidation({
+    paths: input.paths,
+    taskId: input.taskId,
+    attempt,
+    command: { argv: ['git', 'diff', '--cached', '--check'], timeout_seconds: 300 },
+  });
 }
 
 async function committedDiffCheck(
-  repoRoot: string,
+  input: FinalizeOrchestratedInput,
+  attempt: number,
   base: string,
   candidate: string,
-): Promise<ValidationResult> {
+){
   const argv = ['git', 'diff', '--check', `${base}..${candidate}`];
-  const started = Date.now();
-  const result = await git(repoRoot, argv.slice(1));
-  return {
-    argv,
-    exit_code: result.exitCode,
-    timed_out: false,
-    duration_ms: Math.max(0, Date.now() - started),
-  };
+  return runOfficialValidation({
+    paths: input.paths,
+    taskId: input.taskId,
+    attempt,
+    command: { argv, timeout_seconds: 300 },
+  });
 }
 
 async function assertCandidate(
@@ -294,6 +301,7 @@ function evidence(
   candidate: string | null,
   accepted: string | null,
   clean: boolean,
+  validationEvidence: readonly ValidationEvidence[] = [],
 ): OrchestratorEvidence {
   return {
     task_id: source.packet.task_id,
@@ -307,6 +315,9 @@ function evidence(
     exit_code: source.launch.exit_code,
     timed_out: source.launch.timed_out,
     revalidation: [...validations],
+    ...(validationEvidence.length === 0
+      ? {}
+      : { validation_evidence: [...validationEvidence] }),
     observed_at: timestamp,
   };
 }
@@ -346,6 +357,7 @@ async function finishFail(
   source: SourceEvidence,
   reason: string,
   validations: readonly ValidationResult[],
+  validationEvidence: readonly ValidationEvidence[] = [],
 ): Promise<CloseOutcome> {
   const timestamp = (input.now ?? (() => new Date().toISOString()))();
   const differences = discrepancies(source);
@@ -354,7 +366,15 @@ async function finishFail(
     task_id: input.taskId,
     status: 'FAIL',
     report: source.report,
-    orchestrator_evidence: evidence(source, validations, timestamp, null, null, false),
+    orchestrator_evidence: evidence(
+      source,
+      validations,
+      timestamp,
+      null,
+      null,
+      false,
+      validationEvidence,
+    ),
     report_matches_evidence: differences.length === 0,
     discrepancies: differences,
     finalization_mode: 'normal',
@@ -392,6 +412,7 @@ function deterministicCompletion(
       record.candidate_commit,
       record.candidate_commit,
       true,
+      record.validation_evidence ?? [],
     ),
     report_matches_evidence: differences.length === 0,
     discrepancies: differences,
@@ -595,10 +616,17 @@ export async function finalizeOrchestratedTask(
         source.files,
         message,
       );
-      const validationResults = await runOfficialValidations(input, source.packet);
-      validationResults.push(
-        await committedDiffCheck(input.paths.repoRoot, source.packet.base_sha, currentHead),
+      const validationBatch = await runOfficialValidations(input, source.packet, task.attempts);
+      const validationResults = validationBatch.results;
+      const validationEvidence = validationBatch.evidence;
+      const diffExecution = await committedDiffCheck(
+        input,
+        task.attempts,
+        source.packet.base_sha,
+        currentHead,
       );
+      validationResults.push(diffExecution.result);
+      validationEvidence.push(diffExecution.evidence);
       const failed = validationResults.find((result) => result.exit_code !== 0 || result.timed_out);
       if (failed) {
         throw new OrchestratedFinalizationError(
@@ -619,6 +647,7 @@ export async function finalizeOrchestratedTask(
         commit_message: message,
         changed_files: source.files,
         validation_results: validationResults,
+        validation_evidence: validationEvidence,
         patch_fingerprint: sha256Hex(await commitTree(input.paths.repoRoot, currentHead)),
         candidate_commit: currentHead,
         commit_origin: 'orchestrator',
@@ -658,7 +687,9 @@ export async function finalizeOrchestratedTask(
   }
 
   const fingerprintBefore = await patchFingerprint(input.paths.repoRoot);
-  const validationResults = await runOfficialValidations(input, source.packet);
+  const validationBatch = await runOfficialValidations(input, source.packet, task.attempts);
+  const validationResults = validationBatch.results;
+  const validationEvidence = validationBatch.evidence;
   const fingerprintAfter = await patchFingerprint(input.paths.repoRoot);
   const stagedByValidation = await stagedFiles(input.paths.repoRoot);
   if (stagedByValidation.length > 0) {
@@ -672,6 +703,7 @@ export async function finalizeOrchestratedTask(
       source,
       `validação oficial falhou: ${failed.argv.join(' ')} (exit ${failed.exit_code ?? 'null'})`,
       validationResults,
+      validationEvidence,
     );
   }
   if (fingerprintBefore !== fingerprintAfter) {
@@ -681,6 +713,7 @@ export async function finalizeOrchestratedTask(
       source,
       'patch fingerprint mudou durante as validações oficiais',
       validationResults,
+      validationEvidence,
     );
   }
   if (stagedByValidation.length > 0) {
@@ -690,14 +723,29 @@ export async function finalizeOrchestratedTask(
       source,
       'index mudou durante as validações e foi restaurado',
       validationResults,
+      validationEvidence,
     );
   }
   currentHead = await headSha(input.paths.repoRoot);
   if (currentHead !== source.packet.base_sha) {
-    return finishFail(input, state, source, 'HEAD mudou durante as validações', validationResults);
+    return finishFail(
+      input,
+      state,
+      source,
+      'HEAD mudou durante as validações',
+      validationResults,
+      validationEvidence,
+    );
   }
   if ((await stagedFiles(input.paths.repoRoot)).length > 0) {
-    return finishFail(input, state, source, 'index mudou durante as validações', validationResults);
+    return finishFail(
+      input,
+      state,
+      source,
+      'index mudou durante as validações',
+      validationResults,
+      validationEvidence,
+    );
   }
   try {
     assertExactFiles(await workingTreeFiles(input.paths.repoRoot), source.files);
@@ -708,15 +756,18 @@ export async function finalizeOrchestratedTask(
       source,
       error instanceof Error ? error.message : String(error),
       validationResults,
+      validationEvidence,
     );
   }
 
   await stageFiles(input.paths.repoRoot, source.files);
   try {
     assertExactFiles(await stagedFiles(input.paths.repoRoot), source.files);
-    const diffCheck = await cachedDiffCheck(input.paths.repoRoot);
+    const diffExecution = await cachedDiffCheck(input, task.attempts);
+    const diffCheck = diffExecution.result;
     validationResults.push(diffCheck);
-    if (diffCheck.exit_code !== 0) {
+    validationEvidence.push(diffExecution.evidence);
+    if (diffCheck.exit_code !== 0 || diffCheck.timed_out) {
       await restoreStagedFiles(input.paths.repoRoot, source.files);
       if ((await stagedFiles(input.paths.repoRoot)).length > 0) {
         throw new OrchestratedFinalizationError('falha ao restaurar index após cached diff-check');
@@ -727,6 +778,7 @@ export async function finalizeOrchestratedTask(
         source,
         'git diff --cached --check falhou; index restaurado',
         validationResults,
+        validationEvidence,
       );
     }
     const stagedTree = await writeTree(input.paths.repoRoot);
@@ -765,6 +817,7 @@ export async function finalizeOrchestratedTask(
     commit_message: message,
     changed_files: source.files,
     validation_results: validationResults,
+    validation_evidence: validationEvidence,
     patch_fingerprint: fingerprintBefore,
     candidate_commit: currentHead,
     commit_origin: 'orchestrator',

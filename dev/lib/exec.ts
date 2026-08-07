@@ -21,6 +21,8 @@ export interface RunOptions {
 export interface RunOutcome extends ValidationResult {
   readonly stdout: string;
   readonly stderr: string;
+  readonly stdoutBuffer: Buffer;
+  readonly stderrBuffer: Buffer;
   readonly signal: NodeJS.Signals | null;
 }
 
@@ -48,27 +50,31 @@ export function runValidation(
       env: options.env ?? process.env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-    let stdout = '';
-    let stderr = '';
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
     child.stdout.on('data', (chunk: Buffer) => {
+      stdoutChunks.push(chunk);
       const text = chunk.toString('utf8');
-      stdout += text;
       options.onStdout?.(text);
     });
     child.stderr.on('data', (chunk: Buffer) => {
+      stderrChunks.push(chunk);
       const text = chunk.toString('utf8');
-      stderr += text;
       options.onStderr?.(text);
     });
     child.on('error', reject);
     child.on('close', (exitCode, signal) => {
+      const stdoutBuffer = Buffer.concat(stdoutChunks);
+      const stderrBuffer = Buffer.concat(stderrChunks);
       resolve({
         argv: [...command.argv],
         exit_code: exitCode,
         timed_out: exitCode === TIMEOUT_EXIT_CODE,
         duration_ms: Date.now() - startedAt,
-        stdout,
-        stderr,
+        stdout: stdoutBuffer.toString('utf8'),
+        stderr: stderrBuffer.toString('utf8'),
+        stdoutBuffer,
+        stderrBuffer,
         signal,
       });
     });

@@ -67,6 +67,21 @@ export const ValidationResult = z
   .strict();
 export type ValidationResult = z.infer<typeof ValidationResult>;
 
+/**
+ * Evidence externa de uma validação oficial. Os streams continuam fora dos
+ * records estruturados; aqui ficam somente localização, tamanho e digest.
+ */
+export const ValidationEvidence = ValidationResult.extend({
+  sequence: z.number().int().positive(),
+  stdout_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  stderr_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  stdout_bytes: z.number().int().nonnegative(),
+  stderr_bytes: z.number().int().nonnegative(),
+  stdout_path: nonEmpty,
+  stderr_path: nonEmpty,
+}).strict();
+export type ValidationEvidence = z.infer<typeof ValidationEvidence>;
+
 // ---------------------------------------------------------------------------
 // dev/plan.yaml — definição versionada e autoritativa das tarefas
 // ---------------------------------------------------------------------------
@@ -401,6 +416,8 @@ export const OrchestratorEvidence = z
     exit_code: z.number().int().nullable(),
     timed_out: z.boolean(),
     revalidation: z.array(ValidationResult),
+    /** Ausente em evidence histórica anterior aos validation logs. */
+    validation_evidence: z.array(ValidationEvidence).optional(),
     observed_at: z.string().datetime(),
   })
   .strict();
@@ -431,6 +448,10 @@ export const CompletionRecord = z
     recovery_record_sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
     orchestrated_finalization_attempt: z.number().int().positive().optional(),
     orchestrated_finalization_record_sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+    revalidated_after_validation_failure: z.literal(true).optional(),
+    revalidation_attempt: z.number().int().positive().optional(),
+    revalidation_sequence: z.number().int().positive().optional(),
+    revalidation_record_sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
     closed_at: z.string().datetime(),
   })
   .strict()
@@ -468,6 +489,19 @@ export const CompletionRecord = z
       });
     }
     const orchestrated = record.commit_origin === 'orchestrator';
+    const revalidationMetadata = [
+      record.revalidated_after_validation_failure,
+      record.revalidation_attempt,
+      record.revalidation_sequence,
+      record.revalidation_record_sha256,
+    ];
+    const revalidated = revalidationMetadata.some((value) => value !== undefined);
+    if (revalidated && revalidationMetadata.some((value) => value === undefined)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'revalidation exige flag, attempt, sequence e record hash',
+      });
+    }
     if (orchestrated && record.finalization_mode !== 'normal') {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -476,6 +510,7 @@ export const CompletionRecord = z
     }
     if (
       orchestrated &&
+      !revalidated &&
       (record.orchestrated_finalization_attempt === undefined ||
         record.orchestrated_finalization_record_sha256 === undefined)
     ) {
@@ -485,13 +520,19 @@ export const CompletionRecord = z
       });
     }
     if (
-      !orchestrated &&
+      (!orchestrated || revalidated) &&
       (record.orchestrated_finalization_attempt !== undefined ||
         record.orchestrated_finalization_record_sha256 !== undefined)
     ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: 'metadados de orchestrated finalization exigem commit_origin orchestrator',
+      });
+    }
+    if (revalidated && !orchestrated) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'revalidation exige finalization normal com commit_origin orchestrator',
       });
     }
   });
@@ -698,6 +739,7 @@ export const OrchestratedFinalizationRecord = z
     commit_message: CommitMessage,
     changed_files: z.array(nonEmpty).min(1),
     validation_results: z.array(ValidationResult).min(1),
+    validation_evidence: z.array(ValidationEvidence).optional(),
     patch_fingerprint: z.string().regex(/^[0-9a-f]{64}$/),
     candidate_commit: shaHex,
     commit_origin: z.literal('orchestrator'),
@@ -728,6 +770,182 @@ export const OrchestratedFinalizationRecord = z
 export type OrchestratedFinalizationRecord = z.infer<typeof OrchestratedFinalizationRecord>;
 
 // ---------------------------------------------------------------------------
+// Revalidação de FAIL por validation oficial
+// (.dev/revalidations/<task>/attempt-<n>/revalidation-<sequence>.json)
+// ---------------------------------------------------------------------------
+
+export const RevalidationSourceBinding = z
+  .object({
+    schema_version: z.literal(DEV_SCHEMA_VERSION),
+    task_id: identifier,
+    attempt: z.number().int().positive(),
+    source_base_sha: shaHex,
+    original_completion_path: nonEmpty,
+    original_completion_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    report_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    handoff_draft_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    changed_files: z.array(nonEmpty).min(1),
+    derived_patch_fingerprint: z.string().regex(/^[0-9a-f]{64}$/),
+    fingerprint_observed_at: z.string().datetime({ offset: true }),
+    fingerprint_provenance: z.literal('derived_during_revalidation_preflight'),
+  })
+  .strict()
+  .superRefine((binding, ctx) => {
+    const sorted = [...new Set(binding.changed_files)].sort();
+    if (JSON.stringify(sorted) !== JSON.stringify(binding.changed_files)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'changed_files do source binding deve ser único e ordenado',
+      });
+    }
+  });
+export type RevalidationSourceBinding = z.infer<typeof RevalidationSourceBinding>;
+
+export const RevalidationReasonCode = z.literal('NONDETERMINISTIC_VALIDATION');
+export type RevalidationReasonCode = z.infer<typeof RevalidationReasonCode>;
+
+export const OrchestratedRevalidationRecord = z
+  .object({
+    schema_version: z.literal(DEV_SCHEMA_VERSION),
+    task_id: identifier,
+    attempt: z.number().int().positive(),
+    sequence: z.number().int().positive(),
+    outcome: z.enum(['PASS', 'FAIL']),
+    reason_code: RevalidationReasonCode,
+    reason: nonEmpty,
+    source_binding_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    source_base_sha: shaHex,
+    finalization_base_sha: shaHex,
+    original_completion_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    report_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    handoff_draft_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    patch_fingerprint: z.string().regex(/^[0-9a-f]{64}$/),
+    original_validation_results: z.array(ValidationResult).min(1),
+    revalidation_results: z.array(ValidationResult).min(1),
+    validation_evidence: z.array(ValidationEvidence).min(1),
+    changed_files: z.array(nonEmpty).min(1),
+    commit_message: CommitMessage,
+    candidate_commit: shaHex.nullable(),
+    candidate_tree_sha: shaHex.nullable(),
+    commit_origin: z.literal('orchestrator'),
+    working_tree_clean: z.boolean(),
+    revalidated_at: z.string().datetime({ offset: true }),
+  })
+  .strict()
+  .superRefine((record, ctx) => {
+    const failedOriginal = record.original_validation_results.some(
+      (result) => result.exit_code !== 0 || result.timed_out,
+    );
+    if (!failedOriginal) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'revalidation exige validation oficial original malsucedida',
+      });
+    }
+    const failedNew = record.revalidation_results.some(
+      (result) => result.exit_code !== 0 || result.timed_out,
+    );
+    if (record.outcome === 'PASS') {
+      if (record.candidate_commit === null) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'PASS exige candidate_commit' });
+      }
+      if (record.candidate_tree_sha === null) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'PASS exige candidate_tree_sha' });
+      }
+      if (failedNew) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'PASS contém validação malsucedida' });
+      }
+      if (!record.working_tree_clean) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'PASS exige working tree limpa' });
+      }
+    } else {
+      if (record.candidate_commit !== null) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'FAIL não admite candidate_commit' });
+      }
+      if (record.candidate_tree_sha !== null) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'FAIL não admite candidate_tree_sha' });
+      }
+      if (!failedNew) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'FAIL exige validação malsucedida' });
+      }
+      if (record.working_tree_clean) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'FAIL preserva patch na working tree' });
+      }
+    }
+    if (record.validation_evidence.length !== record.revalidation_results.length) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'validation_evidence deve corresponder a revalidation_results',
+      });
+    }
+    for (let index = 0; index < record.revalidation_results.length; index += 1) {
+      const result = record.revalidation_results[index];
+      const evidence = record.validation_evidence[index];
+      if (
+        result &&
+        evidence &&
+        (JSON.stringify(result.argv) !== JSON.stringify(evidence.argv) ||
+          result.exit_code !== evidence.exit_code ||
+          result.timed_out !== evidence.timed_out ||
+          result.duration_ms !== evidence.duration_ms)
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `validation_evidence diverge do resultado na posição ${index}`,
+        });
+      }
+    }
+    const sorted = [...new Set(record.changed_files)].sort();
+    if (JSON.stringify(sorted) !== JSON.stringify(record.changed_files)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'changed_files deve ser único e ordenado',
+      });
+    }
+  });
+export type OrchestratedRevalidationRecord = z.infer<typeof OrchestratedRevalidationRecord>;
+
+export const RevalidationCheckpoint = z
+  .object({
+    schema_version: z.literal(DEV_SCHEMA_VERSION),
+    task_id: identifier,
+    attempt: z.number().int().positive(),
+    sequence: z.number().int().positive(),
+    reason_code: RevalidationReasonCode,
+    reason: nonEmpty,
+    source_binding_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    source_base_sha: shaHex,
+    finalization_base_sha: shaHex,
+    original_completion_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    report_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    handoff_draft_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    patch_fingerprint: z.string().regex(/^[0-9a-f]{64}$/),
+    original_validation_results: z.array(ValidationResult).min(1),
+    revalidation_results: z.array(ValidationResult).min(1),
+    validation_evidence: z.array(ValidationEvidence).min(1),
+    changed_files: z.array(nonEmpty).min(1),
+    commit_message: CommitMessage,
+    staged_tree_sha: shaHex,
+    checkpointed_at: z.string().datetime({ offset: true }),
+  })
+  .strict()
+  .superRefine((checkpoint, ctx) => {
+    if (checkpoint.revalidation_results.some((result) => result.exit_code !== 0 || result.timed_out)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'checkpoint só pode conter validações bem-sucedidas',
+      });
+    }
+    if (checkpoint.validation_evidence.length !== checkpoint.revalidation_results.length) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'checkpoint evidence diverge dos resultados',
+      });
+    }
+  });
+export type RevalidationCheckpoint = z.infer<typeof RevalidationCheckpoint>;
+
+// ---------------------------------------------------------------------------
 // Finalização recuperada (.dev/recoveries/<task>/attempt-<n>.json)
 // ---------------------------------------------------------------------------
 
@@ -747,6 +965,7 @@ export const RecoveredFinalizationRecord = z
     commit_message: CommitMessage,
     changed_files: z.array(nonEmpty).min(1),
     validation_results: z.array(ValidationResult).min(1),
+    validation_evidence: z.array(ValidationEvidence).optional(),
     candidate_commit: shaHex,
     commit_origin: z.literal('orchestrator_recovery'),
     working_tree_clean: z.literal(true),

@@ -1,6 +1,6 @@
-import { mkdir, readFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
-import { writeJsonAtomic } from './atomic.js';
+import { writeJsonAtomic, writeJsonOnce } from './atomic.js';
 import type { HarnessPaths } from './paths.js';
 import {
   AgentCompletionReport,
@@ -9,7 +9,10 @@ import {
   CompletionRecord,
   LaunchRecord,
   MaintenanceRecord,
+  OrchestratedRevalidationRecord,
   OrchestratedFinalizationRecord,
+  RevalidationCheckpoint,
+  RevalidationSourceBinding,
   RecoveredFinalizationRecord,
   type HandoffDraft,
   type HandoffRecord,
@@ -85,6 +88,70 @@ export function orchestratedFinalizationPath(
   attempt: number,
 ): string {
   return path.join(paths.finalizationsDir, taskId, `attempt-${attempt}.json`);
+}
+
+export function revalidationAttemptDir(
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+): string {
+  return path.join(paths.revalidationsDir, taskId, `attempt-${attempt}`);
+}
+
+export function sourceBindingPath(paths: HarnessPaths, taskId: string, attempt: number): string {
+  return path.join(revalidationAttemptDir(paths, taskId, attempt), 'source-binding.json');
+}
+
+export function originalCompletionEvidencePath(
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+): string {
+  return path.join(revalidationAttemptDir(paths, taskId, attempt), 'original-completion.fail.json');
+}
+
+export function revalidationRecordPath(
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+  sequence: number,
+): string {
+  return path.join(
+    revalidationAttemptDir(paths, taskId, attempt),
+    `revalidation-${sequence}.json`,
+  );
+}
+
+export function revalidationCheckpointPath(
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+  sequence: number,
+): string {
+  return path.join(
+    revalidationAttemptDir(paths, taskId, attempt),
+    `revalidation-${sequence}.checkpoint.json`,
+  );
+}
+
+export async function nextRevalidationSequence(
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+): Promise<number> {
+  let names: string[];
+  try {
+    names = await readdir(revalidationAttemptDir(paths, taskId, attempt));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 1;
+    throw error;
+  }
+  let maximum = 0;
+  for (const name of names) {
+    const match = /^revalidation-(\d+)\.json$/.exec(name);
+    if (match?.[1]) maximum = Math.max(maximum, Number(match[1]));
+  }
+  return maximum + 1;
 }
 
 async function readJson(file: string): Promise<unknown> {
@@ -228,3 +295,90 @@ export const writeOrchestratedFinalization = (
     orchestratedFinalizationPath(paths, record.task_id, record.attempt),
     OrchestratedFinalizationRecord.parse(record),
   );
+
+export const readRevalidationSourceBinding = (
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+): Promise<RevalidationSourceBinding | null> =>
+  readOptional(sourceBindingPath(paths, taskId, attempt), (input) =>
+    RevalidationSourceBinding.parse(input),
+  );
+
+export const writeRevalidationSourceBinding = (
+  paths: HarnessPaths,
+  binding: RevalidationSourceBinding,
+): Promise<void> =>
+  writeJsonOnce(
+    sourceBindingPath(paths, binding.task_id, binding.attempt),
+    RevalidationSourceBinding.parse(binding),
+  );
+
+export const readOrchestratedRevalidation = (
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+  sequence: number,
+): Promise<OrchestratedRevalidationRecord | null> =>
+  readOptional(revalidationRecordPath(paths, taskId, attempt, sequence), (input) =>
+    OrchestratedRevalidationRecord.parse(input),
+  );
+
+export const writeOrchestratedRevalidation = (
+  paths: HarnessPaths,
+  record: OrchestratedRevalidationRecord,
+): Promise<void> =>
+  writeJsonOnce(
+    revalidationRecordPath(paths, record.task_id, record.attempt, record.sequence),
+    OrchestratedRevalidationRecord.parse(record),
+  );
+
+export const readRevalidationCheckpoint = (
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+  sequence: number,
+): Promise<RevalidationCheckpoint | null> =>
+  readOptional(revalidationCheckpointPath(paths, taskId, attempt, sequence), (input) =>
+    RevalidationCheckpoint.parse(input),
+  );
+
+export const writeRevalidationCheckpoint = (
+  paths: HarnessPaths,
+  checkpoint: RevalidationCheckpoint,
+): Promise<void> =>
+  writeJsonOnce(
+    revalidationCheckpointPath(
+      paths,
+      checkpoint.task_id,
+      checkpoint.attempt,
+      checkpoint.sequence,
+    ),
+    RevalidationCheckpoint.parse(checkpoint),
+  );
+
+export async function listOrchestratedRevalidations(
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+): Promise<OrchestratedRevalidationRecord[]> {
+  let names: string[];
+  try {
+    names = await readdir(revalidationAttemptDir(paths, taskId, attempt));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
+  }
+  const sequences = names
+    .map((name) => /^revalidation-(\d+)\.json$/.exec(name)?.[1])
+    .filter((value): value is string => value !== undefined)
+    .map(Number)
+    .sort((left, right) => left - right);
+  return Promise.all(
+    sequences.map(async (sequence) => {
+      const record = await readOrchestratedRevalidation(paths, taskId, attempt, sequence);
+      if (!record) throw new Error(`revalidation-${sequence}.json desapareceu durante leitura`);
+      return record;
+    }),
+  );
+}

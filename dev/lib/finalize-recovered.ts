@@ -1,6 +1,5 @@
 import { readFile } from 'node:fs/promises';
 import { canonicalJson, canonicalSha256, sha256Hex } from './canonical.js';
-import { runValidation, toValidationResult } from './exec.js';
 import {
   changedFiles,
   commitExists,
@@ -41,6 +40,7 @@ import {
   type HandoffRecord,
   type RecoveredFinalizationRecord as RecoveredFinalizationRecordType,
   type ValidationCommand,
+  type ValidationEvidence,
   type ValidationResult,
 } from './schemas.js';
 import {
@@ -49,6 +49,7 @@ import {
   withTaskState,
   writeState,
 } from './state.js';
+import { runOfficialValidation } from './validation-evidence.js';
 
 export class RecoveredFinalizationError extends Error {
   constructor(message: string) {
@@ -101,9 +102,6 @@ interface SourceEvidence {
   readonly handoff: HandoffDraft;
   readonly handoffSha256: string;
 }
-
-const defaultValidationRunner: RecoveredValidationRunner = async (command, cwd) =>
-  toValidationResult(await runValidation(command, { cwd }));
 
 export function isForbiddenRecoveredPath(file: string): boolean {
   if (file === 'dev/plan.yaml') return true;
@@ -237,25 +235,34 @@ function assertExactFiles(actual: readonly string[], reported: readonly string[]
 async function runOfficialValidations(
   input: FinalizeRecoveredInput,
   diffArgv: string[],
-): Promise<ValidationResult[]> {
+): Promise<{ results: ValidationResult[]; evidence: ValidationEvidence[] }> {
   const planTask = input.loaded.byId.get(input.taskId);
   if (!planTask) throw new RecoveredFinalizationError(`tarefa ausente no plano: ${input.taskId}`);
-  const runner = input.validationRunner ?? defaultValidationRunner;
   const commands: ValidationCommand[] = [
     ...planTask.validation,
     { argv: diffArgv, timeout_seconds: 300 },
   ];
   const results: ValidationResult[] = [];
+  const validationEvidence: ValidationEvidence[] = [];
   for (const command of commands) {
-    const result = await runner(command, input.paths.repoRoot);
+    const execution = input.validationRunner
+      ? { result: await input.validationRunner(command, input.paths.repoRoot), evidence: null }
+      : await runOfficialValidation({
+          paths: input.paths,
+          taskId: input.taskId,
+          attempt: input.sourceAttempt,
+          command,
+        });
+    const result = execution.result;
     results.push(result);
+    if (execution.evidence) validationEvidence.push(execution.evidence);
     if (result.exit_code !== 0 || result.timed_out) {
       throw new RecoveredFinalizationError(
         `validação falhou: ${command.argv.join(' ')} (exit ${result.exit_code ?? 'null'})`,
       );
     }
   }
-  return results;
+  return { results, evidence: validationEvidence };
 }
 
 async function assertCandidate(
@@ -304,6 +311,9 @@ function deterministicCompletion(
       exit_code: evidence.abandonment.exit_code,
       timed_out: evidence.abandonment.launch_classification === 'TIMED_OUT',
       revalidation: [...record.validation_results],
+      ...(record.validation_evidence === undefined
+        ? {}
+        : { validation_evidence: [...record.validation_evidence] }),
       observed_at: record.finalized_at,
     },
     report_matches_evidence: false,
@@ -526,6 +536,7 @@ export async function finalizeRecovered(
   const finalizationBase = state.authorized_head_sha;
   let candidate = await headSha(input.paths.repoRoot);
   let validationResults: ValidationResult[];
+  let validationEvidence: ValidationEvidence[];
 
   if (candidate === finalizationBase) {
     const actualFiles = await workingTreeFiles(input.paths.repoRoot);
@@ -533,7 +544,9 @@ export async function finalizeRecovered(
       throw new RecoveredFinalizationError('working tree não contém alterações para recuperar');
     }
     assertExactFiles(actualFiles, reportedFiles);
-    validationResults = await runOfficialValidations(input, ['git', 'diff', '--check']);
+    const validationBatch = await runOfficialValidations(input, ['git', 'diff', '--check']);
+    validationResults = validationBatch.results;
+    validationEvidence = validationBatch.evidence;
 
     if ((await headSha(input.paths.repoRoot)) !== finalizationBase) {
       throw new RecoveredFinalizationError('HEAD mudou durante as validações');
@@ -571,12 +584,14 @@ export async function finalizeRecovered(
       reportedFiles,
       commitMessage,
     );
-    validationResults = await runOfficialValidations(input, [
+    const validationBatch = await runOfficialValidations(input, [
       'git',
       'diff',
       '--check',
       `${finalizationBase}..${candidate}`,
     ]);
+    validationResults = validationBatch.results;
+    validationEvidence = validationBatch.evidence;
   }
 
   await assertCandidate(input.paths, candidate, finalizationBase, reportedFiles, commitMessage);
@@ -602,6 +617,7 @@ export async function finalizeRecovered(
     commit_message: commitMessage,
     changed_files: reportedFiles,
     validation_results: validationResults,
+    validation_evidence: validationEvidence,
     candidate_commit: candidate,
     commit_origin: 'orchestrator_recovery',
     working_tree_clean: true,

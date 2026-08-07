@@ -5,7 +5,6 @@ import {
   isWorkingTreeClean,
   parentSha,
 } from './git.js';
-import { runValidation, toValidationResult } from './exec.js';
 import type { HarnessPaths } from './paths.js';
 import type { LoadedPlan } from './plan.js';
 import {
@@ -17,6 +16,7 @@ import {
   type LaunchRecord,
   type OrchestratorEvidence,
   type TaskPacket,
+  type ValidationEvidence,
   type ValidationResult,
 } from './schemas.js';
 import {
@@ -32,6 +32,7 @@ import {
 import { canonicalSha256 } from './canonical.js';
 import { ZodError } from 'zod';
 import { getTaskState, readState, withTaskState, writeState } from './state.js';
+import { runOfficialValidation } from './validation-evidence.js';
 
 /**
  * Caminhos que nunca entram num commit aceito: o runtime do harness e o inbox
@@ -171,11 +172,18 @@ export async function closeTask(input: CloseInput): Promise<CloseOutcome> {
   }
 
   const revalidation: ValidationResult[] = [];
+  const validationEvidence: ValidationEvidence[] = [];
   for (const command of packet.validation) {
-    const result = await runValidation(command, { cwd: paths.repoRoot });
-    revalidation.push(toValidationResult(result));
+    const execution = await runOfficialValidation({
+      paths,
+      taskId,
+      attempt: task.attempts,
+      command,
+    });
+    revalidation.push(execution.result);
+    validationEvidence.push(execution.evidence);
   }
-  const failed = revalidation.filter((result) => result.exit_code !== 0);
+  const failed = revalidation.filter((result) => result.exit_code !== 0 || result.timed_out);
 
   if (failed.length > 0) {
     const evidence = buildEvidence({
@@ -185,6 +193,7 @@ export async function closeTask(input: CloseInput): Promise<CloseOutcome> {
       accepted: null,
       changed,
       revalidation,
+      validationEvidence,
       observedAt: now(),
       launch,
     });
@@ -210,6 +219,7 @@ export async function closeTask(input: CloseInput): Promise<CloseOutcome> {
     accepted: candidate,
     changed,
     revalidation,
+    validationEvidence,
     observedAt: timestamp,
     launch,
   });
@@ -378,6 +388,7 @@ interface EvidenceInput {
   readonly accepted: string | null;
   readonly changed: readonly string[];
   readonly revalidation: readonly ValidationResult[];
+  readonly validationEvidence?: readonly ValidationEvidence[];
   readonly observedAt: string;
   readonly launch: LaunchRecord | null;
 }
@@ -399,6 +410,9 @@ function buildEvidence(input: EvidenceInput): OrchestratorEvidence {
     exit_code: input.launch?.exit_code ?? null,
     timed_out: input.launch?.timed_out ?? false,
     revalidation: [...input.revalidation],
+    ...(input.validationEvidence === undefined
+      ? {}
+      : { validation_evidence: [...input.validationEvidence] }),
     observed_at: input.observedAt,
   };
 }

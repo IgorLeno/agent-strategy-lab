@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -299,6 +300,30 @@ describe('recovered finalization preconditions', () => {
 });
 
 describe('recovered finalization transaction', () => {
+  it('default runner preserva logs externos nas novas finalizações recuperadas', async () => {
+    const result = await finalizeRecovered({
+      paths,
+      loaded,
+      taskId: 'M02',
+      sourceAttempt: 2,
+      reason: REASON,
+      commitMessage: COMMIT_MESSAGE,
+      now: () => FINALIZED_AT,
+    });
+    const completion = await readCompletion(paths, 'M02');
+
+    expect(result.record.validation_evidence).toHaveLength(2);
+    expect(completion?.orchestrator_evidence.validation_evidence).toEqual(
+      result.record.validation_evidence,
+    );
+    for (const evidence of result.record.validation_evidence ?? []) {
+      const stdout = await readFile(path.join(paths.devDir, evidence.stdout_path));
+      const stderr = await readFile(path.join(paths.devDir, evidence.stderr_path));
+      expect(createHash('sha256').update(stdout).digest('hex')).toBe(evidence.stdout_sha256);
+      expect(createHash('sha256').update(stderr).digest('hex')).toBe(evidence.stderr_sha256);
+    }
+  });
+
   it('validation failure creates no commit or PASS state', async () => {
     const failingRunner: RecoveredValidationRunner = async (command) => ({
       argv: [...command.argv],

@@ -4,8 +4,12 @@ import {
   LaunchRecord,
   MAXIMUM_HANDOFF_BYTES,
   MAXIMUM_TASK_PACKET_BYTES,
+  OrchestratedRevalidationRecord,
+  RevalidationSourceBinding,
   TaskState,
   OrchestratedFinalizationRecord,
+  ValidationEvidence,
+  ValidationResult,
   byteSize,
   parseHandoffDraft,
   parseHandoffRecord,
@@ -132,6 +136,140 @@ describe('TaskPacket', () => {
     });
     expect(byteSize(inflated)).toBeGreaterThan(MAXIMUM_TASK_PACKET_BYTES);
     expect(() => parseTaskPacket(inflated)).toThrow(BudgetExceededError);
+  });
+});
+
+describe('validation evidence compatibility', () => {
+  const legacy = {
+    argv: ['pnpm', 'test'],
+    exit_code: 1,
+    timed_out: false,
+    duration_ms: 123,
+  };
+
+  it('continua parseando ValidationResult legado sem acrescentar campos', () => {
+    const before = JSON.stringify(legacy);
+    expect(ValidationResult.parse(legacy)).toEqual(legacy);
+    expect(JSON.stringify(ValidationResult.parse(legacy))).toBe(before);
+  });
+
+  it('tipa metadata externa sem stdout ou stderr bruto', () => {
+    const evidence = ValidationEvidence.parse({
+      sequence: 7,
+      argv: ['pnpm', 'test'],
+      exit_code: 0,
+      timed_out: false,
+      duration_ms: 55,
+      stdout_sha256: 'a'.repeat(64),
+      stderr_sha256: 'b'.repeat(64),
+      stdout_bytes: 12,
+      stderr_bytes: 0,
+      stdout_path: 'validation-logs/M03B/attempt-1/0007.stdout.log',
+      stderr_path: 'validation-logs/M03B/attempt-1/0007.stderr.log',
+    });
+    expect(evidence.stdout_bytes).toBe(12);
+    expect(evidence).not.toHaveProperty('stdout');
+    expect(evidence).not.toHaveProperty('stderr');
+  });
+});
+
+describe('OrchestratedRevalidationRecord', () => {
+  const result = {
+    argv: ['pnpm', 'test'],
+    exit_code: 0,
+    timed_out: false,
+    duration_ms: 1,
+  };
+  const evidence = {
+    sequence: 1,
+    ...result,
+    stdout_sha256: '1'.repeat(64),
+    stderr_sha256: '2'.repeat(64),
+    stdout_bytes: 1,
+    stderr_bytes: 0,
+    stdout_path: 'validation-logs/M03B/attempt-1/0001.stdout.log',
+    stderr_path: 'validation-logs/M03B/attempt-1/0001.stderr.log',
+  };
+  const binding = {
+    schema_version: 1,
+    task_id: 'M03B',
+    attempt: 1,
+    source_base_sha: SHA,
+    original_completion_path: 'original-completion.fail.json',
+    original_completion_sha256: '3'.repeat(64),
+    report_sha256: '4'.repeat(64),
+    handoff_draft_sha256: '5'.repeat(64),
+    changed_files: ['src/a.ts'],
+    derived_patch_fingerprint: '6'.repeat(64),
+    fingerprint_observed_at: NOW,
+    fingerprint_provenance: 'derived_during_revalidation_preflight',
+  };
+  const record = {
+    schema_version: 1,
+    task_id: 'M03B',
+    attempt: 1,
+    sequence: 1,
+    outcome: 'PASS',
+    reason_code: 'NONDETERMINISTIC_VALIDATION',
+    reason: 'gate oscilou sem mudança de patch',
+    source_binding_sha256: '7'.repeat(64),
+    source_base_sha: SHA,
+    finalization_base_sha: 'b'.repeat(40),
+    original_completion_sha256: binding.original_completion_sha256,
+    report_sha256: binding.report_sha256,
+    handoff_draft_sha256: binding.handoff_draft_sha256,
+    patch_fingerprint: binding.derived_patch_fingerprint,
+    original_validation_results: [{ ...result, exit_code: 1 }],
+    revalidation_results: [result],
+    validation_evidence: [evidence],
+    changed_files: ['src/a.ts'],
+    commit_message: 'feat(M03B): EvaluationPlan mínimo (privado)',
+    candidate_commit: 'c'.repeat(40),
+    candidate_tree_sha: 'e'.repeat(40),
+    commit_origin: 'orchestrator',
+    working_tree_clean: true,
+    revalidated_at: NOW,
+  };
+
+  it('tipa o source binding com provenance honesta', () => {
+    expect(RevalidationSourceBinding.parse(binding).source_base_sha).toBe(SHA);
+    expect(() =>
+      RevalidationSourceBinding.parse({ ...binding, fingerprint_provenance: 'historical' }),
+    ).toThrow();
+  });
+
+  it('separa source base da finalization base e aceita PASS consistente', () => {
+    const parsed = OrchestratedRevalidationRecord.parse(record);
+    expect(parsed.source_base_sha).not.toBe(parsed.finalization_base_sha);
+    expect(parsed.candidate_commit).toBe('c'.repeat(40));
+  });
+
+  it('recusa PASS sem candidate e FAIL sem validação malsucedida', () => {
+    expect(() =>
+      OrchestratedRevalidationRecord.parse({ ...record, candidate_commit: null }),
+    ).toThrow(/PASS.*candidate/i);
+    expect(() =>
+      OrchestratedRevalidationRecord.parse({
+        ...record,
+        outcome: 'FAIL',
+        candidate_commit: null,
+        candidate_tree_sha: null,
+        working_tree_clean: false,
+      }),
+    ).toThrow(/FAIL.*malsucedida/i);
+  });
+
+  it('aceita FAIL append-only sem candidate quando uma nova validação falha', () => {
+    const failed = OrchestratedRevalidationRecord.parse({
+      ...record,
+      outcome: 'FAIL',
+      revalidation_results: [{ ...result, exit_code: 1 }],
+      validation_evidence: [{ ...evidence, exit_code: 1 }],
+      candidate_commit: null,
+      candidate_tree_sha: null,
+      working_tree_clean: false,
+    });
+    expect(failed.sequence).toBe(1);
   });
 });
 
