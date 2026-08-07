@@ -55,7 +55,7 @@ export async function buildSectionManifest(
   sectionDir: string,
   options: SectionManifestOptions,
 ): Promise<SectionManifest> {
-  const section = normalizeSection(options.section);
+  const section = normalizeSectionPath(options.section);
   const now = options.now ?? new Date();
   if (!Number.isFinite(now.getTime())) {
     throw new RangeError('now deve ser uma data válida');
@@ -215,7 +215,11 @@ async function readLastLedgerLine(
   return { line, entry: parsed as LedgerEntry };
 }
 
-function normalizeSection(section: string): string {
+/**
+ * Normaliza o caminho de uma seção relativo à raiz do run. Rejeita caminhos que
+ * escapariam do run — a seção é sempre um subdiretório do próprio run.
+ */
+export function normalizeSectionPath(section: string): string {
   const normalized = section.replaceAll('\\', '/').replace(/^\/+|\/+$/g, '');
   if (normalized === '' || normalized.split('/').some((segment) => segment === '..')) {
     throw new TypeError(`seção inválida: ${section}`);

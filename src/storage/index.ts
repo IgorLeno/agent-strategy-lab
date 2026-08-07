@@ -9,9 +9,21 @@ import {
 
 export { appendJsonLine } from './jsonl.js';
 export {
+  finalizeExecution,
+  sealEvaluation,
+  sealScore,
+  sealSection,
+  EVALUATIONS_SECTION_PREFIX,
+  EXECUTION_SECTION,
+  SCORES_SECTION_PREFIX,
+  type SealSectionOptions,
+  type SealedSection,
+} from './finalize.js';
+export {
   appendLedgerEntry,
   buildSectionManifest,
   ledgerLineSha256,
+  normalizeSectionPath,
   writeSectionManifest,
   LEDGER_FILE_NAME,
   MANIFEST_FILE_NAME,
