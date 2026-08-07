@@ -12,11 +12,17 @@ import {
 } from '../../dev/lib/billing.js';
 import { DEFAULT_WORKER_PROFILE_ID } from '../../dev/lib/defaults.js';
 import { diagnose, type Check } from '../../dev/lib/doctor.js';
+import { executionPolicyOf } from '../../dev/lib/execution-policy.js';
 import { buildTaskPacket } from '../../dev/lib/packet.js';
 import { headSha } from '../../dev/lib/git.js';
 import { resolveHarnessPaths, type HarnessPaths } from '../../dev/lib/paths.js';
 import { loadPlan, type LoadedPlan } from '../../dev/lib/plan.js';
-import { buildEnvironment, loadProfile } from '../../dev/lib/profile.js';
+import {
+  ForbiddenFlagError,
+  assertNoForbiddenFlags,
+  buildEnvironment,
+  loadProfile,
+} from '../../dev/lib/profile.js';
 import { readLaunchRecord, writePacket } from '../../dev/lib/records.js';
 import { BillingRecord } from '../../dev/lib/schemas.js';
 import { buildInitialState, ensureRuntimeDirs, getTaskState, readState, writeState } from '../../dev/lib/state.js';
@@ -179,6 +185,7 @@ describe('perfis subscription-only', () => {
   it('os perfis versionados de assinatura não deixam passar variável de API', async () => {
     for (const id of [
       'claude-build-worker-subscription-v1',
+      'claude-build-worker-subscription-v2',
       'codex-build-worker-subscription-v1',
       'codex-build-worker-subscription-high-v1',
       'codex-build-worker-subscription-high-v2',
@@ -213,6 +220,56 @@ describe('perfis subscription-only', () => {
     expect(v2.argv).toEqual(v1.argv);
     expect(v2.env_allowlist).toEqual(v1.env_allowlist);
     expect(Object.keys(v2.env_extra).filter((name) => name.startsWith('GIT_'))).toEqual([]);
+  });
+
+  it('preserva o Claude v1 como worker/full e declara v2 como orchestrator/targeted', async () => {
+    const v1 = await loadProfile(REPO_ROOT, 'claude-build-worker-subscription-v1');
+    const v2 = await loadProfile(REPO_ROOT, 'claude-build-worker-subscription-v2');
+
+    expect(executionPolicyOf(v1)).toEqual({
+      commit_owner: 'worker',
+      official_validation_owner: 'worker',
+      worker_validation_policy: 'full',
+    });
+    expect(executionPolicyOf(v2)).toEqual({
+      commit_owner: 'orchestrator',
+      official_validation_owner: 'orchestrator',
+      worker_validation_policy: 'targeted',
+    });
+
+    // Só a policy muda: cobrança, ambiente, modelo e argv seguem o v1.
+    expect(v2).toMatchObject({
+      agent: 'claude',
+      billing_mode: 'subscription_only',
+      environment_mode: v1.environment_mode,
+      instruction_environment: v1.instruction_environment,
+      timeout_seconds: v1.timeout_seconds,
+    });
+    expect(v2.argv).toEqual(v1.argv);
+    expect(v2.argv[v2.argv.indexOf('--model') + 1]).toBe('claude-opus-5');
+    expect(v2.control_markers).toEqual(v1.control_markers);
+    expect(v2.env_allowlist).toEqual(v1.env_allowlist);
+    expect(v2.env_extra).toEqual(v1.env_extra);
+
+    // Continuidade de sessão continua proibida antes do spawn.
+    for (const flag of ['--resume', '-r', '--continue', '-c', '--fork-session', '--session-id']) {
+      expect(v2.forbidden_flags, flag).toContain(flag);
+      expect(() => assertNoForbiddenFlags(v2, [...v2.argv, flag])).toThrow(ForbiddenFlagError);
+    }
+
+    // Nenhuma variável nem flag de API entrou junto com a nova policy.
+    expect(apiCredentialNamesIn(v2.env_allowlist)).toEqual([]);
+    expect(apiCredentialNamesIn(Object.keys(v2.env_extra))).toEqual([]);
+    expect(v2.argv.filter((token) => /^--(bare|api-key)(=|$)/.test(token))).toEqual([]);
+    expect(v2.forbidden_flags).toEqual(expect.arrayContaining(['--bare', '--api-key']));
+    const env = buildEnvironment(v2, {
+      PATH: '/usr/bin',
+      HOME: '/home/x',
+      ANTHROPIC_API_KEY: FAKE_SECRET,
+      ANTHROPIC_AUTH_TOKEN: FAKE_SECRET,
+    });
+    expect(apiCredentialNamesIn(Object.keys(env))).toEqual([]);
+    expect(JSON.stringify(env)).not.toContain(FAKE_SECRET);
   });
 
   it('rejeita profile com combinação de execution policy não implementada', async () => {

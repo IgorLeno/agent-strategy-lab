@@ -1,0 +1,85 @@
+# Perfil de worker Claude Code pago pela ASSINATURA do usuário, SEM ownership de
+# commit nem de validação oficial.
+#
+# Semanticamente igual a `claude-build-worker-subscription-v1` — mesma cobrança,
+# mesmo modelo, mesmo argv, mesma env_allowlist, mesmas flags proibidas. A única
+# diferença é a execution policy: aqui o worker edita a árvore de trabalho, pode
+# rodar validações direcionadas, escreve AgentCompletionReport e HandoffDraft, e
+# sai. Commit candidato e validações oficiais do TaskPacket pertencem ao
+# orquestrador, fora do sandbox do provider.
+#
+# Assinatura, nunca API — e verificada, não presumida: `dev-doctor` e o preflight
+# do `dev-launch` rodam `claude auth status --json` (local e gratuito) e exigem
+# `authMethod=claude.ai` + `apiProvider=firstParty` + `subscriptionType` presente.
+# Fonte desconhecida BLOQUEIA o run.
+#
+# Consequência assumida: com assinatura NÃO existe modo `controlled` para o
+# Claude. `--bare` é a única flag que desliga auto-descoberta de CLAUDE.md,
+# hooks, plugins e auto-memory, e a própria CLI documenta que nesse modo a auth
+# passa a ser estritamente ANTHROPIC_API_KEY/apiKeyHelper — OAuth e keychain
+# nunca são lidos. Por isso `--bare` é PROIBIDA aqui e o perfil é `real-world`.
+id: claude-build-worker-subscription-v2
+agent: claude
+billing_mode: subscription_only
+environment_mode: real-world
+commit_owner: orchestrator
+official_validation_owner: orchestrator
+worker_validation_policy: targeted
+argv:
+  - claude
+  - --print
+  - --output-format
+  - json
+  - --model
+  - claude-opus-5
+  - --settings
+  - dev/profiles/claude-build-worker.settings.json
+  - --setting-sources
+  - project
+  - --permission-mode
+  - acceptEdits
+  - --strict-mcp-config
+  - --no-session-persistence
+prompt_delivery: argv
+timeout_seconds: 1800
+forbidden_flags:
+  - --resume
+  - -r
+  - --continue
+  - -c
+  - --fork-session
+  - --session-id
+  - --dangerously-skip-permissions
+  - --allow-dangerously-skip-permissions
+  # Trocariam a assinatura por cobrança de API — recusadas antes do spawn.
+  - --bare
+  - --api-key
+env_allowlist:
+  - PATH
+  - HOME
+  - LANG
+  - LC_ALL
+  - TERM
+  - USER
+  - SHELL
+env_extra:
+  CI: '1'
+control_markers:
+  instruction_discovery: --bare
+  plugins_and_hooks: --bare
+  auto_memory: --bare
+  mcp_servers: --strict-mcp-config
+  session_persistence: --no-session-persistence
+  non_interactive: --print
+  permission_policy: --settings
+  personal_settings_excluded: --setting-sources
+  model_pinned: --model
+notes:
+  - 'Cobrança: assinatura Claude Pro (login/OAuth). Nenhuma chave de API na allowlist.'
+  - 'Execução consome a franquia da assinatura: só rodar com autorização explícita do usuário.'
+  - 'O worker edita o patch e pode validar de forma direcionada; commit e validação oficial pertencem ao orquestrador.'
+  - 'Verificado contra Claude Code 2.1.223: --model, --settings, --setting-sources, --permission-mode, --strict-mcp-config, --no-session-persistence e `auth status --json` existem nessa versão.'
+  - 'Sem --bare: CLAUDE.md, hooks e plugins do projeto CARREGAM; user e local ficam fora por --setting-sources project.'
+  - 'Ambiente real-world: nunca comparar estes resultados com os de um perfil controlled.'
+  - 'total_cost_usd emitido pela CLI é equivalência estimada em preço de API, não cobrança.'
+  - 'Limitação conhecida: o campo session_persistence do DoctorReport é derivado de --ephemeral (forma do Codex) e por isso reporta `persistent` para Claude. A checagem `persistência da sessão` é SKIP neste perfil e o control_marker real continua sendo --no-session-persistence.'
