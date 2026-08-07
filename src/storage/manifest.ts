@@ -71,7 +71,7 @@ export async function buildSectionManifest(
     section,
     created_at: now.toISOString(),
     artifacts,
-    digest_sha256: aggregateDigest(section, artifacts),
+    digest_sha256: sectionDigestSha256(section, artifacts),
   };
 }
 
@@ -142,7 +142,15 @@ export function ledgerLineSha256(line: string): string {
   return createHash('sha256').update(line, 'utf8').digest('hex');
 }
 
-function aggregateDigest(section: string, artifacts: readonly ManifestArtifact[]): string {
+/**
+ * Digest agregado de uma seção. Exportado porque a verificação de integridade
+ * precisa recalcular exatamente a mesma regra — duas cópias dela poderiam
+ * divergir e fazer um manifest adulterado passar.
+ */
+export function sectionDigestSha256(
+  section: string,
+  artifacts: readonly ManifestArtifact[],
+): string {
   return canonicalSha256({ schema_version: 1, section, artifacts });
 }
 
@@ -168,14 +176,20 @@ async function collectArtifacts(
 
     if (relativePath === MANIFEST_FILE_NAME) continue;
 
-    const { sha256, sizeBytes } = await hashFile(path.join(sectionDir, relativePath));
+    const { sha256, sizeBytes } = await hashArtifactFile(path.join(sectionDir, relativePath));
     artifacts.push({ path: relativePath, size_bytes: sizeBytes, sha256 });
   }
 
   return artifacts;
 }
 
-async function hashFile(filePath: string): Promise<{ sha256: string; sizeBytes: number }> {
+/**
+ * sha256 e tamanho dos bytes de um artifact, exatamente como registrados no
+ * manifest — a verificação de integridade recalcula por esta mesma função.
+ */
+export async function hashArtifactFile(
+  filePath: string,
+): Promise<{ sha256: string; sizeBytes: number }> {
   const hash = createHash('sha256');
   let sizeBytes = 0;
 

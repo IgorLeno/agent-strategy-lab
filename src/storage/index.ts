@@ -20,10 +20,18 @@ export {
   type SealedSection,
 } from './finalize.js';
 export {
+  verifyRunIntegrity,
+  type IntegrityViolation,
+  type IntegrityViolationKind,
+  type RunIntegrityReport,
+} from './integrity.js';
+export {
   appendLedgerEntry,
   buildSectionManifest,
+  hashArtifactFile,
   ledgerLineSha256,
   normalizeSectionPath,
+  sectionDigestSha256,
   writeSectionManifest,
   LEDGER_FILE_NAME,
   MANIFEST_FILE_NAME,
