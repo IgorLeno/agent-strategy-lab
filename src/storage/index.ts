@@ -45,7 +45,11 @@ export {
   RunIndex,
   RunIndexSchemaVersionError,
   RUN_INDEX_SCHEMA_VERSION,
+  RUN_RECORD_FILE_NAME,
+  type RebuildReport,
   type RunIndexRow,
+  type RunRebuildResult,
+  type RunRecord,
   type TaskIndexRow,
   type TrialIndexRow,
 } from './sqlite-index.js';
