@@ -76,8 +76,18 @@ export interface ClaudeRateLimitObservation {
   readonly utilization_scale: 'fraction' | 'percentage' | null;
   /** Derivado: `fraction` vira `utilization * 100`; `percentage` passa direto. */
   readonly utilization_percentage: number | null;
-  readonly resets_at: string | null;
+  /**
+   * FORMA CRUA do reset, preservada como veio: a CLI já emitiu string ISO e
+   * epoch numérico. Converter um no outro exigiria adivinhar a unidade do
+   * número (segundos? milissegundos?), então a identidade da janela é
+   * comparação exata deste valor, e nada é reescrito.
+   */
+  readonly resets_at: string | number | null;
   readonly session_id: string | null;
+  /** Overage: campos separados porque limite normal e overage são janelas distintas. */
+  readonly overage_status: string | null;
+  readonly overage_resets_at: string | number | null;
+  readonly is_using_overage: boolean | null;
   /** Mensagem crua da CLI, preservada como evidência. */
   readonly raw: Record<string, unknown>;
 }
@@ -98,7 +108,16 @@ export interface ClaudeStreamReading {
  * inteira por causa de um envelope novo. Nada além disso é vasculhado: busca
  * profunda acharia campo homônimo de outro contexto e viraria invenção.
  */
-const RATE_LIMIT_CONTAINER_KEYS = ['rate_limit', 'rateLimit', 'rate_limits', 'rateLimits'];
+const RATE_LIMIT_CONTAINER_KEYS = [
+  // Envelope REAL observado em Claude Code 2.1.226 (evidência da M28): todos os
+  // campos do evento chegam aninhados aqui, e nenhum deles no topo.
+  'rate_limit_info',
+  'rateLimitInfo',
+  'rate_limit',
+  'rateLimit',
+  'rate_limits',
+  'rateLimits',
+];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -125,6 +144,15 @@ function asString(value: unknown): string | null {
 
 function asNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function asBoolean(value: unknown): boolean | null {
+  return typeof value === 'boolean' ? value : null;
+}
+
+/** Instante de reset na forma em que chegou — string ISO ou epoch numérico. */
+function asInstant(value: unknown): string | number | null {
+  return asString(value) ?? asNumber(value);
 }
 
 /**
@@ -156,8 +184,11 @@ function observationOf(
     utilization_scale: scale,
     utilization_percentage:
       utilization === null ? null : round(scale === 'fraction' ? utilization * 100 : utilization),
-    resets_at: asString(pick(message, ['resets_at', 'resetsAt'])),
+    resets_at: asInstant(pick(message, ['resets_at', 'resetsAt'])),
     session_id: asString(pick(message, ['session_id', 'sessionId'])),
+    overage_status: asString(pick(message, ['overage_status', 'overageStatus'])),
+    overage_resets_at: asInstant(pick(message, ['overage_resets_at', 'overageResetsAt'])),
+    is_using_overage: asBoolean(pick(message, ['is_using_overage', 'isUsingOverage'])),
     raw: message,
   };
 }
@@ -227,7 +258,7 @@ export function streamContractViolation(reading: ClaudeStreamReading): string | 
 export interface ClaudeRateLimitWindowDelta {
   readonly rate_limit_type: string;
   /** Mesma janela na primeira e na última observação; senão não há delta. */
-  readonly resets_at: string;
+  readonly resets_at: string | number;
   readonly first_utilization_percentage: number;
   readonly last_utilization_percentage: number;
   /**

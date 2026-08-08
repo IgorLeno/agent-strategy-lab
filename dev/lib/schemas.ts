@@ -360,8 +360,17 @@ export const RateLimitObservation = z
     /** Escala ASSUMIDA para derivar o percentual — registrada, não escondida. */
     utilization_scale: z.enum(['fraction', 'percentage']).nullable(),
     utilization_percentage: z.number().nullable(),
-    resets_at: z.string().nullable(),
+    /**
+     * Forma CRUA do reset: a CLI emite string ISO em algumas versões e epoch
+     * numérico em outras (2.1.226). Converter exigiria adivinhar a unidade do
+     * número, então o valor fica como veio e a janela é comparada por igualdade.
+     */
+    resets_at: z.union([z.string(), z.number()]).nullable(),
     session_id: z.string().nullable(),
+    /** Overage é janela SEPARADA do limite normal; ausente em records anteriores. */
+    overage_status: z.string().nullable().default(null),
+    overage_resets_at: z.union([z.string(), z.number()]).nullable().default(null),
+    is_using_overage: z.boolean().nullable().default(null),
     /** Mensagem crua, preservada como evidência: nada aqui é inventado. */
     raw: z.record(z.unknown()),
   })
@@ -372,7 +381,7 @@ export type RateLimitObservation = z.infer<typeof RateLimitObservation>;
 export const RateLimitWindowDelta = z
   .object({
     rate_limit_type: nonEmpty,
-    resets_at: nonEmpty,
+    resets_at: z.union([nonEmpty, z.number()]),
     first_utilization_percentage: z.number(),
     last_utilization_percentage: z.number(),
     /** Delta ENTRE OBSERVAÇÕES em pontos percentuais, não consumo da tarefa. */
@@ -391,6 +400,81 @@ export const RateLimitObservations = z
   })
   .strict();
 export type RateLimitObservations = z.infer<typeof RateLimitObservations>;
+
+/**
+ * Medição da QUOTA DA ASSINATURA em volta do run, lida com `claude -p "/usage"`.
+ *
+ * É outra métrica, e por isso outro campo: `billing` guarda equivalência em
+ * dólar de preço de API, `rate_limit_observations` guarda o que a CLI observou
+ * DURANTE o run, e isto aqui guarda o percentual da assinatura ANTES e DEPOIS.
+ * Nenhum dos três pode ser lido como se fosse o outro.
+ */
+export const SUBSCRIPTION_USAGE_PROBE_REASON_CODES = [
+  'OK',
+  /** O probe não foi executado (perfil não-Claude, ou run abortado antes). */
+  'NOT_RUN',
+  /** Erro técnico: a CLI não devolveu result legível. Nada foi medido. */
+  'PROBE_FAILED',
+  /** O result não prova custo/tokens/turno zero — pode ter havido inferência. */
+  'ZERO_INFERENCE_UNVERIFIED',
+  /** Contrato de segurança OK, mas o texto do /usage não pôde ser lido. */
+  'PARSE_ERROR',
+] as const;
+export const SubscriptionUsageProbeReasonCode = z.enum(SUBSCRIPTION_USAGE_PROBE_REASON_CODES);
+export type SubscriptionUsageProbeReasonCode = z.infer<typeof SubscriptionUsageProbeReasonCode>;
+
+export const SubscriptionUsageProbe = z
+  .object({
+    /** `true` só quando os dois cabeçalhos do /usage foram extraídos. */
+    available: z.boolean(),
+    /** `true` só com prova positiva de custo, tokens, turnos e modelUsage zerados. */
+    zero_inference_verified: z.boolean(),
+    reason_code: SubscriptionUsageProbeReasonCode,
+    reason: z.string().nullable(),
+    /** Evidência do texto lido — o conteúdo em si não é copiado para o record. */
+    result_text_sha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+    command: nonEmpty,
+    exit_code: z.number().int().nullable(),
+  })
+  .strict();
+export type SubscriptionUsageProbe = z.infer<typeof SubscriptionUsageProbe>;
+
+export const SUBSCRIPTION_USAGE_WINDOW_REASON_CODES = [
+  'OK',
+  /** A janela virou entre os dois probes: subtrair compararia janelas distintas. */
+  'RATE_LIMIT_WINDOW_RESET',
+  /** Um dos probes não produziu leitura utilizável. */
+  'MEASUREMENT_UNAVAILABLE',
+] as const;
+export const SubscriptionUsageWindowReasonCode = z.enum(SUBSCRIPTION_USAGE_WINDOW_REASON_CODES);
+export type SubscriptionUsageWindowReasonCode = z.infer<typeof SubscriptionUsageWindowReasonCode>;
+
+export const SubscriptionUsageWindow = z
+  .object({
+    before_used_pct: z.number().nullable(),
+    after_used_pct: z.number().nullable(),
+    /** Rótulo de reset EXATAMENTE como o /usage escreveu — identidade da janela. */
+    before_reset_label: z.string().nullable(),
+    after_reset_label: z.string().nullable(),
+    same_window: z.boolean(),
+    /** Pontos percentuais consumidos; `null` sempre que houver dúvida. */
+    consumed_pp: z.number().nullable(),
+    reason_code: SubscriptionUsageWindowReasonCode,
+  })
+  .strict();
+export type SubscriptionUsageWindow = z.infer<typeof SubscriptionUsageWindow>;
+
+export const SubscriptionUsage = z
+  .object({
+    source: z.literal('claude_print_usage'),
+    probe_contract: z
+      .object({ before: SubscriptionUsageProbe, after: SubscriptionUsageProbe })
+      .strict(),
+    five_hour: SubscriptionUsageWindow,
+    seven_day_all_models: SubscriptionUsageWindow,
+  })
+  .strict();
+export type SubscriptionUsage = z.infer<typeof SubscriptionUsage>;
 
 export const LaunchRecord = z
   .object({
@@ -422,6 +506,12 @@ export const LaunchRecord = z
      * isso existe `observed: []` dentro do objeto.
      */
     rate_limit_observations: RateLimitObservations.nullable().default(null),
+    /**
+     * `null` quando o perfil não é Claude de assinatura — só ali o probe roda.
+     * Records anteriores à medição continuam válidos sem o campo: ausência NÃO
+     * é medição zerada, e nada histórico é reescrito para preenchê-la.
+     */
+    subscription_usage: SubscriptionUsage.nullable().default(null),
   })
   .strict();
 export type LaunchRecord = z.infer<typeof LaunchRecord>;

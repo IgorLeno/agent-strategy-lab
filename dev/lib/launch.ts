@@ -20,6 +20,13 @@ import {
   usesClaudeStreamJson,
   type ClaudeStreamReading,
 } from './claude-stream.js';
+import {
+  NOT_RUN_OUTCOME,
+  buildSubscriptionUsage,
+  probeClaudeUsage,
+  type ClaudeUsageProbeOutcome,
+  type UsageCommandRunner,
+} from './claude-usage.js';
 import { TIMEOUT_EXIT_CODE } from './exec.js';
 import { executionPolicyOf } from './execution-policy.js';
 import type { HarnessPaths } from './paths.js';
@@ -56,6 +63,8 @@ export interface LaunchInput {
   readonly onStarted?: (identity: ProcessIdentity) => Promise<void>;
   /** Injetado pelos testes para provar a credencial sem chamar CLI de verdade. */
   readonly credentialRunner?: CommandRunner;
+  /** Injetado pelos testes para medir a quota sem chamar CLI de verdade. */
+  readonly usageRunner?: UsageCommandRunner;
 }
 
 export interface LaunchOutcome {
@@ -80,6 +89,18 @@ export class BillingPreflightError extends LaunchError {
   constructor(reason: string) {
     super(`preflight de cobrança recusou o lançamento — ${reason}`);
     this.name = 'BillingPreflightError';
+  }
+}
+
+/**
+ * Recusa da MEDIÇÃO, não do worker: o probe `/usage` de baseline não provou ter
+ * rodado sem inferência, então ele mesmo pode ter consumido franquia. Nada foi
+ * lançado; a tarefa não vai para FAIL por causa disto.
+ */
+export class UsageMeasurementSafetyError extends LaunchError {
+  constructor(reason: string) {
+    super(`medição de quota recusou o lançamento — ${reason}`);
+    this.name = 'UsageMeasurementSafetyError';
   }
 }
 
@@ -131,6 +152,22 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
     ...(input.credentialRunner ? { runner: input.credentialRunner } : {}),
   });
   if (!preflight.ok) throw new BillingPreflightError(preflight.refusal ?? 'motivo não informado');
+
+  // Baseline da quota da assinatura, DEPOIS do preflight e ANTES do spawn. Um
+  // probe que não prova inferência zero pode ter gastado franquia: nesse caso o
+  // worker não nasce, e o valor não é registrado como baseline válido.
+  const measuresUsage = usesSubscriptionUsageProbe(profile);
+  const usageBefore = measuresUsage
+    ? await probeClaudeUsage({
+        binary: profile.argv[0] as string,
+        env,
+        cwd: paths.repoRoot,
+        ...(input.usageRunner ? { runner: input.usageRunner } : {}),
+      })
+    : NOT_RUN_OUTCOME;
+  if (usageBefore.unsafe) {
+    throw new UsageMeasurementSafetyError(usageBefore.probe.reason ?? 'motivo não informado');
+  }
 
   const prompt = buildWorkerPrompt(packet, io, executionPolicy);
   await ensureTaskInbox(paths, packet.task_id);
@@ -193,6 +230,7 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
     | 'survivors_remaining'
     | 'billing'
     | 'rate_limit_observations'
+    | 'subscription_usage'
   > = {
     schema_version: DEV_SCHEMA_VERSION,
     task_id: packet.task_id,
@@ -217,6 +255,11 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
     survivors_remaining: [],
     billing: billingOf(profile, preflight.credential, '', null),
     rate_limit_observations: null,
+    // O baseline já existe e vai gravado agora: se o orquestrador cair durante
+    // a espera, o diagnóstico do probe não se perde junto.
+    subscription_usage: measuresUsage
+      ? buildSubscriptionUsage(usageBefore, NOT_RUN_OUTCOME)
+      : null,
   });
   await input.onStarted?.(identity);
 
@@ -228,8 +271,24 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
   // contrato. Falha de escrita do log não derruba o lançamento.
   await Promise.all([finished(stdoutLog), finished(stderrLog)]).catch(() => {});
 
+  // Marcado ANTES do probe final: a duração do run é do worker, e somar a
+  // medição a ela contaminaria a série de tempos com o custo da observação.
   const finishedAtMs = Date.now();
   const durationMs = finishedAtMs - startedAtMs;
+
+  // Medição final imediatamente depois do término do worker: o que entra na
+  // conta é o consumo da execução Claude, não o tempo de validação oficial ou
+  // de qualquer passo local que venha depois. Falha aqui é OBSERVACIONAL —
+  // nunca rerroda o provider e nunca transforma run bom em veredito ruim.
+  const usageAfter: ClaudeUsageProbeOutcome = measuresUsage
+    ? await probeClaudeUsage({
+        binary: profile.argv[0] as string,
+        env,
+        cwd: paths.repoRoot,
+        ...(input.usageRunner ? { runner: input.usageRunner } : {}),
+      })
+    : NOT_RUN_OUTCOME;
+
   const timedOut = classifyTimeout(exitCode, durationMs, timeoutSeconds);
 
   // O pai ter morrido não prova sessão encerrada: filho vivo continua mexendo
@@ -264,6 +323,7 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
           window_deltas: rateLimitWindowDeltas(stream.observations),
         }
       : null,
+    subscription_usage: measuresUsage ? buildSubscriptionUsage(usageBefore, usageAfter) : null,
   };
   await writeLaunchRecord(paths, record);
 
@@ -304,6 +364,15 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
     };
   }
   return { record, classification: 'FINISHED', reason: `worker saiu com exit ${exitCode}` };
+}
+
+/**
+ * Só perfil Claude pago pela assinatura mede quota: `/usage` é comando da CLI
+ * do Claude e reporta a franquia da conta. Perfil Codex, perfil falso e perfil
+ * de cobrança por API não ganham chamada nenhuma — nem para registrar `null`.
+ */
+function usesSubscriptionUsageProbe(profile: LauncherProfile): boolean {
+  return profile.agent === 'claude' && profile.billing_mode === 'subscription_only';
 }
 
 interface Termination {

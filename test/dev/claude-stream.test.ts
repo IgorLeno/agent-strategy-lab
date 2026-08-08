@@ -11,6 +11,7 @@ import {
   streamContractViolation,
   usesClaudeStreamJson,
 } from '../../dev/lib/claude-stream.js';
+import type { UsageCommandRunner } from '../../dev/lib/claude-usage.js';
 import { diagnose, type Check } from '../../dev/lib/doctor.js';
 import { headSha } from '../../dev/lib/git.js';
 import { launchWorker } from '../../dev/lib/launch.js';
@@ -24,7 +25,7 @@ import {
   readReport,
   writePacket,
 } from '../../dev/lib/records.js';
-import { LaunchRecord } from '../../dev/lib/schemas.js';
+import { LaunchRecord, RateLimitObservation } from '../../dev/lib/schemas.js';
 import { buildInitialState, ensureRuntimeDirs, writeState } from '../../dev/lib/state.js';
 import { REPO_ROOT, makeSandboxRepo, type Sandbox } from './helpers.js';
 
@@ -137,6 +138,28 @@ async function launchStream(scenario: string) {
     profile: streamFixtureProfile(scenario),
     packet,
     credentialRunner: subscriptionRunner,
+    // Perfil Claude de assinatura mede quota; aqui o /usage entra falso, para
+    // que estes testes continuem sem chamar CLI nenhuma.
+    usageRunner: usageRunner(),
+  });
+}
+
+/** `/usage` FALSO: probe local, sem inferência, com os dois cabeçalhos. */
+function usageRunner(): UsageCommandRunner {
+  return async () => ({
+    code: 0,
+    stdout: JSON.stringify({
+      type: 'result',
+      is_error: false,
+      num_turns: 0,
+      total_cost_usd: 0,
+      usage: { input_tokens: 0, output_tokens: 0 },
+      modelUsage: {},
+      result:
+        'Current session: 41% used · resets Aug 8, 9:39pm (America/Sao_Paulo)\n' +
+        'Current week (all models): 63% used · resets Aug 11, 2:59am (America/Sao_Paulo)\n',
+    }),
+    stderr: '',
   });
 }
 
@@ -227,6 +250,90 @@ describe('leitura do stdout stream-json', () => {
       status: null,
       session_id: null,
     });
+  });
+
+  it('L — evento REAL da M28 normaliza status, tipo e reset do envelope aninhado', () => {
+    // Forma exata capturada em Claude Code 2.1.226 na M28: tudo aninhado em
+    // `rate_limit_info`, nada no topo, e `resetsAt` como epoch numérico.
+    const raw = {
+      type: 'rate_limit_event',
+      rate_limit_info: {
+        status: 'allowed',
+        resetsAt: 1786236000,
+        rateLimitType: 'five_hour',
+        overageStatus: 'allowed',
+        overageResetsAt: 1788220800,
+        isUsingOverage: false,
+      },
+      uuid: 'c8181b50-30da-427c-96a1-747c33df3b88',
+      session_id: 'd9510ebb-3990-4fdb-a859-d8d7e820d917',
+    };
+    const reading = readClaudeStream(
+      [JSON.stringify(raw), '{"type":"result","total_cost_usd":0.1}'].join('\n'),
+    );
+
+    expect(reading.observations[0]).toMatchObject({
+      status: 'allowed',
+      rate_limit_type: 'five_hour',
+      // Epoch numérico fica como veio: converter exigiria adivinhar a unidade.
+      resets_at: 1786236000,
+      session_id: 'd9510ebb-3990-4fdb-a859-d8d7e820d917',
+      overage_status: 'allowed',
+      overage_resets_at: 1788220800,
+      is_using_overage: false,
+      // O evento real não traz utilization: nada é inventado no lugar.
+      utilization: null,
+      utilization_percentage: null,
+      raw,
+    });
+  });
+
+  it('M — a forma snake_case de topo continua suportada junto da nova', () => {
+    const reading = readClaudeStream(
+      [
+        '{"type":"rate_limit_event","status":"allowed","rate_limit_type":"five_hour","resets_at":"2026-08-09T00:00:00.000Z","overage_status":"allowed","is_using_overage":true}',
+        '{"type":"result","total_cost_usd":0.1}',
+      ].join('\n'),
+    );
+
+    expect(reading.observations[0]).toMatchObject({
+      status: 'allowed',
+      rate_limit_type: 'five_hour',
+      resets_at: '2026-08-09T00:00:00.000Z',
+      overage_status: 'allowed',
+      overage_resets_at: null,
+      is_using_overage: true,
+    });
+  });
+
+  it('N — a evidência gravada na M28 continua válida e NÃO é reescrita', () => {
+    // Bytes do LaunchRecord da M28: normalização null, raw preservado. O
+    // schema novo aceita o registro histórico como está — não existe migração,
+    // e recalcular os campos agora seria inventar evidência retroativa.
+    const historical = {
+      sequence: 1,
+      status: null,
+      rate_limit_type: null,
+      utilization: null,
+      utilization_scale: null,
+      utilization_percentage: null,
+      resets_at: null,
+      session_id: 'd9510ebb-3990-4fdb-a859-d8d7e820d917',
+      raw: {
+        type: 'rate_limit_event',
+        rate_limit_info: { status: 'allowed', rateLimitType: 'five_hour', resetsAt: 1786236000 },
+      },
+    };
+
+    const parsed = RateLimitObservation.parse(historical);
+
+    expect(parsed.status).toBeNull();
+    expect(parsed.rate_limit_type).toBeNull();
+    expect(parsed.resets_at).toBeNull();
+    // Campos novos entram como ausência declarada, não como valor derivado.
+    expect(parsed.overage_status).toBeNull();
+    expect(parsed.is_using_overage).toBeNull();
+    expect(parsed.raw).toEqual(historical.raw);
   });
 
   it('C — utilization em fração preserva o raw e deriva o percentual', () => {
