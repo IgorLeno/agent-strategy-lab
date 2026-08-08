@@ -23,6 +23,13 @@
  * stdio e só devolve o desfecho, e `startProcess`, que entrega o processo vivo
  * com os pipes abertos para quem precisa ler a saída enquanto ela acontece.
  *
+ * `detached: true` faz o filho liderar um process group novo — o pgid dele
+ * vira o próprio pid, em vez de herdar o do lab. Sem isso, matar um processo
+ * que criou descendentes mataria só o pai e deixaria a árvore inteira viva
+ * mexendo no workspace; com o group próprio, um sinal a `-pgid` (M24A, em
+ * `timeout.ts`) alcança pai e descendentes juntos, e nunca escapa para fora
+ * do group porque é assim que o kernel resolve um pid negativo em kill(2).
+ *
  * Timeout e sinais são de M23 e M24A: aqui o processo é esperado até o fim.
  */
 
@@ -66,6 +73,11 @@ export interface ProcessResult {
  */
 export interface StartedProcess {
   readonly child: ChildProcess;
+  /**
+   * pgid do process group que `child` lidera. É o próprio pid: `detached:
+   * true` faz o Node criar o group antes do exec, com o filho como líder.
+   */
+  readonly pgid: number;
   readonly stdout: Readable;
   readonly stderr: Readable;
   readonly result: Promise<ProcessResult>;
@@ -139,7 +151,13 @@ export function startProcess(options: SpawnProcessOptions): Promise<StartedProce
         reject(new ProcessSpawnError(argv, 'processo iniciou sem pipe de stdout ou stderr'));
         return;
       }
-      resolve({ child, stdout, stderr, result });
+      // `spawn` só dispara com o pid atribuído; a checagem existe para o tipo,
+      // não para um caso real de ausência.
+      if (child.pid === undefined) {
+        reject(new ProcessSpawnError(argv, 'processo iniciou sem pid'));
+        return;
+      }
+      resolve({ child, pgid: child.pid, stdout, stderr, result });
     });
   });
 }
@@ -159,6 +177,8 @@ function launch(
     env: options.env ?? process.env,
     shell: false,
     stdio: ['ignore', output, output],
+    // Novo process group, com o filho como líder — ver o comentário do topo.
+    detached: true,
   });
 
   return { child, result: observeOutcome(argv, child) };

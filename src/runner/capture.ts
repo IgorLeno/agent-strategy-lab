@@ -22,8 +22,9 @@
  * retida a cada corte torna esse caso raro em vez de provável.
  *
  * Timeout é deste módulo (M23): SIGTERM ao vencer o prazo, SIGKILL se a graça
- * também vencer sem o processo sair. Sinal ao process group é M24A — aqui o
- * sinal vai só ao processo iniciado, pelo handle que `startProcess` expõe.
+ * também vencer sem o processo sair. A escalada em si — e o envio do sinal ao
+ * process group inteiro, não só ao processo iniciado — é `timeout.ts` (M24A);
+ * aqui só entram o pgid e o `timeoutMs`/`gracePeriodMs` que a decidem.
  *
  * O sinal reportado no resultado nunca é o que este módulo *mandou* — é o que
  * `spawn.ts` leu do evento `close` do Node, que reflete o motivo real da morte
@@ -32,7 +33,6 @@
  * quando o SIGKILL da escalada é quem de fato encerrou o processo.
  */
 
-import type { ChildProcess } from 'node:child_process';
 import { createWriteStream } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
@@ -42,6 +42,7 @@ import { StringDecoder } from 'node:string_decoder';
 
 import { openMultilineSecretIndex, redactString } from '../storage/index.js';
 import { startProcess, type ProcessResult, type SpawnProcessOptions } from './spawn.js';
+import { scheduleTimeoutEscalation } from './timeout.js';
 
 /** Nomes fixos: a seção `execution/` do run é lida por esses caminhos. */
 export const STDOUT_LOG_NAME = 'stdout.log';
@@ -93,6 +94,11 @@ export interface CaptureResult extends ProcessResult {
   readonly stdout: CapturedStream;
   readonly stderr: CapturedStream;
   /**
+   * pgid do process group em que o processo rodou — evidência de que o
+   * cleanup, quando houve timeout, mirou o group e não só o pid.
+   */
+  readonly pgid: number;
+  /**
    * `true` quando `timeoutMs` venceu e este módulo mandou o SIGTERM que deu
    * início ao desfecho — a dimensão de execução TIMED_OUT, para quem monta o
    * `ExecutionRecord` a decidir. Não depende de qual sinal matou o processo
@@ -140,6 +146,7 @@ export async function captureProcess(options: CaptureProcessOptions): Promise<Ca
   const started = await startProcess(options);
   const escalation = scheduleTimeoutEscalation(
     started.child,
+    started.pgid,
     options.timeoutMs,
     options.gracePeriodMs ?? DEFAULT_GRACE_PERIOD_MS,
   );
@@ -166,52 +173,9 @@ export async function captureProcess(options: CaptureProcessOptions): Promise<Ca
     ...outcome.value,
     stdout: { path: stdoutPath, bytesWritten: stdoutWritten.value },
     stderr: { path: stderrPath, bytesWritten: stderrWritten.value },
+    pgid: started.pgid,
     timedOut: escalation.timedOut(),
   };
-}
-
-/**
- * Arma o SIGTERM de `timeoutMs` e, se `child` seguir vivo depois da graça, o
- * SIGKILL da escalada. `timeoutMs` ausente desarma tudo — comportamento
- * idêntico ao de antes do M23.
- *
- * O `exit` do processo é o que desarma os timers, não o envio do sinal: um
- * SIGTERM aceito e um SIGTERM ignorado só se distinguem por o processo ter
- * saído ou não, e só o evento diz isso. Cancelar pelo envio do sinal armaria o
- * SIGKILL mesmo quando o SIGTERM já bastou.
- */
-function scheduleTimeoutEscalation(
-  child: ChildProcess,
-  timeoutMs: number | undefined,
-  gracePeriodMs: number,
-): { timedOut: () => boolean } {
-  if (timeoutMs === undefined) {
-    return { timedOut: () => false };
-  }
-
-  let timedOut = false;
-  let sigtermTimer: NodeJS.Timeout | undefined;
-  let sigkillTimer: NodeJS.Timeout | undefined;
-
-  sigtermTimer = setTimeout(() => {
-    sigtermTimer = undefined;
-    timedOut = true;
-    child.kill('SIGTERM');
-    sigkillTimer = setTimeout(() => {
-      sigkillTimer = undefined;
-      child.kill('SIGKILL');
-    }, gracePeriodMs);
-  }, timeoutMs);
-
-  // `once`: o processo só sai uma vez. Isso corre depois de qualquer timer que
-  // já tenha disparado no mesmo instante, então limpar aqui nunca reabre um
-  // timer que já mandou seu sinal.
-  child.once('exit', () => {
-    if (sigtermTimer !== undefined) clearTimeout(sigtermTimer);
-    if (sigkillTimer !== undefined) clearTimeout(sigkillTimer);
-  });
-
-  return { timedOut: () => timedOut };
 }
 
 /**

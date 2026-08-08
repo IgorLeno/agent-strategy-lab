@@ -30,3 +30,4 @@ export {
   type SpawnProcessOptions,
   type StartedProcess,
 } from './spawn.js';
+export { scheduleTimeoutEscalation, type TimeoutEscalation } from './timeout.js';
