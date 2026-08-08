@@ -13,6 +13,7 @@ const FLAGS = [
   '--print',
   '--output-format',
   '--model',
+  '--effort',
   '--settings',
   '--setting-sources',
   '--permission-mode',

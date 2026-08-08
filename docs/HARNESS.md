@@ -177,6 +177,30 @@ desliga instruction files, hooks, plugins e auto-memory, e ela força
 autenticação por `ANTHROPIC_API_KEY`. **Com assinatura não existe modo
 `controlled` para o Claude** — a flag é proibida nos perfis de assinatura.
 
+### Modelo e reasoning effort são dimensões experimentais
+
+Ambos saem do **argv versionado do perfil** — nunca de settings pessoais, config
+pessoal ou variável de ambiente da máquina de quem roda. O `DoctorReport`
+publica `model`, `reasoning_effort` e `reasoning_effort_source`, de modo que
+"o perfil fixou este effort" nunca se confunde com "alguém supôs este effort".
+
+- Codex: `--model` fixa o modelo (aprovados: `gpt-5.6-sol`, `gpt-5.6-terra`,
+  `gpt-5.6-luna`) e `--config model_reasoning_effort="…"` fixa o effort
+  (aprovados: `none`, `low`, `medium`, `high`, `xhigh`, `max`). Modelo ou effort
+  ausente, duplicado, malformado ou fora da lista **reprova**, e effort sem
+  `--ignore-user-config` também reprova — o `config.toml` pessoal ainda entraria.
+- Claude: `--effort` fixa o effort (aprovados: `low`, `medium`, `high`, `xhigh`,
+  `max`), e só conta como evidência com `--setting-sources` sem fonte pessoal.
+  Perfil que declara o `control_marker` `reasoning_effort_pinned: --effort` sem
+  a flag no argv reprova.
+- Perfil Claude **sem** `--effort` é reportado como `unpinned` (`WARN`), nunca
+  como um valor: é o caso de `claude-build-worker-subscription-v2`, e pinar o
+  effort nele retroativamente falsificaria os runs já registrados.
+
+Perfis de experimento (mesmas garantias do baseline; só modelo e effort mudam):
+`codex-build-worker-subscription-{high,sol-medium,terra-high,terra-medium,luna-medium}-v2`
+e `claude-build-worker-subscription-{opus5,sonnet5}-{high,medium}-v3`.
+
 `claude-build-worker-v1`, `claude-build-worker-v2` e `codex-build-worker-v1`
 foram removidos: mantinham chave de API na `env_allowlist`, e bastava a
 variável existir no shell para o run trocar de fonte de cobrança sem ninguém

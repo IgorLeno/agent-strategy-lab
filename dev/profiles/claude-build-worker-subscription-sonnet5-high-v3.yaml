@@ -1,0 +1,90 @@
+# Perfil de worker Claude Code pago pela ASSINATURA do usuário, SEM ownership de
+# commit nem de validação oficial.
+#
+# Semanticamente igual a `claude-build-worker-subscription-v2` — mesma cobrança,
+# mesma execution policy, mesmas settings versionadas, mesma env_allowlist,
+# mesmas flags proibidas. A ÚNICA diferença é a dimensão experimental: aqui
+# modelo E reasoning effort são fixados explicitamente no argv.
+#
+# `--effort high` é a diferença de contrato em relação ao v2: naquele perfil o
+# effort NÃO é pinado e o doctor o reporta como `unpinned`. Aqui o effort é
+# evidência versionada, e o `control_marker` `reasoning_effort_pinned` obriga o
+# doctor a exigir a flag no argv — declaração sem flag reprova.
+#
+# Assinatura, nunca API — e verificada, não presumida: `dev-doctor` e o preflight
+# do `dev-launch` rodam `claude auth status --json` (local e gratuito) e exigem
+# `authMethod=claude.ai` + `apiProvider=firstParty` + `subscriptionType` presente.
+# Fonte desconhecida BLOQUEIA o run.
+#
+# `--bare` continua PROIBIDA: ela força auth por ANTHROPIC_API_KEY/apiKeyHelper,
+# o que trocaria assinatura por cobrança de API. Por isso o perfil é `real-world`.
+id: claude-build-worker-subscription-sonnet5-high-v3
+agent: claude
+billing_mode: subscription_only
+environment_mode: real-world
+commit_owner: orchestrator
+official_validation_owner: orchestrator
+worker_validation_policy: targeted
+argv:
+  - claude
+  - --print
+  - --output-format
+  - json
+  - --model
+  - claude-sonnet-5
+  - --effort
+  - high
+  - --settings
+  - dev/profiles/claude-build-worker.settings.json
+  - --setting-sources
+  - project
+  - --permission-mode
+  - acceptEdits
+  - --strict-mcp-config
+  - --no-session-persistence
+prompt_delivery: argv
+timeout_seconds: 1800
+forbidden_flags:
+  - --resume
+  - -r
+  - --continue
+  - -c
+  - --fork-session
+  - --session-id
+  - --dangerously-skip-permissions
+  - --allow-dangerously-skip-permissions
+  # Trocariam a assinatura por cobrança de API — recusadas antes do spawn.
+  - --bare
+  - --api-key
+env_allowlist:
+  - PATH
+  - HOME
+  - LANG
+  - LC_ALL
+  - TERM
+  - USER
+  - SHELL
+env_extra:
+  CI: '1'
+control_markers:
+  instruction_discovery: --bare
+  plugins_and_hooks: --bare
+  auto_memory: --bare
+  mcp_servers: --strict-mcp-config
+  session_persistence: --no-session-persistence
+  non_interactive: --print
+  permission_policy: --settings
+  personal_settings_excluded: --setting-sources
+  model_pinned: --model
+  reasoning_effort_pinned: --effort
+notes:
+  - 'Modelo: claude-sonnet-5; reasoning effort: high, ambos fixados no argv.'
+  - 'Dimensão experimental: o effort é pinado; claude-build-worker-subscription-v2 continua unpinned e não deve ser lido como high.'
+  - 'Effort só é evidência com --setting-sources sem fontes pessoais: nenhum settings.json de usuário nem variável de ambiente pessoal conta como prova.'
+  - 'Cobrança: assinatura Claude Pro (login/OAuth). Nenhuma chave de API na allowlist.'
+  - 'Execução consome a franquia da assinatura: só rodar com autorização explícita do usuário.'
+  - 'O worker edita o patch e pode validar de forma direcionada; commit e validação oficial pertencem ao orquestrador.'
+  - 'Sem --bare: CLAUDE.md, hooks e plugins do projeto CARREGAM; user e local ficam fora por --setting-sources project.'
+  - 'Ambiente real-world: nunca comparar estes resultados com os de um perfil controlled.'
+  - 'total_cost_usd emitido pela CLI é equivalência estimada em preço de API, não cobrança.'
+  - 'Limitação conhecida: o campo session_persistence do DoctorReport é derivado de --ephemeral (forma do Codex) e por isso reporta `persistent` para Claude. A checagem `persistência da sessão` é SKIP neste perfil e o control_marker real continua sendo --no-session-persistence.'

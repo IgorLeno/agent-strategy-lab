@@ -35,11 +35,56 @@ export interface Check {
   readonly detail: string;
 }
 
+/**
+ * Modelos Codex aprovados pelo laboratório. Modelo e reasoning effort são
+ * DIMENSÕES EXPERIMENTAIS: o doctor não decide qual é o "certo", mas recusa o
+ * que ninguém aprovou — comparar resultados de um modelo que entrou no argv
+ * por engano é pior do que não ter o resultado.
+ */
+export const CODEX_APPROVED_MODELS: readonly string[] = [
+  'gpt-5.6-sol',
+  'gpt-5.6-terra',
+  'gpt-5.6-luna',
+];
+
+/** Valores de `model_reasoning_effort` aceitos pelo laboratório para Codex. */
+export const CODEX_REASONING_EFFORTS: readonly string[] = [
+  'none',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+];
+
+/** Valores de `--effort` aceitos pelo laboratório para Claude. */
+export const CLAUDE_REASONING_EFFORTS: readonly string[] = [
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+];
+
+/**
+ * De ONDE veio o effort reportado. Sem isto, `reasoning_effort: "high"` não
+ * distingue "o perfil fixou high no argv" de "alguém supôs high" — e um perfil
+ * que não fixa nada precisa aparecer como `unpinned`, nunca como um valor.
+ */
+export type ReasoningEffortSource =
+  | 'codex_config_override'
+  | 'claude_effort_flag'
+  | 'unpinned'
+  | 'unknown'
+  | 'not_applicable';
+
 export interface DoctorReport {
   readonly profile_id: string;
   readonly agent: string;
   readonly model: string;
   readonly reasoning_effort: string;
+  /** Evidência do effort: argv do perfil, nunca settings ou env pessoais. */
+  readonly reasoning_effort_source: ReasoningEffortSource;
   /** Cobrança e ambiente são dimensões separadas, e ambas ficam no relatório. */
   readonly billing_mode: string;
   readonly credential_source: CredentialSource;
@@ -181,24 +226,42 @@ async function checkPolicy(repoRoot: string, profile: LauncherProfile): Promise<
   }
 }
 
+interface SettingSources {
+  /** `true` só com exatamente um `--setting-sources` legível no argv. */
+  readonly declared: boolean;
+  readonly sources: readonly string[];
+  readonly personal: readonly string[];
+}
+
+function settingSourcesOf(argv: readonly string[]): SettingSources {
+  const values = optionValues(argv, '--setting-sources');
+  if (values.length !== 1) return { declared: false, sources: [], personal: [] };
+  const sources = (values[0] as string)
+    .split(',')
+    .map((source) => source.trim())
+    .filter((source) => source !== '');
+  return {
+    declared: true,
+    sources,
+    personal: sources.filter((source) => source === 'user' || source === 'local'),
+  };
+}
+
 function checkPersonalSettings(profile: LauncherProfile): Check {
   if (profile.agent !== 'claude') {
     return check('settings pessoais', 'SKIP', `não se aplica ao agente ${profile.agent}`);
   }
-  const index = profile.argv.indexOf('--setting-sources');
-  const value = index >= 0 ? profile.argv[index + 1] : undefined;
-  if (value === undefined) {
+  const settings = settingSourcesOf(profile.argv);
+  if (!settings.declared) {
     return check(
       'settings pessoais',
       'WARN',
-      'sem --setting-sources: settings de user e local do usuário carregam junto',
+      'sem --setting-sources único: settings de user e local do usuário carregam junto',
     );
   }
-  const sources = value.split(',').map((source) => source.trim());
-  const personal = sources.filter((source) => source === 'user' || source === 'local');
-  return personal.length === 0
-    ? check('settings pessoais', 'PASS', `somente ${sources.join(', ')}`)
-    : check('settings pessoais', 'WARN', `inclui fonte pessoal: ${personal.join(', ')}`);
+  return settings.personal.length === 0
+    ? check('settings pessoais', 'PASS', `somente ${settings.sources.join(', ')}`)
+    : check('settings pessoais', 'WARN', `inclui fonte pessoal: ${settings.personal.join(', ')}`);
 }
 
 function optionValues(argv: readonly string[], flag: string): string[] {
@@ -376,48 +439,170 @@ export function codexReasoningEffort(argv: readonly string[]): string | null {
   return values.length === 1 && value !== null && value !== undefined ? value : null;
 }
 
-function reasoningEffortOf(profile: LauncherProfile): string {
-  if (profile.agent !== 'codex') return 'not_applicable';
-  return codexReasoningEffort(profile.argv) ?? 'unknown';
+/** `--effort` presente mas sem valor legível também conta como ocorrência. */
+function flagOccurrences(argv: readonly string[], flag: string): number {
+  return argv.filter((token) => token === flag || token.startsWith(`${flag}=`)).length;
+}
+
+export type EffortPinning = 'pinned' | 'unpinned' | 'ambiguous';
+
+export interface ClaudeEffortEvidence {
+  readonly pinning: EffortPinning;
+  readonly effort: string | null;
+}
+
+/**
+ * Effort do Claude derivado EXCLUSIVAMENTE do argv do perfil. Settings do
+ * usuário e variáveis de ambiente pessoais não são consultados: o que não está
+ * versionado no perfil não é evidência do experimento.
+ */
+export function claudeReasoningEffort(argv: readonly string[]): ClaudeEffortEvidence {
+  const occurrences = flagOccurrences(argv, '--effort');
+  if (occurrences === 0) return { pinning: 'unpinned', effort: null };
+  const values = optionValues(argv, '--effort');
+  if (occurrences !== 1 || values.length !== 1) return { pinning: 'ambiguous', effort: null };
+  return { pinning: 'pinned', effort: values[0] as string };
+}
+
+interface ReasoningEffortFacts {
+  readonly effort: string;
+  readonly source: ReasoningEffortSource;
+  readonly claude: ClaudeEffortEvidence | null;
+}
+
+function reasoningEffortFactsOf(profile: LauncherProfile): ReasoningEffortFacts {
+  if (profile.agent === 'codex') {
+    const effort = codexReasoningEffort(profile.argv);
+    return effort === null
+      ? { effort: 'unknown', source: 'unknown', claude: null }
+      : { effort, source: 'codex_config_override', claude: null };
+  }
+  if (profile.agent === 'claude') {
+    const evidence = claudeReasoningEffort(profile.argv);
+    if (evidence.pinning === 'pinned') {
+      return { effort: evidence.effort as string, source: 'claude_effort_flag', claude: evidence };
+    }
+    return evidence.pinning === 'unpinned'
+      ? { effort: 'unpinned', source: 'unpinned', claude: evidence }
+      : { effort: 'unknown', source: 'unknown', claude: evidence };
+  }
+  return { effort: 'not_applicable', source: 'not_applicable', claude: null };
 }
 
 function checkModelPinned(profile: LauncherProfile, model: string): Check {
   if (profile.agent === 'fake') return check('modelo', 'SKIP', 'worker falso não tem modelo');
   if (model === 'unknown') {
-    return check('modelo', 'FAIL', 'modelo não fixado de forma única no argv');
+    return check('modelo', 'FAIL', 'modelo não fixado de forma única e explícita no argv');
   }
-  if (profile.agent === 'codex' && model !== 'gpt-5.6-sol') {
-    return check('modelo', 'FAIL', `esperado gpt-5.6-sol, recebido ${model}`);
+  if (profile.agent === 'codex' && !CODEX_APPROVED_MODELS.includes(model)) {
+    return check(
+      'modelo',
+      'FAIL',
+      `${model} não está entre os modelos Codex aprovados: ${CODEX_APPROVED_MODELS.join(', ')}`,
+    );
   }
   return check('modelo', 'PASS', model);
 }
 
-function checkReasoningEffort(profile: LauncherProfile, reasoningEffort: string): Check {
-  if (profile.agent !== 'codex') {
-    return check('reasoning effort', 'SKIP', `não se aplica ao agente ${profile.agent}`);
-  }
-  if (reasoningEffort === 'unknown') {
+/**
+ * Um perfil que declara ter fixado o reasoning precisa provar a flag no argv.
+ * O marcador é a declaração de intenção; o argv é o fato.
+ */
+function declaresEffortMarker(profile: LauncherProfile): boolean {
+  return Object.values(profile.control_markers).includes('--effort');
+}
+
+function checkCodexReasoningEffort(profile: LauncherProfile, effort: string): Check {
+  if (effort === 'unknown') {
     return check(
       'reasoning effort',
       'FAIL',
       'model_reasoning_effort não está fixado de forma explícita e única no argv',
     );
   }
-  if (reasoningEffort !== 'high') {
-    return check('reasoning effort', 'FAIL', `esperado high, recebido ${reasoningEffort}`);
+  if (!CODEX_REASONING_EFFORTS.includes(effort)) {
+    return check(
+      'reasoning effort',
+      'FAIL',
+      `${effort} não está entre os efforts Codex aprovados: ${CODEX_REASONING_EFFORTS.join(', ')}`,
+    );
   }
   if (!profile.argv.includes('--ignore-user-config')) {
     return check(
       'reasoning effort',
       'FAIL',
-      'high explícito, mas sem --ignore-user-config o config.toml pessoal ainda seria carregado',
+      `${effort} explícito, mas sem --ignore-user-config o config.toml pessoal ainda seria carregado`,
     );
   }
   return check(
     'reasoning effort',
     'PASS',
-    'high · override explícito no argv · --ignore-user-config',
+    `${effort} · override explícito no argv · --ignore-user-config`,
   );
+}
+
+function checkClaudeReasoningEffort(
+  profile: LauncherProfile,
+  evidence: ClaudeEffortEvidence,
+): Check {
+  if (evidence.pinning === 'ambiguous') {
+    return check(
+      'reasoning effort',
+      'FAIL',
+      '--effort duplicado ou sem valor: effort não fixado de forma única e explícita no argv',
+    );
+  }
+  if (evidence.pinning === 'unpinned') {
+    return declaresEffortMarker(profile)
+      ? check(
+          'reasoning effort',
+          'FAIL',
+          'control_marker declara --effort, mas a flag não está no argv',
+        )
+      : check(
+          'reasoning effort',
+          'WARN',
+          'unpinned: o perfil não fixa --effort; o effort efetivo é o default da CLI e NÃO é evidência de nenhum valor',
+        );
+  }
+  const effort = evidence.effort as string;
+  if (!CLAUDE_REASONING_EFFORTS.includes(effort)) {
+    return check(
+      'reasoning effort',
+      'FAIL',
+      `${effort} não está entre os efforts Claude aprovados: ${CLAUDE_REASONING_EFFORTS.join(', ')}`,
+    );
+  }
+  // Effort fixado no argv só é evidência se os settings pessoais estiverem
+  // fora: caso contrário o valor efetivo poderia vir da máquina de quem roda.
+  const settings = settingSourcesOf(profile.argv);
+  if (!settings.declared) {
+    return check(
+      'reasoning effort',
+      'FAIL',
+      `--effort ${effort} fixado, mas sem --setting-sources único os settings pessoais entrariam junto`,
+    );
+  }
+  if (settings.personal.length > 0) {
+    return check(
+      'reasoning effort',
+      'FAIL',
+      `--effort ${effort} fixado, mas --setting-sources inclui fonte pessoal: ${settings.personal.join(', ')}`,
+    );
+  }
+  return check(
+    'reasoning effort',
+    'PASS',
+    `${effort} · --effort explícito no argv · settings pessoais fora por --setting-sources ${settings.sources.join(',')}`,
+  );
+}
+
+function checkReasoningEffort(profile: LauncherProfile, facts: ReasoningEffortFacts): Check {
+  if (profile.agent === 'codex') return checkCodexReasoningEffort(profile, facts.effort);
+  if (profile.agent === 'claude') {
+    return checkClaudeReasoningEffort(profile, facts.claude as ClaudeEffortEvidence);
+  }
+  return check('reasoning effort', 'SKIP', `não se aplica ao agente ${profile.agent}`);
 }
 
 /**
@@ -592,7 +777,7 @@ export async function diagnose(input: DoctorInput): Promise<DoctorReport> {
     environmentError = error instanceof Error ? error.message : String(error);
   }
   const model = modelOf(profile);
-  const reasoningEffort = reasoningEffortOf(profile);
+  const reasoning = reasoningEffortFactsOf(profile);
   const sandbox = uniqueOptionValue(profile.argv, '--sandbox');
   const sessionPersistence = profile.argv.includes('--ephemeral') ? 'ephemeral' : 'persistent';
   const userConfigIgnored = profile.argv.includes('--ignore-user-config');
@@ -611,7 +796,7 @@ export async function diagnose(input: DoctorInput): Promise<DoctorReport> {
     checkInstructionHome(profile, workerEnv, environmentError, sanitizedHome),
     await checkGitIdentity(input.repoRoot, profile, workerEnv),
     checkModelPinned(profile, model),
-    checkReasoningEffort(profile, reasoningEffort),
+    checkReasoningEffort(profile, reasoning),
     await checkPolicy(input.repoRoot, profile),
     checkPersonalSettings(profile),
     await checkValidationCoverage(input.repoRoot, profile, input.loaded ?? null),
@@ -624,7 +809,8 @@ export async function diagnose(input: DoctorInput): Promise<DoctorReport> {
     profile_id: profile.id,
     agent: profile.agent,
     model,
-    reasoning_effort: reasoningEffort,
+    reasoning_effort: reasoning.effort,
+    reasoning_effort_source: reasoning.source,
     billing_mode: profile.billing_mode,
     credential_source: credential.source,
     environment_mode: profile.environment_mode,

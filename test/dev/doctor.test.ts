@@ -1,9 +1,11 @@
 import { spawn } from 'node:child_process';
-import { access, mkdir, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { API_CREDENTIAL_VARIABLES } from '../../dev/lib/billing.js';
+import { API_CREDENTIAL_VARIABLES, apiCredentialNamesIn } from '../../dev/lib/billing.js';
 import {
+  CODEX_APPROVED_MODELS,
+  claudeReasoningEffort,
   codexReasoningEffort,
   diagnose,
   flagsOf,
@@ -13,7 +15,7 @@ import {
 } from '../../dev/lib/doctor.js';
 import { loadPlan, type LoadedPlan } from '../../dev/lib/plan.js';
 import { resolveHarnessPaths, type HarnessPaths } from '../../dev/lib/paths.js';
-import { buildEnvironment, loadProfile } from '../../dev/lib/profile.js';
+import { buildEnvironment, loadProfile, type LauncherProfile } from '../../dev/lib/profile.js';
 import {
   REPO_ROOT,
   buildTestProcessEnvironment,
@@ -27,6 +29,8 @@ import {
 let sandbox: Sandbox;
 let paths: HarnessPaths;
 let loaded: LoadedPlan;
+/** Plano REAL do repositório: a allow list versionada é conferida contra ele. */
+let repoPlan: LoadedPlan;
 
 const FAKE_CLI_DIR = path.join(REPO_ROOT, 'fixtures', 'fake-clis');
 const FAKE_API_SECRET = 'sk-test-nao-deve-chegar-ao-worker';
@@ -35,6 +39,7 @@ beforeEach(async () => {
   sandbox = await makeSandboxRepo();
   paths = resolveHarnessPaths(sandbox.root);
   loaded = await loadPlan(paths.planFile);
+  repoPlan = await loadPlan(resolveHarnessPaths(REPO_ROOT).planFile);
 });
 
 afterEach(async () => {
@@ -62,7 +67,12 @@ function fakeCodexEnv(): NodeJS.ProcessEnv {
   };
 }
 
-function codexProfile(id: string, reasoning?: string, ignoreUserConfig = true): string {
+function codexProfile(
+  id: string,
+  reasoning?: string,
+  ignoreUserConfig = true,
+  model = 'gpt-5.6-sol',
+): string {
   const argv = [
     '  - codex',
     '  - exec',
@@ -74,7 +84,7 @@ function codexProfile(id: string, reasoning?: string, ignoreUserConfig = true): 
     '  - --ephemeral',
     '  - --ignore-rules',
     '  - --model',
-    '  - gpt-5.6-sol',
+    `  - ${model}`,
     ...(reasoning === undefined
       ? []
       : ['  - --config', `  - 'model_reasoning_effort="${reasoning}"'`]),
@@ -633,21 +643,27 @@ describe('perfil Codex Sol High por assinatura', () => {
     expect(find(report.checks, 'reasoning effort').status).toBe('FAIL');
   });
 
-  it.each(['medium', 'xhigh'])('reasoning %s não é aceito como high', async (reasoning) => {
-    const id = `codex-${reasoning}-v1`;
-    await writeProfile(id, codexProfile(id, reasoning));
+  it.each(['none', 'low', 'medium', 'xhigh', 'max'])(
+    'reasoning %s é reconhecido como ele mesmo, não normalizado para high',
+    async (reasoning) => {
+      const id = `codex-${reasoning}-v1`;
+      await writeProfile(id, codexProfile(id, reasoning));
 
-    const report = await diagnose({
-      repoRoot: sandbox.root,
-      profileId: id,
-      loaded,
-      env: fakeCodexEnv(),
-    });
+      const report = await diagnose({
+        repoRoot: sandbox.root,
+        profileId: id,
+        loaded,
+        env: fakeCodexEnv(),
+      });
 
-    expect(report.ok).toBe(false);
-    expect(report.reasoning_effort).toBe(reasoning);
-    expect(find(report.checks, 'reasoning effort').status).toBe('FAIL');
-  });
+      expect(report.reasoning_effort).toBe(reasoning);
+      expect(report.reasoning_effort_source).toBe('codex_config_override');
+      expect(find(report.checks, 'reasoning effort')).toMatchObject({
+        status: 'PASS',
+        detail: expect.stringContaining(reasoning),
+      });
+    },
+  );
 
   it('high sem --ignore-user-config falha por depender de configuração implícita', async () => {
     const id = 'codex-high-config-implicita-v1';
@@ -723,6 +739,545 @@ describe('perfil Codex Sol High por assinatura', () => {
     expect(report.ok).toBe(false);
     expect(report.reasoning_effort).toBe('unknown');
     expect(find(report.checks, 'reasoning effort').status).toBe('FAIL');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Modelo e reasoning effort como DIMENSÕES EXPERIMENTAIS
+// ---------------------------------------------------------------------------
+
+const CODEX_BASELINE = 'codex-build-worker-subscription-high-v2';
+const CLAUDE_BASELINE = 'claude-build-worker-subscription-v2';
+
+const CODEX_EXPERIMENTS = [
+  { id: CODEX_BASELINE, model: 'gpt-5.6-sol', effort: 'high' },
+  { id: 'codex-build-worker-subscription-sol-medium-v2', model: 'gpt-5.6-sol', effort: 'medium' },
+  { id: 'codex-build-worker-subscription-terra-high-v2', model: 'gpt-5.6-terra', effort: 'high' },
+  {
+    id: 'codex-build-worker-subscription-terra-medium-v2',
+    model: 'gpt-5.6-terra',
+    effort: 'medium',
+  },
+  { id: 'codex-build-worker-subscription-luna-medium-v2', model: 'gpt-5.6-luna', effort: 'medium' },
+] as const;
+
+const CLAUDE_EXPERIMENTS = [
+  { id: 'claude-build-worker-subscription-opus5-high-v3', model: 'claude-opus-5', effort: 'high' },
+  {
+    id: 'claude-build-worker-subscription-opus5-medium-v3',
+    model: 'claude-opus-5',
+    effort: 'medium',
+  },
+  {
+    id: 'claude-build-worker-subscription-sonnet5-high-v3',
+    model: 'claude-sonnet-5',
+    effort: 'high',
+  },
+  {
+    id: 'claude-build-worker-subscription-sonnet5-medium-v3',
+    model: 'claude-sonnet-5',
+    effort: 'medium',
+  },
+] as const;
+
+const CLAUDE_MODELS = ['claude-opus-5', 'claude-sonnet-5'];
+
+function fakeClaudeEnv(): NodeJS.ProcessEnv {
+  return {
+    PATH: `${FAKE_CLI_DIR}:${process.env['PATH'] ?? ''}`,
+    HOME: '/home/test-user',
+    ANTHROPIC_API_KEY: FAKE_API_SECRET,
+  };
+}
+
+/** Tudo o que NÃO é dimensão experimental: precisa ser idêntico ao baseline. */
+function nonExperimentalFields(profile: LauncherProfile): Record<string, unknown> {
+  const { id, argv, notes, control_markers, ...rest } = profile;
+  void id;
+  void argv;
+  void notes;
+  void control_markers;
+  return rest;
+}
+
+/** Argv com modelo e effort apagados: o que sobra tem de ser igual ao baseline. */
+function argvWithoutCodexExperiment(argv: readonly string[]): string[] {
+  return argv.map((token) => {
+    if (CODEX_APPROVED_MODELS.includes(token)) return '<model>';
+    return token.startsWith('model_reasoning_effort=') ? '<effort>' : token;
+  });
+}
+
+function argvWithoutClaudeExperiment(argv: readonly string[]): string[] {
+  const remaining: string[] = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index] as string;
+    if (token === '--effort') {
+      index += 1;
+      continue;
+    }
+    remaining.push(CLAUDE_MODELS.includes(token) ? '<model>' : token);
+  }
+  return remaining;
+}
+
+async function permissionsOf(profileId: string): Promise<unknown> {
+  const profile = await loadProfile(REPO_ROOT, profileId);
+  const file = profile.argv[profile.argv.indexOf('--settings') + 1] as string;
+  return JSON.parse(await readFile(path.join(REPO_ROOT, file), 'utf8')) as unknown;
+}
+
+function claudeProfile(
+  id: string,
+  argvExtra: readonly string[],
+  markers: readonly string[] = [],
+): string {
+  return [
+    `id: ${id}`,
+    'agent: claude',
+    'billing_mode: subscription_only',
+    'environment_mode: real-world',
+    'commit_owner: orchestrator',
+    'official_validation_owner: orchestrator',
+    'worker_validation_policy: targeted',
+    'argv:',
+    '  - claude',
+    '  - --print',
+    '  - --model',
+    '  - claude-opus-5',
+    ...argvExtra.map((token) => `  - ${token}`),
+    '  - --settings',
+    '  - dev/profiles/experimento.settings.json',
+    '  - --setting-sources',
+    '  - project',
+    'prompt_delivery: argv',
+    'timeout_seconds: 1800',
+    'forbidden_flags: [--resume, --continue, --fork-session, --session-id, --bare]',
+    'env_allowlist: [PATH, HOME]',
+    'control_markers:',
+    '  model_pinned: --model',
+    ...markers.map((marker) => `  ${marker}`),
+  ].join('\n');
+}
+
+async function writeExperimentSettings(): Promise<void> {
+  await writeFile(
+    path.join(sandbox.root, 'dev', 'profiles', 'experimento.settings.json'),
+    JSON.stringify({ permissions: { allow: ['Bash(true)'], deny: [] } }),
+    'utf8',
+  );
+}
+
+describe('perfis históricos permanecem semanticamente imutáveis', () => {
+  it('Codex Sol/high v2 mantém argv, marcadores e políticas exatamente', async () => {
+    const profile = await loadProfile(REPO_ROOT, CODEX_BASELINE);
+
+    expect(profile.argv).toEqual([
+      'codex',
+      'exec',
+      '--json',
+      '--strict-config',
+      '--ignore-user-config',
+      '--sandbox',
+      'workspace-write',
+      '--ephemeral',
+      '--ignore-rules',
+      '--model',
+      'gpt-5.6-sol',
+      '--config',
+      'model_reasoning_effort="high"',
+      '-',
+    ]);
+    expect(profile.control_markers).toEqual({
+      strict_config: '--strict-config',
+      user_config_ignored: '--ignore-user-config',
+      event_stream: '--json',
+      model_pinned: '--model',
+      reasoning_pinned: '--config',
+      session_persistence: '--ephemeral',
+      execpolicy_rules_ignored: '--ignore-rules',
+    });
+    expect(profile.billing_mode).toBe('subscription_only');
+    expect(profile.instruction_environment).toBe('sanitized_user_home');
+  });
+
+  it('Claude v2 continua SEM --effort: nada de pinar effort retroativamente', async () => {
+    const profile = await loadProfile(REPO_ROOT, CLAUDE_BASELINE);
+
+    expect(profile.argv).toEqual([
+      'claude',
+      '--print',
+      '--output-format',
+      'json',
+      '--model',
+      'claude-opus-5',
+      '--settings',
+      'dev/profiles/claude-build-worker.settings.json',
+      '--setting-sources',
+      'project',
+      '--permission-mode',
+      'acceptEdits',
+      '--strict-mcp-config',
+      '--no-session-persistence',
+    ]);
+    expect(profile.argv).not.toContain('--effort');
+    expect(Object.values(profile.control_markers)).not.toContain('--effort');
+    expect(claudeReasoningEffort(profile.argv)).toEqual({ pinning: 'unpinned', effort: null });
+  });
+});
+
+describe('perfis novos de modelo e effort', () => {
+  it.each(CODEX_EXPERIMENTS.filter((experiment) => experiment.id !== CODEX_BASELINE))(
+    '$id só difere do baseline Codex em modelo e effort',
+    async ({ id }) => {
+      const baseline = await loadProfile(REPO_ROOT, CODEX_BASELINE);
+      const profile = await loadProfile(REPO_ROOT, id);
+
+      expect(nonExperimentalFields(profile)).toEqual(nonExperimentalFields(baseline));
+      expect(argvWithoutCodexExperiment(profile.argv)).toEqual(
+        argvWithoutCodexExperiment(baseline.argv),
+      );
+      expect(profile.control_markers).toEqual(baseline.control_markers);
+    },
+  );
+
+  it.each(CLAUDE_EXPERIMENTS)(
+    '$id só difere do baseline Claude em modelo e no pinning do effort',
+    async ({ id }) => {
+      const baseline = await loadProfile(REPO_ROOT, CLAUDE_BASELINE);
+      const profile = await loadProfile(REPO_ROOT, id);
+
+      expect(nonExperimentalFields(profile)).toEqual(nonExperimentalFields(baseline));
+      expect(argvWithoutClaudeExperiment(profile.argv)).toEqual(
+        argvWithoutClaudeExperiment(baseline.argv),
+      );
+      expect(profile.control_markers).toEqual({
+        ...baseline.control_markers,
+        reasoning_effort_pinned: '--effort',
+      });
+    },
+  );
+
+  it.each(CLAUDE_EXPERIMENTS)('$id usa as MESMAS settings e permissões do v2', async ({ id }) => {
+    expect(await permissionsOf(id)).toEqual(await permissionsOf(CLAUDE_BASELINE));
+  });
+
+  it.each([...CODEX_EXPERIMENTS, ...CLAUDE_EXPERIMENTS])(
+    '$id é subscription_only, sem variável nem flag de API',
+    async ({ id }) => {
+      const profile = await loadProfile(REPO_ROOT, id);
+
+      expect(profile.billing_mode).toBe('subscription_only');
+      expect(
+        apiCredentialNamesIn([...profile.env_allowlist, ...Object.keys(profile.env_extra)]),
+      ).toEqual([]);
+      for (const token of profile.argv) {
+        expect(API_CREDENTIAL_VARIABLES).not.toContain(token);
+        expect(['--bare', '--api-key', '--with-api-key', '--with-access-token']).not.toContain(
+          token,
+        );
+      }
+    },
+  );
+
+  it.each([...CODEX_EXPERIMENTS, ...CLAUDE_EXPERIMENTS])(
+    '$id mantém execution policy orchestrator/orchestrator/targeted e as flags de continuidade proibidas',
+    async ({ id }) => {
+      const profile = await loadProfile(REPO_ROOT, id);
+      const baseline = await loadProfile(
+        REPO_ROOT,
+        profile.agent === 'codex' ? CODEX_BASELINE : CLAUDE_BASELINE,
+      );
+
+      expect(profile.commit_owner).toBe('orchestrator');
+      expect(profile.official_validation_owner).toBe('orchestrator');
+      expect(profile.worker_validation_policy).toBe('targeted');
+      expect(profile.forbidden_flags).toEqual(baseline.forbidden_flags);
+    },
+  );
+});
+
+describe('doctor reconhece cada combinação de modelo e effort', () => {
+  it.each(CODEX_EXPERIMENTS)('$id é reportado como $model / $effort', async (experiment) => {
+    const report = await diagnose({
+      repoRoot: REPO_ROOT,
+      profileId: experiment.id,
+      loaded,
+      env: fakeCodexEnv(),
+    });
+
+    expect(report).toMatchObject({
+      model: experiment.model,
+      reasoning_effort: experiment.effort,
+      reasoning_effort_source: 'codex_config_override',
+      billing_mode: 'subscription_only',
+      credential_source: 'chatgpt_subscription',
+      commit_owner: 'orchestrator',
+      official_validation_owner: 'orchestrator',
+      worker_validation_policy: 'targeted',
+      sandbox: 'workspace-write',
+      session_persistence: 'ephemeral',
+      user_config_ignored: true,
+      execpolicy_rules_ignored: true,
+      ok: true,
+    });
+    expect(find(report.checks, 'modelo').detail).toBe(experiment.model);
+    expect(find(report.checks, 'reasoning effort').status).toBe('PASS');
+  });
+
+  it.each(CLAUDE_EXPERIMENTS)('$id é reportado como $model / $effort', async (experiment) => {
+    const report = await diagnose({
+      repoRoot: REPO_ROOT,
+      profileId: experiment.id,
+      loaded: repoPlan,
+      env: fakeClaudeEnv(),
+    });
+
+    expect(report).toMatchObject({
+      model: experiment.model,
+      reasoning_effort: experiment.effort,
+      reasoning_effort_source: 'claude_effort_flag',
+      billing_mode: 'subscription_only',
+      credential_source: 'claude_subscription_oauth',
+      commit_owner: 'orchestrator',
+      official_validation_owner: 'orchestrator',
+      worker_validation_policy: 'targeted',
+      ok: true,
+    });
+    expect(find(report.checks, 'modelo').detail).toBe(experiment.model);
+    expect(find(report.checks, 'reasoning effort')).toMatchObject({
+      status: 'PASS',
+      detail: expect.stringContaining(experiment.effort),
+    });
+    expect(find(report.checks, 'política de permissões').status).toBe('PASS');
+    expect(find(report.checks, 'settings pessoais').status).toBe('PASS');
+    expect(find(report.checks, 'validações do plano').status).toBe('PASS');
+    expect(find(report.checks, 'variáveis de API').status).toBe('PASS');
+  });
+
+  it('Claude v2 histórico continua válido e é reportado como unpinned, nunca high', async () => {
+    const report = await diagnose({
+      repoRoot: REPO_ROOT,
+      profileId: CLAUDE_BASELINE,
+      loaded: repoPlan,
+      env: fakeClaudeEnv(),
+    });
+
+    expect(report).toMatchObject({
+      model: 'claude-opus-5',
+      reasoning_effort: 'unpinned',
+      reasoning_effort_source: 'unpinned',
+      credential_source: 'claude_subscription_oauth',
+      ok: true,
+    });
+    expect(find(report.checks, 'reasoning effort')).toMatchObject({
+      status: 'WARN',
+      detail: expect.stringContaining('unpinned'),
+    });
+    expect(find(report.checks, 'reasoning effort').detail).not.toMatch(/\bhigh\b/);
+  });
+});
+
+describe('modelo e effort desconhecidos falham fechado', () => {
+  it('modelo Codex fora dos aprovados reprova', async () => {
+    const id = 'codex-modelo-desconhecido-v1';
+    await writeProfile(id, codexProfile(id, 'high', true, 'gpt-5.6-plutao'));
+
+    const report = await diagnose({
+      repoRoot: sandbox.root,
+      profileId: id,
+      loaded,
+      env: fakeCodexEnv(),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.model).toBe('gpt-5.6-plutao');
+    expect(find(report.checks, 'modelo')).toMatchObject({
+      status: 'FAIL',
+      detail: expect.stringContaining('gpt-5.6-sol'),
+    });
+  });
+
+  it('effort Codex fora dos aprovados reprova', async () => {
+    const id = 'codex-effort-desconhecido-v1';
+    await writeProfile(id, codexProfile(id, 'turbo'));
+
+    const report = await diagnose({
+      repoRoot: sandbox.root,
+      profileId: id,
+      loaded,
+      env: fakeCodexEnv(),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.reasoning_effort).toBe('turbo');
+    expect(find(report.checks, 'reasoning effort')).toMatchObject({
+      status: 'FAIL',
+      detail: expect.stringContaining('aprovados'),
+    });
+  });
+
+  it('effort Codex duplicado é ambíguo e reprova mesmo com os dois valores válidos', async () => {
+    const id = 'codex-effort-duplicado-v1';
+    await writeProfile(
+      id,
+      codexProfile(id, 'high').replace(
+        "  - '-'",
+        "  - --config\n  - 'model_reasoning_effort=\"medium\"'\n  - '-'",
+      ),
+    );
+
+    const report = await diagnose({
+      repoRoot: sandbox.root,
+      profileId: id,
+      loaded,
+      env: fakeCodexEnv(),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.reasoning_effort).toBe('unknown');
+    expect(report.reasoning_effort_source).toBe('unknown');
+    expect(find(report.checks, 'reasoning effort').status).toBe('FAIL');
+  });
+
+  it('modelo Codex duplicado reprova por não estar fixado de forma única', async () => {
+    const id = 'codex-modelo-duplicado-v1';
+    await writeProfile(
+      id,
+      codexProfile(id, 'high').replace(
+        "  - '-'",
+        '  - --model\n  - gpt-5.6-terra\n  - \'-\'',
+      ),
+    );
+
+    const report = await diagnose({
+      repoRoot: sandbox.root,
+      profileId: id,
+      loaded,
+      env: fakeCodexEnv(),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.model).toBe('unknown');
+    expect(find(report.checks, 'modelo').status).toBe('FAIL');
+  });
+
+  it('--effort duplicado no Claude reprova', async () => {
+    const id = 'claude-effort-duplicado-v1';
+    await writeExperimentSettings();
+    await writeProfile(
+      id,
+      claudeProfile(id, ['--effort', 'high', '--effort', 'medium'], [
+        'reasoning_effort_pinned: --effort',
+      ]),
+    );
+
+    const report = await diagnose({
+      repoRoot: sandbox.root,
+      profileId: id,
+      loaded,
+      env: fakeClaudeEnv(),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.reasoning_effort).toBe('unknown');
+    expect(report.reasoning_effort_source).toBe('unknown');
+    expect(find(report.checks, 'reasoning effort')).toMatchObject({
+      status: 'FAIL',
+      detail: expect.stringContaining('--effort'),
+    });
+  });
+
+  it('perfil que declara pinning de effort mas não traz --effort reprova', async () => {
+    const id = 'claude-effort-declarado-ausente-v1';
+    await writeExperimentSettings();
+    await writeProfile(id, claudeProfile(id, [], ['reasoning_effort_pinned: --effort']));
+
+    const report = await diagnose({
+      repoRoot: sandbox.root,
+      profileId: id,
+      loaded,
+      env: fakeClaudeEnv(),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.reasoning_effort).toBe('unpinned');
+    expect(find(report.checks, 'reasoning effort')).toMatchObject({
+      status: 'FAIL',
+      detail: expect.stringContaining('control_marker'),
+    });
+  });
+
+  it('effort Claude fora dos aprovados reprova', async () => {
+    const id = 'claude-effort-desconhecido-v1';
+    await writeExperimentSettings();
+    await writeProfile(
+      id,
+      claudeProfile(id, ['--effort', 'turbo'], ['reasoning_effort_pinned: --effort']),
+    );
+
+    const report = await diagnose({
+      repoRoot: sandbox.root,
+      profileId: id,
+      loaded,
+      env: fakeClaudeEnv(),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.reasoning_effort).toBe('turbo');
+    expect(find(report.checks, 'reasoning effort')).toMatchObject({
+      status: 'FAIL',
+      detail: expect.stringContaining('aprovados'),
+    });
+  });
+
+  it('effort Claude não é evidência quando settings pessoais entrariam junto', async () => {
+    const id = 'claude-effort-com-settings-pessoais-v1';
+    await writeExperimentSettings();
+    await writeProfile(
+      id,
+      claudeProfile(id, ['--effort', 'high'], ['reasoning_effort_pinned: --effort']).replace(
+        '  - project',
+        '  - project,user',
+      ),
+    );
+
+    const report = await diagnose({
+      repoRoot: sandbox.root,
+      profileId: id,
+      loaded,
+      env: fakeClaudeEnv(),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.reasoning_effort).toBe('high');
+    expect(find(report.checks, 'reasoning effort')).toMatchObject({
+      status: 'FAIL',
+      detail: expect.stringContaining('user'),
+    });
+  });
+
+  it('effort do Claude vem só do argv: env e settings pessoais não são evidência', () => {
+    expect(claudeReasoningEffort(['claude', '--print'])).toEqual({
+      pinning: 'unpinned',
+      effort: null,
+    });
+    expect(claudeReasoningEffort(['claude', '--effort', 'high'])).toEqual({
+      pinning: 'pinned',
+      effort: 'high',
+    });
+    expect(claudeReasoningEffort(['claude', '--effort=max'])).toEqual({
+      pinning: 'pinned',
+      effort: 'max',
+    });
+    expect(claudeReasoningEffort(['claude', '--effort', '--print'])).toEqual({
+      pinning: 'ambiguous',
+      effort: null,
+    });
+    expect(claudeReasoningEffort(['claude', '--effort', 'high', '--effort', 'low'])).toEqual({
+      pinning: 'ambiguous',
+      effort: null,
+    });
   });
 });
 
