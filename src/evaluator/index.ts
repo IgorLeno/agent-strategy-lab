@@ -9,4 +9,10 @@
  *
  * Preenchido por M27A, M27B e M28.
  */
-export {};
+export {
+  createEvaluatorWorkspace,
+  withEvaluatorWorkspace,
+  EVALUATION_PLAN_FILE_NAME,
+  type CreateEvaluatorWorkspaceOptions,
+  type EvaluatorWorkspace,
+} from './workspace.js';
