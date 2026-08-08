@@ -23,3 +23,10 @@ export {
   type CommandGraderRun,
   type CommandGraderArtifacts,
 } from './command-grader.js';
+export {
+  runEvaluation,
+  EVALUATION_RECORD_FILE_NAME,
+  type GraderSpec,
+  type RunEvaluationOptions,
+  type EvaluationRun,
+} from './evaluate.js';
