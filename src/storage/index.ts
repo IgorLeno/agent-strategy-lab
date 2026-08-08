@@ -42,6 +42,14 @@ export {
   type WrittenSectionManifest,
 } from './manifest.js';
 export {
+  RunIndex,
+  RunIndexSchemaVersionError,
+  RUN_INDEX_SCHEMA_VERSION,
+  type RunIndexRow,
+  type TaskIndexRow,
+  type TrialIndexRow,
+} from './sqlite-index.js';
+export {
   redactEnvironment,
   redactJsonValue,
   type EnvironmentDisposition,
