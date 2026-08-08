@@ -262,8 +262,13 @@ interface GitResult {
  * nada do usuário: `init.templateDir` instalaria hooks dele dentro do
  * workspace, e um credential helper ou `url.*.insteadOf` reintroduziria
  * credencial no repositório que deveria estar isolado.
+ *
+ * Exportado para a captura do bundle em `change-bundle.ts`: todo git do
+ * workspace roda no mesmo ambiente, senão a captura reintroduziria pela config
+ * do usuário exatamente o que a criação do clone descartou. Não é API pública
+ * do workspace — `index.ts` não reexporta.
  */
-function cloneGitEnv(): NodeJS.ProcessEnv {
+export function cloneGitEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const [name, value] of Object.entries(process.env)) {
     if (!name.startsWith('GIT_')) env[name] = value;
@@ -274,13 +279,24 @@ function cloneGitEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
-/** Sempre argv, nunca shell — nenhum caminho daqui interpola string em shell. */
-function runGit(cwd: string, args: readonly string[]): Promise<GitResult> {
+/**
+ * Sempre argv, nunca shell — nenhum caminho daqui interpola string em shell.
+ *
+ * `extraEnv` entra depois de `cloneGitEnv`, e é o único jeito de repor uma
+ * variável `GIT_*`: a captura do bundle precisa de `GIT_INDEX_FILE` apontando
+ * para o índice dela. Reposta aqui é escolha explícita de quem chama, não
+ * herança do ambiente.
+ */
+function runGit(
+  cwd: string,
+  args: readonly string[],
+  extraEnv?: NodeJS.ProcessEnv,
+): Promise<GitResult> {
   return new Promise((resolve, reject) => {
     const child = spawn('git', [...args], {
       cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: cloneGitEnv(),
+      env: { ...cloneGitEnv(), ...extraEnv },
     });
     let stdout = '';
     let stderr = '';
@@ -295,8 +311,13 @@ function runGit(cwd: string, args: readonly string[]): Promise<GitResult> {
   });
 }
 
-async function gitOrThrow(cwd: string, args: readonly string[]): Promise<string> {
-  const result = await runGit(cwd, args);
+/** Exportado para `change-bundle.ts` pelo mesmo motivo de `cloneGitEnv`. */
+export async function gitOrThrow(
+  cwd: string,
+  args: readonly string[],
+  extraEnv?: NodeJS.ProcessEnv,
+): Promise<string> {
+  const result = await runGit(cwd, args, extraEnv);
   if (result.exitCode !== 0) {
     throw new Error(
       `git ${args.join(' ')} falhou (exit ${result.exitCode}): ${result.stderr.trim()}`,

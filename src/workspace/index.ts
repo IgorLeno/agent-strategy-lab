@@ -16,3 +16,13 @@ export {
   type DisposableClone,
 } from './clone.js';
 export { assertWithinClone, disposeClone, withDisposableClone } from './cleanup.js';
+export {
+  captureChangeBundle,
+  CHANGES_MANIFEST_FILE_NAME,
+  CHANGES_PATCH_FILE_NAME,
+  type CaptureChangeBundleOptions,
+  type ChangeBundle,
+  type ChangedFile,
+  type ChangesManifest,
+  type ChangeStatus,
+} from './change-bundle.js';
