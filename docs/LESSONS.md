@@ -219,3 +219,20 @@ fora da prova oficial.
 Rule: policies multifield aceitam somente tuples implementados; a finalização
 amarra o patch por fingerprint antes/depois das validações, stageia paths exatos
 e exige `git diff --cached --check` sobre o conteúdo que será commitado.
+
+[2026-08-08] Contexto: M23 — teste de escalada SIGTERM → graça → SIGKILL, sob
+`pnpm test` completo.
+Mistake: um `timeoutMs` curto (300ms) numa tentativa anterior mandava o SIGTERM
+antes de o processo filho terminar o próprio startup do Node (fork+exec até a
+primeira linha JS, que é quando `process.on("SIGTERM", ...)` é registrado).
+Sob a suíte inteira rodando em paralelo, essa janela de startup competia por
+CPU e passava do timeout: o filho morria pela ação padrão do SIGTERM antes de
+instalar o handler que deveria ignorá-lo, e o teste via exatamente o sintoma
+que existia para pegar (SIGTERM em vez do SIGKILL da escalada) por um motivo
+que não tinha nada a ver com a escalada em si — startup lento, não escalada
+quebrada.
+Rule: teste de sinal contra processo filho real usa `timeoutMs` com folga
+generosa (≥1s) sobre o pior caso de startup do interpretador sob carga, nunca
+o menor valor que passa isolado. Asserção de tempo mínimo (`elapsed >= timeout
++ graça`) é segura contra essa folga — só falha se a escalada disparar cedo
+demais, o que timers reais não fazem.

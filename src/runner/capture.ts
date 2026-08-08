@@ -21,9 +21,18 @@
  * lab morrer de memória por causa de um processo mal comportado, e a cauda
  * retida a cada corte torna esse caso raro em vez de provável.
  *
- * Timeout e sinais são de M23 e M24A: aqui o processo é lido até o fim.
+ * Timeout é deste módulo (M23): SIGTERM ao vencer o prazo, SIGKILL se a graça
+ * também vencer sem o processo sair. Sinal ao process group é M24A — aqui o
+ * sinal vai só ao processo iniciado, pelo handle que `startProcess` expõe.
+ *
+ * O sinal reportado no resultado nunca é o que este módulo *mandou* — é o que
+ * `spawn.ts` leu do evento `close` do Node, que reflete o motivo real da morte
+ * segundo o kernel. Gravar o sinal enviado em vez de esperar esse evento é
+ * como um SIGTERM ignorado vira "morto por SIGTERM" na evidência mesmo
+ * quando o SIGKILL da escalada é quem de fato encerrou o processo.
  */
 
+import type { ChildProcess } from 'node:child_process';
 import { createWriteStream } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
@@ -48,6 +57,12 @@ const DEFAULT_MAX_PENDING_CHARS = 1 << 20;
  */
 const FORCED_FLUSH_CARRY_DIVISOR = 16;
 
+/**
+ * Prazo padrão entre o SIGTERM do timeout e o SIGKILL da escalada, quando
+ * `timeoutMs` está definido e `gracePeriodMs` não veio explícito.
+ */
+const DEFAULT_GRACE_PERIOD_MS = 10_000;
+
 export interface CaptureProcessOptions extends SpawnProcessOptions {
   /** Diretório de `stdout.log` e `stderr.log`. Criado se ainda não existir. */
   readonly logDir: string;
@@ -56,6 +71,16 @@ export interface CaptureProcessOptions extends SpawnProcessOptions {
    * opção para que o corte forçado possa ser exercitado sem gerar 1 MiB.
    */
   readonly maxPendingChars?: number;
+  /**
+   * Tempo de execução tolerado antes de mandar SIGTERM. Ausente: sem timeout,
+   * o processo roda até terminar por conta própria.
+   */
+  readonly timeoutMs?: number;
+  /**
+   * Prazo entre o SIGTERM do timeout e o SIGKILL da escalada. Só importa
+   * quando `timeoutMs` está definido. Default: 10s.
+   */
+  readonly gracePeriodMs?: number;
 }
 
 export interface CapturedStream {
@@ -67,6 +92,13 @@ export interface CapturedStream {
 export interface CaptureResult extends ProcessResult {
   readonly stdout: CapturedStream;
   readonly stderr: CapturedStream;
+  /**
+   * `true` quando `timeoutMs` venceu e este módulo mandou o SIGTERM que deu
+   * início ao desfecho — a dimensão de execução TIMED_OUT, para quem monta o
+   * `ExecutionRecord` a decidir. Não depende de qual sinal matou o processo
+   * de fato: SIGTERM aceito ou SIGKILL da escalada contam igual como timeout.
+   */
+  readonly timedOut: boolean;
 }
 
 /**
@@ -106,11 +138,18 @@ export async function captureProcess(options: CaptureProcessOptions): Promise<Ca
   await mkdir(options.logDir, { recursive: true });
 
   const started = await startProcess(options);
+  const escalation = scheduleTimeoutEscalation(
+    started.child,
+    options.timeoutMs,
+    options.gracePeriodMs ?? DEFAULT_GRACE_PERIOD_MS,
+  );
   const stdout = persist(started.stdout, stdoutPath, maxPendingChars);
   const stderr = persist(started.stderr, stderrPath, maxPendingChars);
 
   // Os três são esperados sempre: desistir no primeiro erro deixaria o outro
-  // pipeline escrevendo em um arquivo que ninguém mais fecha.
+  // pipeline escrevendo em um arquivo que ninguém mais fecha. A escalada em si
+  // não entra nesse `allSettled`: ela não tem desfecho próprio para esperar,
+  // só sinaliza o processo cujo desfecho já está sendo observado ali.
   const [outcome, stdoutWritten, stderrWritten] = await Promise.allSettled([
     started.result,
     stdout,
@@ -127,7 +166,52 @@ export async function captureProcess(options: CaptureProcessOptions): Promise<Ca
     ...outcome.value,
     stdout: { path: stdoutPath, bytesWritten: stdoutWritten.value },
     stderr: { path: stderrPath, bytesWritten: stderrWritten.value },
+    timedOut: escalation.timedOut(),
   };
+}
+
+/**
+ * Arma o SIGTERM de `timeoutMs` e, se `child` seguir vivo depois da graça, o
+ * SIGKILL da escalada. `timeoutMs` ausente desarma tudo — comportamento
+ * idêntico ao de antes do M23.
+ *
+ * O `exit` do processo é o que desarma os timers, não o envio do sinal: um
+ * SIGTERM aceito e um SIGTERM ignorado só se distinguem por o processo ter
+ * saído ou não, e só o evento diz isso. Cancelar pelo envio do sinal armaria o
+ * SIGKILL mesmo quando o SIGTERM já bastou.
+ */
+function scheduleTimeoutEscalation(
+  child: ChildProcess,
+  timeoutMs: number | undefined,
+  gracePeriodMs: number,
+): { timedOut: () => boolean } {
+  if (timeoutMs === undefined) {
+    return { timedOut: () => false };
+  }
+
+  let timedOut = false;
+  let sigtermTimer: NodeJS.Timeout | undefined;
+  let sigkillTimer: NodeJS.Timeout | undefined;
+
+  sigtermTimer = setTimeout(() => {
+    sigtermTimer = undefined;
+    timedOut = true;
+    child.kill('SIGTERM');
+    sigkillTimer = setTimeout(() => {
+      sigkillTimer = undefined;
+      child.kill('SIGKILL');
+    }, gracePeriodMs);
+  }, timeoutMs);
+
+  // `once`: o processo só sai uma vez. Isso corre depois de qualquer timer que
+  // já tenha disparado no mesmo instante, então limpar aqui nunca reabre um
+  // timer que já mandou seu sinal.
+  child.once('exit', () => {
+    if (sigtermTimer !== undefined) clearTimeout(sigtermTimer);
+    if (sigkillTimer !== undefined) clearTimeout(sigkillTimer);
+  });
+
+  return { timedOut: () => timedOut };
 }
 
 /**
