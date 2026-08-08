@@ -31,3 +31,9 @@ export {
   type StartedProcess,
 } from './spawn.js';
 export { scheduleTimeoutEscalation, type TimeoutEscalation } from './timeout.js';
+export {
+  confirmGroupCleanup,
+  listDescendantPids,
+  ProcessGroupSurvivorError,
+  DEFAULT_CONFIRM_CLEANUP_TIMEOUT_MS,
+} from './process-group.js';

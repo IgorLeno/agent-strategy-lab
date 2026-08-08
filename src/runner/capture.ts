@@ -24,7 +24,11 @@
  * Timeout é deste módulo (M23): SIGTERM ao vencer o prazo, SIGKILL se a graça
  * também vencer sem o processo sair. A escalada em si — e o envio do sinal ao
  * process group inteiro, não só ao processo iniciado — é `timeout.ts` (M24A);
- * aqui só entram o pgid e o `timeoutMs`/`gracePeriodMs` que a decidem.
+ * aqui só entram o pgid e o `timeoutMs`/`gracePeriodMs` que a decidem. Depois
+ * que o alvo sai, `escalation.confirmCleanup()` (M24B) cobra que ninguém
+ * sobrou do group; sem essa confirmação o run rejeita com
+ * `ProcessGroupSurvivorError` em vez de devolver um resultado que presume
+ * cleanup que não foi verificado.
  *
  * O sinal reportado no resultado nunca é o que este módulo *mandou* — é o que
  * `spawn.ts` leu do evento `close` do Node, que reflete o motivo real da morte
@@ -82,6 +86,11 @@ export interface CaptureProcessOptions extends SpawnProcessOptions {
    * quando `timeoutMs` está definido. Default: 10s.
    */
   readonly gracePeriodMs?: number;
+  /**
+   * Teto de `confirmCleanup` depois do kill do group. Só importa quando
+   * `timeoutMs` está definido e venceu. Default: o de `process-group.ts`.
+   */
+  readonly cleanupConfirmTimeoutMs?: number;
 }
 
 export interface CapturedStream {
@@ -149,6 +158,7 @@ export async function captureProcess(options: CaptureProcessOptions): Promise<Ca
     started.pgid,
     options.timeoutMs,
     options.gracePeriodMs ?? DEFAULT_GRACE_PERIOD_MS,
+    options.cleanupConfirmTimeoutMs,
   );
   const stdout = persist(started.stdout, stdoutPath, maxPendingChars);
   const stderr = persist(started.stderr, stderrPath, maxPendingChars);
@@ -168,6 +178,10 @@ export async function captureProcess(options: CaptureProcessOptions): Promise<Ca
   if (stdoutWritten.status === 'rejected') throw stdoutWritten.reason;
   if (stderrWritten.status === 'rejected') throw stderrWritten.reason;
   if (outcome.status === 'rejected') throw outcome.reason;
+
+  // Depois do desfecho do alvo, nunca antes: confirmar sobrevivente é inútil
+  // enquanto o próprio processo que os criou ainda pode estar gerando mais.
+  await escalation.confirmCleanup();
 
   return {
     ...outcome.value,
