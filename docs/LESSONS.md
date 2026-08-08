@@ -236,3 +236,22 @@ generosa (≥1s) sobre o pior caso de startup do interpretador sob carga, nunca
 o menor valor que passa isolado. Asserção de tempo mínimo (`elapsed >= timeout
 + graça`) é segura contra essa folga — só falha se a escalada disparar cedo
 demais, o que timers reais não fazem.
+
+[2026-08-08] Contexto: M23 — attempts 2 e 3 rejeitados pela validation oficial e
+arquivados por `dev-retry-failed`; attempt 4 passou e criou candidate commit.
+Mistake: `dev-retry-failed` preservava patch, manifesto e
+`ValidationFailedAttemptRecord` do attempt reprovado, mas deixava o
+CompletionRecord FAIL no slot corrente
+(`.dev/completions/<task>.completion.json`). Na selagem do attempt seguinte,
+`sealOrchestratedFinalization` comparou esse FAIL histórico com o
+CompletionRecord PASS derivado do finalization record e parou em
+"CompletionRecord existente diverge do finalization record" — com o commit já
+criado e o fechamento pela metade.
+Rule: quando um attempt é arquivado, todo artifact que representa o fechamento
+DAQUELE attempt sai do slot corrente junto com o resto da evidência: os bytes do
+CompletionRecord FAIL são preservados append-only em
+`.dev/failed-attempts/<task>/attempt-<n>/completion.fail.json`, conferidos
+contra `original_completion_sha256` do record (fonte única do hash), e só então
+o slot corrente é liberado. Slot "mais recente" nunca pode reter estado de um
+attempt já encerrado, e a retomada depois de crash lê a evidência arquivada em
+vez de exigir o arquivo que o próprio fluxo removeu.

@@ -40,6 +40,8 @@ async function main(): Promise<void> {
     removed_files: result.removed,
     change_bundle: result.record.change_bundle,
     failed_attempt_record: result.recordPath,
+    archived_completion: result.completionArchivePath,
+    released_current_completion: result.releasedCurrentCompletion,
   });
 }
 

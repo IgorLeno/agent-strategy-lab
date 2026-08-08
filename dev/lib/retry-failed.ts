@@ -1,4 +1,5 @@
-import { readFile } from 'node:fs/promises';
+import { readFile, rm } from 'node:fs/promises';
+import { writeFileOnce } from './atomic.js';
 import { canonicalJson, sha256Hex } from './canonical.js';
 import {
   preserveFailedAttemptBundle,
@@ -15,6 +16,7 @@ import {
 import type { HarnessPaths } from './paths.js';
 import {
   completionPath,
+  failedAttemptCompletionPath,
   handoffDraftPath,
   launchRecordPath,
   readValidationFailedAttempt,
@@ -51,6 +53,11 @@ import { getTaskState, readState, withTaskState, writeState } from './state.js';
  *
  * Nenhum provider é chamado aqui. O comando arquiva, limpa e devolve a tarefa a
  * READY; lançar o próximo attempt continua sendo do dev-launch.
+ *
+ * Arquivar inclui os bytes do CompletionRecord FAIL: o slot corrente
+ * (`.dev/completions/<task>.completion.json`) é do fechamento MAIS RECENTE, e um
+ * FAIL histórico esquecido lá faz a selagem do attempt seguinte bater em
+ * "CompletionRecord existente diverge do finalization record".
  */
 export class RetryFailedAttemptError extends Error {
   constructor(message: string) {
@@ -65,8 +72,12 @@ export interface RetryFailedAttemptInput {
   readonly reasonCode: string;
   readonly reason: string;
   readonly now?: () => string;
-  /** Ponto de crash injetado pelos testes, entre record e reset. */
+  /** Ponto de crash injetado pelos testes, entre record e archive do completion. */
   readonly afterRecordWritten?: (record: ValidationFailedAttemptRecordType) => Promise<void>;
+  /** Ponto de crash injetado pelos testes, entre archive e liberação do slot. */
+  readonly afterCompletionArchived?: (record: ValidationFailedAttemptRecordType) => Promise<void>;
+  /** Ponto de crash injetado pelos testes, entre liberação do slot e reset. */
+  readonly afterCompletionReleased?: (record: ValidationFailedAttemptRecordType) => Promise<void>;
 }
 
 export interface RetryFailedAttemptResult {
@@ -76,15 +87,23 @@ export interface RetryFailedAttemptResult {
   readonly restored: readonly string[];
   readonly removed: readonly string[];
   readonly alreadyArchived: boolean;
+  /** Onde os bytes do CompletionRecord FAIL ficaram preservados. */
+  readonly completionArchivePath: string;
+  /** `true` quando esta execução foi a que removeu o slot corrente. */
+  readonly releasedCurrentCompletion: boolean;
 }
 
 async function readRequired(file: string, label: string): Promise<Buffer> {
+  const bytes = await readIfPresent(file);
+  if (bytes === null) throw new RetryFailedAttemptError(`${label} ausente`);
+  return bytes;
+}
+
+async function readIfPresent(file: string): Promise<Buffer | null> {
   try {
     return await readFile(file);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      throw new RetryFailedAttemptError(`${label} ausente`);
-    }
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
     throw error;
   }
 }
@@ -105,12 +124,43 @@ interface FailedSource {
   readonly binding: RevalidationSourceBinding;
   readonly bindingSha256: string;
   readonly completion: CompletionRecord;
+  readonly completionBytes: Buffer;
   readonly completionSha256: string;
+  /** Record já publicado deste attempt — presente só em retomada. */
+  readonly archived: ValidationFailedAttemptRecordType | null;
   readonly reportSha256: string;
   readonly handoffSha256: string;
   readonly launch: LaunchRecord;
   readonly launchSha256: string;
   readonly authorizedHead: string;
+}
+
+/**
+ * Os bytes do FAIL vêm do slot corrente enquanto ele existir. Depois que o
+ * archival publicou a evidência e liberou o slot, a fonte passa a ser o archive
+ * append-only do próprio attempt — é o que permite que uma retomada depois de
+ * crash não dependa de um arquivo que o fluxo já removeu de propósito.
+ */
+async function loadCompletionEvidence(
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+  archived: ValidationFailedAttemptRecordType | null,
+): Promise<Buffer> {
+  const current = await readIfPresent(completionPath(paths, taskId));
+  if (current !== null) return current;
+  if (archived === null) throw new RetryFailedAttemptError('CompletionRecord ausente');
+
+  const bytes = await readRequired(
+    failedAttemptCompletionPath(paths, taskId, attempt),
+    'CompletionRecord arquivado',
+  );
+  if (sha256Hex(bytes) !== archived.original_completion_sha256) {
+    throw new RetryFailedAttemptError(
+      'completion.fail.json diverge de original_completion_sha256 do attempt arquivado',
+    );
+  }
+  return bytes;
 }
 
 /**
@@ -124,12 +174,18 @@ async function loadFailedSource(input: RetryFailedAttemptInput): Promise<FailedS
   const state = await readState(paths);
   const task = getTaskState(state, taskId);
 
-  if (task.status !== 'FAIL') {
+  if (task.attempts < 1) throw new RetryFailedAttemptError('FAIL sem attempt');
+  const attempt = task.attempts;
+  const archived = await readValidationFailedAttempt(paths, taskId, attempt);
+
+  // A guarda de uma operação NOVA continua sendo FAIL. READY só é aceito como
+  // RETOMADA: o record append-only deste mesmo attempt já está publicado, e o
+  // que resta é convergir os efeitos que faltaram depois dele.
+  if (task.status !== 'FAIL' && !(task.status === 'READY' && archived !== null)) {
     throw new RetryFailedAttemptError(
       `dev-retry-failed exige tarefa FAIL, encontrada ${task.status}`,
     );
   }
-  if (task.attempts < 1) throw new RetryFailedAttemptError('FAIL sem attempt');
   const otherRunning = state.tasks.find(
     (candidate) => candidate.id !== taskId && candidate.status === 'RUNNING',
   );
@@ -142,12 +198,8 @@ async function loadFailedSource(input: RetryFailedAttemptInput): Promise<FailedS
   if (state.authorized_head_sha === null) {
     throw new RetryFailedAttemptError('authorized_head_sha ausente');
   }
-  const attempt = task.attempts;
 
-  const completionBytes = await readRequired(
-    completionPath(paths, taskId),
-    'CompletionRecord',
-  );
+  const completionBytes = await loadCompletionEvidence(paths, taskId, attempt, archived);
   const completion = parseJson('CompletionRecord', completionBytes, (value) =>
     CompletionRecord.parse(value),
   );
@@ -243,7 +295,9 @@ async function loadFailedSource(input: RetryFailedAttemptInput): Promise<FailedS
     binding,
     bindingSha256: sha256Hex(bindingBytes),
     completion,
+    completionBytes,
     completionSha256: sha256Hex(completionBytes),
+    archived,
     reportSha256: sha256Hex(reportBytes),
     handoffSha256: sha256Hex(handoffBytes),
     launch,
@@ -332,6 +386,50 @@ function assertMatchesRequest(
   }
 }
 
+/**
+ * Preserva os bytes exatos do CompletionRecord FAIL dentro do attempt e confere
+ * o binding criptográfico contra `original_completion_sha256` — o record é o
+ * único source of truth desse hash. Append-only: republicar com os mesmos bytes
+ * é aceito, com bytes diferentes é recusado.
+ */
+async function archiveFailedCompletion(
+  paths: HarnessPaths,
+  source: FailedSource,
+  record: ValidationFailedAttemptRecordType,
+): Promise<string> {
+  const file = failedAttemptCompletionPath(paths, record.task_id, record.attempt);
+  try {
+    await writeFileOnce(file, source.completionBytes);
+  } catch (error) {
+    throw new RetryFailedAttemptError(
+      `archive do CompletionRecord FAIL diverge do já publicado: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+  const published = await readRequired(file, 'CompletionRecord arquivado');
+  if (sha256Hex(published) !== record.original_completion_sha256) {
+    throw new RetryFailedAttemptError(
+      'completion.fail.json publicado diverge de original_completion_sha256',
+    );
+  }
+  return file;
+}
+
+/**
+ * Libera o slot do fechamento corrente para que o PRÓXIMO attempt escreva o
+ * CompletionRecord dele. Só é chamado depois que bundle, record e archive já
+ * estão publicados e conferidos: até lá, o FAIL corrente é a única cópia.
+ *
+ * Remove exatamente este arquivo — nenhum outro completion é tocado.
+ */
+async function releaseCurrentCompletion(paths: HarnessPaths, taskId: string): Promise<boolean> {
+  const file = completionPath(paths, taskId);
+  const existed = (await readIfPresent(file)) !== null;
+  await rm(file, { force: true });
+  return existed;
+}
+
 /** Reabre a tarefa para um NOVO attempt. `attempts` nunca diminui. */
 async function reopenTask(
   paths: HarnessPaths,
@@ -370,14 +468,16 @@ export async function retryFailedAttempt(
   const now = input.now ?? (() => new Date().toISOString());
 
   const source = await loadFailedSource(input);
-  const archived = await readValidationFailedAttempt(paths, taskId, source.attempt);
+  const archived = source.archived;
   if (archived) assertMatchesRequest(archived, source, reasonCode, input.reason);
 
   // Retomada idempotente: se o crash foi DEPOIS do reset, não há patch em disco
   // para preservar de novo — o record já publicado é a evidência, e o que falta
-  // é apenas a transição de state.
+  // é apenas convergir archive, slot corrente e state.
   const treeClean = await isWorkingTreeClean(paths.repoRoot);
   if (archived && treeClean) {
+    const completionArchivePath = await archiveFailedCompletion(paths, source, archived);
+    const releasedCurrentCompletion = await releaseCurrentCompletion(paths, taskId);
     await reopenTask(paths, taskId, archived);
     return {
       record: archived,
@@ -386,6 +486,8 @@ export async function retryFailedAttempt(
       restored: [],
       removed: [],
       alreadyArchived: true,
+      completionArchivePath,
+      releasedCurrentCompletion,
     };
   }
 
@@ -403,6 +505,14 @@ export async function retryFailedAttempt(
   const record = archived ?? buildRecord(input, source, bundle, reasonCode, now());
   if (!archived) await writeValidationFailedAttempt(paths, record);
   await input.afterRecordWritten?.(record);
+
+  const completionArchivePath = await archiveFailedCompletion(paths, source, record);
+  await input.afterCompletionArchived?.(record);
+
+  // Bundle, record e archive publicados e conferidos: agora — e só agora — o
+  // slot do fechamento corrente pode ser liberado para o próximo attempt.
+  const releasedCurrentCompletion = await releaseCurrentCompletion(paths, taskId);
+  await input.afterCompletionReleased?.(record);
 
   // Só depois de todo artifact append-only estar publicado o patch some do disco.
   const reset = await resetFilesToBase({
@@ -428,6 +538,8 @@ export async function retryFailedAttempt(
     restored: reset.restored,
     removed: reset.removed,
     alreadyArchived: archived !== null,
+    completionArchivePath,
+    releasedCurrentCompletion,
   };
 }
 

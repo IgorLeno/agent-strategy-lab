@@ -148,6 +148,20 @@ export function validationFailedAttemptPath(
   return path.join(failedAttemptDir(paths, taskId, attempt), 'validation-failed-attempt.json');
 }
 
+/**
+ * Bytes exatos do CompletionRecord FAIL que foi reprovado neste attempt.
+ * Append-only, dentro do diretório do próprio attempt: o slot corrente
+ * (`completionPath`) precisa ficar livre para o CompletionRecord do PRÓXIMO
+ * attempt, e um FAIL histórico parado lá bloquearia a selagem seguinte.
+ */
+export function failedAttemptCompletionPath(
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+): string {
+  return path.join(failedAttemptDir(paths, taskId, attempt), 'completion.fail.json');
+}
+
 export function preservedBundleManifestPath(
   paths: HarnessPaths,
   taskId: string,

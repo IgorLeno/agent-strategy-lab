@@ -7,6 +7,7 @@ import { resolveHarnessPaths, type HarnessPaths } from '../../dev/lib/paths.js';
 import { loadPlan, type LoadedPlan } from '../../dev/lib/plan.js';
 import {
   completionPath,
+  failedAttemptCompletionPath,
   handoffDraftPath,
   preservedBundleManifestPath,
   preservedBundlePatchPath,
@@ -495,6 +496,182 @@ describe('dev-retry-failed preserva a solução reprovada', () => {
     expect(result.bundle).toBeNull();
     const after = await readState(fixture.paths);
     expect(after.tasks.find((task) => task.id === TASK)?.status).toBe('READY');
+  });
+});
+
+describe('dev-retry-failed libera o slot do CompletionRecord corrente', () => {
+  /** Repõe o patch reprovado no disco, como um novo attempt faria. */
+  async function rewritePatch(root: string): Promise<void> {
+    await write(root, MODIFIED, 'export const spawnProcess = (timeoutMs: number) => timeoutMs;\n');
+    await rm(path.join(root, REMOVED), { force: true });
+    await write(root, ADDED, "import { it } from 'vitest';\nit('mata no timeout', () => {});\n");
+  }
+
+  it('arquiva o CompletionRecord FAIL byte a byte e libera o slot corrente', async () => {
+    const fixture = await setup();
+    const original = await readFile(completionPath(fixture.paths, TASK));
+    const result = await retry(fixture);
+
+    const archiveFile = failedAttemptCompletionPath(fixture.paths, TASK, 2);
+    expect(result.completionArchivePath).toBe(archiveFile);
+    expect(await readFile(archiveFile)).toEqual(original);
+    // O hash tem uma única fonte: o record do attempt arquivado.
+    expect(digest(original)).toBe(result.record.original_completion_sha256);
+
+    expect(result.releasedCurrentCompletion).toBe(true);
+    expect(await exists(completionPath(fixture.paths, TASK))).toBe(false);
+  });
+
+  it('recusa archive divergente já publicado', async () => {
+    const fixture = await setup();
+    const archiveFile = failedAttemptCompletionPath(fixture.paths, TASK, 2);
+    await mkdir(path.dirname(archiveFile), { recursive: true });
+    await writeFile(archiveFile, '{"schema_version":1,"outros":"bytes"}\n', 'utf8');
+
+    await expect(retry(fixture)).rejects.toThrow(/archive do CompletionRecord FAIL diverge/i);
+    // O slot corrente continua sendo a única evidência viva do FAIL.
+    expect(await exists(completionPath(fixture.paths, TASK))).toBe(true);
+  });
+
+  it('não libera o slot antes de publicar record e archive', async () => {
+    const fixture = await setup();
+    class Crash extends Error {}
+    await expect(
+      retryFailedAttempt({
+        paths: fixture.paths,
+        taskId: TASK,
+        reasonCode: 'OFFICIAL_VALIDATION_FAILURE',
+        reason: REASON,
+        now: () => NOW,
+        afterRecordWritten: async () => {
+          throw new Crash('crash antes do archive');
+        },
+      }),
+    ).rejects.toThrow(/crash antes do archive/);
+
+    expect(await exists(failedAttemptCompletionPath(fixture.paths, TASK, 2))).toBe(false);
+    expect(await exists(completionPath(fixture.paths, TASK))).toBe(true);
+  });
+
+  it('retoma depois de crash entre o archive e a liberação do slot', async () => {
+    const fixture = await setup();
+    const original = await readFile(completionPath(fixture.paths, TASK));
+    class Crash extends Error {}
+    await expect(
+      retryFailedAttempt({
+        paths: fixture.paths,
+        taskId: TASK,
+        reasonCode: 'OFFICIAL_VALIDATION_FAILURE',
+        reason: REASON,
+        now: () => NOW,
+        afterCompletionArchived: async () => {
+          throw new Crash('crash depois do archive');
+        },
+      }),
+    ).rejects.toThrow(/crash depois do archive/);
+
+    // Archive publicado, slot ainda ocupado, tarefa ainda FAIL.
+    expect(await readFile(failedAttemptCompletionPath(fixture.paths, TASK, 2))).toEqual(original);
+    expect(await exists(completionPath(fixture.paths, TASK))).toBe(true);
+    expect((await readState(fixture.paths)).tasks.find((task) => task.id === TASK)?.status).toBe(
+      'FAIL',
+    );
+
+    const result = await retry(fixture);
+    expect(result.alreadyArchived).toBe(true);
+    expect(await exists(completionPath(fixture.paths, TASK))).toBe(false);
+    expect((await readState(fixture.paths)).tasks.find((task) => task.id === TASK)?.status).toBe(
+      'READY',
+    );
+  });
+
+  it('retoma depois de crash entre a liberação do slot e o reset', async () => {
+    const fixture = await setup();
+    const original = await readFile(completionPath(fixture.paths, TASK));
+    class Crash extends Error {}
+    await expect(
+      retryFailedAttempt({
+        paths: fixture.paths,
+        taskId: TASK,
+        reasonCode: 'OFFICIAL_VALIDATION_FAILURE',
+        reason: REASON,
+        now: () => NOW,
+        afterCompletionReleased: async () => {
+          throw new Crash('crash depois da liberação');
+        },
+      }),
+    ).rejects.toThrow(/crash depois da liberação/);
+
+    // Slot já liberado e patch ainda em disco: a retomada não pode depender do
+    // CompletionRecord corrente que ela mesma removeu.
+    expect(await exists(completionPath(fixture.paths, TASK))).toBe(false);
+    const status = await runGit(fixture.sandbox.root, ['status', '--porcelain=v1']);
+    expect(status.stdout.trim()).not.toBe('');
+
+    const result = await retry(fixture);
+    expect(result.alreadyArchived).toBe(true);
+    expect(await readFile(failedAttemptCompletionPath(fixture.paths, TASK, 2))).toEqual(original);
+    expect(result.restored).toEqual([REMOVED, MODIFIED].sort());
+    expect((await runGit(fixture.sandbox.root, ['status', '--porcelain=v1'])).stdout.trim()).toBe('');
+    expect((await readState(fixture.paths)).tasks.find((task) => task.id === TASK)?.status).toBe(
+      'READY',
+    );
+  });
+
+  it('é idempotente com a tarefa já READY e o archive publicado', async () => {
+    const fixture = await setup();
+    const first = await retry(fixture);
+    const archived = await readFile(failedAttemptCompletionPath(fixture.paths, TASK, 2));
+
+    // Sem reabrir o state: READY com archive publicado é retomada legítima.
+    const second = await retry(fixture);
+    expect(second.alreadyArchived).toBe(true);
+    expect(second.releasedCurrentCompletion).toBe(false);
+    expect(second.record).toEqual(first.record);
+    expect(await readFile(failedAttemptCompletionPath(fixture.paths, TASK, 2))).toEqual(archived);
+
+    const state = await readState(fixture.paths);
+    expect(state.tasks.find((task) => task.id === TASK)?.status).toBe('READY');
+    expect(state.tasks.find((task) => task.id === TASK)?.attempts).toBe(2);
+  });
+
+  it('um FAIL posterior não sobrescreve o archive do attempt anterior', async () => {
+    const fixture = await setup();
+    const original = await readFile(completionPath(fixture.paths, TASK));
+    await retry(fixture);
+
+    // Attempt 3: mesma solução reprovada de novo, com evidence própria.
+    await rewritePatch(fixture.sandbox.root);
+    await writeFile(completionPath(fixture.paths, TASK), original);
+    await writeRevalidationSourceBinding(fixture.paths, {
+      schema_version: 1,
+      task_id: TASK,
+      attempt: 3,
+      source_base_sha: fixture.baseSha,
+      original_completion_path: 'original-completion.fail.json',
+      original_completion_sha256: digest(original),
+      report_sha256: digest(await readFile(reportPath(fixture.paths, TASK))),
+      handoff_draft_sha256: digest(await readFile(handoffDraftPath(fixture.paths, TASK))),
+      changed_files: PATCH_FILES,
+      derived_patch_fingerprint: await patchFingerprint(fixture.sandbox.root),
+      fingerprint_observed_at: NOW,
+      fingerprint_provenance: 'derived_during_revalidation_preflight',
+    });
+    const state = await readState(fixture.paths);
+    await writeState(
+      fixture.paths,
+      withTaskState(state, TASK, { status: 'FAIL', attempts: 3, finished_at: NOW }),
+    );
+
+    const result = await retry(fixture);
+    expect(result.record.attempt).toBe(3);
+    expect(await readFile(failedAttemptCompletionPath(fixture.paths, TASK, 3))).toEqual(original);
+    // O attempt 2 continua intacto: cada attempt tem o próprio archive.
+    expect(await readFile(failedAttemptCompletionPath(fixture.paths, TASK, 2))).toEqual(original);
+    expect(await readValidationFailedAttempt(fixture.paths, TASK, 2)).not.toBeNull();
+    expect(
+      (await readState(fixture.paths)).tasks.find((task) => task.id === TASK)?.attempts,
+    ).toBe(3);
   });
 });
 
