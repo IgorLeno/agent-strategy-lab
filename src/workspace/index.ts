@@ -8,4 +8,10 @@
  *
  * Preenchido por M18, M19 e M20.
  */
-export {};
+export {
+  createDisposableClone,
+  CLONE_DIRECTORY_PREFIX,
+  WORKSPACE_BRANCH,
+  type CreateDisposableCloneOptions,
+  type DisposableClone,
+} from './clone.js';
