@@ -12,4 +12,9 @@
  *
  * Preenchido por M21, M22, M23, M24A e M24B.
  */
-export {};
+export {
+  spawnProcess,
+  ProcessSpawnError,
+  type ProcessResult,
+  type SpawnProcessOptions,
+} from './spawn.js';
