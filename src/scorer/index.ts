@@ -9,4 +9,10 @@
  *
  * Preenchido por M29.
  */
-export {};
+export {
+  scoreRunV1,
+  SCORE_PROFILE_V1_ID,
+  SCORE_PROFILE_V1_VERSION,
+  type ScoreProfileV1Options,
+  type ScoreProfileV1Result,
+} from './score-profile.js';
