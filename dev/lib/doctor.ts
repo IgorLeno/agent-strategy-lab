@@ -9,6 +9,12 @@ import {
   type CommandRunner,
   type CredentialSource,
 } from './billing.js';
+import {
+  OUTPUT_FORMAT_NOT_DECLARED,
+  OUTPUT_FORMAT_UNKNOWN,
+  STREAM_JSON_OUTPUT_FORMAT,
+  claudeOutputFormat,
+} from './claude-stream.js';
 import type { LoadedPlan } from './plan.js';
 import { executionPolicyOf } from './execution-policy.js';
 import {
@@ -82,6 +88,8 @@ export interface DoctorReport {
   readonly profile_id: string;
   readonly agent: string;
   readonly model: string;
+  /** Transporte do stdout do worker — `json`, `stream-json`, ou o que veio. */
+  readonly output_format: string;
   readonly reasoning_effort: string;
   /** Evidência do effort: argv do perfil, nunca settings ou env pessoais. */
   readonly reasoning_effort_source: ReasoningEffortSource;
@@ -505,6 +513,51 @@ function checkModelPinned(profile: LauncherProfile, model: string): Check {
 }
 
 /**
+ * Transporte do stdout é a dimensão experimental do perfil stream: ele decide
+ * o que o harness consegue LER do run (result final, e evento de limite ou
+ * nada). Por isso vira fato verificado, não detalhe de invocação.
+ *
+ * `--verbose` não é cosmético: em `--print`, a CLI recusa `stream-json` sem
+ * ele. Declarar um sem o outro é perfil que nunca roda.
+ */
+function checkOutputFormat(profile: LauncherProfile, format: string): Check {
+  if (profile.agent !== 'claude') {
+    return check('formato de saída', 'SKIP', `não se aplica ao agente ${profile.agent}`);
+  }
+  if (format === OUTPUT_FORMAT_UNKNOWN) {
+    return check(
+      'formato de saída',
+      'FAIL',
+      '--output-format duplicado ou sem valor: o transporte do stdout não é único e explícito',
+    );
+  }
+  if (format === OUTPUT_FORMAT_NOT_DECLARED) {
+    return check(
+      'formato de saída',
+      'WARN',
+      'sem --output-format: o stdout sai como texto e o harness não lê result nem custo estimado',
+    );
+  }
+  if (format === STREAM_JSON_OUTPUT_FORMAT) {
+    return profile.argv.includes('--verbose')
+      ? check(
+          'formato de saída',
+          'PASS',
+          'stream-json · --verbose explícito · result final e rate_limit_event legíveis',
+        )
+      : check(
+          'formato de saída',
+          'FAIL',
+          'stream-json exige --verbose em --print: sem ele a CLI recusa o formato',
+        );
+  }
+  if (format === 'json') {
+    return check('formato de saída', 'PASS', 'json · objeto único no stdout');
+  }
+  return check('formato de saída', 'WARN', `${format}: o harness só lê json e stream-json`);
+}
+
+/**
  * Um perfil que declara ter fixado o reasoning precisa provar a flag no argv.
  * O marcador é a declaração de intenção; o argv é o fato.
  */
@@ -777,6 +830,8 @@ export async function diagnose(input: DoctorInput): Promise<DoctorReport> {
     environmentError = error instanceof Error ? error.message : String(error);
   }
   const model = modelOf(profile);
+  const outputFormat =
+    profile.agent === 'claude' ? claudeOutputFormat(profile.argv) : 'not_applicable';
   const reasoning = reasoningEffortFactsOf(profile);
   const sandbox = uniqueOptionValue(profile.argv, '--sandbox');
   const sessionPersistence = profile.argv.includes('--ephemeral') ? 'ephemeral' : 'persistent';
@@ -796,6 +851,7 @@ export async function diagnose(input: DoctorInput): Promise<DoctorReport> {
     checkInstructionHome(profile, workerEnv, environmentError, sanitizedHome),
     await checkGitIdentity(input.repoRoot, profile, workerEnv),
     checkModelPinned(profile, model),
+    checkOutputFormat(profile, outputFormat),
     checkReasoningEffort(profile, reasoning),
     await checkPolicy(input.repoRoot, profile),
     checkPersonalSettings(profile),
@@ -809,6 +865,7 @@ export async function diagnose(input: DoctorInput): Promise<DoctorReport> {
     profile_id: profile.id,
     agent: profile.agent,
     model,
+    output_format: outputFormat,
     reasoning_effort: reasoning.effort,
     reasoning_effort_source: reasoning.source,
     billing_mode: profile.billing_mode,

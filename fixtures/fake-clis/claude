@@ -12,6 +12,7 @@ const scenario = process.env.AGENTLAB_FAKE_AUTH ?? 'subscription';
 const FLAGS = [
   '--print',
   '--output-format',
+  '--verbose',
   '--model',
   '--effort',
   '--settings',

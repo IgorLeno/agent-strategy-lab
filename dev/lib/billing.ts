@@ -392,8 +392,19 @@ function usageFrom(value: unknown): ProviderUsageEstimate | null {
  * tokens: com assinatura, o run consome a franquia incluída, e o número não
  * corresponde a nenhuma cobrança adicional.
  */
+const EMPTY_USAGE: ProviderUsageEstimate = { estimated_api_equivalent_usd: null, turns: null };
+
+/**
+ * Mesma leitura, a partir de UM objeto já parseado — a mensagem `type=result`
+ * do stream-json. O contrato é o mesmo do objeto único de `--output-format
+ * json`: `total_cost_usd` e `num_turns` saem do mesmo lugar semântico.
+ */
+export function usageEstimateOf(value: unknown): ProviderUsageEstimate {
+  return usageFrom(value) ?? EMPTY_USAGE;
+}
+
 export function extractUsageEstimate(stdout: string): ProviderUsageEstimate {
-  const empty: ProviderUsageEstimate = { estimated_api_equivalent_usd: null, turns: null };
+  const empty = EMPTY_USAGE;
   const text = stdout.trim();
   if (text === '') return empty;
 

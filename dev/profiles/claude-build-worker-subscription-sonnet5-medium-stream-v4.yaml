@@ -1,0 +1,113 @@
+# Perfil de worker Claude Code pago pela ASSINATURA do usuário, SEM ownership de
+# commit nem de validação oficial.
+#
+# Semanticamente igual a `claude-build-worker-subscription-sonnet5-medium-v3` —
+# mesmo modelo, mesmo effort, mesma cobrança, mesma execution policy, mesmas
+# settings versionadas, mesma env_allowlist, mesmas flags proibidas.
+#
+# A ÚNICA dimensão experimental nova é o TRANSPORTE DO STDOUT: aqui a CLI emite
+# `stream-json` (JSONL, uma mensagem por linha) em vez de um objeto único. O
+# resultado final continua vindo da mensagem `type=result`, com os mesmos
+# campos; o que muda é que o stream também carrega mensagens
+# `type=rate_limit_event`, a única observação de limite de uso que o protocolo
+# documentado do print mode expõe.
+#
+# `--verbose` NÃO é cosmético: em `--print` a CLI recusa `stream-json` sem ele.
+# `--include-partial-messages` fica DE FORA de propósito — token streaming não
+# acrescenta nada à observabilidade de limite e só engordaria o log.
+#
+# Isto NÃO é "quota consumida pela tarefa". A primeira observação pode chegar
+# depois da primeira chamada do run, e a janela é da CONTA, não desta tarefa —
+# por isso a evidência se chama `rate_limit_observations` e o delta se chama
+# `observed_delta_pp`. Ausência de evento é resultado válido: nunca reprova run.
+#
+# Comparabilidade: por mudar o transporte, os resultados deste perfil NÃO devem
+# ser lidos como continuação da série produzida pelo medium-v3. O medium-v3
+# permanece com `--output-format json` e é o perfil dos resultados históricos.
+#
+# Assinatura, nunca API — e verificada, não presumida: `dev-doctor` e o preflight
+# do `dev-launch` rodam `claude auth status --json` (local e gratuito) e exigem
+# `authMethod=claude.ai` + `apiProvider=firstParty` + `subscriptionType` presente.
+# Fonte desconhecida BLOQUEIA o run.
+#
+# `--bare` continua PROIBIDA: ela força auth por ANTHROPIC_API_KEY/apiKeyHelper,
+# o que trocaria assinatura por cobrança de API. Por isso o perfil é `real-world`.
+id: claude-build-worker-subscription-sonnet5-medium-stream-v4
+agent: claude
+billing_mode: subscription_only
+environment_mode: real-world
+commit_owner: orchestrator
+official_validation_owner: orchestrator
+worker_validation_policy: targeted
+argv:
+  - claude
+  - --print
+  - --output-format
+  - stream-json
+  - --verbose
+  - --model
+  - claude-sonnet-5
+  - --effort
+  - medium
+  - --settings
+  - dev/profiles/claude-build-worker.settings.json
+  - --setting-sources
+  - project
+  - --permission-mode
+  - acceptEdits
+  - --strict-mcp-config
+  - --no-session-persistence
+prompt_delivery: argv
+timeout_seconds: 1800
+forbidden_flags:
+  - --resume
+  - -r
+  - --continue
+  - -c
+  - --fork-session
+  - --session-id
+  - --dangerously-skip-permissions
+  - --allow-dangerously-skip-permissions
+  # Trocariam a assinatura por cobrança de API — recusadas antes do spawn.
+  - --bare
+  - --api-key
+env_allowlist:
+  - PATH
+  - HOME
+  - LANG
+  - LC_ALL
+  - TERM
+  - USER
+  - SHELL
+env_extra:
+  CI: '1'
+control_markers:
+  instruction_discovery: --bare
+  plugins_and_hooks: --bare
+  auto_memory: --bare
+  mcp_servers: --strict-mcp-config
+  session_persistence: --no-session-persistence
+  non_interactive: --print
+  permission_policy: --settings
+  personal_settings_excluded: --setting-sources
+  model_pinned: --model
+  reasoning_effort_pinned: --effort
+  output_transport: --output-format
+  stream_verbosity: --verbose
+notes:
+  - 'Modelo: claude-sonnet-5; reasoning effort: medium, ambos fixados no argv — idênticos ao medium-v3.'
+  - 'Dimensão experimental: transporte do stdout (stream-json + --verbose). Modelo e effort NÃO mudam.'
+  - 'Objetivo do transporte: ler a mensagem type=result e as mensagens type=rate_limit_event pelo protocolo documentado do print mode.'
+  - 'Sem --include-partial-messages: token streaming não é necessário para observabilidade de limite.'
+  - 'Falha fechada: run que termine sem exatamente uma mensagem type=result vira INFRA_ERROR, não veredito sobre o worker.'
+  - 'Ausência de rate_limit_event é resultado VÁLIDO e nunca transforma run bom em FAIL.'
+  - 'rate_limit_observations é observação, não "quota da tarefa": a primeira observação pode ocorrer depois da primeira chamada e a janela é da conta.'
+  - 'Limite de uso e provider_estimated_api_equivalent_usd são métricas diferentes e ficam em campos separados do LaunchRecord.'
+  - 'Não comparar diretamente com a série do medium-v3: o transporte mudou.'
+  - 'Cobrança: assinatura Claude Pro (login/OAuth). Nenhuma chave de API na allowlist.'
+  - 'Execução consome a franquia da assinatura: só rodar com autorização explícita do usuário.'
+  - 'O worker edita o patch e pode validar de forma direcionada; commit e validação oficial pertencem ao orquestrador.'
+  - 'Sem --bare: CLAUDE.md, hooks e plugins do projeto CARREGAM; user e local ficam fora por --setting-sources project.'
+  - 'Ambiente real-world: nunca comparar estes resultados com os de um perfil controlled.'
+  - 'total_cost_usd emitido pela CLI é equivalência estimada em preço de API, não cobrança.'
+  - 'Limitação conhecida: o campo session_persistence do DoctorReport é derivado de --ephemeral (forma do Codex) e por isso reporta `persistent` para Claude. A checagem `persistência da sessão` é SKIP neste perfil e o control_marker real continua sendo --no-session-persistence.'

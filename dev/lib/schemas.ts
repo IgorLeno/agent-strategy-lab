@@ -341,6 +341,57 @@ export const BillingRecord = z
   });
 export type BillingRecord = z.infer<typeof BillingRecord>;
 
+/**
+ * O que a CLI OBSERVOU de limite durante o run — não o que a tarefa consumiu.
+ * O nome é deliberado: a primeira observação pode chegar depois da primeira
+ * chamada, e a janela é da conta inteira, não desta tarefa. Fica FORA de
+ * BillingRecord porque limite de uso e equivalência estimada em dólar são
+ * métricas diferentes e não devem ser lidas na mesma linha.
+ */
+export const RateLimitObservation = z
+  .object({
+    /** Ordem de chegada no stream, 1-based. */
+    sequence: z.number().int().positive(),
+    status: z.string().nullable(),
+    /** Normalizado de rate_limit_type/rateLimitType; a forma crua fica em `raw`. */
+    rate_limit_type: z.string().nullable(),
+    /** Valor RAW emitido pela CLI, sem reescala. */
+    utilization: z.number().nullable(),
+    /** Escala ASSUMIDA para derivar o percentual — registrada, não escondida. */
+    utilization_scale: z.enum(['fraction', 'percentage']).nullable(),
+    utilization_percentage: z.number().nullable(),
+    resets_at: z.string().nullable(),
+    session_id: z.string().nullable(),
+    /** Mensagem crua, preservada como evidência: nada aqui é inventado. */
+    raw: z.record(z.unknown()),
+  })
+  .strict();
+export type RateLimitObservation = z.infer<typeof RateLimitObservation>;
+
+/** Só existe com >=2 observações do mesmo tipo dentro da MESMA janela. */
+export const RateLimitWindowDelta = z
+  .object({
+    rate_limit_type: nonEmpty,
+    resets_at: nonEmpty,
+    first_utilization_percentage: z.number(),
+    last_utilization_percentage: z.number(),
+    /** Delta ENTRE OBSERVAÇÕES em pontos percentuais, não consumo da tarefa. */
+    observed_delta_pp: z.number(),
+    observation_count: z.number().int().min(2),
+  })
+  .strict();
+export type RateLimitWindowDelta = z.infer<typeof RateLimitWindowDelta>;
+
+export const RateLimitObservations = z
+  .object({
+    source: z.enum(['claude_stream_json']),
+    /** Lista vazia é resultado VÁLIDO: a CLI não promete evento em todo run. */
+    observed: z.array(RateLimitObservation),
+    window_deltas: z.array(RateLimitWindowDelta),
+  })
+  .strict();
+export type RateLimitObservations = z.infer<typeof RateLimitObservations>;
+
 export const LaunchRecord = z
   .object({
     schema_version: z.literal(DEV_SCHEMA_VERSION),
@@ -365,6 +416,12 @@ export const LaunchRecord = z
     controlled: z.record(z.union([z.boolean(), z.string(), z.number()])),
     /** `null` só em LaunchRecord gravado antes da política de cobrança. */
     billing: BillingRecord.nullable().default(null),
+    /**
+     * `null` quando o perfil não usa stream-json: só esse transporte carrega
+     * `rate_limit_event`. `null` NÃO significa "nenhum limite observado" — para
+     * isso existe `observed: []` dentro do objeto.
+     */
+    rate_limit_observations: RateLimitObservations.nullable().default(null),
   })
   .strict();
 export type LaunchRecord = z.infer<typeof LaunchRecord>;

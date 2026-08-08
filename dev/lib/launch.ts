@@ -3,14 +3,23 @@ import { randomUUID } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
+import { finished } from 'node:stream/promises';
 import {
   assertNoApiCredentials,
   buildBillingRecord,
   extractUsageEstimate,
   runBillingPreflight,
+  usageEstimateOf,
   type CommandRunner,
   type CredentialProbe,
 } from './billing.js';
+import {
+  rateLimitWindowDeltas,
+  readClaudeStream,
+  streamContractViolation,
+  usesClaudeStreamJson,
+  type ClaudeStreamReading,
+} from './claude-stream.js';
 import { TIMEOUT_EXIT_CODE } from './exec.js';
 import { executionPolicyOf } from './execution-policy.js';
 import type { HarnessPaths } from './paths.js';
@@ -183,6 +192,7 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
     | 'survivors_killed'
     | 'survivors_remaining'
     | 'billing'
+    | 'rate_limit_observations'
   > = {
     schema_version: DEV_SCHEMA_VERSION,
     task_id: packet.task_id,
@@ -205,13 +215,18 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
     timed_out: false,
     survivors_killed: [],
     survivors_remaining: [],
-    billing: billingOf(profile, preflight.credential, ''),
+    billing: billingOf(profile, preflight.credential, '', null),
+    rate_limit_observations: null,
   });
   await input.onStarted?.(identity);
 
   const { exitCode, signal } = await termination;
   stdoutLog.end();
   stderrLog.end();
+  // Sem esperar o flush, o stdout lido logo abaixo pode terminar numa linha
+  // pela metade — e, num perfil stream-json, uma linha truncada é violação de
+  // contrato. Falha de escrita do log não derruba o lançamento.
+  await Promise.all([finished(stdoutLog), finished(stderrLog)]).catch(() => {});
 
   const finishedAtMs = Date.now();
   const durationMs = finishedAtMs - startedAtMs;
@@ -225,6 +240,14 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
     ignorePids: [process.pid, process.ppid],
   });
 
+  // Um único read do stdout serve aos dois consumidores: o perfil json lê a
+  // cauda (semântica inalterada) e o perfil stream-json lê o arquivo inteiro,
+  // porque um evento de limite pode ter chegado bem antes do fim.
+  const stdout = await readStdoutLog(path.join(paths.logsDir, `${packet.task_id}.stdout.log`));
+  const stream = usesClaudeStreamJson(profile.agent, profile.argv)
+    ? readClaudeStream(stdout)
+    : null;
+
   const record: LaunchRecord = {
     ...base,
     finished_at: new Date(finishedAtMs).toISOString(),
@@ -233,11 +256,14 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
     timed_out: timedOut,
     survivors_killed: [...cleanup.killed],
     survivors_remaining: [...cleanup.remaining],
-    billing: billingOf(
-      profile,
-      preflight.credential,
-      await readLogTail(path.join(paths.logsDir, `${packet.task_id}.stdout.log`)),
-    ),
+    billing: billingOf(profile, preflight.credential, stdout, stream),
+    rate_limit_observations: stream
+      ? {
+          source: 'claude_stream_json',
+          observed: [...stream.observations],
+          window_deltas: rateLimitWindowDeltas(stream.observations),
+        }
+      : null,
   };
   await writeLaunchRecord(paths, record);
 
@@ -266,6 +292,17 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
       reason: `worker encerrado por sinal ${signal ?? 'desconhecido'} sem exit code`,
     };
   }
+  // Por último, e só num término que de outra forma seria FINISHED: timeout e
+  // sobrevivente têm diagnóstico próprio e não podem ser mascarados por uma
+  // violação de transporte que é consequência deles.
+  const violation = stream ? streamContractViolation(stream) : null;
+  if (violation) {
+    return {
+      record,
+      classification: 'INFRA_ERROR',
+      reason: `contrato do transporte stream-json violado: ${violation}`,
+    };
+  }
   return { record, classification: 'FINISHED', reason: `worker saiu com exit ${exitCode}` };
 }
 
@@ -286,32 +323,39 @@ function observeTermination(child: ChildProcess): Promise<Termination> {
 }
 
 /**
- * A estimativa de custo vem no stdout da própria CLI; só o fim do arquivo
- * interessa (Claude emite um objeto JSON final, Codex um stream JSONL). Ler o
- * arquivo inteiro seria caro num run longo e não acrescenta nada.
+ * Para a varredura textual da estimativa só o fim do arquivo interessa (Claude
+ * emite um objeto JSON final, Codex um stream JSONL). Varrer o arquivo inteiro
+ * seria caro num run longo e não acrescentaria nada — no stream-json a leitura
+ * é outra: lá a mensagem `result` é localizada por tipo, não por posição.
  */
 const USAGE_TAIL_BYTES = 256 * 1024;
 
-async function readLogTail(file: string): Promise<string> {
+async function readStdoutLog(file: string): Promise<string> {
   try {
-    const content = await readFile(file, 'utf8');
-    return content.length > USAGE_TAIL_BYTES ? content.slice(-USAGE_TAIL_BYTES) : content;
+    return await readFile(file, 'utf8');
   } catch {
     // Log ausente ou ilegível não invalida o lançamento: fica sem estimativa.
     return '';
   }
 }
 
+function usageTail(stdout: string): string {
+  return stdout.length > USAGE_TAIL_BYTES ? stdout.slice(-USAGE_TAIL_BYTES) : stdout;
+}
+
 function billingOf(
   profile: LauncherProfile,
   credential: CredentialProbe,
   stdout: string,
+  stream: ClaudeStreamReading | null,
 ): ReturnType<typeof buildBillingRecord> {
   return buildBillingRecord({
     mode: profile.billing_mode,
     credentialSource: credential.source,
     consumedAllowance: profile.billing_mode === 'subscription_only',
-    estimate: extractUsageEstimate(stdout),
+    // No stream-json a fonte autoritativa é a mensagem `result`, não a última
+    // linha que por acaso tenha `total_cost_usd`.
+    estimate: stream ? usageEstimateOf(stream.result) : extractUsageEstimate(usageTail(stdout)),
   });
 }
 

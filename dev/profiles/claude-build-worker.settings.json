@@ -56,9 +56,5 @@
       "WebFetch",
       "WebSearch"
     ]
-  },
-  "statusLine": {
-    "type": "command",
-    "command": "node dev/profiles/claude-usage-statusline.mjs"
   }
 }
