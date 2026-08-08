@@ -16,3 +16,10 @@ export {
   type CreateEvaluatorWorkspaceOptions,
   type EvaluatorWorkspace,
 } from './workspace.js';
+export {
+  runCommandGrader,
+  GRADER_ARTIFACTS_DIR_NAME,
+  type RunCommandGraderOptions,
+  type CommandGraderRun,
+  type CommandGraderArtifacts,
+} from './command-grader.js';
