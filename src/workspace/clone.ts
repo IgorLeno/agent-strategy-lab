@@ -172,8 +172,12 @@ async function resolveParentDir(parentDir: string, sourceRepo: string): Promise<
  * sozinho não serve aqui: o diretório ainda pode não ter sido criado, e é
  * justamente antes de criá-lo que a fronteira do repo-alvo precisa ser
  * conferida.
+ *
+ * Exportado para a guarda de escrita em `cleanup.ts`, que precisa medir a mesma
+ * fronteira do repo-alvo com a mesma noção de caminho. Não é API pública do
+ * workspace — `index.ts` não reexporta.
  */
-async function resolveIntendedPath(target: string): Promise<string> {
+export async function resolveIntendedPath(target: string): Promise<string> {
   const absolute = path.resolve(target);
   const missing: string[] = [];
   let existing = absolute;
@@ -232,8 +236,10 @@ async function pathExists(target: string): Promise<boolean> {
  * Um nome que comece com `..` conta como fora e no máximo custa uma recusa a
  * mais — o erro que importa evitar é o contrário, aceitar como fora algo que
  * está dentro do repo-alvo.
+ *
+ * Exportado junto com `resolveIntendedPath` para a guarda de `cleanup.ts`.
  */
-function isInside(parent: string, child: string): boolean {
+export function isInside(parent: string, child: string): boolean {
   const relative = path.relative(parent, child);
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
 }

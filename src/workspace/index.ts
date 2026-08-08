@@ -15,3 +15,4 @@ export {
   type CreateDisposableCloneOptions,
   type DisposableClone,
 } from './clone.js';
+export { assertWithinClone, disposeClone, withDisposableClone } from './cleanup.js';
