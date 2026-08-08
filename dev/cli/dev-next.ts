@@ -5,6 +5,7 @@ import { buildTaskPacket } from '../lib/packet.js';
 import { resolveHarnessPaths } from '../lib/paths.js';
 import { loadPlan } from '../lib/plan.js';
 import { readHandoff } from '../lib/records.js';
+import { readPreviousAttemptDiagnostics } from '../lib/retry-failed.js';
 import { selectNextTask } from '../lib/select.js';
 import { readState } from '../lib/state.js';
 
@@ -40,10 +41,16 @@ async function main(): Promise<void> {
     ? await readHandoff(paths, selection.handoffSourceTaskId)
     : null;
 
+  const task = state.tasks.find((candidate) => candidate.id === selection.task?.id);
   const packet = buildTaskPacket({
     task: selection.task,
     baseSha: await headSha(paths.repoRoot),
     previousHandoff,
+    previousAttemptDiagnostics: await readPreviousAttemptDiagnostics(
+      paths,
+      selection.task.id,
+      task?.attempts ?? 0,
+    ),
   });
 
   emit({ status: 'SELECTED', reason: selection.reason, packet });

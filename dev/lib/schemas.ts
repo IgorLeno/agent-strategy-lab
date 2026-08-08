@@ -207,6 +207,40 @@ export type HandoffRecord = z.infer<typeof HandoffRecord>;
 // TaskPacket — a ÚNICA entrada do worker. ≤ 12 KiB.
 // ---------------------------------------------------------------------------
 
+/**
+ * O que um attempt de reparo sabe do attempt anterior. Tudo aqui é DERIVADO
+ * pelo orquestrador a partir de records selados — nunca transcript, raciocínio
+ * ou conversa do provider anterior. Um FAIL legítimo precisa dizer ao próximo
+ * worker o que falhou, sem reintroduzir contexto pela porta dos fundos.
+ */
+export const PreviousAttemptFailedValidation = z
+  .object({
+    argv: z.array(nonEmpty).min(1),
+    exit_code: z.number().int().nullable(),
+    timed_out: z.boolean(),
+    /** Caminho do log oficial, relativo ao devDir; ausente em record legado. */
+    stdout_path: nonEmpty.optional(),
+    stderr_path: nonEmpty.optional(),
+  })
+  .strict();
+export type PreviousAttemptFailedValidation = z.infer<typeof PreviousAttemptFailedValidation>;
+
+export const PreviousAttemptDiagnostics = z
+  .object({
+    attempt: z.number().int().positive(),
+    profile_id: nonEmpty,
+    /** O worker anterior declarou sucesso; o orquestrador rejeitou a solução. */
+    worker_self_reported_result: z.literal('SUCCESS'),
+    reason_code: nonEmpty,
+    reason: nonEmpty,
+    failed_validations: z.array(PreviousAttemptFailedValidation).min(1).max(20),
+    changed_files: z.array(nonEmpty).max(50),
+    /** Diretório dos logs oficiais, relativo ao devDir. */
+    validation_logs_dir: nonEmpty,
+  })
+  .strict();
+export type PreviousAttemptDiagnostics = z.infer<typeof PreviousAttemptDiagnostics>;
+
 export const TaskPacket = z
   .object({
     schema_version: z.literal(DEV_SCHEMA_VERSION),
@@ -219,6 +253,8 @@ export const TaskPacket = z
     validation: z.array(ValidationCommand).min(1),
     constraints: z.array(nonEmpty),
     previous_handoff: HandoffRecord.nullable(),
+    /** Só existe em attempt de reparo; ausente em packet legado e no attempt 1. */
+    previous_attempt_diagnostics: PreviousAttemptDiagnostics.optional(),
     generated_at: z.string().datetime(),
   })
   .strict();
@@ -1004,6 +1040,170 @@ export const RecoveredFinalizationRecord = z
     }
   });
 export type RecoveredFinalizationRecord = z.infer<typeof RecoveredFinalizationRecord>;
+
+// ---------------------------------------------------------------------------
+// Attempt rejeitado pela validation oficial
+// (.dev/failed-attempts/<task>/attempt-<n>/…)
+// ---------------------------------------------------------------------------
+
+const sha256Hex = z.string().regex(/^[0-9a-f]{64}$/);
+
+/**
+ * Como o arquivo chegou à working tree do worker, relativo ao base autorizado.
+ * Os códigos espelham `git diff --name-status`, e não a porcelain do status:
+ * o bundle preservado descreve base -> árvore do worker, não index -> disco.
+ */
+export const PRESERVED_CHANGE_STATUSES = [
+  'added',
+  'copied',
+  'deleted',
+  'modified',
+  'renamed',
+  'type_changed',
+] as const;
+export const PreservedChangeStatus = z.enum(PRESERVED_CHANGE_STATUSES);
+export type PreservedChangeStatus = z.infer<typeof PreservedChangeStatus>;
+
+export const PreservedChangeFile = z
+  .object({
+    path: nonEmpty,
+    status: PreservedChangeStatus,
+    /** Origem de um rename/copy; `null` nos demais status. */
+    old_path: nonEmpty.nullable(),
+    /** Modo git na árvore do worker (`100644`, `100755`, `120000`); `null` se removido. */
+    mode: z.string().regex(/^[0-7]{6}$/).nullable(),
+    size_bytes: z.number().int().nonnegative().nullable(),
+    sha256: sha256Hex.nullable(),
+  })
+  .strict()
+  .superRefine((file, ctx) => {
+    const removed = file.status === 'deleted';
+    if (removed && (file.mode !== null || file.size_bytes !== null || file.sha256 !== null)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${file.path}: removido não tem conteúdo` });
+    }
+    if (!removed && (file.mode === null || file.size_bytes === null || file.sha256 === null)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${file.path}: conteúdo preservado ausente` });
+    }
+    const renamed = file.status === 'renamed' || file.status === 'copied';
+    if (renamed === (file.old_path === null)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${file.path}: old_path só existe em rename/copy` });
+    }
+  });
+export type PreservedChangeFile = z.infer<typeof PreservedChangeFile>;
+
+/**
+ * Manifesto do change bundle preservado. Ele existe para responder, depois que
+ * a working tree foi limpa para o próximo attempt, o que a solução rejeitada
+ * mudou e como reconstruí-la — o patch reaplica sobre `base_sha`.
+ */
+export const PreservedChangeBundleManifest = z
+  .object({
+    schema_version: z.literal(DEV_SCHEMA_VERSION),
+    task_id: identifier,
+    attempt: z.number().int().positive(),
+    base_sha: shaHex,
+    changed_files: z.array(nonEmpty).min(1),
+    files: z.array(PreservedChangeFile).min(1),
+    patch_file: nonEmpty,
+    patch_sha256: sha256Hex,
+    patch_size_bytes: z.number().int().nonnegative(),
+    /** Fingerprint da working tree observada no instante da preservação. */
+    patch_fingerprint: sha256Hex,
+    captured_at: z.string().datetime(),
+  })
+  .strict()
+  .superRefine((manifest, ctx) => {
+    const sorted = [...new Set(manifest.changed_files)].sort();
+    if (JSON.stringify(sorted) !== JSON.stringify(manifest.changed_files)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'changed_files deve ser único e ordenado' });
+    }
+    // Todo caminho tocado precisa estar em changed_files, incluindo a origem de
+    // um rename: sem isso o reset limparia só metade do par e deixaria resíduo.
+    const declared = new Set(manifest.changed_files);
+    for (const file of manifest.files) {
+      for (const touched of [file.path, file.old_path]) {
+        if (touched !== null && !declared.has(touched)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `arquivo tocado fora de changed_files: ${touched}`,
+          });
+        }
+      }
+    }
+  });
+export type PreservedChangeBundleManifest = z.infer<typeof PreservedChangeBundleManifest>;
+
+/**
+ * Motivos pelos quais um attempt inteiro é arquivado e a tarefa volta a READY.
+ * Append-only: novos códigos entram no fim, records antigos continuam parseando.
+ *
+ * `OFFICIAL_VALIDATION_FAILURE` NÃO é nondeterminismo nem defeito do harness —
+ * é o orquestrador rejeitando uma solução que o worker declarou pronta.
+ */
+export const VALIDATION_FAILED_ATTEMPT_REASON_CODES = ['OFFICIAL_VALIDATION_FAILURE'] as const;
+export const ValidationFailedAttemptReasonCode = z.enum(VALIDATION_FAILED_ATTEMPT_REASON_CODES);
+export type ValidationFailedAttemptReasonCode = z.infer<typeof ValidationFailedAttemptReasonCode>;
+
+export const PreservedChangeBundleRef = z
+  .object({
+    /** Caminhos relativos ao devDir — o record é evidência portável. */
+    manifest_path: nonEmpty,
+    manifest_sha256: sha256Hex,
+    patch_path: nonEmpty,
+    patch_sha256: sha256Hex,
+    patch_size_bytes: z.number().int().nonnegative(),
+  })
+  .strict();
+export type PreservedChangeBundleRef = z.infer<typeof PreservedChangeBundleRef>;
+
+/**
+ * Attempt cuja solução foi REJEITADA pela validation oficial do orquestrador.
+ *
+ * Os três campos redundantes no topo existem para que ninguém precise inferir a
+ * história: o worker reportou SUCCESS, o report não trouxe candidate, e o
+ * veredito foi do orquestrador. Isto não é falha de infraestrutura e não é
+ * nondeterminismo — a solução foi medida e reprovada.
+ */
+export const ValidationFailedAttemptRecord = z
+  .object({
+    schema_version: z.literal(DEV_SCHEMA_VERSION),
+    task_id: identifier,
+    attempt: z.number().int().positive(),
+    source_base_sha: shaHex,
+    profile_id: nonEmpty,
+    worker_self_reported_result: z.literal('SUCCESS'),
+    report_candidate_commit: z.literal(null),
+    orchestrator_verdict: z.literal('REJECTED_BY_OFFICIAL_VALIDATION'),
+    finalization_mode: z.literal('normal'),
+    launch_record_sha256: sha256Hex,
+    original_completion_sha256: sha256Hex,
+    report_sha256: sha256Hex,
+    handoff_draft_sha256: sha256Hex,
+    source_binding_sha256: sha256Hex,
+    patch_fingerprint: sha256Hex,
+    changed_files: z.array(nonEmpty).min(1),
+    original_validation_results: z.array(ValidationResult).min(1),
+    /** Ausente somente quando o FAIL é anterior aos validation logs. */
+    original_validation_evidence: z.array(ValidationEvidence).optional(),
+    change_bundle: PreservedChangeBundleRef,
+    reason_code: ValidationFailedAttemptReasonCode,
+    reason: nonEmpty,
+    archived_at: z.string().datetime(),
+  })
+  .strict()
+  .superRefine((record, ctx) => {
+    if (!record.original_validation_results.some((r) => r.exit_code !== 0 || r.timed_out)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'attempt arquivado exige validation oficial malsucedida',
+      });
+    }
+    const sorted = [...new Set(record.changed_files)].sort();
+    if (JSON.stringify(sorted) !== JSON.stringify(record.changed_files)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'changed_files deve ser único e ordenado' });
+    }
+  });
+export type ValidationFailedAttemptRecord = z.infer<typeof ValidationFailedAttemptRecord>;
 
 // ---------------------------------------------------------------------------
 // Parsers com budget — schema válido mas acima do budget também é rejeição.

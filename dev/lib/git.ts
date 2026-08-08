@@ -109,6 +109,36 @@ export async function workingTreeFiles(repoRoot: string): Promise<string[]> {
   return [...files].sort();
 }
 
+export interface FileContent {
+  readonly sizeBytes: number;
+  readonly sha256: string;
+}
+
+/**
+ * Conteúdo atual de um caminho, na mesma leitura que o git usaria para gravar o
+ * blob: symlink vira o alvo do link, e não o que está do outro lado dele.
+ * `null` quando o caminho não existe (removido pelo worker).
+ */
+export async function currentFileContent(
+  repoRoot: string,
+  relativePath: string,
+): Promise<FileContent | null> {
+  const absolutePath = path.join(repoRoot, relativePath);
+  try {
+    const metadata = await lstat(absolutePath);
+    const content = metadata.isSymbolicLink()
+      ? Buffer.from(await readlink(absolutePath), 'utf8')
+      : await readFile(absolutePath);
+    return {
+      sizeBytes: content.byteLength,
+      sha256: createHash('sha256').update(content).digest('hex'),
+    };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
 async function currentContentSha256(repoRoot: string, relativePath: string): Promise<string | null> {
   const absolutePath = path.join(repoRoot, relativePath);
   try {
@@ -140,6 +170,159 @@ export async function patchFingerprint(repoRoot: string): Promise<string> {
     ),
   );
   return createHash('sha256').update(canonicalJson(entries)).digest('hex');
+}
+
+export interface TreeEntry {
+  readonly mode: string;
+  readonly oid: string;
+  readonly path: string;
+}
+
+/** Entradas de blob de uma árvore, opcionalmente restritas a um pathspec. */
+export async function treeEntries(
+  repoRoot: string,
+  tree: string,
+  files?: readonly string[],
+): Promise<TreeEntry[]> {
+  const pathspec = files === undefined || files.length === 0 ? [] : ['--', ...files];
+  const output = await gitOrThrow(repoRoot, [
+    'ls-tree',
+    '-r',
+    '-z',
+    '--full-tree',
+    tree,
+    ...pathspec,
+  ]);
+  return nulSeparated(output).map((record) => {
+    const separator = record.indexOf('\t');
+    const header = separator === -1 ? [] : record.slice(0, separator).split(' ');
+    const [mode, , oid] = header;
+    if (mode === undefined || oid === undefined || header.length !== 3) {
+      throw new Error(`entrada de git ls-tree em formato inesperado: ${record}`);
+    }
+    return { mode, oid, path: record.slice(separator + 1) };
+  });
+}
+
+export interface NameStatusEntry {
+  readonly code: string;
+  readonly path: string;
+  readonly oldPath: string | null;
+}
+
+/** `git diff --name-status` entre dois tree-ish, com detecção de rename. */
+export async function treeNameStatus(
+  repoRoot: string,
+  from: string,
+  to: string,
+  files: readonly string[],
+): Promise<NameStatusEntry[]> {
+  const output = await gitOrThrow(repoRoot, [
+    'diff',
+    '--name-status',
+    '-z',
+    '--find-renames',
+    from,
+    to,
+    '--',
+    ...files,
+  ]);
+  const tokens = nulSeparated(output);
+  const entries: NameStatusEntry[] = [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    const code = tokens[index] as string;
+    const renamedOrCopied = code.startsWith('R') || code.startsWith('C');
+    const first = tokens[index + 1];
+    if (first === undefined) throw new Error(`git diff --name-status terminou em ${code}`);
+    if (renamedOrCopied) {
+      const second = tokens[index + 2];
+      if (second === undefined) throw new Error(`git diff --name-status ${code} sem destino`);
+      entries.push({ code, path: second, oldPath: first });
+      index += 2;
+      continue;
+    }
+    entries.push({ code, path: first, oldPath: null });
+    index += 1;
+  }
+  return entries;
+}
+
+/**
+ * Monta uma árvore com o conteúdo ATUAL de `files` sobre `baseSha`, sem tocar no
+ * index do repositório: o índice é próprio (`GIT_INDEX_FILE`) e nasce do base.
+ *
+ * `add --all` restrito ao pathspec é o que faz a árvore descrever também os
+ * arquivos removidos e os que ainda não estavam rastreados — um `write-tree` do
+ * index real veria só o que o worker tivesse staged, que não é o material.
+ */
+export async function writeScopedTree(
+  repoRoot: string,
+  baseSha: string,
+  files: readonly string[],
+  indexFile: string,
+): Promise<string> {
+  const env: NodeJS.ProcessEnv = { GIT_INDEX_FILE: indexFile };
+  await gitOrThrow(repoRoot, ['read-tree', baseSha], env);
+  await gitOrThrow(repoRoot, ['add', '--all', '--', ...files], env);
+  return (await gitOrThrow(repoRoot, ['write-tree'], env)).trim();
+}
+
+/**
+ * Argumentos que fixam o formato do patch: o repositório pode ter `diff.noprefix`
+ * ou um `textconv` configurado, que produziriam um patch legível mas que não
+ * reaplica — falha que só apareceria quando a árvore original não existe mais.
+ */
+const PRESERVED_PATCH_ARGS = [
+  '-c',
+  'diff.noprefix=false',
+  '-c',
+  'diff.mnemonicPrefix=false',
+  'diff',
+  '--no-color',
+  '--no-ext-diff',
+  '--no-textconv',
+  '--no-relative',
+  '--binary',
+  '--full-index',
+  '--find-renames',
+  '--unified=3',
+] as const;
+
+export async function scopedPatch(
+  repoRoot: string,
+  from: string,
+  to: string,
+  files: readonly string[],
+): Promise<string> {
+  return gitOrThrow(repoRoot, [...PRESERVED_PATCH_ARGS, from, to, '--', ...files]);
+}
+
+/** Caminhos de `files` que existem em `treeish`. */
+export async function pathsPresentIn(
+  repoRoot: string,
+  treeish: string,
+  files: readonly string[],
+): Promise<Set<string>> {
+  const output = await gitOrThrow(repoRoot, [
+    'ls-tree',
+    '-r',
+    '-z',
+    '--full-tree',
+    '--name-only',
+    treeish,
+    '--',
+    ...files,
+  ]);
+  return new Set(nulSeparated(output));
+}
+
+/** Devolve index e working tree de `files` ao conteúdo de `treeish`. */
+export async function restoreFilesFrom(
+  repoRoot: string,
+  treeish: string,
+  files: readonly string[],
+): Promise<void> {
+  await gitOrThrow(repoRoot, ['restore', '--source', treeish, '--staged', '--worktree', '--', ...files]);
 }
 
 export async function stageFiles(repoRoot: string, files: readonly string[]): Promise<void> {

@@ -6,6 +6,7 @@ import type { HarnessPaths } from './paths.js';
 import type { LoadedPlan } from './plan.js';
 import { loadProfile } from './profile.js';
 import { readHandoff, writePacket } from './records.js';
+import { readPreviousAttemptDiagnostics } from './retry-failed.js';
 import { selectNextTask, type Selection } from './select.js';
 import { getTaskState, readState, withTaskState, writeState } from './state.js';
 import type { TaskPacket } from './schemas.js';
@@ -42,10 +43,18 @@ export async function prepareNextTask(
   const previousHandoff = selection.handoffSourceTaskId
     ? await readHandoff(paths, selection.handoffSourceTaskId)
     : null;
+  // Reparo: a tarefa voltou a READY sem perder attempts, então o attempt já
+  // arquivado é exatamente `attempts` — e é dele que vem o diagnóstico.
+  const previousAttemptDiagnostics = await readPreviousAttemptDiagnostics(
+    paths,
+    selection.task.id,
+    getTaskState(state, selection.task.id).attempts,
+  );
   const packet = buildTaskPacket({
     task: selection.task,
     baseSha: await headSha(paths.repoRoot),
     previousHandoff,
+    previousAttemptDiagnostics,
   });
   await writePacket(paths, packet);
   return { selection, packet, baseViolation: null };

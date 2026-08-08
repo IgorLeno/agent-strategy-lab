@@ -110,9 +110,28 @@ ${io.handoffDraftPath} (máx. 4 KiB)
 Packet (também em ${io.packetPath}):
 `;
 
-  const size = Buffer.byteLength(preamble, 'utf8');
+  const full = `${preamble}${repairNotice(packet)}`;
+  const size = Buffer.byteLength(full, 'utf8');
   if (size > MAXIMUM_PREAMBLE_BYTES) {
     throw new Error(`preâmbulo do prompt excede ${MAXIMUM_PREAMBLE_BYTES} bytes: ${size}`);
   }
-  return `${preamble}${canonicalJson(packet)}\n`;
+  return `${full}${canonicalJson(packet)}\n`;
+}
+
+/**
+ * Sem esta nota o campo chegaria como um objeto qualquer no meio do packet, e o
+ * worker não teria como saber que ele descreve a própria tarefa reprovada. O
+ * texto é fixo: todo o conteúdo variável mora no packet, derivado de record.
+ */
+function repairNotice(packet: TaskPacket): string {
+  if (packet.previous_attempt_diagnostics === undefined) return '';
+  return `
+ATTEMPT DE REPARO — leia previous_attempt_diagnostics no packet.
+O attempt anterior DESTA MESMA tarefa declarou SUCCESS e foi REPROVADO pela
+validação oficial do orquestrador. failed_validations lista os comandos que
+falharam; validation_logs_dir aponta os logs oficiais no runtime do
+orquestrador. O patch anterior NÃO está em disco: a working tree já voltou ao
+base. Corrija a causa da falha; repetir a mesma solução reprova de novo.
+
+`;
 }

@@ -22,6 +22,8 @@ export interface HarnessPaths {
   readonly recoveriesDir: string;
   readonly finalizationsDir: string;
   readonly revalidationsDir: string;
+  /** Attempts rejeitados pela validation oficial, com a solução preservada. */
+  readonly failedAttemptsDir: string;
   readonly validationLogsDir: string;
 }
 
@@ -50,6 +52,7 @@ export function resolveHarnessPaths(repoRoot: string = process.cwd()): HarnessPa
     recoveriesDir: path.join(devDir, 'recoveries'),
     finalizationsDir: path.join(devDir, 'finalizations'),
     revalidationsDir: path.join(devDir, 'revalidations'),
+    failedAttemptsDir: path.join(devDir, 'failed-attempts'),
     validationLogsDir: path.join(devDir, 'validation-logs'),
   };
 }

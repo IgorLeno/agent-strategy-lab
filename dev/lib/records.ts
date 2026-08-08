@@ -11,9 +11,11 @@ import {
   MaintenanceRecord,
   OrchestratedRevalidationRecord,
   OrchestratedFinalizationRecord,
+  PreservedChangeBundleManifest,
   RevalidationCheckpoint,
   RevalidationSourceBinding,
   RecoveredFinalizationRecord,
+  ValidationFailedAttemptRecord,
   type HandoffDraft,
   type HandoffRecord,
   type LaunchRecordInput,
@@ -132,6 +134,34 @@ export function revalidationCheckpointPath(
     revalidationAttemptDir(paths, taskId, attempt),
     `revalidation-${sequence}.checkpoint.json`,
   );
+}
+
+export function failedAttemptDir(paths: HarnessPaths, taskId: string, attempt: number): string {
+  return path.join(paths.failedAttemptsDir, taskId, `attempt-${attempt}`);
+}
+
+export function validationFailedAttemptPath(
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+): string {
+  return path.join(failedAttemptDir(paths, taskId, attempt), 'validation-failed-attempt.json');
+}
+
+export function preservedBundleManifestPath(
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+): string {
+  return path.join(failedAttemptDir(paths, taskId, attempt), 'changes-manifest.json');
+}
+
+export function preservedBundlePatchPath(
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+): string {
+  return path.join(failedAttemptDir(paths, taskId, attempt), 'changes.patch');
 }
 
 export async function nextRevalidationSequence(
@@ -355,6 +385,42 @@ export const writeRevalidationCheckpoint = (
       checkpoint.sequence,
     ),
     RevalidationCheckpoint.parse(checkpoint),
+  );
+
+export const readValidationFailedAttempt = (
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+): Promise<ValidationFailedAttemptRecord | null> =>
+  readOptional(validationFailedAttemptPath(paths, taskId, attempt), (input) =>
+    ValidationFailedAttemptRecord.parse(input),
+  );
+
+export const writeValidationFailedAttempt = (
+  paths: HarnessPaths,
+  record: ValidationFailedAttemptRecord,
+): Promise<void> =>
+  writeJsonOnce(
+    validationFailedAttemptPath(paths, record.task_id, record.attempt),
+    ValidationFailedAttemptRecord.parse(record),
+  );
+
+export const readPreservedBundleManifest = (
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+): Promise<PreservedChangeBundleManifest | null> =>
+  readOptional(preservedBundleManifestPath(paths, taskId, attempt), (input) =>
+    PreservedChangeBundleManifest.parse(input),
+  );
+
+export const writePreservedBundleManifest = (
+  paths: HarnessPaths,
+  manifest: PreservedChangeBundleManifest,
+): Promise<void> =>
+  writeJsonOnce(
+    preservedBundleManifestPath(paths, manifest.task_id, manifest.attempt),
+    PreservedChangeBundleManifest.parse(manifest),
   );
 
 export async function listOrchestratedRevalidations(
