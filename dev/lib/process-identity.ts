@@ -21,6 +21,29 @@ export async function readProcStartTicks(pid: number): Promise<number> {
   return parsed;
 }
 
+/**
+ * Sentinela de `proc_start_ticks` para processo que já não existia no instante
+ * da captura. Não é um starttime plausível: nenhum processo observável pelo
+ * harness nasce no tick 0 do boot.
+ */
+export const PROCESS_GONE_START_TICKS = 0;
+
+/**
+ * `null` quando o processo já não existe. Um worker que morre no mesmo instante
+ * do spawn — comando inexistente, por exemplo — é desfecho legítimo do
+ * lançamento, e chegar tarde demais em /proc não pode transformar isso em
+ * crash do launcher: o término precisa continuar sendo classificável.
+ */
+async function readProcStartTicksIfAlive(pid: number): Promise<number | null> {
+  try {
+    return await readProcStartTicks(pid);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ESRCH') return null;
+    throw error;
+  }
+}
+
 export async function captureProcessIdentity(
   pid: number,
   pgid: number,
@@ -31,13 +54,16 @@ export async function captureProcessIdentity(
     pid,
     pgid,
     started_at: startedAt,
-    proc_start_ticks: await readProcStartTicks(pid),
+    proc_start_ticks: (await readProcStartTicksIfAlive(pid)) ?? PROCESS_GONE_START_TICKS,
     command_sha256: canonicalSha256(argv),
   };
 }
 
 /** true quando o processo registrado ainda existe — mesmo pid E mesmo starttime. */
 export async function isSameProcessAlive(identity: ProcessIdentity): Promise<boolean> {
+  // Identidade capturada depois do término não descreve processo nenhum; o pid
+  // pode ter sido reusado, e comparar com a sentinela afirmaria vida alheia.
+  if (identity.proc_start_ticks === PROCESS_GONE_START_TICKS) return false;
   try {
     return (await readProcStartTicks(identity.pid)) === identity.proc_start_ticks;
   } catch {

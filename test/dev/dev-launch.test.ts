@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process';
 import { readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -22,7 +23,11 @@ import {
   reportPath,
   writePacket,
 } from '../../dev/lib/records.js';
-import { isSameProcessAlive } from '../../dev/lib/process-identity.js';
+import {
+  PROCESS_GONE_START_TICKS,
+  captureProcessIdentity,
+  isSameProcessAlive,
+} from '../../dev/lib/process-identity.js';
 import {
   buildInitialState,
   ensureRuntimeDirs,
@@ -245,8 +250,24 @@ describe('launchWorker', () => {
       expect(outcome.record.exit_code).toBe(127);
       expect(outcome.record.timed_out).toBe(false);
       expect(outcome.record.finished_at).not.toBeNull();
+      // O processo pode já ter sumido de /proc antes da captura: a identidade
+      // registra a sentinela em vez de derrubar o lançamento.
+      expect(outcome.record.process.pid).toBeGreaterThan(0);
+      expect(await isSameProcessAlive(outcome.record.process)).toBe(false);
     }
   }, 30_000);
+
+  it('identidade de processo já encerrado usa sentinela em vez de falhar', async () => {
+    // pid de um processo que com certeza já terminou: nascido e colhido agora.
+    const dead = await new Promise<number>((resolve) => {
+      const child = spawn('true');
+      child.once('close', () => resolve(child.pid as number));
+    });
+
+    const identity = await captureProcessIdentity(dead, dead, ['true'], new Date().toISOString());
+    expect(identity.proc_start_ticks).toBe(PROCESS_GONE_START_TICKS);
+    expect(await isSameProcessAlive(identity)).toBe(false);
+  });
 });
 
 describe('dev-launch CLI', () => {
