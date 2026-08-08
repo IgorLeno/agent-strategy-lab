@@ -233,6 +233,42 @@ export async function reconcileMaintenanceRecords(
   }
 }
 
+/**
+ * Cadeia de MaintenanceRecords adotados que leva `from` até `to`, na ordem de
+ * adoção e já verificada contra o Git. Só existe caminho por records: um `to`
+ * inalcançável significa que ninguém respondeu pela diferença entre as duas
+ * bases, e a cadeia vazia é sempre recusa — não há manutenção a invocar.
+ */
+export async function maintenanceChainBetween(
+  paths: HarnessPaths,
+  from: string,
+  to: string,
+): Promise<MaintenanceRecord[]> {
+  const records = await readAllMaintenanceRecords(paths);
+  const chain: MaintenanceRecord[] = [];
+  const consumed = new Set<string>();
+  let current = from;
+  while (current !== to) {
+    const candidates = records.filter(
+      (record) =>
+        !consumed.has(record.adopted_head_sha) &&
+        record.previous_authorized_head_sha === current,
+    );
+    if (candidates.length === 0) {
+      throw new MaintenanceError(`nenhum MaintenanceRecord adotado liga ${from} a ${to}`);
+    }
+    if (candidates.length > 1) {
+      throw new MaintenanceError(`MaintenanceRecords ambíguos a partir de ${current}`);
+    }
+    const next = candidates[0] as MaintenanceRecord;
+    consumed.add(next.adopted_head_sha);
+    chain.push(next);
+    current = next.adopted_head_sha;
+  }
+  if (chain.length === 0) throw new MaintenanceError(`nenhuma manutenção adotada entre ${from} e ${to}`);
+  return chain;
+}
+
 export async function adoptMaintenance(input: AdoptionInput): Promise<AdoptionResult> {
   const bootstrapRange = input.bootstrapRange ?? false;
   const reason = input.reason.trim();

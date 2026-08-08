@@ -5,6 +5,9 @@ import {
   MAXIMUM_HANDOFF_BYTES,
   MAXIMUM_TASK_PACKET_BYTES,
   OrchestratedRevalidationRecord,
+  REVALIDATION_REASON_CODES,
+  RevalidationCheckpoint,
+  RevalidationReasonCode,
   RevalidationSourceBinding,
   TaskState,
   OrchestratedFinalizationRecord,
@@ -16,6 +19,7 @@ import {
   parseTaskPacket,
 } from '../../dev/lib/schemas.js';
 import { BudgetExceededError } from '../../dev/lib/budget.js';
+import { canonicalJson, canonicalSha256 } from '../../dev/lib/canonical.js';
 
 const SHA = 'a'.repeat(40);
 const NOW = '2026-08-05T12:00:00.000Z';
@@ -270,6 +274,71 @@ describe('OrchestratedRevalidationRecord', () => {
       working_tree_clean: false,
     });
     expect(failed.sequence).toBe(1);
+  });
+
+  it('aceita os dois reason codes e recusa qualquer outro', () => {
+    expect([...REVALIDATION_REASON_CODES]).toEqual([
+      'NONDETERMINISTIC_VALIDATION',
+      'HARNESS_VALIDATION_DEFECT',
+    ]);
+    expect(RevalidationReasonCode.parse('NONDETERMINISTIC_VALIDATION')).toBe(
+      'NONDETERMINISTIC_VALIDATION',
+    );
+    expect(RevalidationReasonCode.parse('HARNESS_VALIDATION_DEFECT')).toBe(
+      'HARNESS_VALIDATION_DEFECT',
+    );
+    expect(() => RevalidationReasonCode.parse('QUALQUER_OUTRO')).toThrow();
+  });
+
+  it('HARNESS_VALIDATION_DEFECT parseia em record e checkpoint', () => {
+    expect(
+      OrchestratedRevalidationRecord.parse({ ...record, reason_code: 'HARNESS_VALIDATION_DEFECT' })
+        .reason_code,
+    ).toBe('HARNESS_VALIDATION_DEFECT');
+
+    const checkpoint = {
+      schema_version: record.schema_version,
+      task_id: record.task_id,
+      attempt: record.attempt,
+      sequence: record.sequence,
+      reason_code: 'HARNESS_VALIDATION_DEFECT',
+      reason: record.reason,
+      source_binding_sha256: record.source_binding_sha256,
+      source_base_sha: record.source_base_sha,
+      finalization_base_sha: record.finalization_base_sha,
+      original_completion_sha256: record.original_completion_sha256,
+      report_sha256: record.report_sha256,
+      handoff_draft_sha256: record.handoff_draft_sha256,
+      patch_fingerprint: record.patch_fingerprint,
+      original_validation_results: record.original_validation_results,
+      revalidation_results: record.revalidation_results,
+      validation_evidence: record.validation_evidence,
+      changed_files: record.changed_files,
+      commit_message: record.commit_message,
+      staged_tree_sha: 'd'.repeat(40),
+      checkpointed_at: NOW,
+    };
+    expect(RevalidationCheckpoint.parse(checkpoint).reason_code).toBe('HARNESS_VALIDATION_DEFECT');
+    expect(
+      RevalidationCheckpoint.parse({ ...checkpoint, reason_code: 'NONDETERMINISTIC_VALIDATION' })
+        .reason_code,
+    ).toBe('NONDETERMINISTIC_VALIDATION');
+  });
+
+  // O enum é append-only: os bytes gravados antes de HARNESS_VALIDATION_DEFECT
+  // existir continuam parseando, e o conteúdo lido é idêntico ao gravado — a
+  // identidade do harness é a forma canônica, não a ordem das chaves no arquivo.
+  it('record histórico continua byte/parse-compatible', () => {
+    const historicalBytes = `${JSON.stringify(record, null, 2)}\n`;
+    const parsed = OrchestratedRevalidationRecord.parse(JSON.parse(historicalBytes));
+    expect(parsed.reason_code).toBe('NONDETERMINISTIC_VALIDATION');
+    expect(canonicalJson(parsed)).toBe(canonicalJson(record));
+    expect(canonicalSha256(parsed)).toBe(canonicalSha256(record));
+
+    const historicalBinding = `${JSON.stringify(binding, null, 2)}\n`;
+    expect(canonicalJson(RevalidationSourceBinding.parse(JSON.parse(historicalBinding)))).toBe(
+      canonicalJson(binding),
+    );
   });
 });
 

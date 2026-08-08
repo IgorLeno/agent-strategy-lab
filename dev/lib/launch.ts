@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
 import { readFile } from 'node:fs/promises';
@@ -150,6 +150,13 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
     stdio: [profile.prompt_delivery === 'stdin' ? 'pipe' : 'ignore', 'pipe', 'pipe'],
   });
 
+  // Um comando inexistente faz o `timeout` sair no mesmo instante do spawn: o
+  // 'close' já teria sido emitido antes dos awaits abaixo (identidade, record,
+  // onStarted). Instalado só depois, o listener perderia o evento e a espera
+  // pelo término nunca resolveria — top-level await pendurado, exit 13 em vez
+  // do INFRA_ERROR real. Por isso o observador nasce junto com o processo.
+  const termination = observeTermination(child);
+
   const spawnFailure = await new Promise<Error | null>((resolve) => {
     child.once('error', resolve);
     child.once('spawn', () => resolve(null));
@@ -202,12 +209,7 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
   });
   await input.onStarted?.(identity);
 
-  const { exitCode, signal } = await new Promise<{
-    exitCode: number | null;
-    signal: NodeJS.Signals | null;
-  }>((resolve) => {
-    child.once('close', (code, sig) => resolve({ exitCode: code, signal: sig }));
-  });
+  const { exitCode, signal } = await termination;
   stdoutLog.end();
   stderrLog.end();
 
@@ -265,6 +267,22 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
     };
   }
   return { record, classification: 'FINISHED', reason: `worker saiu com exit ${exitCode}` };
+}
+
+interface Termination {
+  readonly exitCode: number | null;
+  readonly signal: NodeJS.Signals | null;
+}
+
+/**
+ * UM único listener de término, instalado no mesmo tick do spawn. Um segundo
+ * observador (por exemplo em 'exit') poderia resolver com um resultado
+ * diferente do 'close' — a espera precisa ter uma fonte só.
+ */
+function observeTermination(child: ChildProcess): Promise<Termination> {
+  return new Promise((resolve) => {
+    child.once('close', (exitCode, signal) => resolve({ exitCode, signal }));
+  });
 }
 
 /**

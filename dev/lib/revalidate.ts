@@ -16,6 +16,7 @@ import {
   workingTreeFiles,
   writeTree,
 } from './git.js';
+import { maintenanceChainBetween } from './maintenance.js';
 import type { HarnessPaths } from './paths.js';
 import type { LoadedPlan } from './plan.js';
 import {
@@ -308,6 +309,45 @@ function assertCommonSource(
   return files;
 }
 
+/**
+ * `HARNESS_VALIDATION_DEFECT` só é dizível quando alguém já respondeu pelo
+ * defeito: precisa existir manutenção ADOTADA entre a base histórica da task e
+ * a base de finalização, e essa manutenção não pode ter tocado nenhum arquivo
+ * do patch — se tocou, o que passa na revalidation não é mais o patch do
+ * worker, e o veredito seria sobre outro conteúdo.
+ */
+async function assertHarnessDefectLineage(
+  paths: HarnessPaths,
+  sourceBase: string,
+  finalizationBase: string,
+  files: readonly string[],
+): Promise<void> {
+  if (sourceBase === finalizationBase) {
+    throw new OrchestratedRevalidationError(
+      'HARNESS_VALIDATION_DEFECT exige manutenção adotada entre source_base_sha e finalization_base_sha',
+    );
+  }
+  let chain;
+  try {
+    chain = await maintenanceChainBetween(paths, sourceBase, finalizationBase);
+  } catch (error) {
+    throw new OrchestratedRevalidationError(
+      `HARNESS_VALIDATION_DEFECT sem MaintenanceRecord válido: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+  const patched = new Set(files);
+  for (const record of chain) {
+    const overlap = record.changed_files.filter((file) => patched.has(file));
+    if (overlap.length > 0) {
+      throw new OrchestratedRevalidationError(
+        `manutenção adotada ${record.adopted_head_sha} tocou arquivo do patch da task: ${overlap.join(', ')}`,
+      );
+    }
+  }
+}
+
 function commitMessage(input: RevalidateOrchestratedInput): string {
   const task = input.loaded.byId.get(input.taskId);
   if (!task) throw new OrchestratedRevalidationError(`tarefa ausente no plano: ${input.taskId}`);
@@ -524,6 +564,14 @@ export async function verifyOrchestratedRevalidationRecord(
   ) {
     throw new OrchestratedRevalidationError('RevalidationRecord diverge da source evidence');
   }
+  if (record.reason_code === 'HARNESS_VALIDATION_DEFECT') {
+    await assertHarnessDefectLineage(
+      paths,
+      record.source_base_sha,
+      record.finalization_base_sha,
+      record.changed_files,
+    );
+  }
   await assertCandidate(
     paths,
     record.candidate_commit,
@@ -632,6 +680,14 @@ export async function revalidateOrchestrated(
   const finalizationBase = state.authorized_head_sha;
   const source = await loadBoundSource(input.paths, input.loaded, input.taskId, task.attempts);
   const files = assertCommonSource(source, input.taskId, task.attempts, task.base_sha);
+  if (reasonCode === 'HARNESS_VALIDATION_DEFECT') {
+    await assertHarnessDefectLineage(
+      input.paths,
+      source.binding.source_base_sha,
+      finalizationBase,
+      files,
+    );
+  }
   const message = commitMessage(input);
   if (await readOrchestratedFinalization(input.paths, input.taskId, task.attempts)) {
     throw new OrchestratedRevalidationError('attempt já possui candidate/finalization record');

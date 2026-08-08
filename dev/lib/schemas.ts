@@ -801,7 +801,23 @@ export const RevalidationSourceBinding = z
   });
 export type RevalidationSourceBinding = z.infer<typeof RevalidationSourceBinding>;
 
-export const RevalidationReasonCode = z.literal('NONDETERMINISTIC_VALIDATION');
+/**
+ * Motivos pelos quais uma validation oficial malsucedida pode ser reexecutada
+ * sobre o MESMO patch:
+ *
+ * - `NONDETERMINISTIC_VALIDATION`: o gate oficial não é função só do patch.
+ * - `HARNESS_VALIDATION_DEFECT`: o patch do worker permaneceu byte-idêntico,
+ *   mas a baseline/harness usada pela validation oficial continha um defeito
+ *   posteriormente corrigido por uma manutenção adotada.
+ *
+ * A ordem é append-only: records históricos gravados com o primeiro código
+ * continuam parseando sem alteração nenhuma.
+ */
+export const REVALIDATION_REASON_CODES = [
+  'NONDETERMINISTIC_VALIDATION',
+  'HARNESS_VALIDATION_DEFECT',
+] as const;
+export const RevalidationReasonCode = z.enum(REVALIDATION_REASON_CODES);
 export type RevalidationReasonCode = z.infer<typeof RevalidationReasonCode>;
 
 export const OrchestratedRevalidationRecord = z

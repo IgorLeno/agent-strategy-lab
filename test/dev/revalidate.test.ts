@@ -25,6 +25,7 @@ import {
   sourceBindingPath,
   writeCompletion,
   writePacket,
+  writeMaintenanceRecord,
   writeRevalidationSourceBinding,
 } from '../../dev/lib/records.js';
 import { revalidateOrchestrated } from '../../dev/lib/revalidate.js';
@@ -88,6 +89,8 @@ interface SetupOptions {
   readonly changedFiles?: readonly string[];
   readonly extraFiles?: readonly string[];
   readonly separateFinalizationBase?: boolean;
+  /** Arquivos que o commit de manutenção entre source base e finalization base altera. */
+  readonly maintenanceFiles?: readonly string[];
 }
 
 interface Fixture {
@@ -111,9 +114,13 @@ async function setup(options: SetupOptions = {}): Promise<Fixture> {
   const loaded = await loadPlan(paths.planFile);
   const sourceBase = await headSha(sandbox.root);
 
+  const maintenanceFiles = options.maintenanceFiles ?? ['dev/harness-maintenance.txt'];
   if (options.separateFinalizationBase ?? true) {
-    await writeFile(path.join(sandbox.root, 'dev', 'harness-maintenance.txt'), 'maintenance\n');
-    await runGit(sandbox.root, ['add', '--', 'dev/harness-maintenance.txt']);
+    for (const file of maintenanceFiles) {
+      await mkdir(path.dirname(path.join(sandbox.root, file)), { recursive: true });
+      await writeFile(path.join(sandbox.root, file), 'maintenance\n');
+    }
+    await runGit(sandbox.root, ['add', '--', ...maintenanceFiles]);
     await runGit(sandbox.root, ['commit', '-q', '-m', 'maintenance']);
   }
   const finalizationBase = await headSha(sandbox.root);
@@ -519,5 +526,113 @@ describe('dev-revalidate transaction', () => {
     expect(await readOrchestratedRevalidation(fixture.paths, 'M03B', 1, 1)).toEqual(
       failed.record,
     );
+  });
+});
+
+/**
+ * HARNESS_VALIDATION_DEFECT afirma que a culpa foi da baseline, não do patch.
+ * Só é dizível se existir manutenção adotada respondendo pelo defeito, e essa
+ * manutenção não pode ter encostado no patch da task.
+ */
+describe('dev-revalidate HARNESS_VALIDATION_DEFECT', () => {
+  const DEFECT_REASON = 'official validation was blocked by a harness defect fixed by maintenance';
+
+  function defectRun(fixture: Fixture, overrides: Record<string, unknown> = {}) {
+    return run(fixture, {
+      reasonCode: 'HARNESS_VALIDATION_DEFECT',
+      reason: DEFECT_REASON,
+      ...overrides,
+    });
+  }
+
+  async function writeMaintenance(
+    fixture: Fixture,
+    maintenanceFiles: readonly string[],
+  ): Promise<void> {
+    await writeMaintenanceRecord(fixture.paths, {
+      schema_version: 1,
+      previous_authorized_head_sha: fixture.sourceBase,
+      adopted_head_sha: fixture.finalizationBase,
+      commits: [
+        {
+          sha: fixture.finalizationBase,
+          parent_sha: fixture.sourceBase,
+          changed_files: [...maintenanceFiles],
+        },
+      ],
+      changed_files: [...new Set(maintenanceFiles)].sort(),
+      validation_results: [
+        ['pnpm', 'typecheck'],
+        ['pnpm', 'build'],
+        ['pnpm', 'test'],
+        ['git', 'diff', '--check', `${fixture.sourceBase}..${fixture.finalizationBase}`],
+      ].map((argv) => ({ argv, exit_code: 0, timed_out: false, duration_ms: 1 })),
+      working_tree_clean: true,
+      bootstrap_range: false,
+      reason: 'correção do defeito do harness',
+      adopted_at: NOW,
+    });
+  }
+
+  it('recusa sem MaintenanceRecord entre source base e finalization base', async () => {
+    const fixture = await setup();
+    await expect(defectRun(fixture)).rejects.toThrow(
+      /HARNESS_VALIDATION_DEFECT sem MaintenanceRecord válido/i,
+    );
+  });
+
+  it('recusa quando source base e finalization base são o mesmo commit', async () => {
+    const fixture = await setup({ separateFinalizationBase: false });
+    await expect(defectRun(fixture)).rejects.toThrow(
+      /exige manutenção adotada entre source_base_sha e finalization_base_sha/i,
+    );
+  });
+
+  it('recusa manutenção que tocou arquivo do patch da task', async () => {
+    // O arquivo do patch precisa estar num caminho que a manutenção PODE tocar
+    // — senão a recusa viria do escopo de manutenção, não da sobreposição.
+    const fixture = await setup({
+      changedFiles: ['test/a.test.ts'],
+      maintenanceFiles: ['dev/harness-maintenance.txt', 'test/a.test.ts'],
+    });
+    await writeMaintenance(fixture, ['dev/harness-maintenance.txt', 'test/a.test.ts']);
+    await expect(defectRun(fixture)).rejects.toThrow(
+      /tocou arquivo do patch da task: test\/a\.test\.ts/i,
+    );
+  });
+
+  it('recusa fingerprint divergente mesmo com manutenção válida', async () => {
+    const fixture = await setup();
+    await writeMaintenance(fixture, ['dev/harness-maintenance.txt']);
+    await writeFile(path.join(fixture.sandbox.root, 'src/a.ts'), 'patch alterado\n');
+    await expect(defectRun(fixture)).rejects.toThrow(/fingerprint/i);
+  });
+
+  it('PASS com manutenção adotada disjunta do patch e candidate filho da nova base', async () => {
+    const fixture = await setup();
+    await writeMaintenance(fixture, ['dev/harness-maintenance.txt']);
+
+    const result = await defectRun(fixture);
+    const candidate = result.record.candidate_commit as string;
+
+    expect(result.record.outcome).toBe('PASS');
+    expect(result.record.reason_code).toBe('HARNESS_VALIDATION_DEFECT');
+    expect(result.record.source_base_sha).toBe(fixture.sourceBase);
+    expect(result.record.finalization_base_sha).toBe(fixture.finalizationBase);
+    expect(result.record.patch_fingerprint).toBe(fixture.binding.derived_patch_fingerprint);
+    expect(await parentShas(fixture.sandbox.root, candidate)).toEqual([fixture.finalizationBase]);
+    expect(await changedFiles(fixture.sandbox.root, candidate)).toEqual(['src/a.ts']);
+    expect((await readState(fixture.paths)).tasks.find((task) => task.id === 'M03B')).toMatchObject({
+      status: 'PASS',
+      attempts: 1,
+      accepted_commit: candidate,
+    });
+  });
+
+  it('não enfraquece NONDETERMINISTIC_VALIDATION: segue válido sem MaintenanceRecord', async () => {
+    const fixture = await setup();
+    const result = await run(fixture);
+    expect(result.record.outcome).toBe('PASS');
+    expect(result.record.reason_code).toBe('NONDETERMINISTIC_VALIDATION');
   });
 });

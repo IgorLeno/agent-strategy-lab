@@ -212,6 +212,41 @@ describe('launchWorker', () => {
     expect(outcome.record.timed_out).toBe(true);
     expect(await isSameProcessAlive(outcome.record.process)).toBe(false);
   }, 30_000);
+
+  // Regressão: o processo termina no mesmo instante do spawn, então o 'close'
+  // é emitido ANTES dos awaits de identidade/record/onStarted. Com o observador
+  // instalado tarde, a espera nunca resolvia e o dev-launch morria com top-level
+  // await pendurado (exit 13) em vez de classificar INFRA_ERROR.
+  it('captura o término de processo que encerra imediatamente', async () => {
+    await persistPacket();
+    const packet = buildTaskPacket({
+      task: loaded.byId.get('T1')!,
+      baseSha: await headSha(paths.repoRoot),
+      previousHandoff: null,
+    });
+    const missingCommandProfile: LauncherProfile = {
+      ...profile,
+      argv: ['agentlab-comando-que-nao-existe'],
+    };
+
+    // Repetido: a race é de ordenação de eventos, e uma passada só poderia
+    // esconder o defeito atrás do escalonamento de um run específico.
+    for (let repetition = 0; repetition < 3; repetition += 1) {
+      const outcome = await launchWorker({
+        paths,
+        profile: missingCommandProfile,
+        packet,
+        // Um timeout curto NÃO é o que faz o teste terminar: se o close se
+        // perder, a Promise nunca resolve e o caso estoura por timeout do
+        // vitest, não por classificação errada.
+        timeoutSecondsOverride: 30,
+      });
+      expect(outcome.classification).toBe('INFRA_ERROR');
+      expect(outcome.record.exit_code).toBe(127);
+      expect(outcome.record.timed_out).toBe(false);
+      expect(outcome.record.finished_at).not.toBeNull();
+    }
+  }, 30_000);
 });
 
 describe('dev-launch CLI', () => {
