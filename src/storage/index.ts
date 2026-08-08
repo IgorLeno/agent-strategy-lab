@@ -54,6 +54,7 @@ export {
   containsSecret,
   isRedactionPlaceholder,
   isSensitiveKeyName,
+  openMultilineSecretIndex,
   redactString,
   redactionPlaceholder,
   REDACTED_PLACEHOLDER,

@@ -19,11 +19,15 @@
  * exit code do agente. E com shell o mesmo caso viraria um `127` legítimo aos
  * olhos de quem lê o record, indistinguível de um comando que rodou e falhou.
  *
- * Captura de stdout e stderr é de M22, timeout e sinais são de M23 e M24A: aqui
- * o stdio é descartado e o processo é esperado até o fim.
+ * Duas portas de entrada sobre o mesmo spawn: `spawnProcess`, que descarta o
+ * stdio e só devolve o desfecho, e `startProcess`, que entrega o processo vivo
+ * com os pipes abertos para quem precisa ler a saída enquanto ela acontece.
+ *
+ * Timeout e sinais são de M23 e M24A: aqui o processo é esperado até o fim.
  */
 
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
+import type { Readable } from 'node:stream';
 
 /** Faixa de um exit status POSIX. Fora dela não é exit code de processo nenhum. */
 const MAX_EXIT_CODE = 255;
@@ -47,6 +51,24 @@ export interface SpawnProcessOptions {
 export interface ProcessResult {
   readonly exitCode: number | null;
   readonly signal: NodeJS.Signals | null;
+}
+
+/**
+ * Processo já iniciado, com os pipes de saída abertos e o desfecho pendente.
+ *
+ * `result` observa o processo desde o instante do spawn, e não a partir do
+ * momento em que alguém resolve esperá-lo: um processo que morre no mesmo tick
+ * em que nasce não perde o desfecho por um listener instalado tarde demais.
+ *
+ * Os pipes chegam ainda pausados. Ninguém lê a saída antes de quem recebeu
+ * este objeto começar a ler, então nenhum byte é perdido no caminho — mas
+ * alguém precisa lê-los: pipe cheio e sem leitor bloqueia o processo.
+ */
+export interface StartedProcess {
+  readonly child: ChildProcess;
+  readonly stdout: Readable;
+  readonly stderr: Readable;
+  readonly result: Promise<ProcessResult>;
 }
 
 /**
@@ -81,16 +103,72 @@ export class ProcessSpawnError extends Error {
  */
 export function spawnProcess(options: SpawnProcessOptions): Promise<ProcessResult> {
   const argv = assertArgv(options.argv);
-  const [command, ...args] = argv;
+  // stdio descartado pelo sistema, não por este processo: sem ninguém lendo um
+  // pipe, um processo falante enche o buffer do kernel e trava. Quem quer a
+  // saída usa `startProcess` — ou `captureProcess`, que já a persiste.
+  return launch(argv, options, 'ignore').result;
+}
 
-  return new Promise<ProcessResult>((resolve, reject) => {
-    const child = spawn(command, args, {
-      cwd: options.cwd,
-      env: options.env ?? process.env,
-      shell: false,
-      stdio: ['ignore', 'ignore', 'ignore'],
+/**
+ * Inicia `argv` e devolve o processo vivo, com stdout e stderr em pipe.
+ *
+ * Rejeita com `ProcessSpawnError` quando o processo não inicia — o mesmo caso
+ * que `spawnProcess` trata, resolvido aqui antes de qualquer efeito colateral
+ * de quem ia ler a saída.
+ */
+export function startProcess(options: SpawnProcessOptions): Promise<StartedProcess> {
+  const argv = assertArgv(options.argv);
+
+  return new Promise<StartedProcess>((resolve, reject) => {
+    const { child, result } = launch(argv, options, 'pipe');
+
+    // `result` só chega a quem chamou depois do `spawn`. Sem este consumidor, a
+    // rejeição do processo que nem iniciou viraria unhandledRejection — ninguém
+    // teve a chance de esperar por ela.
+    result.catch(() => {});
+
+    child.once('error', (error: unknown) => {
+      reject(new ProcessSpawnError(argv, describeCause(error), error));
     });
 
+    child.once('spawn', () => {
+      const { stdout, stderr } = child;
+      // Com `stdio: pipe` os dois existem; a checagem é o que permite tipá-los
+      // como presentes para quem recebe, em vez de empurrar a dúvida adiante.
+      if (stdout === null || stderr === null) {
+        reject(new ProcessSpawnError(argv, 'processo iniciou sem pipe de stdout ou stderr'));
+        return;
+      }
+      resolve({ child, stdout, stderr, result });
+    });
+  });
+}
+
+/**
+ * O spawn em si e o observador do desfecho, nascidos juntos: os listeners são
+ * instalados no mesmo tick do `spawn`, antes de qualquer await de quem chamou.
+ */
+function launch(
+  argv: readonly [string, ...string[]],
+  options: SpawnProcessOptions,
+  output: 'ignore' | 'pipe',
+): { child: ChildProcess; result: Promise<ProcessResult> } {
+  const [command, ...args] = argv;
+  const child = spawn(command, args, {
+    cwd: options.cwd,
+    env: options.env ?? process.env,
+    shell: false,
+    stdio: ['ignore', output, output],
+  });
+
+  return { child, result: observeOutcome(argv, child) };
+}
+
+function observeOutcome(
+  argv: readonly [string, ...string[]],
+  child: ChildProcess,
+): Promise<ProcessResult> {
+  return new Promise<ProcessResult>((resolve, reject) => {
     // `error` e `close` podem chegar os dois (é o que acontece no ENOENT), então
     // o primeiro desfecho é o que vale: o erro de início nunca é sobrescrito
     // pelo `close` sintético que vem atrás dele.

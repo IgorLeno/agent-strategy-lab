@@ -13,8 +13,20 @@
  * Preenchido por M21, M22, M23, M24A e M24B.
  */
 export {
+  captureProcess,
+  createRedactingStream,
+  ProcessCaptureError,
+  STDERR_LOG_NAME,
+  STDOUT_LOG_NAME,
+  type CaptureProcessOptions,
+  type CaptureResult,
+  type CapturedStream,
+} from './capture.js';
+export {
   spawnProcess,
+  startProcess,
   ProcessSpawnError,
   type ProcessResult,
   type SpawnProcessOptions,
+  type StartedProcess,
 } from './spawn.js';

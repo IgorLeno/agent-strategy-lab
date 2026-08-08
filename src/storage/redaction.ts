@@ -75,12 +75,22 @@ interface RedactionRule {
 }
 
 /**
+ * Marcadores do único secret que atravessa linhas. Ficam em uma fonte só porque
+ * a regra de formato e a de retenção incremental precisam concordar sobre onde
+ * o bloco começa: divergirem significa segurar o texto errado, ou nenhum.
+ */
+const PRIVATE_KEY_BEGIN_SOURCE = String.raw`-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----`;
+const PRIVATE_KEY_END_SOURCE = String.raw`-----END [A-Z0-9 ]*PRIVATE KEY-----`;
+const PRIVATE_KEY_BEGIN_PATTERN = new RegExp(PRIVATE_KEY_BEGIN_SOURCE, 'g');
+const PRIVATE_KEY_END_PATTERN = new RegExp(PRIVATE_KEY_END_SOURCE);
+
+/**
  * Ordem importa: os formatos conhecidos vêm antes da regra por nome de chave,
  * para que `ANTHROPIC_API_KEY=sk-ant-...` conserve o rótulo mais específico.
  */
 const RULES: readonly RedactionRule[] = [
   {
-    pattern: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g,
+    pattern: new RegExp(`${PRIVATE_KEY_BEGIN_SOURCE}[\\s\\S]*?${PRIVATE_KEY_END_SOURCE}`, 'g'),
     replace: () => redactionPlaceholder('private-key'),
   },
   {
@@ -169,6 +179,28 @@ export function redactString(value: string): string {
     redacted = redacted.replace(rule.pattern, rule.replace);
   }
   return redactSensitiveAssignments(redacted);
+}
+
+/**
+ * Índice onde começa um secret multi-linha ainda sem terminador, ou `null`.
+ *
+ * Existe para a captura incremental: redigir linha a linha nunca casaria o
+ * bloco inteiro de uma chave privada, e cada linha do corpo iria crua para o
+ * disco. Quem captura segura o texto a partir deste índice até o `END` chegar.
+ */
+export function openMultilineSecretIndex(text: string): number | null {
+  PRIVATE_KEY_BEGIN_PATTERN.lastIndex = 0;
+  let start: number | null = null;
+  let match: RegExpExecArray | null;
+
+  // O último `BEGIN` é o que interessa: os anteriores já foram fechados, ou
+  // nenhum corte seguro existiria depois deles.
+  while ((match = PRIVATE_KEY_BEGIN_PATTERN.exec(text)) !== null) {
+    start = match.index;
+  }
+  if (start === null) return null;
+
+  return PRIVATE_KEY_END_PATTERN.test(text.slice(start)) ? null : start;
 }
 
 /** Verdadeiro quando ainda há algo a redigir — usado para provar zero vazamento. */
