@@ -13,6 +13,8 @@ export { AgentEvent, parseAgentEvents } from './events.js';
 export {
   FAKE_ADAPTER_IDENTITY,
   runFakeAgent,
+  type FakeAgentEvent,
   type FakeAgentRun,
   type RunFakeAgentOptions,
+  type UnknownAgentEvent,
 } from './fake/index.js';
