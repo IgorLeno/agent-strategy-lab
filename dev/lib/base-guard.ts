@@ -1,4 +1,5 @@
-import { headSha, isWorkingTreeClean } from './git.js';
+import { changedFiles, gitOrThrow, headSha, isWorkingTreeClean, parentShas } from './git.js';
+import { assertAllowedMaintenanceFiles } from './maintenance.js';
 import type { HarnessPaths } from './paths.js';
 import type { DevelopmentState } from './schemas.js';
 
@@ -37,4 +38,71 @@ export async function checkProgressionBase(
     return `HEAD (${head}) não é a base esperada (${expected}) — houve trabalho fora do harness`;
   }
   return null;
+}
+
+export class AttemptHeadError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AttemptHeadError';
+  }
+}
+
+export interface AttemptHeadGuardInput {
+  readonly repoRoot: string;
+  /** `base_sha` do attempt que está sendo encerrado. */
+  readonly baseSha: string;
+  readonly authorizedHeadSha: string | null;
+  /**
+   * Libera EXATAMENTE um commit de manutenção sobre o `base_sha`: é o caso em
+   * que o próprio harness foi consertado para conseguir encerrar o attempt.
+   */
+  readonly allowPendingMaintenance: boolean;
+  /** Nome da operação, usado só na recusa por árvore suja. */
+  readonly label: string;
+}
+
+/**
+ * Guarda de HEAD comum a todo encerramento de attempt sem solução aceita
+ * (`dev-retry`, `dev-recover-infra`).
+ *
+ * Encerrar um attempt não pode acontecer sobre um repositório que mudou por
+ * fora: o record afirma `working_tree_clean` e `head_sha`, e essas duas
+ * afirmações precisam ser verdadeiras no instante em que são gravadas.
+ */
+export async function assertAttemptHead(input: AttemptHeadGuardInput): Promise<string> {
+  const head = await headSha(input.repoRoot);
+  if (!(await isWorkingTreeClean(input.repoRoot))) {
+    throw new AttemptHeadError(`working tree suja; ${input.label} recusado`);
+  }
+
+  if (!input.allowPendingMaintenance) {
+    if (head !== input.baseSha) {
+      throw new AttemptHeadError(`HEAD ${head} diverge do base_sha ${input.baseSha}`);
+    }
+    const count = Number(
+      (await gitOrThrow(input.repoRoot, ['rev-list', '--count', `${input.baseSha}..HEAD`])).trim(),
+    );
+    if (count !== 0) throw new AttemptHeadError('existe commit sobre o base_sha');
+    return head;
+  }
+
+  if (input.authorizedHeadSha !== input.baseSha) {
+    throw new AttemptHeadError('base_sha da tentativa diverge de authorized_head_sha');
+  }
+  const count = Number(
+    (await gitOrThrow(input.repoRoot, ['rev-list', '--count', `${input.baseSha}..HEAD`])).trim(),
+  );
+  if (count !== 1) {
+    throw new AttemptHeadError(
+      `--allow-pending-maintenance exige exatamente um commit; encontrados ${count}`,
+    );
+  }
+  const parents = await parentShas(input.repoRoot, head);
+  if (parents.length !== 1 || parents[0] !== input.baseSha) {
+    throw new AttemptHeadError(
+      'commit de manutenção não é filho direto do base_sha e authorized_head_sha',
+    );
+  }
+  assertAllowedMaintenanceFiles(await changedFiles(input.repoRoot, head));
+  return head;
 }

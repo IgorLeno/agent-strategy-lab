@@ -11,6 +11,8 @@
  * fica `null`, e a mensagem crua é preservada junto da versão normalizada.
  */
 
+import { sha256Hex } from './canonical.js';
+
 // ---------------------------------------------------------------------------
 // Transporte declarado no argv
 // ---------------------------------------------------------------------------
@@ -249,6 +251,80 @@ export function streamContractViolation(reading: ClaudeStreamReading): string | 
     return `stdout de stream-json trouxe ${reading.invalid_lines} linha(s) que não são objeto JSON: o stream está incompleto ou corrompido`;
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Falha terminal declarada pelo provider
+// ---------------------------------------------------------------------------
+
+/** Único `terminal_reason` que a CLI usa para término normal da sessão. */
+export const CLAUDE_TERMINAL_REASON_COMPLETED = 'completed';
+
+/** O texto do erro vai preservado, mas limitado: o record não é um log. */
+export const PROVIDER_FAILURE_MESSAGE_MAX_CHARS = 512;
+
+/**
+ * O que a mensagem `result` declara quando a SESSÃO terminou por falha do
+ * provider ou do transporte até ele, e não por conclusão do trabalho.
+ *
+ * `signals` guarda quais campos motivaram a classificação — a decisão fica
+ * auditável sem depender de reler o stdout.
+ */
+export interface ClaudeProviderFailure {
+  readonly is_error: boolean;
+  readonly terminal_reason: string | null;
+  /** Status HTTP quando a CLI conseguiu um; `null` em falha de transporte. */
+  readonly api_error_status: string | number | null;
+  readonly subtype: string | null;
+  readonly num_turns: number | null;
+  /** Texto do erro, truncado; a íntegra continua no stdout preservado. */
+  readonly message: string | null;
+  /** Hash do texto INTEIRO — o truncamento não apaga a identidade da mensagem. */
+  readonly message_sha256: string | null;
+  readonly signals: readonly string[];
+}
+
+/**
+ * Falha terminal do provider lida do `result` — NUNCA de texto de erro
+ * específico. `ENOTFOUND` é o diagnóstico de um incidente; o contrato são os
+ * campos que a CLI emite para declarar como a sessão terminou.
+ *
+ * A regra enumera o SUCESSO, não as falhas: `is_error=true` é falha, e
+ * `terminal_reason` diferente de `completed` é falha. Um motivo terminal novo
+ * cai automaticamente do lado seguro, em vez de passar por conclusão normal
+ * porque ninguém o acrescentou a uma lista. `terminal_reason` ausente não
+ * classifica nada sozinho: versão de CLI que não emite o campo continua sendo
+ * julgada só por `is_error`.
+ *
+ * Consumo de tokens NÃO entra na regra. Uma API pode falhar depois de gastar
+ * franquia; o que a classe descreve é o término da sessão, e o consumo real
+ * observado segue registrado como veio.
+ */
+export function providerTerminalFailure(
+  result: Record<string, unknown> | null,
+): ClaudeProviderFailure | null {
+  if (result === null) return null;
+
+  const isError = result['is_error'] === true;
+  const terminalReason = asString(result['terminal_reason']);
+  const signals: string[] = [];
+  if (isError) signals.push('is_error=true');
+  if (terminalReason !== null && terminalReason !== CLAUDE_TERMINAL_REASON_COMPLETED) {
+    signals.push(`terminal_reason=${terminalReason}`);
+  }
+  if (signals.length === 0) return null;
+
+  const message = typeof result['result'] === 'string' ? (result['result'] as string) : null;
+  return {
+    is_error: isError,
+    terminal_reason: terminalReason,
+    api_error_status: asInstant(result['api_error_status']),
+    subtype: asString(result['subtype']),
+    num_turns: asNumber(result['num_turns']),
+    message: message === null ? null : message.slice(0, PROVIDER_FAILURE_MESSAGE_MAX_CHARS),
+    message_sha256: message === null ? null : sha256Hex(message),
+    signals,
+  };
 }
 
 // ---------------------------------------------------------------------------

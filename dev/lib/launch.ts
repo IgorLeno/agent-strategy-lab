@@ -14,10 +14,12 @@ import {
   type CredentialProbe,
 } from './billing.js';
 import {
+  providerTerminalFailure,
   rateLimitWindowDeltas,
   readClaudeStream,
   streamContractViolation,
   usesClaudeStreamJson,
+  type ClaudeProviderFailure,
   type ClaudeStreamReading,
 } from './claude-stream.js';
 import {
@@ -231,6 +233,7 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
     | 'billing'
     | 'rate_limit_observations'
     | 'subscription_usage'
+    | 'provider_failure'
   > = {
     schema_version: DEV_SCHEMA_VERSION,
     task_id: packet.task_id,
@@ -307,6 +310,10 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
     ? readClaudeStream(stdout)
     : null;
 
+  // A falha terminal do provider é lida SEMPRE, mesmo quando outro diagnóstico
+  // vence a classificação: ela é evidência do run, não só um veredito.
+  const providerFailure = stream ? providerTerminalFailure(stream.result) : null;
+
   const record: LaunchRecord = {
     ...base,
     finished_at: new Date(finishedAtMs).toISOString(),
@@ -324,46 +331,100 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
         }
       : null,
     subscription_usage: measuresUsage ? buildSubscriptionUsage(usageBefore, usageAfter) : null,
+    provider_failure:
+      providerFailure === null ? null : { ...providerFailure, signals: [...providerFailure.signals] },
   };
   await writeLaunchRecord(paths, record);
 
-  if (cleanup.remaining.length > 0) {
-    const detail = cleanup.remaining.map((survivor) => `${survivor.pid} (${survivor.command})`);
+  const { classification, reason } = classifyTermination({
+    timedOut,
+    timeoutSeconds,
+    exitCode,
+    signal,
+    survivorsRemaining: cleanup.remaining,
+    streamViolation: stream ? streamContractViolation(stream) : null,
+    providerFailure,
+  });
+  return { record, classification, reason };
+}
+
+export interface TerminationFacts {
+  readonly timedOut: boolean;
+  readonly timeoutSeconds: number;
+  readonly exitCode: number | null;
+  readonly signal: NodeJS.Signals | null;
+  readonly survivorsRemaining: readonly { readonly pid: number; readonly command: string }[];
+  /** `null` quando o perfil não fala stream-json ou o transporte veio íntegro. */
+  readonly streamViolation: string | null;
+  readonly providerFailure: ClaudeProviderFailure | null;
+}
+
+/**
+ * PRECEDÊNCIA dos diagnósticos, do mais objetivo ao mais interpretado:
+ *
+ * 1. sobrevivente ao SIGKILL — a sessão contaminou a máquina;
+ * 2. timeout — o limite externo encerrou o grupo;
+ * 3. exit code do próprio launcher (125/126/127) e término por sinal;
+ * 4. contrato do transporte violado — o stdout não é legível;
+ * 5. falha terminal declarada pelo provider.
+ *
+ * A falha do provider vem por último porque os itens acima podem PRODUZI-LA:
+ * um worker morto por timeout também deixa result truncado ou com erro, e
+ * classificar isso como "provider caiu" trocaria a causa pelo sintoma. Ainda
+ * assim ela precede FINISHED — sessão que terminou por erro do provider nunca
+ * pode seguir para um fechamento que exige `AgentCompletionReport`, porque o
+ * protocolo do worker não chegou a completar.
+ */
+export function classifyTermination(facts: TerminationFacts): {
+  classification: LaunchOutcome['classification'];
+  reason: string;
+} {
+  if (facts.survivorsRemaining.length > 0) {
+    const detail = facts.survivorsRemaining.map(
+      (survivor) => `${survivor.pid} (${survivor.command})`,
+    );
     return {
-      record,
       classification: 'INFRA_ERROR',
       reason: `descendente do worker sobreviveu ao SIGKILL: ${detail.join(', ')}`,
     };
   }
-  if (timedOut) {
-    return { record, classification: 'TIMED_OUT', reason: `worker excedeu ${timeoutSeconds}s` };
+  if (facts.timedOut) {
+    return { classification: 'TIMED_OUT', reason: `worker excedeu ${facts.timeoutSeconds}s` };
   }
-  if (exitCode !== null && LAUNCH_FAILURE_EXIT_CODES.has(exitCode)) {
+  if (facts.exitCode !== null && LAUNCH_FAILURE_EXIT_CODES.has(facts.exitCode)) {
     return {
-      record,
       classification: 'INFRA_ERROR',
-      reason: `o comando do perfil não pôde ser executado (exit ${exitCode})`,
+      reason: `o comando do perfil não pôde ser executado (exit ${facts.exitCode})`,
     };
   }
-  if (exitCode === null) {
+  if (facts.exitCode === null) {
     return {
-      record,
       classification: 'INFRA_ERROR',
-      reason: `worker encerrado por sinal ${signal ?? 'desconhecido'} sem exit code`,
+      reason: `worker encerrado por sinal ${facts.signal ?? 'desconhecido'} sem exit code`,
     };
   }
-  // Por último, e só num término que de outra forma seria FINISHED: timeout e
-  // sobrevivente têm diagnóstico próprio e não podem ser mascarados por uma
-  // violação de transporte que é consequência deles.
-  const violation = stream ? streamContractViolation(stream) : null;
-  if (violation) {
+  if (facts.streamViolation) {
     return {
-      record,
       classification: 'INFRA_ERROR',
-      reason: `contrato do transporte stream-json violado: ${violation}`,
+      reason: `contrato do transporte stream-json violado: ${facts.streamViolation}`,
     };
   }
-  return { record, classification: 'FINISHED', reason: `worker saiu com exit ${exitCode}` };
+  if (facts.providerFailure) {
+    return {
+      classification: 'INFRA_ERROR',
+      reason: providerFailureReason(facts.providerFailure),
+    };
+  }
+  return { classification: 'FINISHED', reason: `worker saiu com exit ${facts.exitCode}` };
+}
+
+/** Motivo legível sem citar erro específico: o texto do provider entra como veio. */
+export function providerFailureReason(failure: ClaudeProviderFailure): string {
+  const detail = failure.message === null ? '' : `: ${failure.message.split('\n')[0] ?? ''}`;
+  return (
+    'sessão encerrada por falha terminal do provider antes de o protocolo do worker completar ' +
+    `(${failure.signals.join(', ')})${detail}`
+  );
 }
 
 /**

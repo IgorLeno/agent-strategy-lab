@@ -255,3 +255,36 @@ contra `original_completion_sha256` do record (fonte única do hash), e só ent�
 o slot corrente é liberado. Slot "mais recente" nunca pode reter estado de um
 attempt já encerrado, e a retomada depois de crash lê a evidência arquivada em
 vez de exigir o arquivo que o próprio fluxo removeu.
+
+[2026-08-09] Contexto: M33 — a CLI do Claude perdeu a conexão com a API
+(`ENOTFOUND`), fez dez `api_retry` e terminou com um `result` declarando
+`is_error: true` e `terminal_reason: "api_error"`, zero turno, zero token,
+exit 1.
+Mistake: o launcher só classificava INFRA_ERROR por exit code do `timeout`
+(125/126/127), término por sinal, sobrevivente ou violação do contrato do
+transporte. O stream estava íntegro e o exit não era nenhum daqueles, então o
+run passou por FINISHED, a tarefa foi para `RUNNING/FINALIZING` e o fechamento
+parou em "AgentCompletionReport ausente" — pedindo para sempre um arquivo que
+uma sessão sem inferência nenhuma jamais escreveria. O diagnóstico apontava
+para o worker; a causa era a rede.
+Rule: quando o provider declara COMO a sessão terminou, essa declaração é
+evidência de primeira classe e precede FINISHED. A regra enumera o sucesso
+(`is_error` falso E `terminal_reason` ausente ou `completed`), nunca a lista de
+falhas — motivo terminal novo cai do lado seguro sozinho, e texto de erro
+específico (`ENOTFOUND`) é diagnóstico de incidente, não contrato. Falha do
+provider entra DEPOIS de timeout, sobrevivente, exit de launcher e contrato de
+transporte, porque qualquer um deles pode produzi-la e trocar causa por sintoma
+esconde o diagnóstico real. Consumo não entra na classe: API pode cair depois
+de gastar franquia, e o consumo observado vai registrado como veio.
+
+[2026-08-09] Contexto: M33 — recuperar o attempt morto para poder repetir.
+Mistake: `.dev/logs/<task>.launch.json` e `.dev/logs/<task>.*.log` são do
+lançamento MAIS RECENTE. Liberar a tarefa para o attempt 2 sem copiar nada
+apagaria a única evidência do incidente na primeira retentativa — e o attempt 1
+viraria um buraco na história.
+Rule: attempt encerrado sem solução aceita arquiva a evidência ANTES de a
+tarefa voltar a READY, byte a byte e append-only, com hash e tamanho no record.
+Ordem transacional: evidência, record, state — nessa ordem, para que qualquer
+crash no meio convirja na repetição. `attempts` nunca diminui: attempt 1
+permanece na história como infraestrutura, não como tentativa reprovada, e
+lançar de novo continua sendo decisão explícita do usuário.

@@ -7,6 +7,7 @@ import {
   AttemptAbandonmentRecord,
   CloseManifest,
   CompletionRecord,
+  InfraFailedAttemptRecord,
   LaunchRecord,
   MaintenanceRecord,
   OrchestratedRevalidationRecord,
@@ -160,6 +161,34 @@ export function failedAttemptCompletionPath(
   attempt: number,
 ): string {
   return path.join(failedAttemptDir(paths, taskId, attempt), 'completion.fail.json');
+}
+
+/**
+ * Attempt encerrado por falha de infraestrutura do provider. Mora no diretório
+ * do próprio attempt, ao lado da evidência de um attempt reprovado pela
+ * validation: o diretório é "tudo o que sobrou deste attempt", e o nome do
+ * arquivo é que diz qual foi o desfecho.
+ */
+export function infraFailedAttemptPath(
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+): string {
+  return path.join(failedAttemptDir(paths, taskId, attempt), 'infra-failed-attempt.json');
+}
+
+/**
+ * Cópias byte-idênticas do que `.dev/logs/<task>.*` continha no attempt.
+ * Aquele slot é do lançamento MAIS RECENTE: um novo attempt o sobrescreve, e
+ * sem a cópia a evidência do incidente desapareceria na primeira retentativa.
+ */
+export function infraAttemptEvidencePath(
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+  name: 'launch.infra.json' | 'stdout.log' | 'stderr.log',
+): string {
+  return path.join(failedAttemptDir(paths, taskId, attempt), name);
 }
 
 export function preservedBundleManifestPath(
@@ -417,6 +446,24 @@ export const writeValidationFailedAttempt = (
   writeJsonOnce(
     validationFailedAttemptPath(paths, record.task_id, record.attempt),
     ValidationFailedAttemptRecord.parse(record),
+  );
+
+export const readInfraFailedAttempt = (
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+): Promise<InfraFailedAttemptRecord | null> =>
+  readOptional(infraFailedAttemptPath(paths, taskId, attempt), (input) =>
+    InfraFailedAttemptRecord.parse(input),
+  );
+
+export const writeInfraFailedAttempt = (
+  paths: HarnessPaths,
+  record: InfraFailedAttemptRecord,
+): Promise<void> =>
+  writeJsonOnce(
+    infraFailedAttemptPath(paths, record.task_id, record.attempt),
+    InfraFailedAttemptRecord.parse(record),
   );
 
 export const readPreservedBundleManifest = (

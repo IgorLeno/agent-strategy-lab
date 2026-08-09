@@ -342,6 +342,31 @@ export const BillingRecord = z
 export type BillingRecord = z.infer<typeof BillingRecord>;
 
 /**
+ * Falha TERMINAL declarada pelo provider na própria mensagem `result`.
+ *
+ * Existir aqui significa que a SESSÃO não terminou por conclusão do trabalho —
+ * o protocolo do worker pode nem ter começado. É por isso que o campo mora no
+ * LaunchRecord e não em `billing`: cobrança e término são perguntas distintas,
+ * e um run pode ter falhado depois de consumo real.
+ */
+export const ProviderTerminalFailure = z
+  .object({
+    is_error: z.boolean(),
+    terminal_reason: z.string().nullable(),
+    /** Status HTTP quando houve um; `null` em falha de transporte. */
+    api_error_status: z.union([z.string(), z.number()]).nullable(),
+    subtype: z.string().nullable(),
+    num_turns: z.number().nullable(),
+    /** Texto do erro truncado; a íntegra fica no stdout preservado. */
+    message: z.string().nullable(),
+    message_sha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+    /** Campos que motivaram a classificação — decisão auditável sem reler log. */
+    signals: z.array(nonEmpty).min(1),
+  })
+  .strict();
+export type ProviderTerminalFailure = z.infer<typeof ProviderTerminalFailure>;
+
+/**
  * O que a CLI OBSERVOU de limite durante o run — não o que a tarefa consumiu.
  * O nome é deliberado: a primeira observação pode chegar depois da primeira
  * chamada, e a janela é da conta inteira, não desta tarefa. Fica FORA de
@@ -512,6 +537,12 @@ export const LaunchRecord = z
      * é medição zerada, e nada histórico é reescrito para preenchê-la.
      */
     subscription_usage: SubscriptionUsage.nullable().default(null),
+    /**
+     * `null` quando o `result` não declarou término por falha do provider — o
+     * que inclui todo perfil que não fala stream-json. `null` NÃO significa
+     * "provider saudável": significa que não houve declaração a registrar.
+     */
+    provider_failure: ProviderTerminalFailure.nullable().default(null),
   })
   .strict();
 export type LaunchRecord = z.infer<typeof LaunchRecord>;
@@ -1351,6 +1382,79 @@ export const ValidationFailedAttemptRecord = z
     }
   });
 export type ValidationFailedAttemptRecord = z.infer<typeof ValidationFailedAttemptRecord>;
+
+/**
+ * Motivos pelos quais um attempt é arquivado SEM solução nenhuma para preservar.
+ * Append-only, como os demais códigos.
+ */
+export const INFRA_FAILED_ATTEMPT_REASON_CODES = ['PROVIDER_TERMINAL_FAILURE'] as const;
+export const InfraFailedAttemptReasonCode = z.enum(INFRA_FAILED_ATTEMPT_REASON_CODES);
+export type InfraFailedAttemptReasonCode = z.infer<typeof InfraFailedAttemptReasonCode>;
+
+/** Cópia byte-idêntica de um arquivo de evidência, com hash e tamanho. */
+export const ArchivedEvidenceFile = z
+  .object({
+    /** Caminho relativo ao devDir — o record é evidência portável. */
+    path: nonEmpty,
+    /** Origem de onde os bytes foram copiados, também relativa ao devDir. */
+    source_path: nonEmpty,
+    sha256: sha256Hex,
+    size_bytes: z.number().int().nonnegative(),
+  })
+  .strict();
+export type ArchivedEvidenceFile = z.infer<typeof ArchivedEvidenceFile>;
+
+/**
+ * Attempt encerrado por FALHA DE INFRAESTRUTURA do provider, antes de o
+ * protocolo do worker completar.
+ *
+ * Distinto de `ValidationFailedAttemptRecord` de propósito: lá existe uma
+ * solução que foi medida e reprovada; aqui não existe solução nenhuma — não há
+ * patch, não há candidate e não há `AgentCompletionReport`. Confundir os dois
+ * apagaria a única evidência de que nada chegou a ser produzido.
+ *
+ * O consumo real observado vai preservado como veio (`billing`,
+ * `subscription_usage`): zero permanece zero, e um incidente futuro com consumo
+ * parcial continuará mostrando o consumo que houve.
+ */
+export const InfraFailedAttemptRecord = z
+  .object({
+    schema_version: z.literal(DEV_SCHEMA_VERSION),
+    task_id: identifier,
+    attempt: z.number().int().positive(),
+    source_base_sha: shaHex,
+    profile_id: nonEmpty,
+    process: ProcessIdentity,
+    launch_id: z.string().uuid(),
+    launch_classification: z.literal('INFRA_ERROR'),
+    launch_record_sha256: sha256Hex,
+    exit_code: z.number().int().nullable(),
+    /** Timeout tem diagnóstico próprio e precedência: aqui é sempre `false`. */
+    timed_out: z.literal(false),
+    started_at: z.string().datetime(),
+    finished_at: z.string().datetime(),
+    provider_failure: ProviderTerminalFailure,
+    /**
+     * `stdout_stream` significa que o LaunchRecord é anterior ao campo e a
+     * falha foi derivada do stdout preservado do próprio attempt. Classificação
+     * feita depois do fato não pode se passar pela do lançamento.
+     */
+    provider_failure_source: z.enum(['launch_record', 'stdout_stream']),
+    billing: BillingRecord.nullable(),
+    subscription_usage: SubscriptionUsage.nullable(),
+    rate_limit_observations: RateLimitObservations.nullable(),
+    /** Sem report e sem handoff: o protocolo do worker não chegou a começar. */
+    worker_output_present: z.literal(false),
+    candidate_commit: z.literal(null),
+    working_tree_clean: z.literal(true),
+    head_sha: shaHex,
+    evidence: z.array(ArchivedEvidenceFile).min(1),
+    reason_code: InfraFailedAttemptReasonCode,
+    reason: nonEmpty,
+    archived_at: z.string().datetime(),
+  })
+  .strict();
+export type InfraFailedAttemptRecord = z.infer<typeof InfraFailedAttemptRecord>;
 
 // ---------------------------------------------------------------------------
 // Parsers com budget — schema válido mas acima do budget também é rejeição.

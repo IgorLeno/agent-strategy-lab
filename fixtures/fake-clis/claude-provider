@@ -1,0 +1,66 @@
+#!/usr/bin/env node
+// CLI Claude FALSA "completa" — fala as TRÊS coisas que o launcher precisa de
+// um perfil de assinatura: `auth status`, o probe `/usage` e um run em
+// `--output-format stream-json`. Existe para que os testes exercitem o caminho
+// inteiro (preflight -> baseline -> spawn -> classificação -> orquestrador) sem
+// gastar franquia e sem tocar a rede.
+//
+// A `claude` falsa ao lado continua recusando qualquer run: ela cobre doctor e
+// preflight, onde um run seria acidente. Aqui o run é o objeto do teste, e por
+// isso o cenário é obrigatório — sem `AGENTLAB_FAKE_STREAM` esta CLI também
+// recusa, para que nenhum teste "quase pago" passe despercebido.
+import { spawnSync } from 'node:child_process';
+import path from 'node:path';
+
+const args = process.argv.slice(2);
+const scenario = process.env.AGENTLAB_FAKE_STREAM;
+
+if (args.includes('--help') || args[0] === 'help') {
+  process.stdout.write('fake claude-provider 9.9.9\n');
+  process.exit(0);
+}
+
+if (args[0] === 'auth' && args[1] === 'status') {
+  process.stdout.write(
+    `${JSON.stringify(
+      {
+        loggedIn: true,
+        authMethod: 'claude.ai',
+        apiProvider: 'firstParty',
+        subscriptionType: 'pro',
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  process.exit(0);
+}
+
+// Probe `/usage`: local, sem inferência, com os dois cabeçalhos que o parser lê.
+if (args.includes('/usage')) {
+  process.stdout.write(
+    `${JSON.stringify({
+      type: 'result',
+      is_error: false,
+      num_turns: 0,
+      total_cost_usd: 0,
+      usage: { input_tokens: 0, output_tokens: 0 },
+      modelUsage: {},
+      result:
+        'Current session: 95% used · resets Aug 8, 9:40pm (America/Sao_Paulo)\n' +
+        'Current week (all models): 67% used · resets Aug 11, 3am (America/Sao_Paulo)\n',
+    })}\n`,
+  );
+  process.exit(0);
+}
+
+if (!scenario) {
+  process.stderr.write('fake claude-provider: run sem cenário declarado não é permitido\n');
+  process.exit(70);
+}
+
+// O stream em si é o mesmo fixture usado pelos testes de transporte: um único
+// lugar descreve o que a CLI emite.
+const stream = path.join(process.env.AGENTLAB_REPO_ROOT ?? process.cwd(), 'fixtures', 'fake-claude-stream.mjs');
+const run = spawnSync(process.execPath, [stream], { stdio: 'inherit', env: process.env });
+process.exit(run.status ?? 70);

@@ -1,13 +1,6 @@
 import { access, readFile } from 'node:fs/promises';
+import { assertAttemptHead } from './base-guard.js';
 import { canonicalJson, sha256Hex } from './canonical.js';
-import {
-  changedFiles,
-  gitOrThrow,
-  headSha,
-  isWorkingTreeClean,
-  parentShas,
-} from './git.js';
-import { assertAllowedMaintenanceFiles } from './maintenance.js';
 import type { HarnessPaths } from './paths.js';
 import { isSameProcessAlive } from './process-identity.js';
 import {
@@ -87,39 +80,17 @@ async function assertHead(
   state: DevelopmentState,
   baseSha: string,
 ): Promise<string> {
-  const head = await headSha(input.paths.repoRoot);
-  if (!(await isWorkingTreeClean(input.paths.repoRoot))) {
-    throw new RetryError('working tree suja; retry recusado');
-  }
-
-  if (!input.allowPendingMaintenance) {
-    if (head !== baseSha) throw new RetryError(`HEAD ${head} diverge do base_sha ${baseSha}`);
-    const count = Number(
-      (await gitOrThrow(input.paths.repoRoot, ['rev-list', '--count', `${baseSha}..HEAD`])).trim(),
-    );
-    if (count !== 0) throw new RetryError('existe commit sobre o base_sha');
-    return head;
-  }
-
-  if (state.authorized_head_sha !== baseSha) {
-    throw new RetryError('base_sha da tentativa diverge de authorized_head_sha');
-  }
-  const count = Number(
-    (await gitOrThrow(input.paths.repoRoot, ['rev-list', '--count', `${baseSha}..HEAD`])).trim(),
-  );
-  if (count !== 1) {
-    throw new RetryError(`--allow-pending-maintenance exige exatamente um commit; encontrados ${count}`);
-  }
-  const parents = await parentShas(input.paths.repoRoot, head);
-  if (parents.length !== 1 || parents[0] !== baseSha) {
-    throw new RetryError('commit de manutenção não é filho direto do base_sha e authorized_head_sha');
-  }
   try {
-    assertAllowedMaintenanceFiles(await changedFiles(input.paths.repoRoot, head));
+    return await assertAttemptHead({
+      repoRoot: input.paths.repoRoot,
+      baseSha,
+      authorizedHeadSha: state.authorized_head_sha,
+      allowPendingMaintenance: input.allowPendingMaintenance === true,
+      label: 'retry',
+    });
   } catch (error) {
     throw new RetryError(error instanceof Error ? error.message : String(error));
   }
-  return head;
 }
 
 function sameRecord(

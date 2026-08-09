@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { copyFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -5,7 +6,9 @@ import type { CommandRunner } from '../../dev/lib/billing.js';
 import {
   OUTPUT_FORMAT_NOT_DECLARED,
   OUTPUT_FORMAT_UNKNOWN,
+  PROVIDER_FAILURE_MESSAGE_MAX_CHARS,
   claudeOutputFormat,
+  providerTerminalFailure,
   rateLimitWindowDeltas,
   readClaudeStream,
   streamContractViolation,
@@ -14,7 +17,7 @@ import {
 import type { UsageCommandRunner } from '../../dev/lib/claude-usage.js';
 import { diagnose, type Check } from '../../dev/lib/doctor.js';
 import { headSha } from '../../dev/lib/git.js';
-import { launchWorker } from '../../dev/lib/launch.js';
+import { classifyTermination, launchWorker, type TerminationFacts } from '../../dev/lib/launch.js';
 import { buildTaskPacket } from '../../dev/lib/packet.js';
 import { resolveHarnessPaths, type HarnessPaths } from '../../dev/lib/paths.js';
 import { loadPlan, type LoadedPlan } from '../../dev/lib/plan.js';
@@ -598,6 +601,212 @@ describe('perfis --output-format json continuam intactos', () => {
     };
 
     expect(LaunchRecord.parse(legacy).rate_limit_observations).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Falha terminal do provider
+// ---------------------------------------------------------------------------
+
+describe('leitura da falha terminal declarada no result', () => {
+  it('A — result de conclusão normal não declara falha nenhuma', () => {
+    expect(
+      providerTerminalFailure({
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        terminal_reason: 'completed',
+        total_cost_usd: 1.2,
+      }),
+    ).toBeNull();
+    // Versão de CLI que não emite terminal_reason continua sendo julgada só
+    // por is_error — ausência não é falha.
+    expect(providerTerminalFailure({ type: 'result', is_error: false })).toBeNull();
+    expect(providerTerminalFailure(null)).toBeNull();
+  });
+
+  it('B/C — is_error e terminal_reason declaram a falha; o texto vai preservado e com hash', () => {
+    const message = 'API Error: Unable to connect to API (ENOTFOUND)';
+    const failure = providerTerminalFailure({
+      type: 'result',
+      subtype: 'success',
+      is_error: true,
+      terminal_reason: 'api_error',
+      api_error_status: null,
+      result: message,
+      num_turns: 1,
+      total_cost_usd: 0,
+    });
+
+    expect(failure).toMatchObject({
+      is_error: true,
+      terminal_reason: 'api_error',
+      api_error_status: null,
+      // `subtype: success` no mesmo result é justamente por que a classe não
+      // pode depender dele.
+      subtype: 'success',
+      num_turns: 1,
+      message,
+      message_sha256: createHash('sha256').update(message, 'utf8').digest('hex'),
+    });
+    expect(failure?.signals).toEqual(['is_error=true', 'terminal_reason=api_error']);
+  });
+
+  it('B — terminal_reason desconhecido cai do lado seguro sem lista de falhas', () => {
+    const failure = providerTerminalFailure({
+      type: 'result',
+      is_error: false,
+      terminal_reason: 'motivo_que_ninguem_previu',
+    });
+
+    expect(failure?.signals).toEqual(['terminal_reason=motivo_que_ninguem_previu']);
+  });
+
+  it('H — status HTTP numérico e consumo real são preservados como vieram', () => {
+    const failure = providerTerminalFailure({
+      type: 'result',
+      is_error: true,
+      terminal_reason: 'api_error',
+      api_error_status: 529,
+      result: 'API Error: 529 overloaded_error',
+      num_turns: 9,
+    });
+
+    expect(failure?.api_error_status).toBe(529);
+    expect(failure?.num_turns).toBe(9);
+  });
+
+  it('preserva o hash do texto INTEIRO mesmo quando a mensagem é truncada', () => {
+    const message = 'x'.repeat(PROVIDER_FAILURE_MESSAGE_MAX_CHARS + 100);
+    const failure = providerTerminalFailure({ type: 'result', is_error: true, result: message });
+
+    expect(failure?.message).toHaveLength(PROVIDER_FAILURE_MESSAGE_MAX_CHARS);
+    expect(failure?.message_sha256).toBe(
+      createHash('sha256').update(message, 'utf8').digest('hex'),
+    );
+  });
+});
+
+describe('precedência dos diagnósticos de término', () => {
+  const apiError = providerTerminalFailure({
+    type: 'result',
+    is_error: true,
+    terminal_reason: 'api_error',
+    result: 'API Error: Unable to connect to API (ENOTFOUND)',
+  });
+
+  const facts = (overrides: Partial<TerminationFacts> = {}): TerminationFacts => ({
+    timedOut: false,
+    timeoutSeconds: 1800,
+    exitCode: 1,
+    signal: null,
+    survivorsRemaining: [],
+    streamViolation: null,
+    providerFailure: null,
+    ...overrides,
+  });
+
+  it('I — timeout continua tendo precedência sobre a falha do provider', () => {
+    expect(facts({ timedOut: true, providerFailure: apiError, exitCode: 124 })).toBeDefined();
+    expect(classifyTermination(facts({ timedOut: true, providerFailure: apiError, exitCode: 124 })))
+      .toMatchObject({ classification: 'TIMED_OUT' });
+  });
+
+  it('I — sobrevivente e exit code de launcher também vêm antes', () => {
+    expect(
+      classifyTermination(
+        facts({ survivorsRemaining: [{ pid: 42, command: 'sleep' }], providerFailure: apiError }),
+      ),
+    ).toMatchObject({ classification: 'INFRA_ERROR', reason: expect.stringMatching(/SIGKILL/) });
+    expect(
+      classifyTermination(facts({ exitCode: 127, providerFailure: apiError })),
+    ).toMatchObject({ reason: expect.stringMatching(/não pôde ser executado/) });
+  });
+
+  it('J — transporte corrompido continua falhando fechado pelo contrato existente', () => {
+    expect(
+      classifyTermination(
+        facts({ streamViolation: 'linha inválida', providerFailure: apiError }),
+      ),
+    ).toMatchObject({
+      classification: 'INFRA_ERROR',
+      reason: expect.stringMatching(/contrato do transporte stream-json violado/),
+    });
+  });
+
+  it('B — sem diagnóstico anterior, a falha do provider vira INFRA_ERROR', () => {
+    expect(classifyTermination(facts({ providerFailure: apiError }))).toMatchObject({
+      classification: 'INFRA_ERROR',
+      reason: expect.stringMatching(/falha terminal do provider antes de o protocolo do worker/),
+    });
+  });
+
+  it('A — término sem nenhuma dessas marcas continua FINISHED', () => {
+    expect(classifyTermination(facts({ exitCode: 0 }))).toMatchObject({
+      classification: 'FINISHED',
+    });
+  });
+});
+
+describe('launchWorker com falha terminal do provider', () => {
+  it('B/C/D — api_error vira INFRA_ERROR e não pede AgentCompletionReport', async () => {
+    const outcome = await launchStream('api-error');
+
+    expect(outcome.classification).toBe('INFRA_ERROR');
+    expect(outcome.reason).toMatch(/falha terminal do provider/);
+    expect(outcome.reason).toMatch(/ENOTFOUND/);
+
+    const record = await readLaunchRecord(paths, 'T1');
+    expect(record?.exit_code).toBe(1);
+    expect(record?.timed_out).toBe(false);
+    expect(record?.provider_failure).toMatchObject({
+      is_error: true,
+      terminal_reason: 'api_error',
+      api_error_status: null,
+      message: 'API Error: Unable to connect to API (ENOTFOUND)',
+    });
+    // O protocolo do worker nunca começou: nada de report, nada de handoff.
+    expect(await readReport(paths, 'T1')).toBeNull();
+  });
+
+  it('G — infra sem inferência é preservada como zero, não como ausência', async () => {
+    await launchStream('api-error');
+
+    const record = await readLaunchRecord(paths, 'T1');
+    expect(record?.billing?.provider_estimated_api_equivalent_usd).toBe(0);
+    expect(record?.subscription_usage?.five_hour).toMatchObject({
+      before_used_pct: 41,
+      after_used_pct: 41,
+      consumed_pp: 0,
+      reason_code: 'OK',
+    });
+    expect(record?.rate_limit_observations).toMatchObject({ observed: [], window_deltas: [] });
+  });
+
+  it('H — falha de API com consumo real NÃO perde billing nem observação', async () => {
+    const outcome = await launchStream('api-error-with-usage');
+
+    expect(outcome.classification).toBe('INFRA_ERROR');
+    const record = await readLaunchRecord(paths, 'T1');
+    expect(record?.provider_failure?.api_error_status).toBe(529);
+    expect(record?.billing?.provider_estimated_api_equivalent_usd).toBe(1.2345);
+    expect(record?.rate_limit_observations?.observed).toHaveLength(1);
+  });
+
+  it('B — motivo terminal desconhecido também não passa por FINISHED', async () => {
+    const outcome = await launchStream('terminal-reason-only');
+
+    expect(outcome.classification).toBe('INFRA_ERROR');
+    expect(outcome.record.provider_failure?.signals).toEqual([
+      'terminal_reason=motivo_novo_da_cli',
+    ]);
+  });
+
+  it('A — run normal continua FINISHED e sem provider_failure', async () => {
+    const outcome = await launchStream('no-events');
+
+    expect(outcome.classification).toBe('FINISHED');
+    expect(outcome.record.provider_failure).toBeNull();
   });
 });
 

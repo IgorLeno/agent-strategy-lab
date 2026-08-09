@@ -22,7 +22,11 @@ export interface HarnessPaths {
   readonly recoveriesDir: string;
   readonly finalizationsDir: string;
   readonly revalidationsDir: string;
-  /** Attempts rejeitados pela validation oficial, com a solução preservada. */
+  /**
+   * Attempts encerrados sem solução aceita: rejeitados pela validation oficial
+   * (com a solução preservada) ou abortados por falha de infraestrutura do
+   * provider (sem solução nenhuma a preservar).
+   */
   readonly failedAttemptsDir: string;
   readonly validationLogsDir: string;
 }

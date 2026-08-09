@@ -73,6 +73,53 @@ switch (scenario) {
     write(result());
     break;
 
+  // Incidente REAL da M33: dez `api_retry`, nenhum turno, e um result final que
+  // declara término por erro de API. Zero token, zero custo — o transporte
+  // nunca chegou ao provider. O texto do erro é reproduzido como veio.
+  case 'api-error':
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      write({ type: 'system', subtype: 'api_retry', attempt, max_retries: 10, error_status: null });
+    }
+    write(
+      result({
+        is_error: true,
+        terminal_reason: 'api_error',
+        api_error_status: null,
+        result: 'API Error: Unable to connect to API (ENOTFOUND)',
+        num_turns: 1,
+        total_cost_usd: 0,
+        usage: { input_tokens: 0, output_tokens: 0 },
+        modelUsage: {},
+      }),
+    );
+    process.exitCode = 1;
+    break;
+
+  // Mesma CLASSE de falha, com consumo real antes de a API cair: o consumo
+  // observado precisa sobreviver à classificação.
+  case 'api-error-with-usage':
+    write(rateLimit(52, WINDOW_A));
+    write(
+      result({
+        is_error: true,
+        terminal_reason: 'api_error',
+        api_error_status: 529,
+        result: 'API Error: 529 overloaded_error',
+        num_turns: 9,
+        total_cost_usd: 1.2345,
+        usage: { input_tokens: 4200, output_tokens: 900 },
+      }),
+    );
+    process.exitCode = 1;
+    break;
+
+  // Falha terminal SEM `is_error`: motivo terminal desconhecido cai do lado
+  // seguro sem que ninguém precise acrescentá-lo a uma lista.
+  case 'terminal-reason-only':
+    write(result({ terminal_reason: 'motivo_novo_da_cli' }));
+    process.exitCode = 1;
+    break;
+
   default:
     write(rateLimit(41.5, WINDOW_A));
     write(result());

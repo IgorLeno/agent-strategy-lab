@@ -60,13 +60,39 @@ dev-recover      reconcilia plano + commits + completions + runtime
   re-executada pelo orquestrador falhou.
 - **TIMED_OUT** — timeout externo encerrou o process group. Não avança.
   `MISSCOPED` é reclassificação humana posterior, nunca decisão do timeout.
-- **INFRA_ERROR** — launcher falhou (exit 125/126/127, término por sinal), ou
-  `RUNNING/EXECUTING` com processo inexistente.
+- **INFRA_ERROR** — launcher falhou (exit 125/126/127, término por sinal),
+  `RUNNING/EXECUTING` com processo inexistente, ou o `result` do provider
+  declarou término por falha (ver abaixo).
 - **Guarda operacional incompleta ≠ FAIL** — draft/report ausente, tree suja,
   commit não localizado ou fora do escopo deixam a tarefa em
   `RUNNING/FINALIZING` com diagnóstico. Retry é legítimo.
 
 `FAIL`, `TIMED_OUT`, `MISSCOPED` e `INFRA_ERROR` **param o fluxo**.
+
+### Falha terminal do provider ≠ guarda operacional
+
+No transporte `stream-json`, a mensagem `result` diz **como a sessão terminou**.
+`is_error: true`, ou `terminal_reason` diferente de `completed`, significa que a
+sessão morreu por falha do provider ou do transporte até ele — o protocolo do
+worker pode nem ter começado. Isso é `INFRA_ERROR`, nunca fechamento pendente:
+cobrar `AgentCompletionReport` de uma sessão que nunca falou com o modelo pede
+para sempre um arquivo que ninguém vai escrever.
+
+A regra enumera o **sucesso**, não as falhas: motivo terminal novo cai do lado
+seguro sozinho. Nenhum texto de erro específico entra no contrato — `ENOTFOUND`
+é diagnóstico de um incidente, não regra. Consumo também não entra: API pode
+cair depois de gastar franquia, e o consumo observado vai registrado como veio.
+
+Precedência dos diagnósticos, do mais objetivo ao mais interpretado:
+sobrevivente ao SIGKILL → timeout → exit code do launcher / término por sinal →
+contrato do transporte violado → falha terminal do provider. Os quatro
+primeiros podem PRODUZIR o quinto, e trocar a causa pelo sintoma esconderia o
+diagnóstico real.
+
+A evidência fica em `LaunchRecord.provider_failure` (`terminal_reason`,
+`api_error_status`, texto do erro truncado + hash da íntegra, e os `signals` que
+motivaram a classificação), ao lado de `billing`, `subscription_usage` e
+`rate_limit_observations` — que continuam intactos.
 
 `dev-orchestrate` também para em `LIMIT_REACHED` (exit 9) quando esgota
 `--max-iterations` com tarefa ainda pendente — sair com 0 e `ALL_DONE` ali
@@ -237,8 +263,30 @@ pnpm dev-next                 # imprime o packet da próxima tarefa (não grava)
 pnpm dev-launch --task M01    # um processo novo para uma tarefa
 pnpm dev-close                # valida e fecha a tarefa RUNNING
 pnpm dev-recover --dry-run    # relata reconciliações sem gravar
+pnpm dev-recover-infra --task M33 --reason '...'   # attempt morto por falha do provider
 pnpm dev-orchestrate --profile claude-build-worker-subscription-v1
 ```
+
+`dev-recover-infra` arquiva o attempt que morreu por **falha terminal do
+provider** e devolve a tarefa a `READY` sem tocar em `attempts` — o attempt
+continua na história como infraestrutura, e repetir é decisão do usuário: o
+comando não lança nada.
+
+Antes de liberar, ele copia para
+`.dev/failed-attempts/<task>/attempt-<n>/` os bytes exatos de
+`launch.infra.json`, `stdout.log` e `stderr.log`, com hash e tamanho no
+`InfraFailedAttemptRecord`: o slot `.dev/logs/<task>.*` é do lançamento MAIS
+RECENTE, e sem a cópia a evidência do incidente sumiria na primeira
+retentativa. É fail-closed — recusa se houver patch na árvore, commit sobre o
+`base_sha`, candidate commit, output do worker, timeout ou sobrevivente. Nada
+de `AgentCompletionReport`, patch ou candidate é inventado: não houve solução.
+
+LaunchRecord gravado ANTES do campo `provider_failure` não é reescrito à mão —
+isso seria fabricar evidência. A falha é DERIVADA do stdout preservado do
+próprio attempt, e só quando o transporte está íntegro (argv declarando
+stream-json, exatamente um `result`, nenhuma linha inválida). A origem fica
+registrada em `provider_failure_source`: classificação feita depois do fato
+não se passa pela do lançamento.
 
 Exit codes: `dev-doctor` 3 = algum check FAIL · `dev-next` 4 = fluxo
 parado/ocupado · `dev-close` 5 = FAIL, 6 = guarda pendente · `dev-launch` 7 = TIMED_OUT, 8 = INFRA_ERROR ·
@@ -249,8 +297,8 @@ comando que muda estado).
 
 `.dev/orchestrator.lock` é criado com `wx` (criação exclusiva) por todo
 comando que **muda estado**: `dev-init`, `dev-launch`, `dev-close`,
-`dev-recover` (sem `--dry-run`) e `dev-orchestrate` — este último segura o
-lock pelo loop inteiro. `dev-next` e `dev-recover --dry-run` são somente
+`dev-recover` (sem `--dry-run`), `dev-recover-infra` e `dev-orchestrate` —
+este último segura o lock pelo loop inteiro. `dev-next` e `dev-recover --dry-run` são somente
 leitura e não pegam lock.
 
 Sem isso, dois orquestradores podiam ler `READY`, gerar packet e lançar dois
