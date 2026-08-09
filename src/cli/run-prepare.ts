@@ -44,6 +44,7 @@ export interface PrepareRunOptions {
 
 export interface PreparedRun {
   readonly runId: string;
+  readonly dataDir: string;
   readonly runDir: string;
   readonly executionDir: string;
   readonly envelopePath: string;
@@ -118,6 +119,7 @@ async function prepareInRunDirectory(
 
     return {
       runId: runDirectory.runId,
+      dataDir: runDirectory.dataDir,
       runDir: runDirectory.runDir,
       executionDir: runDirectory.executionDir,
       envelopePath,
