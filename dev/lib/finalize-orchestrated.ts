@@ -1,6 +1,8 @@
 import { readFile } from 'node:fs/promises';
+import { jsonBytes, writeFileAtomic } from './atomic.js';
 import { canonicalJson, canonicalSha256, sha256Hex } from './canonical.js';
 import type { CloseOutcome } from './close.js';
+import { materializeFailedAttemptSource } from './failed-attempt-source.js';
 import {
   changedFiles,
   commitExists,
@@ -21,13 +23,16 @@ import type { HarnessPaths } from './paths.js';
 import type { LoadedPlan } from './plan.js';
 import { isSameProcessAlive } from './process-identity.js';
 import {
+  completionPath,
   handoffDraftPath,
+  originalCompletionEvidencePath,
   readCloseManifest,
   readCompletion,
   readHandoff,
   readLaunchRecord,
   readOrchestratedFinalization,
   readPacket,
+  readRevalidationSourceBinding,
   reportPath,
   writeCloseManifest,
   writeCompletion,
@@ -37,11 +42,12 @@ import {
 import {
   AgentCompletionReport,
   CommitMessage,
+  CompletionRecord,
   DEV_SCHEMA_VERSION,
   OrchestratedFinalizationRecord,
   parseHandoffDraft,
   type AgentCompletionReport as AgentCompletionReportType,
-  type CompletionRecord,
+  type CompletionRecord as CompletionRecordType,
   type DevelopmentState,
   type HandoffDraft,
   type HandoffRecord,
@@ -78,7 +84,9 @@ export interface FinalizeOrchestratedInput {
   readonly afterFinalizationWritten?: (
     record: OrchestratedFinalizationRecordType,
   ) => Promise<void>;
-  readonly afterCompletionWritten?: (completion: CompletionRecord) => Promise<void>;
+  readonly afterCompletionWritten?: (completion: CompletionRecordType) => Promise<void>;
+  /** Ponto de crash injetado pelos testes, entre selar a fonte do FAIL e publicá-lo. */
+  readonly afterFailSourceSealed?: (completion: CompletionRecordType) => Promise<void>;
 }
 
 interface SourceEvidence {
@@ -334,7 +342,7 @@ function closeOutcome(
   kind: 'PASS' | 'FAIL' | 'PENDING',
   taskId: string,
   reason: string,
-  completion: CompletionRecord | null,
+  completion: CompletionRecordType | null,
   handoff: HandoffRecord | null,
   differences: readonly string[] = [],
 ): CloseOutcome {
@@ -351,6 +359,24 @@ async function stayPending(
   return closeOutcome('PENDING', taskId, reason, null, null);
 }
 
+/**
+ * Um FAIL cuja fonte precisa ficar selada: a solução foi ENTREGUE pelo worker e
+ * REPROVADA pelo gate oficial. É o único desfecho em que sobra um patch
+ * rejeitado no disco e uma intervenção humana possível depois — revalidação
+ * auditada ou reparo por `dev-retry-failed`.
+ *
+ * Os outros FAILs não qualificam e não devem qualificar: worker FAILURE tem
+ * `dev-retry`, e um FAIL por HEAD/index/fingerprint que se moveram durante o
+ * gate não tem validation reprovada nenhuma para revalidar ou reparar.
+ */
+function failNeedsSourceBinding(
+  source: SourceEvidence,
+  validations: readonly ValidationResult[],
+): boolean {
+  if (source.report.self_reported_result !== 'SUCCESS') return false;
+  return validations.some((result) => result.exit_code !== 0 || result.timed_out);
+}
+
 async function finishFail(
   input: FinalizeOrchestratedInput,
   state: DevelopmentState,
@@ -361,7 +387,7 @@ async function finishFail(
 ): Promise<CloseOutcome> {
   const timestamp = (input.now ?? (() => new Date().toISOString()))();
   const differences = discrepancies(source);
-  const completion: CompletionRecord = {
+  const completion: CompletionRecordType = {
     schema_version: DEV_SCHEMA_VERSION,
     task_id: input.taskId,
     status: 'FAIL',
@@ -380,6 +406,35 @@ async function finishFail(
     finalization_mode: 'normal',
     closed_at: timestamp,
   };
+
+  // Ordem deliberada: a fonte é selada ANTES de o veredito existir no slot
+  // corrente e antes de o state ir para FAIL.
+  //
+  // O motivo é o incidente que esta ordem existe para não repetir: gravar
+  // `status = FAIL` junto com um CompletionRecord oficial e um patch rejeitado,
+  // sem o binding, produz uma tarefa que nenhuma intervenção suportada
+  // consegue mais tocar. Selar primeiro significa que todo estado observável
+  // depois de um crash é retomável: ou a fonte ainda não existe e o attempt
+  // inteiro se repete, ou ela existe e a selagem converge para os MESMOS bytes
+  // (`adoptSealedFail`).
+  //
+  // Os bytes do binding são derivados de `jsonBytes` — exatamente os que
+  // `writeCompletion` vai gravar —, e não de uma segunda serialização: o hash
+  // publicado tem que ser o do arquivo que existe no fim.
+  const completionBytes = jsonBytes(CompletionRecord.parse(completion));
+  if (failNeedsSourceBinding(source, validations)) {
+    await materializeFailedAttemptSource({
+      paths: input.paths,
+      taskId: input.taskId,
+      attempt: getTaskState(state, input.taskId).attempts,
+      completionBytes,
+      stateBaseSha: source.packet.base_sha,
+      provenance: 'derived_at_official_validation_failure',
+      now: () => timestamp,
+    });
+    await input.afterFailSourceSealed?.(completion);
+  }
+
   await writeCompletion(input.paths, completion);
   await writeState(
     input.paths,
@@ -395,10 +450,70 @@ async function finishFail(
   return closeOutcome('FAIL', input.taskId, reason, completion, null, differences);
 }
 
+/**
+ * Retomada de um FAIL cuja fonte já foi selada mas cujo veredito não chegou ao
+ * state — o crash entre `materializeFailedAttemptSource` e `writeState`.
+ *
+ * O attempt já terminou e já foi medido: reexecutar o gate aqui poderia
+ * produzir um veredito diferente do que está selado e, no limite, promover a
+ * PASS um attempt que tem um FAIL oficial arquivado. Então a retomada não
+ * reavalia nada — republica os bytes já selados e converge.
+ */
+async function adoptSealedFail(
+  input: FinalizeOrchestratedInput,
+  state: DevelopmentState,
+  attempt: number,
+): Promise<CloseOutcome | null> {
+  const binding = await readRevalidationSourceBinding(input.paths, input.taskId, attempt);
+  if (!binding) return null;
+
+  const archiveFile = originalCompletionEvidencePath(input.paths, input.taskId, attempt);
+  const archived = await readFile(archiveFile).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  });
+  if (archived === null) {
+    throw new OrchestratedFinalizationError(
+      `source binding do attempt ${attempt} existe sem ${archiveFile}`,
+    );
+  }
+  if (sha256Hex(archived) !== binding.original_completion_sha256) {
+    throw new OrchestratedFinalizationError('CompletionRecord FAIL selado diverge do source binding');
+  }
+  const completion = parseJson(archiveFile, archived, (value) => CompletionRecord.parse(value));
+  if (completion.task_id !== input.taskId || completion.status !== 'FAIL') {
+    throw new OrchestratedFinalizationError('CompletionRecord FAIL selado pertence a outro desfecho');
+  }
+
+  const failed = completion.orchestrator_evidence.revalidation.find(
+    (result) => result.exit_code !== 0 || result.timed_out,
+  );
+  const reason = failed
+    ? `validação oficial falhou: ${failed.argv.join(' ')} (exit ${
+        failed.exit_code ?? 'null'
+      }) — selagem do FAIL retomada`
+    : 'selagem do FAIL retomada';
+
+  // Bytes idênticos aos selados: o slot corrente não pode divergir do archive.
+  await writeFileAtomic(completionPath(input.paths, input.taskId), archived.toString('utf8'));
+  await writeState(
+    input.paths,
+    withTaskState(state, input.taskId, {
+      status: 'FAIL',
+      phase: null,
+      candidate_commit: null,
+      accepted_commit: null,
+      diagnostics: reason,
+      finished_at: completion.closed_at,
+    }),
+  );
+  return closeOutcome('FAIL', input.taskId, reason, completion, null, completion.discrepancies);
+}
+
 function deterministicCompletion(
   record: OrchestratedFinalizationRecordType,
   source: SourceEvidence,
-): CompletionRecord {
+): CompletionRecordType {
   const differences = discrepancies(source);
   return {
     schema_version: DEV_SCHEMA_VERSION,
@@ -490,7 +605,7 @@ export async function verifyOrchestratedFinalizationRecord(
 export async function sealOrchestratedFinalization(
   input: FinalizeOrchestratedInput,
   record: OrchestratedFinalizationRecordType,
-): Promise<{ completion: CompletionRecord; handoff: HandoffRecord }> {
+): Promise<{ completion: CompletionRecordType; handoff: HandoffRecord }> {
   const source = await verifyOrchestratedFinalizationRecord(input, record);
   const completion = deterministicCompletion(record, source);
   const handoff = deterministicHandoff(record, source);
@@ -582,6 +697,14 @@ export async function finalizeOrchestratedTask(
   }
   if (state.tasks.some((candidate) => candidate.id !== input.taskId && candidate.status === 'RUNNING')) {
     return stayPending(input.paths, state, input.taskId, 'outra tarefa está RUNNING');
+  }
+
+  // Simétrico ao replay do OrchestratedFinalizationRecord acima: um FAIL cuja
+  // fonte já está selada é uma decisão publicada deste attempt, e a retomada a
+  // conclui em vez de reabrir o gate.
+  if (task.attempts > 0) {
+    const adopted = await adoptSealedFail(input, state, task.attempts);
+    if (adopted) return adopted;
   }
 
   let source: SourceEvidence;

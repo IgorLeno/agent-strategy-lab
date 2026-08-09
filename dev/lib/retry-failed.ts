@@ -7,6 +7,10 @@ import {
   type PreservedBundle,
 } from './failed-attempt-bundle.js';
 import {
+  FailedAttemptSourceError,
+  materializeFailedAttemptSource,
+} from './failed-attempt-source.js';
+import {
   headSha,
   isWorkingTreeClean,
   patchFingerprint,
@@ -91,6 +95,11 @@ export interface RetryFailedAttemptResult {
   readonly completionArchivePath: string;
   /** `true` quando esta execução foi a que removeu o slot corrente. */
   readonly releasedCurrentCompletion: boolean;
+  /**
+   * `true` quando o source binding não existia e foi derivado agora, por
+   * compatibilidade com um FAIL anterior à selagem automática.
+   */
+  readonly bindingRecovered: boolean;
 }
 
 async function readRequired(file: string, label: string): Promise<Buffer> {
@@ -123,6 +132,8 @@ interface FailedSource {
   readonly files: string[];
   readonly binding: RevalidationSourceBinding;
   readonly bindingSha256: string;
+  /** `true` quando esta execução derivou o binding de um FAIL legado. */
+  readonly bindingRecovered: boolean;
   readonly completion: CompletionRecord;
   readonly completionBytes: Buffer;
   readonly completionSha256: string;
@@ -241,10 +252,57 @@ async function loadFailedSource(input: RetryFailedAttemptInput): Promise<FailedS
     throw new RetryFailedAttemptError('FAIL sem validation oficial malsucedida');
   }
 
-  const bindingBytes = await readRequired(
-    sourceBindingPath(paths, taskId, attempt),
-    'RevalidationSourceBinding',
-  );
+  const launchBytes = await readRequired(launchRecordPath(paths, taskId), 'LaunchRecord');
+  const launch = parseJson('LaunchRecord', launchBytes, (value) => LaunchRecord.parse(value));
+  if (launch.task_id !== taskId) {
+    throw new RetryFailedAttemptError(`LaunchRecord pertence a ${launch.task_id}`);
+  }
+
+  // Repositório antes do binding: derivar a fonte de um FAIL legado ESCREVE
+  // evidência, e escrever evidência a partir de um repositório que já não é o
+  // do FAIL seria selar o patch errado.
+  const head = await headSha(paths.repoRoot);
+  if (head !== state.authorized_head_sha) {
+    throw new RetryFailedAttemptError(
+      `HEAD ${head} diverge do authorized_head_sha ${state.authorized_head_sha}`,
+    );
+  }
+  if ((await stagedFiles(paths.repoRoot)).length > 0) {
+    throw new RetryFailedAttemptError('index contém mudanças staged');
+  }
+
+  // FAIL LEGADO: antes de o finalization selar a fonte no instante do FAIL, um
+  // attempt reprovado terminava sem binding e ficava impossível de arquivar —
+  // era o beco sem saída do M39B. O binding pode ser DERIVADO agora, porque
+  // toda a evidência necessária continua no disco e é conferida acima; o que
+  // não pode é ser inventado. Por isso a derivação passa pelo mesmo helper
+  // fail-closed do caminho normal, e a proveniência registra que ela aconteceu
+  // na recuperação, não no FAIL original.
+  const bindingFile = sourceBindingPath(paths, taskId, attempt);
+  let bindingBytes = await readIfPresent(bindingFile);
+  const bindingRecovered = bindingBytes === null;
+  if (bindingBytes === null) {
+    if (task.base_sha === null) throw new RetryFailedAttemptError('FAIL sem base_sha no state');
+    try {
+      await materializeFailedAttemptSource({
+        paths,
+        taskId,
+        attempt,
+        completionBytes,
+        stateBaseSha: task.base_sha,
+        provenance: 'derived_during_failed_attempt_recovery',
+        now: input.now ?? (() => new Date().toISOString()),
+      });
+    } catch (error) {
+      if (error instanceof FailedAttemptSourceError) {
+        throw new RetryFailedAttemptError(
+          `RevalidationSourceBinding ausente e não derivável: ${error.message}`,
+        );
+      }
+      throw error;
+    }
+    bindingBytes = await readRequired(bindingFile, 'RevalidationSourceBinding');
+  }
   const binding = parseJson('RevalidationSourceBinding', bindingBytes, (value) =>
     RevalidationSourceBinding.parse(value),
   );
@@ -273,27 +331,12 @@ async function loadFailedSource(input: RetryFailedAttemptInput): Promise<FailedS
   const forbidden = files.find(isForbiddenRevalidationPath);
   if (forbidden) throw new RetryFailedAttemptError(`caminho proibido: ${forbidden}`);
 
-  const launchBytes = await readRequired(launchRecordPath(paths, taskId), 'LaunchRecord');
-  const launch = parseJson('LaunchRecord', launchBytes, (value) => LaunchRecord.parse(value));
-  if (launch.task_id !== taskId) {
-    throw new RetryFailedAttemptError(`LaunchRecord pertence a ${launch.task_id}`);
-  }
-
-  const head = await headSha(paths.repoRoot);
-  if (head !== state.authorized_head_sha) {
-    throw new RetryFailedAttemptError(
-      `HEAD ${head} diverge do authorized_head_sha ${state.authorized_head_sha}`,
-    );
-  }
-  if ((await stagedFiles(paths.repoRoot)).length > 0) {
-    throw new RetryFailedAttemptError('index contém mudanças staged');
-  }
-
   return {
     attempt,
     files,
     binding,
     bindingSha256: sha256Hex(bindingBytes),
+    bindingRecovered,
     completion,
     completionBytes,
     completionSha256: sha256Hex(completionBytes),
@@ -488,6 +531,7 @@ export async function retryFailedAttempt(
       alreadyArchived: true,
       completionArchivePath,
       releasedCurrentCompletion,
+      bindingRecovered: source.bindingRecovered,
     };
   }
 
@@ -540,6 +584,7 @@ export async function retryFailedAttempt(
     alreadyArchived: archived !== null,
     completionArchivePath,
     releasedCurrentCompletion,
+    bindingRecovered: source.bindingRecovered,
   };
 }
 

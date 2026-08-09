@@ -42,6 +42,7 @@ async function main(): Promise<void> {
     failed_attempt_record: result.recordPath,
     archived_completion: result.completionArchivePath,
     released_current_completion: result.releasedCurrentCompletion,
+    source_binding_recovered: result.bindingRecovered,
   });
 }
 

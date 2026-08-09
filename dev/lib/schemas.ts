@@ -1022,6 +1022,30 @@ export type OrchestratedFinalizationRecord = z.infer<typeof OrchestratedFinaliza
 // (.dev/revalidations/<task>/attempt-<n>/revalidation-<sequence>.json)
 // ---------------------------------------------------------------------------
 
+/**
+ * Em que momento o binding foi derivado. O binding NUNCA afirma que o
+ * fingerprint existia no instante histórico do FAIL — ele afirma quando foi
+ * observado, e é por isso que a proveniência é um campo e não um detalhe:
+ *
+ * - `derived_at_official_validation_failure`: derivado pelo próprio
+ *   finalization, no instante em que a validation oficial reprovou o attempt.
+ *   É o caminho normal desde que o FAIL passou a nascer selado.
+ * - `derived_during_revalidation_preflight`: derivado depois, no preflight de
+ *   uma revalidation auditada. Único valor existente antes desta correção.
+ * - `derived_during_failed_attempt_recovery`: derivado depois, ao arquivar um
+ *   FAIL LEGADO que ficou sem binding porque o finalization da época não o
+ *   materializava. Marca o record como recuperado por compatibilidade, não
+ *   como contemporâneo do FAIL.
+ *
+ * Enum append-only: bytes gravados com o valor antigo continuam parseando.
+ */
+export const FailedAttemptSourceProvenance = z.enum([
+  'derived_at_official_validation_failure',
+  'derived_during_revalidation_preflight',
+  'derived_during_failed_attempt_recovery',
+]);
+export type FailedAttemptSourceProvenance = z.infer<typeof FailedAttemptSourceProvenance>;
+
 export const RevalidationSourceBinding = z
   .object({
     schema_version: z.literal(DEV_SCHEMA_VERSION),
@@ -1035,7 +1059,7 @@ export const RevalidationSourceBinding = z
     changed_files: z.array(nonEmpty).min(1),
     derived_patch_fingerprint: z.string().regex(/^[0-9a-f]{64}$/),
     fingerprint_observed_at: z.string().datetime({ offset: true }),
-    fingerprint_provenance: z.literal('derived_during_revalidation_preflight'),
+    fingerprint_provenance: FailedAttemptSourceProvenance,
   })
   .strict()
   .superRefine((binding, ctx) => {

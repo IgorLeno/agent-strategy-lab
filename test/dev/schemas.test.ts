@@ -242,6 +242,22 @@ describe('OrchestratedRevalidationRecord', () => {
     ).toThrow();
   });
 
+  // O enum de proveniência é append-only. `derived_during_revalidation_preflight`
+  // era o único valor possível antes de o FAIL passar a nascer selado, e os
+  // bindings gravados naquela época continuam sendo bindings válidos.
+  it('a proveniência distingue quando a fonte foi observada', () => {
+    for (const provenance of [
+      'derived_at_official_validation_failure',
+      'derived_during_revalidation_preflight',
+      'derived_during_failed_attempt_recovery',
+    ] as const) {
+      expect(
+        RevalidationSourceBinding.parse({ ...binding, fingerprint_provenance: provenance })
+          .fingerprint_provenance,
+      ).toBe(provenance);
+    }
+  });
+
   it('separa source base da finalization base e aceita PASS consistente', () => {
     const parsed = OrchestratedRevalidationRecord.parse(record);
     expect(parsed.source_base_sha).not.toBe(parsed.finalization_base_sha);

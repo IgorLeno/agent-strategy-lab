@@ -19,8 +19,18 @@ export async function writeFileAtomic(file: string, contents: string): Promise<v
   await rename(temporary, file);
 }
 
+/**
+ * Bytes EXATOS que qualquer publicação JSON do harness grava. Quem precisa
+ * hashear um record antes de escrevê-lo — ou provar que dois caminhos de
+ * escrita produziram o mesmo arquivo — tem que derivar o hash daqui, não de
+ * uma segunda serialização parecida.
+ */
+export function jsonBytes(value: unknown): Buffer {
+  return Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8');
+}
+
 export async function writeJsonAtomic(file: string, value: unknown): Promise<void> {
-  await writeFileAtomic(file, `${JSON.stringify(value, null, 2)}\n`);
+  await writeFileAtomic(file, jsonBytes(value).toString('utf8'));
 }
 
 /** Publicação append-only: replay só é válido quando os bytes são idênticos. */
@@ -48,5 +58,5 @@ export async function writeFileOnce(file: string, bytes: Buffer): Promise<void> 
 }
 
 export async function writeJsonOnce(file: string, value: unknown): Promise<void> {
-  await writeFileOnce(file, Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8'));
+  await writeFileOnce(file, jsonBytes(value));
 }

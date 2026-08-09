@@ -9,11 +9,14 @@ import {
   completionPath,
   failedAttemptCompletionPath,
   handoffDraftPath,
+  originalCompletionEvidencePath,
   preservedBundleManifestPath,
   preservedBundlePatchPath,
   readPreservedBundleManifest,
+  readRevalidationSourceBinding,
   readValidationFailedAttempt,
   reportPath,
+  sourceBindingPath,
   validationFailedAttemptPath,
   writeCompletion,
   writeLaunchRecord,
@@ -340,11 +343,6 @@ describe('dev-retry-failed preconditions', () => {
     await expect(retry(fixture)).rejects.toThrow(/candidate\/accepted commit/i);
   });
 
-  it('exige source binding', async () => {
-    const fixture = await setup({ writeBinding: false });
-    await expect(retry(fixture)).rejects.toThrow(/RevalidationSourceBinding ausente/i);
-  });
-
   it('recusa fingerprint divergente do binding', async () => {
     const fixture = await setup({ bindingFingerprint: 'a'.repeat(64) });
     await expect(retry(fixture)).rejects.toThrow(/patch fingerprint diverge/i);
@@ -377,6 +375,166 @@ describe('dev-retry-failed preconditions', () => {
     const state = await readState(fixture.paths);
     await writeState(fixture.paths, { ...state, authorized_head_sha: 'b'.repeat(40) });
     await expect(retry(fixture)).rejects.toThrow(/diverge do authorized_head_sha/i);
+  });
+});
+
+/**
+ * FAIL LEGADO: produzido quando o finalization ainda não materializava a fonte.
+ * Sobra `status = FAIL` + CompletionRecord oficial + patch rejeitado, e nenhuma
+ * intervenção suportada consegue tocar na tarefa — foi o que prendeu o M39B.
+ *
+ * A recuperação é uma DERIVAÇÃO a partir dos bytes que sobraram, não uma
+ * reconstrução do histórico: se qualquer peça da evidência não sustentar o
+ * binding, nada é escrito.
+ */
+describe('dev-retry-failed recupera FAIL legado sem source binding', () => {
+  it('deriva o binding dos bytes reais em disco e arquiva o attempt', async () => {
+    const fixture = await setup({ writeBinding: false });
+    expect(await readRevalidationSourceBinding(fixture.paths, TASK, 2)).toBeNull();
+
+    const completionBytes = await readFile(completionPath(fixture.paths, TASK));
+    const reportBytes = await readFile(reportPath(fixture.paths, TASK));
+    const handoffBytes = await readFile(handoffDraftPath(fixture.paths, TASK));
+    const fingerprint = await patchFingerprint(fixture.sandbox.root);
+
+    const result = await retry(fixture);
+    expect(result.bindingRecovered).toBe(true);
+
+    // Cada hash do binding é o hash dos bytes que realmente estavam no disco.
+    const binding = await readRevalidationSourceBinding(fixture.paths, TASK, 2);
+    expect(binding).toMatchObject({
+      task_id: TASK,
+      attempt: 2,
+      source_base_sha: fixture.baseSha,
+      original_completion_sha256: digest(completionBytes),
+      report_sha256: digest(reportBytes),
+      handoff_draft_sha256: digest(handoffBytes),
+      derived_patch_fingerprint: fingerprint,
+      changed_files: PATCH_FILES,
+    });
+    expect(result.record.attempt).toBe(2);
+    expect(result.record.patch_fingerprint).toBe(fingerprint);
+    expect((await readState(fixture.paths)).tasks.find((task) => task.id === TASK)?.status).toBe(
+      'READY',
+    );
+  });
+
+  it('registra a proveniência como recuperação, não como contemporânea do FAIL', async () => {
+    const fixture = await setup({ writeBinding: false });
+    await retry(fixture);
+    const binding = await readRevalidationSourceBinding(fixture.paths, TASK, 2);
+    expect(binding?.fingerprint_provenance).toBe('derived_during_failed_attempt_recovery');
+  });
+
+  it('publica o archive do CompletionRecord FAIL que o binding referencia', async () => {
+    const fixture = await setup({ writeBinding: false });
+    const completionBytes = await readFile(completionPath(fixture.paths, TASK));
+    await retry(fixture);
+
+    // Sem esse archive a revalidação auditada não teria contra o que conferir
+    // o hash: binding e bytes originais são um par indivisível.
+    const archived = await readFile(originalCompletionEvidencePath(fixture.paths, TASK, 2));
+    expect(archived).toEqual(completionBytes);
+  });
+
+  it('não redepende do binding derivado numa segunda execução', async () => {
+    const fixture = await setup({ writeBinding: false });
+    const first = await retry(fixture);
+    const bindingBytes = await readFile(sourceBindingPath(fixture.paths, TASK, 2));
+
+    const second = await retry(fixture);
+    expect(first.bindingRecovered).toBe(true);
+    expect(second.bindingRecovered).toBe(false);
+    expect(second.alreadyArchived).toBe(true);
+    expect(second.record).toEqual(first.record);
+    expect(await readFile(sourceBindingPath(fixture.paths, TASK, 2))).toEqual(bindingBytes);
+  });
+
+  it('recusa quando o report em disco não é mais o preservado no FAIL', async () => {
+    const fixture = await setup({ writeBinding: false });
+    const report = JSON.parse(await readFile(reportPath(fixture.paths, TASK), 'utf8'));
+    await writeFile(
+      reportPath(fixture.paths, TASK),
+      `${JSON.stringify({ ...report, summary: 'outra narrativa' }, null, 2)}\n`,
+    );
+
+    await expect(retry(fixture)).rejects.toThrow(/report atual diverge do report preservado/i);
+    expect(await exists(sourceBindingPath(fixture.paths, TASK, 2))).toBe(false);
+  });
+
+  it('recusa quando o CompletionRecord foi editado depois do FAIL', async () => {
+    const fixture = await setup({ writeBinding: false });
+    const completion = JSON.parse(await readFile(completionPath(fixture.paths, TASK), 'utf8'));
+    completion.report.summary = 'sumário reescrito à mão';
+    await writeFile(completionPath(fixture.paths, TASK), `${JSON.stringify(completion, null, 2)}\n`);
+
+    await expect(retry(fixture)).rejects.toThrow(/report atual diverge do report preservado/i);
+    expect(await exists(sourceBindingPath(fixture.paths, TASK, 2))).toBe(false);
+  });
+
+  it('recusa quando o HandoffDraft em disco não é mais o do fechamento', async () => {
+    const fixture = await setup({ writeBinding: false });
+    const handoff = JSON.parse(await readFile(handoffDraftPath(fixture.paths, TASK), 'utf8'));
+    await writeFile(
+      handoffDraftPath(fixture.paths, TASK),
+      `${JSON.stringify({ ...handoff, changed_files: ['src/outro.ts'] }, null, 2)}\n`,
+    );
+
+    await expect(retry(fixture)).rejects.toThrow(/HandoffDraft diverge do que o FAIL registrou/i);
+    expect(await exists(sourceBindingPath(fixture.paths, TASK, 2))).toBe(false);
+  });
+
+  it('recusa changed_files divergentes entre report e orchestrator evidence', async () => {
+    const fixture = await setup({ writeBinding: false });
+    const completion = JSON.parse(await readFile(completionPath(fixture.paths, TASK), 'utf8'));
+    completion.orchestrator_evidence.changed_files = [MODIFIED];
+    await writeFile(completionPath(fixture.paths, TASK), `${JSON.stringify(completion, null, 2)}\n`);
+
+    await expect(retry(fixture)).rejects.toThrow(/changed_files diverge/i);
+    expect(await exists(sourceBindingPath(fixture.paths, TASK, 2))).toBe(false);
+  });
+
+  it('recusa patch em disco divergente dos changed_files reportados', async () => {
+    const fixture = await setup({ writeBinding: false });
+    await write(fixture.sandbox.root, 'src/runner/extra.ts', 'export const extra = 1;\n');
+
+    await expect(retry(fixture)).rejects.toThrow(/working tree diverge do report/i);
+    expect(await exists(sourceBindingPath(fixture.paths, TASK, 2))).toBe(false);
+  });
+
+  it('recusa index sujo sem escrever binding', async () => {
+    const fixture = await setup({ writeBinding: false });
+    await runGit(fixture.sandbox.root, ['add', '--', MODIFIED]);
+
+    await expect(retry(fixture)).rejects.toThrow(/index contém mudanças staged/i);
+    expect(await exists(sourceBindingPath(fixture.paths, TASK, 2))).toBe(false);
+  });
+
+  it('recusa HEAD divergente do authorized_head_sha sem escrever binding', async () => {
+    const fixture = await setup({ writeBinding: false });
+    const state = await readState(fixture.paths);
+    await writeState(fixture.paths, { ...state, authorized_head_sha: 'b'.repeat(40) });
+
+    await expect(retry(fixture)).rejects.toThrow(/diverge do authorized_head_sha/i);
+    expect(await exists(sourceBindingPath(fixture.paths, TASK, 2))).toBe(false);
+  });
+
+  it('recusa candidate/accepted no state sem escrever binding', async () => {
+    const fixture = await setup({ writeBinding: false, candidateInState: true });
+    await expect(retry(fixture)).rejects.toThrow(/candidate\/accepted commit/i);
+    expect(await exists(sourceBindingPath(fixture.paths, TASK, 2))).toBe(false);
+  });
+
+  it('não recupera FAIL de worker FAILURE — esse é o caminho do dev-retry', async () => {
+    const fixture = await setup({ writeBinding: false, workerResult: 'FAILURE' });
+    await expect(retry(fixture)).rejects.toThrow(/worker report SUCCESS/i);
+    expect(await exists(sourceBindingPath(fixture.paths, TASK, 2))).toBe(false);
+  });
+
+  it('não recupera FAIL sem validation oficial malsucedida', async () => {
+    const fixture = await setup({ writeBinding: false, officialFailure: false });
+    await expect(retry(fixture)).rejects.toThrow(/validation oficial malsucedida/i);
+    expect(await exists(sourceBindingPath(fixture.paths, TASK, 2))).toBe(false);
   });
 });
 
