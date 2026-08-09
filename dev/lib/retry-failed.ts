@@ -290,6 +290,12 @@ async function loadFailedSource(input: RetryFailedAttemptInput): Promise<FailedS
         attempt,
         completionBytes,
         stateBaseSha: task.base_sha,
+        // O patch legado continua no disco, mas o authorized head pode ter
+        // avançado desde o FAIL — uma manutenção adotada para consertar o
+        // próprio harness, por exemplo. A observação honesta é contra o head
+        // atual, que é a referência real da working tree; `source_base_sha`
+        // segue registrando a base do attempt.
+        expectedHeadSha: state.authorized_head_sha,
         provenance: 'derived_during_failed_attempt_recovery',
         now: input.now ?? (() => new Date().toISOString()),
       });

@@ -69,6 +69,18 @@ export interface DeriveFailedAttemptSourceInput {
   readonly completionBytes: Buffer;
   /** `base_sha` da task no state. O binding recusa qualquer divergência. */
   readonly stateBaseSha: string;
+  /**
+   * Commit contra o qual o fingerprint pode ser observado.
+   *
+   * Não é sempre `source_base_sha`, e a diferença é o ponto: no instante do
+   * FAIL o HEAD ainda É a base do attempt, e exigir isso é o que torna o
+   * fingerprint contemporâneo. Depois, uma manutenção adotada pode ter movido
+   * o authorized head sem tocar no patch rejeitado — e aí a observação
+   * honesta é contra o head atual, que é o que a working tree de fato tem como
+   * referência. Quem chama declara qual dos dois vale; o helper nunca aceita
+   * "qualquer HEAD".
+   */
+  readonly expectedHeadSha: string;
   readonly provenance: FailedAttemptSourceProvenance;
   readonly now?: () => string;
 }
@@ -227,10 +239,13 @@ export async function deriveFailedAttemptSource(
     throw new FailedAttemptSourceError('HandoffDraft diverge do que o FAIL registrou');
   }
 
-  // O fingerprint é relativo ao HEAD: derivá-lo de outra base descreveria um
-  // patch que ninguém validou.
-  if ((await headSha(paths.repoRoot)) !== evidence.base_sha) {
-    throw new FailedAttemptSourceError('HEAD diverge da base do FAIL');
+  // O fingerprint é relativo ao HEAD: derivá-lo contra um commit que o chamador
+  // não declarou descreveria um patch que ninguém mediu.
+  const head = await headSha(paths.repoRoot);
+  if (head !== input.expectedHeadSha) {
+    throw new FailedAttemptSourceError(
+      `HEAD ${head} diverge do commit esperado ${input.expectedHeadSha}`,
+    );
   }
   if ((await stagedFiles(paths.repoRoot)).length > 0) {
     throw new FailedAttemptSourceError('index contém mudanças staged');

@@ -429,6 +429,9 @@ async function finishFail(
       attempt: getTaskState(state, input.taskId).attempts,
       completionBytes,
       stateBaseSha: source.packet.base_sha,
+      // No instante do FAIL o HEAD ainda é a base do attempt: é isso que faz
+      // deste fingerprint o único contemporâneo da solução reprovada.
+      expectedHeadSha: source.packet.base_sha,
       provenance: 'derived_at_official_validation_failure',
       now: () => timestamp,
     });

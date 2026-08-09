@@ -510,6 +510,48 @@ describe('dev-retry-failed recupera FAIL legado sem source binding', () => {
     expect(await exists(sourceBindingPath(fixture.paths, TASK, 2))).toBe(false);
   });
 
+  /**
+   * Cenário exato do M39B: a correção do próprio harness foi adotada como
+   * manutenção antes do reparo, então o authorized head avançou enquanto o
+   * patch rejeitado continuou no disco. O binding é observado contra o head
+   * atual — que é a referência real da working tree —, e `source_base_sha`
+   * continua registrando a base do attempt.
+   */
+  it('recupera o FAIL legado depois de uma manutenção mover o authorized head', async () => {
+    const fixture = await setup({ writeBinding: false });
+    const patched = await readFile(path.join(fixture.sandbox.root, MODIFIED), 'utf8');
+
+    // Manutenção adotada: commit que não toca em nenhum changed_files do FAIL.
+    await write(fixture.sandbox.root, MODIFIED, BASE_CONTENT[MODIFIED] ?? '');
+    await write(fixture.sandbox.root, 'dev/lib/harness-fix.ts', 'export const fixed = true;\n');
+    await runGit(fixture.sandbox.root, ['add', '--', 'dev/lib/harness-fix.ts']);
+    await runGit(fixture.sandbox.root, ['commit', '-q', '-m', 'fix(harness): manutenção']);
+    const adoptedHead = await headSha(fixture.sandbox.root);
+    expect(adoptedHead).not.toBe(fixture.baseSha);
+    await write(fixture.sandbox.root, MODIFIED, patched);
+
+    const state = await readState(fixture.paths);
+    await writeState(fixture.paths, { ...state, authorized_head_sha: adoptedHead });
+
+    const result = await retry(fixture);
+    expect(result.bindingRecovered).toBe(true);
+
+    const binding = await readRevalidationSourceBinding(fixture.paths, TASK, 2);
+    // A base do attempt é histórica; a observação é contra o head adotado.
+    expect(binding?.source_base_sha).toBe(fixture.baseSha);
+    expect(result.record.source_base_sha).toBe(fixture.baseSha);
+
+    // O reset devolve os changed_files ao head autorizado, e nada mais.
+    expect(await readFile(path.join(fixture.sandbox.root, MODIFIED), 'utf8')).toBe(
+      BASE_CONTENT[MODIFIED],
+    );
+    expect(await exists(path.join(fixture.sandbox.root, 'dev/lib/harness-fix.ts'))).toBe(true);
+    expect((await runGit(fixture.sandbox.root, ['status', '--porcelain=v1'])).stdout.trim()).toBe(
+      '',
+    );
+    expect(await headSha(fixture.sandbox.root)).toBe(adoptedHead);
+  });
+
   it('recusa HEAD divergente do authorized_head_sha sem escrever binding', async () => {
     const fixture = await setup({ writeBinding: false });
     const state = await readState(fixture.paths);

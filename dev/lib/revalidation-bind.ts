@@ -55,6 +55,9 @@ export async function bindRevalidationSource(
     throw new RevalidationBindError('FAIL não pode ter candidate/accepted commit no state');
   }
   if (task.base_sha === null) throw new RevalidationBindError('FAIL sem base_sha no state');
+  if (state.authorized_head_sha === null) {
+    throw new RevalidationBindError('authorized_head_sha ausente');
+  }
 
   let completionBytes: Buffer;
   try {
@@ -73,6 +76,7 @@ export async function bindRevalidationSource(
       attempt: task.attempts,
       completionBytes,
       stateBaseSha: task.base_sha,
+      expectedHeadSha: state.authorized_head_sha,
       provenance: 'derived_during_revalidation_preflight',
       ...(input.now === undefined ? {} : { now: input.now }),
     });
