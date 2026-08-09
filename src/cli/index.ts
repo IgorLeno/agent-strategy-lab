@@ -10,6 +10,7 @@
  */
 import { runDoctor, type DoctorReport } from './doctor.js';
 import { runInit } from './init.js';
+import { runTaskCreate } from './task-create.js';
 
 export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<number> {
   const [command, ...rest] = argv;
@@ -24,8 +25,38 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
     return runInitCommand(rest);
   }
 
-  process.stderr.write(`comando desconhecido: ${command ?? '(nenhum)'}\nUso: agentlab doctor | agentlab init --repo <caminho> [--force]\n`);
+  if (command === 'task') {
+    const [subcommand, ...taskArgs] = rest;
+    if (subcommand === 'create') {
+      return runTaskCreateCommand(taskArgs);
+    }
+    process.stderr.write(`task: subcomando desconhecido: ${subcommand ?? '(nenhum)'}\nUso: agentlab task create --input <caminho> [--force]\n`);
+    return 1;
+  }
+
+  process.stderr.write(
+    `comando desconhecido: ${command ?? '(nenhum)'}\nUso: agentlab doctor | agentlab init --repo <caminho> [--force] | agentlab task create --input <caminho> [--force]\n`,
+  );
   return 1;
+}
+
+async function runTaskCreateCommand(args: readonly string[]): Promise<number> {
+  const input = readFlagValue(args, '--input');
+  if (input === undefined) {
+    process.stderr.write('task create: --input <caminho> é obrigatório\n');
+    return 1;
+  }
+  const force = args.includes('--force');
+
+  try {
+    const result = await runTaskCreate({ input, force });
+    process.stdout.write(`task create: ${result.taskSpecPath}\n`);
+    process.stdout.write(`task create: ${result.evaluationPlanPath}\n`);
+    return 0;
+  } catch (error) {
+    process.stderr.write(`task create: ${error instanceof Error ? error.message : String(error)}\n`);
+    return 1;
+  }
 }
 
 async function runInitCommand(args: readonly string[]): Promise<number> {
