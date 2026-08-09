@@ -5,10 +5,10 @@ estratégias, modelos e stacks. O produto é a CLI `agentlab` (`src/`); o harnes
 de sessões descartáveis que o constrói é outra coisa e vive em `dev/`
 ([HARNESS.md](HARNESS.md)).
 
-> **Estado em M01.** Só o layout de áreas existe: cada `src/<área>/index.ts`
-> declara responsabilidade e fronteira, e nomeia a microtarefa que a preenche.
-> Este documento descreve o alvo do Marco 1; M40B o reescreve contra o que de
-> fato foi construído. Onde houver divergência, o código é a autoridade.
+> **Estado em M40B (fim do Marco 1).** Todas as microtarefas M01–M40A estão
+> implementadas; este documento foi conferido contra `src/` na revisão de
+> fechamento do marco. Onde houver divergência futura, o código é a
+> autoridade.
 
 ---
 
