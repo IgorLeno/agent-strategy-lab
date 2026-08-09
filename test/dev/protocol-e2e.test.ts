@@ -71,7 +71,7 @@ describe('protocolo de sessões descartáveis — duas tarefas em sequência', (
       { AGENTLAB_DEV_DIR: sandbox.devDir, AGENTLAB_FAKE_MODE: 'orchestrator-success' },
     );
     expect(result.exitCode, result.stderr).toBe(9);
-    expect(JSON.parse(result.stdout).iterations[0].close).toBe('PASS');
+    expect(JSON.parse(result.stdout).iterations[0].result).toBe('PASS');
     expect((await readCompletion(paths, 'T1'))?.commit_origin).toBe('orchestrator');
     expect((await readLaunchRecord(paths, 'T1'))?.execution_policy.commit_owner).toBe(
       'orchestrator',
@@ -85,11 +85,13 @@ describe('protocolo de sessões descartáveis — duas tarefas em sequência', (
 
     const summary = JSON.parse(result.stdout) as {
       stopped_by: string;
-      iterations: { task_id: string; launch: string; close: string }[];
+      iteration_count: number;
+      iterations: { task_id: string; result: string }[];
     };
     expect(summary.stopped_by).toBe('ALL_DONE');
+    expect(summary.iteration_count).toBe(2);
     expect(summary.iterations.map((i) => i.task_id)).toEqual(['T1', 'T2']);
-    expect(summary.iterations.every((i) => i.close === 'PASS')).toBe(true);
+    expect(summary.iterations.every((i) => i.result === 'PASS')).toBe(true);
 
     const state = await readState(paths);
     expect(state.tasks.map((task) => task.status)).toEqual(['PASS', 'PASS']);

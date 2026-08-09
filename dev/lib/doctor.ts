@@ -497,6 +497,28 @@ function reasoningEffortFactsOf(profile: LauncherProfile): ReasoningEffortFacts 
   return { effort: 'not_applicable', source: 'not_applicable', claude: null };
 }
 
+/**
+ * Dimensões experimentais do perfil (agente, modelo, effort) derivadas só do
+ * argv versionado. Fica aqui, e não duplicado em cada CLI, porque quem
+ * pergunta "qual modelo rodou?" precisa da MESMA resposta que o doctor dá.
+ */
+export interface ExperimentFacts {
+  readonly agent: string;
+  readonly model: string;
+  readonly reasoning_effort: string;
+  readonly reasoning_effort_source: ReasoningEffortSource;
+}
+
+export function experimentFactsOf(profile: LauncherProfile): ExperimentFacts {
+  const reasoning = reasoningEffortFactsOf(profile);
+  return {
+    agent: profile.agent,
+    model: modelOf(profile),
+    reasoning_effort: reasoning.effort,
+    reasoning_effort_source: reasoning.source,
+  };
+}
+
 function checkModelPinned(profile: LauncherProfile, model: string): Check {
   if (profile.agent === 'fake') return check('modelo', 'SKIP', 'worker falso não tem modelo');
   if (model === 'unknown') {
@@ -881,5 +903,50 @@ export async function diagnose(input: DoctorInput): Promise<DoctorReport> {
     execpolicy_rules_ignored: rulesIgnored,
     ok: checks.every((entry) => entry.status !== 'FAIL'),
     checks,
+  };
+}
+
+/**
+ * Recorte do relatório para a saída padrão do `dev-doctor`.
+ *
+ * Despejar os ~20 checks PASS a cada execução esconde o que importa dentro do
+ * que já se sabia. O que sobra é o perfil efetivo mais o que exige ação:
+ * `warnings` continua visível porque WARN é fato do ambiente, e `failures`
+ * carrega o check inteiro — descobrir POR QUE o doctor falhou nunca pode
+ * depender de repetir o comando com `--verbose`.
+ */
+export interface DoctorSummary {
+  readonly ok: boolean;
+  readonly profile_id: string;
+  readonly agent: string;
+  readonly model: string;
+  readonly reasoning_effort: string;
+  readonly billing_mode: string;
+  readonly credential_source: CredentialSource;
+  readonly warnings: readonly string[];
+  readonly failures: readonly Check[];
+}
+
+export function doctorWarnings(report: DoctorReport): string[] {
+  return report.checks
+    .filter((entry) => entry.status === 'WARN')
+    .map((entry) => `${entry.name}: ${entry.detail}`);
+}
+
+export function doctorFailures(report: DoctorReport): Check[] {
+  return report.checks.filter((entry) => entry.status === 'FAIL');
+}
+
+export function summarizeDoctorReport(report: DoctorReport): DoctorSummary {
+  return {
+    ok: report.ok,
+    profile_id: report.profile_id,
+    agent: report.agent,
+    model: report.model,
+    reasoning_effort: report.reasoning_effort,
+    billing_mode: report.billing_mode,
+    credential_source: report.credential_source,
+    warnings: doctorWarnings(report),
+    failures: doctorFailures(report),
   };
 }

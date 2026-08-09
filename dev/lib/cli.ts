@@ -7,7 +7,12 @@ export interface ParsedArgs {
   readonly positionals: readonly string[];
 }
 
-export function parseArgs(argv: readonly string[]): ParsedArgs {
+/**
+ * `booleanFlags` nomeia as opções que NUNCA consomem o token seguinte. Sem
+ * isso, `--verbose fake-worker-v1` viraria a opção `verbose=fake-worker-v1` e
+ * engoliria o positional — o comando rodaria contra o perfil errado.
+ */
+export function parseArgs(argv: readonly string[], booleanFlags: readonly string[] = []): ParsedArgs {
   const flags = new Set<string>();
   const options = new Map<string, string>();
   const positionals: string[] = [];
@@ -23,6 +28,10 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       options.set(name.slice(0, eq), name.slice(eq + 1));
       continue;
     }
+    if (booleanFlags.includes(name)) {
+      flags.add(name);
+      continue;
+    }
     const next = argv[index + 1];
     if (next !== undefined && !next.startsWith('--')) {
       options.set(name, next);
@@ -32,6 +41,18 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     }
   }
   return { flags, options, positionals };
+}
+
+/** Nome único da flag de verbosidade — os CLIs não inventam variações. */
+export const VERBOSE_FLAG = 'verbose';
+
+/**
+ * Saída padrão é enxuta: só o que serve para acompanhar uma implementação.
+ * `--verbose` acrescenta o payload detalhado; nunca troca o significado dos
+ * campos que já apareciam.
+ */
+export function isVerbose(args: ParsedArgs): boolean {
+  return args.flags.has(VERBOSE_FLAG);
 }
 
 /** stdout é reservado para saída de máquina (JSON); diagnóstico vai em stderr. */

@@ -180,17 +180,26 @@ describe('orquestrador diante de falha terminal do provider', () => {
     const output = JSON.parse(result.stdout) as {
       stopped_by: string;
       reason: string;
-      iterations: { task_id: string; launch: string; close: string | null }[];
+      iterations: {
+        task_id: string;
+        result: string;
+        attempt: number;
+        provider_failure?: { terminal_reason: string | null; message: string | null };
+      }[];
     };
     expect(output.stopped_by).toBe('INFRA_ERROR');
     expect(output.reason).toMatch(/falha terminal do provider/);
     expect(output.iterations).toHaveLength(1);
-    // Nenhum fechamento foi tentado: `close` fica null na iteração.
+    // Nenhum fechamento foi tentado: o veredito da iteração é o do launch.
     expect(output.iterations[0]).toMatchObject({
       task_id: 'T1',
-      launch: 'INFRA_ERROR',
-      close: null,
+      result: 'INFRA_ERROR',
+      attempt: 1,
     });
+    // A falha do provider chega resumida na saída PADRÃO: exigir `--verbose`
+    // para descobrir por que a sessão morreu custaria outra execução paga.
+    expect(output.iterations[0]?.provider_failure?.terminal_reason).toBeTruthy();
+    expect(output.iterations[0]?.provider_failure?.message).toBeTruthy();
 
     const state = await readState(paths);
     expect(getTaskState(state, 'T1')).toMatchObject({

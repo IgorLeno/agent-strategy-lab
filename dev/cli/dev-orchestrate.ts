@@ -1,40 +1,42 @@
 #!/usr/bin/env tsx
 import { ESTIMATED_COST_LABEL } from '../lib/billing.js';
 import { closeTaskByLaunchPolicy } from '../lib/close-dispatch.js';
-import { emit, fail, parseArgs, runMain } from '../lib/cli.js';
+import { VERBOSE_FLAG, emit, fail, isVerbose, parseArgs, runMain } from '../lib/cli.js';
 import { DEFAULT_WORKER_PROFILE_ID } from '../lib/defaults.js';
+import { experimentFactsOf } from '../lib/doctor.js';
 import { withHarnessLock } from '../lib/lock.js';
+import {
+  detailIteration,
+  summarizeIteration,
+  type IterationInput,
+} from '../lib/orchestrate-report.js';
 import { resolveHarnessPaths } from '../lib/paths.js';
 import { loadPlan } from '../lib/plan.js';
+import { loadProfile } from '../lib/profile.js';
 import { selectNextTask } from '../lib/select.js';
-import { ensureRuntimeDirs, readState } from '../lib/state.js';
+import { ensureRuntimeDirs, getTaskState, readState } from '../lib/state.js';
 import { launchTask, prepareNextTask, type LaunchStepResult } from '../lib/steps.js';
 
 const DEFAULT_PROFILE = DEFAULT_WORKER_PROFILE_ID;
-
-interface Iteration {
-  readonly task_id: string;
-  readonly launch: string;
-  readonly close: string | null;
-  readonly reason: string;
-  /** Equivalência estimada em preço de API. NÃO é valor cobrado. */
-  readonly provider_estimated_api_equivalent_usd: number | null;
-}
 
 /**
  * O loop externo: next -> persistir packet -> launch (processo NOVO) -> wait ->
  * close -> PASS? continua : para. O worker nunca executa este loop; ele encerra
  * e o orquestrador decide o que vem depois.
  *
+ * Saída padrão: o resultado experimental de cada tarefa (perfil, veredito,
+ * tempo de implementação, equivalência em dólar e quota da assinatura).
+ * `--verbose` acrescenta os records completos por trás desses números.
+ *
  * Exit codes: 0 fluxo terminou sem pendência | 9 fluxo parado (inclui
  * LIMIT_REACHED) | 10 harness ocupado.
  */
-function estimateOf(launch: LaunchStepResult): number | null {
-  return launch.outcome?.record.billing?.provider_estimated_api_equivalent_usd ?? null;
+function recordOf(launch: LaunchStepResult) {
+  return launch.outcome?.record ?? null;
 }
 
 async function main(): Promise<void> {
-  const args = parseArgs(process.argv.slice(2));
+  const args = parseArgs(process.argv.slice(2), [VERBOSE_FLAG]);
   const paths = resolveHarnessPaths(args.options.get('repo') ?? process.cwd());
   const loaded = await loadPlan(paths.planFile);
   await ensureRuntimeDirs(paths);
@@ -46,7 +48,12 @@ async function main(): Promise<void> {
     fail(`--max-iterations precisa ser inteiro positivo: ${args.options.get('max-iterations')}`);
   }
 
-  const iterations: Iteration[] = [];
+  // Só para o relatório: perfil quebrado continua falhando no lançamento, que é
+  // onde a falha significa alguma coisa. Ler aqui não muda o fluxo.
+  const profile = await loadProfile(paths.repoRoot, profileId).catch(() => null);
+  const facts = profile ? experimentFactsOf(profile) : null;
+
+  const iterations: IterationInput[] = [];
   let stop = { status: 'ALL_DONE', reason: 'nenhuma tarefa pendente' };
 
   // O lock cobre o loop INTEIRO: um segundo orquestrador não pode selecionar
@@ -73,13 +80,17 @@ async function main(): Promise<void> {
         profileId,
         timeoutOverride === undefined ? undefined : Number(timeoutOverride),
       );
+      // A tentativa é a do state, não uma contagem local: reparo e retry mexem
+      // nela, e o relatório precisa dizer qual tentativa produziu este resultado.
+      const attempt = getTaskState(await readState(paths), packet.task_id).attempts;
       if (launch.classification !== 'FINISHED') {
         iterations.push({
-          task_id: packet.task_id,
+          taskId: packet.task_id,
+          attempt,
           launch: launch.classification,
           close: null,
           reason: launch.reason,
-          provider_estimated_api_equivalent_usd: estimateOf(launch),
+          record: recordOf(launch),
         });
         stop = { status: launch.classification, reason: launch.reason };
         break;
@@ -87,11 +98,12 @@ async function main(): Promise<void> {
 
       const close = await closeTaskByLaunchPolicy({ paths, loaded, taskId: packet.task_id });
       iterations.push({
-        task_id: packet.task_id,
+        taskId: packet.task_id,
+        attempt,
         launch: launch.classification,
         close: close.kind,
         reason: close.reason,
-        provider_estimated_api_equivalent_usd: estimateOf(launch),
+        record: recordOf(launch),
       });
       if (close.kind !== 'PASS') {
         stop = { status: close.kind, reason: close.reason };
@@ -116,18 +128,30 @@ async function main(): Promise<void> {
   });
 
   const halted = stop.status !== 'ALL_DONE';
+  const verbose = isVerbose(args);
   const estimates = iterations
-    .map((iteration) => iteration.provider_estimated_api_equivalent_usd)
+    .map((iteration) => iteration.record?.billing?.provider_estimated_api_equivalent_usd ?? null)
     .filter((value): value is number => value !== null);
+  // Soma das equivalências que as CLIs estimaram; `null` quando nenhuma sessão
+  // reportou número. Continua não sendo cobrança.
+  const total = estimates.length ? estimates.reduce((sum, value) => sum + value, 0) : null;
+
   emit({
     stopped_by: stop.status,
     reason: stop.reason,
-    iterations,
-    // Soma das equivalências que as CLIs estimaram; `null` quando nenhuma
-    // sessão reportou número. Continua não sendo cobrança.
-    total_provider_estimated_api_equivalent_usd: estimates.length
-      ? estimates.reduce((total, value) => total + value, 0)
-      : null,
+    // O perfil é único na invocação: repetir agente/modelo/effort em cada
+    // iteração seria ruído, não evidência adicional.
+    profile_id: profileId,
+    agent: facts?.agent ?? 'unknown',
+    model: facts?.model ?? 'unknown',
+    reasoning_effort: facts?.reasoning_effort ?? 'unknown',
+    ...(verbose ? { reasoning_effort_source: facts?.reasoning_effort_source ?? 'unknown' } : {}),
+    iteration_count: iterations.length,
+    iterations: iterations.map((iteration) =>
+      verbose ? detailIteration(iteration) : summarizeIteration(iteration),
+    ),
+    total_api_equivalent_usd: total,
+    ...(verbose ? { total_provider_estimated_api_equivalent_usd: total } : {}),
     billing_note: ESTIMATED_COST_LABEL,
   });
   process.exit(halted ? 9 : 0);

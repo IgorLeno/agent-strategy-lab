@@ -288,6 +288,27 @@ stream-json, exatamente um `result`, nenhuma linha inválida). A origem fica
 registrada em `provider_failure_source`: classificação feita depois do fato
 não se passa pela do lançamento.
 
+### Saída dos comandos
+
+`dev-doctor` e `dev-orchestrate` imprimem por padrão só o que serve para
+acompanhar uma implementação, e aceitam `--verbose` para o payload detalhado.
+
+- `dev-doctor`: perfil efetivo (`agent`, `model`, `reasoning_effort`,
+  `billing_mode`, `credential_source`), `warnings` e `failures`. Os ~20 checks
+  que passaram só aparecem com `--verbose`; **check FAIL nunca depende dele**.
+- `dev-orchestrate`: perfil no topo (único na invocação) e, por iteração,
+  `task_id`, `attempt`, `result`, `reason`, `implementation_duration_ms`
+  (= `LaunchRecord.duration_ms`, tempo do worker — sem probe, validação oficial
+  nem fechamento), `api_equivalent_usd` (= `provider_estimated_api_equivalent_usd`,
+  equivalência estimada, não cobrança) e `subscription_usage` reduzido a
+  `current_used_pct` + `consumed_pp` por janela. Falha terminal do provider entra
+  resumida **sem** `--verbose`.
+
+`--verbose` ACRESCENTA: probe, hashes, rótulos de janela, `rate_limit_observations`
+e identidade do processo voltam em chaves próprias, e nenhum campo do resumo muda
+de significado. A escolha é de apresentação: `.dev/`, LaunchRecord, CompletionRecord,
+evidência e billing são gravados iguais nos dois modos.
+
 Exit codes: `dev-doctor` 3 = algum check FAIL · `dev-next` 4 = fluxo
 parado/ocupado · `dev-close` 5 = FAIL, 6 = guarda pendente · `dev-launch` 7 = TIMED_OUT, 8 = INFRA_ERROR ·
 `dev-orchestrate` 9 = fluxo parado · **10 = harness ocupado** (qualquer
