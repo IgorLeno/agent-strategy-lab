@@ -288,3 +288,28 @@ Ordem transacional: evidência, record, state — nessa ordem, para que qualquer
 crash no meio convirja na repetição. `attempts` nunca diminui: attempt 1
 permanece na história como infraestrutura, não como tentativa reprovada, e
 lançar de novo continua sendo decisão explícita do usuário.
+
+[2026-08-09] Contexto: M39B — a validation oficial reprovou o attempt 1
+(`test/e2e/failure-paths.test.ts` timing-sensitive), o finalization gravou
+`status = FAIL` + CompletionRecord oficial + patch rejeitado no disco, e
+`dev-retry-failed` recusou com "RevalidationSourceBinding ausente".
+Mistake: o `RevalidationSourceBinding` era exigido por `dev-retry-failed` e por
+`dev-revalidate`, mas o único produtor era o `dev-revalidation-bind` manual — o
+caminho normal do FAIL nunca o materializava. A tarefa terminava com veredito
+oficial publicado, evidência completa e NENHUMA intervenção suportada capaz de
+tocá-la: nem revalidar, nem reparar. Não era falta de evidência, era falta de
+selo sobre a evidência que já existia.
+Rule: um desfecho que deixa trabalho rejeitado em disco tem que nascer com a
+fonte selada, no mesmo fluxo que publica o veredito e ANTES dele — se um estado
+final admite intervenção humana, o artifact que essa intervenção exige é parte
+do próprio desfecho, não um passo manual posterior. Corolários que custaram o
+incidente: (1) quando dois comandos exigem o mesmo artifact, a DERIVAÇÃO dele é
+um helper único e fail-closed, nunca duas verdades sobre os mesmos bytes;
+(2) o nome histórico de um record não é argumento para duplicá-lo — verifique se
+os campos falam do domínio que o nome sugere antes de criar um paralelo;
+(3) recuperar um registro faltante é DERIVAR dos bytes que sobraram, com hashes
+reais e proveniência que diga que a observação é de agora, jamais fingir que o
+artifact existia no instante original; (4) guarda de HEAD em código de reparo
+tem que declarar CONTRA QUAL commit observa — exigir a base histórica quebra o
+reparo assim que uma manutenção adotada move o authorized head, que foi
+exatamente o segundo modo de falha deste mesmo incidente.
