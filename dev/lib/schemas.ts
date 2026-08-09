@@ -470,9 +470,33 @@ export const SUBSCRIPTION_USAGE_WINDOW_REASON_CODES = [
   'RATE_LIMIT_WINDOW_RESET',
   /** Um dos probes não produziu leitura utilizável. */
   'MEASUREMENT_UNAVAILABLE',
+  /**
+   * Os rótulos diferem e pelo menos um não pôde ser interpretado. Não há prova
+   * de reset nem prova de mesma janela — a métrica falha fechada.
+   */
+  'WINDOW_LABEL_UNPARSEABLE',
+  /**
+   * Mesma janela, mas o percentual DESCEU. O valor bruto é preservado como veio;
+   * este código existe para que o fato apareça em vez de ser clampado a zero.
+   */
+  'OBSERVED_DELTA_NEGATIVE',
 ] as const;
 export const SubscriptionUsageWindowReasonCode = z.enum(SUBSCRIPTION_USAGE_WINDOW_REASON_CODES);
 export type SubscriptionUsageWindowReasonCode = z.infer<typeof SubscriptionUsageWindowReasonCode>;
+
+/** Como a identidade da janela foi decidida — torna a decisão auditável. */
+export const SUBSCRIPTION_USAGE_WINDOW_MATCH_METHODS = [
+  /** Os dois rótulos são byte-a-byte iguais. */
+  'exact',
+  /** Rótulos diferentes que representam o mesmo instante dentro da tolerância de exibição. */
+  'display_tolerance',
+  /** Rótulos representam instantes distintos (ou fusos distintos): a janela virou. */
+  'mismatch',
+  /** Pelo menos um rótulo não casou com o formato conhecido do /usage. */
+  'unparseable',
+] as const;
+export const SubscriptionUsageWindowMatchMethod = z.enum(SUBSCRIPTION_USAGE_WINDOW_MATCH_METHODS);
+export type SubscriptionUsageWindowMatchMethod = z.infer<typeof SubscriptionUsageWindowMatchMethod>;
 
 export const SubscriptionUsageWindow = z
   .object({
@@ -482,8 +506,18 @@ export const SubscriptionUsageWindow = z
     before_reset_label: z.string().nullable(),
     after_reset_label: z.string().nullable(),
     same_window: z.boolean(),
-    /** Pontos percentuais consumidos; `null` sempre que houver dúvida. */
+    /**
+     * Delta OBSERVADO em pontos percentuais (`after - before`), não convertido em
+     * token nem em dólar. O nome é mantido por compatibilidade com os records já
+     * gravados. Nunca é clampado: negativo é registrado como negativo.
+     * `null` sempre que a janela não puder ser comparada.
+     */
     consumed_pp: z.number().nullable(),
+    /**
+     * Como `same_window` foi decidido. `null` nos records gravados antes deste
+     * campo existir — ausência é ausência, não é `exact`.
+     */
+    window_match_method: SubscriptionUsageWindowMatchMethod.nullable().default(null),
     reason_code: SubscriptionUsageWindowReasonCode,
   })
   .strict();

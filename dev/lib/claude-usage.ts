@@ -4,6 +4,7 @@ import type {
   SubscriptionUsage,
   SubscriptionUsageProbe,
   SubscriptionUsageWindow,
+  SubscriptionUsageWindowMatchMethod,
 } from './schemas.js';
 
 /**
@@ -349,6 +350,105 @@ function sha256(text: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Identidade da janela — comparação dos rótulos de reset
+// ---------------------------------------------------------------------------
+
+/**
+ * Tolerância de EXIBIÇÃO, não de janela.
+ *
+ * Incidente que motivou isto (M33 attempt 2, ~02:43–02:45 America/Sao_Paulo):
+ * o mesmo reset das 07:00 foi escrito "Aug 9, 6:59am" no probe BEFORE e
+ * "Aug 9, 7am" no AFTER, e a comparação byte-a-byte declarou reset de janela
+ * onde não houve nenhum — o `rate_limit_event` do próprio worker trazia
+ * `resetsAt=1786269600`, isto é, 07:00, o tempo todo. A semana repetiu o
+ * fenômeno ("Aug 11, 2:59am" contra "Aug 11, 3am").
+ *
+ * 60s é exatamente o passo do arredondamento de minuto que produziu a
+ * divergência. Não aumentar sem evidência nova: qualquer valor maior passa a
+ * esconder reset de verdade.
+ */
+export const WINDOW_DISPLAY_TOLERANCE_SECONDS = 60;
+
+const MONTH_NAMES = [
+  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+] as const;
+
+/** Dias acumulados até o dia 1 de cada mês num calendário BISSEXTO de referência. */
+const CUMULATIVE_DAYS = [0, 31, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335] as const;
+
+/**
+ * O único formato que o /usage entrega: "Aug 9, 6:59am (America/Sao_Paulo)" —
+ * com o minuto omitido na hora cheia ("Aug 9, 7am"). Nada além disso é aceito,
+ * e `Date.parse` não entra aqui: ele não interpreta o fuso IANA entre
+ * parênteses e devolveria um instante errado com cara de instante certo.
+ */
+const RESET_LABEL = /^([A-Z][a-z]{2}) (\d{1,2}), (\d{1,2})(?::(\d{2}))?(am|pm) \(([^()]+)\)$/;
+
+export interface ParsedResetLabel {
+  /** Fuso preservado como TEXTO: fusos diferentes nunca são a mesma janela. */
+  readonly timezone: string;
+  /**
+   * Segundos desde o início do calendário de referência.
+   *
+   * O rótulo não traz ano, e comparar duas janelas só precisa da DISTÂNCIA
+   * entre elas — por isso o ano não é inferido. O preço documentado: se os dois
+   * rótulos caírem em lados opostos da virada de ano (ou do 28/29 de fevereiro
+   * num ano não-bissexto), a distância sai grande demais e a comparação vira
+   * `mismatch`. Falha fechada, nunca `same_window` falso.
+   */
+  readonly seconds_in_year: number;
+}
+
+export function parseResetLabel(label: string): ParsedResetLabel | null {
+  const match = RESET_LABEL.exec(label.trim());
+  if (!match) return null;
+
+  const monthIndex = MONTH_NAMES.indexOf(match[1] as (typeof MONTH_NAMES)[number]);
+  if (monthIndex < 0) return null;
+
+  const day = Number(match[2]);
+  const hour12 = Number(match[3]);
+  const minute = match[4] === undefined ? 0 : Number(match[4]);
+  const timezone = (match[6] as string).trim();
+  if (day < 1 || day > 31) return null;
+  if (hour12 < 1 || hour12 > 12) return null;
+  if (minute > 59) return null;
+  if (timezone === '') return null;
+
+  const hour = match[5] === 'am' ? hour12 % 12 : (hour12 % 12) + 12;
+  const days = (CUMULATIVE_DAYS[monthIndex] as number) + (day - 1);
+  return { timezone, seconds_in_year: ((days * 24 + hour) * 60 + minute) * 60 };
+}
+
+export interface ResetLabelMatch {
+  readonly same_window: boolean;
+  readonly method: SubscriptionUsageWindowMatchMethod;
+}
+
+/** Regra da tolerância, isolada para poder ser testada na borda exata. */
+export function withinDisplayTolerance(deltaSeconds: number): boolean {
+  return Math.abs(deltaSeconds) <= WINDOW_DISPLAY_TOLERANCE_SECONDS;
+}
+
+export function matchResetLabels(before: string, after: string): ResetLabelMatch {
+  // Igualdade byte-a-byte continua sendo a prova mais forte, e vale mesmo para
+  // um rótulo em formato que o parser não conhece.
+  if (before === after) return { same_window: true, method: 'exact' };
+
+  const parsedBefore = parseResetLabel(before);
+  const parsedAfter = parseResetLabel(after);
+  if (!parsedBefore || !parsedAfter) return { same_window: false, method: 'unparseable' };
+  if (parsedBefore.timezone !== parsedAfter.timezone) {
+    return { same_window: false, method: 'mismatch' };
+  }
+
+  const delta = parsedAfter.seconds_in_year - parsedBefore.seconds_in_year;
+  if (withinDisplayTolerance(delta)) return { same_window: true, method: 'display_tolerance' };
+  return { same_window: false, method: 'mismatch' };
+}
+
+// ---------------------------------------------------------------------------
 // Medição — consumo só existe dentro da MESMA janela
 // ---------------------------------------------------------------------------
 
@@ -368,18 +468,37 @@ function windowMeasurement(
     after_reset_label: after?.reset_label ?? null,
   };
   if (!before || !after) {
-    return { ...base, same_window: false, consumed_pp: null, reason_code: 'MEASUREMENT_UNAVAILABLE' };
+    return {
+      ...base,
+      same_window: false,
+      consumed_pp: null,
+      window_match_method: null,
+      reason_code: 'MEASUREMENT_UNAVAILABLE',
+    };
   }
-  // Comparação exata do rótulo: converter data para comparar janela exigiria
-  // reimplementar fuso e formato da CLI, e um erro ali produziria "3 - 97".
-  if (before.reset_label !== after.reset_label) {
-    return { ...base, same_window: false, consumed_pp: null, reason_code: 'RATE_LIMIT_WINDOW_RESET' };
+
+  const match = matchResetLabels(before.reset_label, after.reset_label);
+  if (!match.same_window) {
+    return {
+      ...base,
+      same_window: false,
+      consumed_pp: null,
+      window_match_method: match.method,
+      reason_code:
+        match.method === 'unparseable' ? 'WINDOW_LABEL_UNPARSEABLE' : 'RATE_LIMIT_WINDOW_RESET',
+    };
   }
+
+  // Delta observado, cru. Sem clamp, sem monotonicidade fabricada, sem
+  // redistribuir arredondamento: se o percentual desceu, isso é o que fica
+  // gravado, com o código que diz que desceu.
+  const observed = round(after.used_pct - before.used_pct);
   return {
     ...base,
     same_window: true,
-    consumed_pp: round(after.used_pct - before.used_pct),
-    reason_code: 'OK',
+    consumed_pp: observed,
+    window_match_method: match.method,
+    reason_code: observed < 0 ? 'OBSERVED_DELTA_NEGATIVE' : 'OK',
   };
 }
 

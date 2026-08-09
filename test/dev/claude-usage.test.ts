@@ -6,8 +6,11 @@ import {
   CLAUDE_USAGE_PROMPT,
   buildSubscriptionUsage,
   claudeUsageArgv,
+  matchResetLabels,
   parseClaudeUsageText,
+  parseResetLabel,
   probeClaudeUsage,
+  withinDisplayTolerance,
   zeroInferenceViolations,
   type ClaudeUsageProbeOutcome,
   type UsageCommandRunner,
@@ -19,7 +22,7 @@ import { resolveHarnessPaths, type HarnessPaths } from '../../dev/lib/paths.js';
 import { loadPlan, type LoadedPlan } from '../../dev/lib/plan.js';
 import type { LauncherProfile } from '../../dev/lib/profile.js';
 import { readLaunchRecord, writePacket } from '../../dev/lib/records.js';
-import { LaunchRecord } from '../../dev/lib/schemas.js';
+import { LaunchRecord, SubscriptionUsageWindow } from '../../dev/lib/schemas.js';
 import { buildInitialState, ensureRuntimeDirs, writeState } from '../../dev/lib/state.js';
 import { REPO_ROOT, makeSandboxRepo, type Sandbox } from './helpers.js';
 
@@ -306,6 +309,7 @@ describe('medição entre os dois probes', () => {
       after_reset_label: FIVE_HOUR_LABEL,
       same_window: true,
       consumed_pp: 6,
+      window_match_method: 'exact',
       reason_code: 'OK',
     });
     expect(usage.probe_contract.before.zero_inference_verified).toBe(true);
@@ -318,6 +322,7 @@ describe('medição entre os dois probes', () => {
     expect(usage.five_hour).toMatchObject({
       same_window: false,
       consumed_pp: null,
+      window_match_method: 'mismatch',
       reason_code: 'RATE_LIMIT_WINDOW_RESET',
     });
     // A semana continua na mesma janela e é medida normalmente.
@@ -331,6 +336,15 @@ describe('medição entre os dois probes', () => {
     expect(usage.five_hour.reason_code).toBe('OK');
   });
 
+  it('delta negativo na mesma janela é preservado cru, com diagnóstico próprio', () => {
+    const usage = buildSubscriptionUsage(reading(41), reading(38));
+
+    // Sem clamp e sem monotonicidade fabricada: -3 é -3.
+    expect(usage.five_hour.consumed_pp).toBe(-3);
+    expect(usage.five_hour.same_window).toBe(true);
+    expect(usage.five_hour.reason_code).toBe('OBSERVED_DELTA_NEGATIVE');
+  });
+
   it('probe indisponível dos dois lados deixa a medição explícita, sem inventar 0', () => {
     const usage = buildSubscriptionUsage(reading(41), UNAVAILABLE);
 
@@ -339,9 +353,202 @@ describe('medição entre os dois probes', () => {
       after_used_pct: null,
       same_window: false,
       consumed_pp: null,
+      window_match_method: null,
       reason_code: 'MEASUREMENT_UNAVAILABLE',
     });
     expect(usage.probe_contract.after.reason_code).toBe('PROBE_FAILED');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Identidade da janela: o falso RATE_LIMIT_WINDOW_RESET da M33
+// ---------------------------------------------------------------------------
+
+/**
+ * Texto do /usage da M33 attempt 2 (~02:43–02:45 America/Sao_Paulo). O reset das
+ * 07:00 apareceu como "6:59am" antes do worker e como "7am" depois; o
+ * `rate_limit_event` do próprio worker trazia `resetsAt=1786269600` (07:00) o
+ * tempo todo. Não houve reset — houve arredondamento de exibição.
+ */
+const M33_BEFORE_TEXT =
+  'Current session: 29% used · resets Aug 9, 6:59am (America/Sao_Paulo)\n' +
+  'Current week (all models): 70% used · resets Aug 11, 2:59am (America/Sao_Paulo)\n';
+const M33_AFTER_TEXT =
+  'Current session: 32% used · resets Aug 9, 7am (America/Sao_Paulo)\n' +
+  'Current week (all models): 70% used · resets Aug 11, 3am (America/Sao_Paulo)\n';
+
+function windowFor(before: string, after: string, pct: readonly [number, number] = [10, 10]) {
+  return buildSubscriptionUsage(reading(pct[0], before), reading(pct[1], after)).five_hour;
+}
+
+describe('comparação dos rótulos de reset', () => {
+  it('A — rótulos idênticos casam por igualdade exata', () => {
+    expect(matchResetLabels(FIVE_HOUR_LABEL, FIVE_HOUR_LABEL)).toEqual({
+      same_window: true,
+      method: 'exact',
+    });
+  });
+
+  it('B — 6:59am e 7am do mesmo dia são a mesma janela, por tolerância de exibição', () => {
+    expect(
+      matchResetLabels('Aug 9, 6:59am (America/Sao_Paulo)', 'Aug 9, 7am (America/Sao_Paulo)'),
+    ).toEqual({ same_window: true, method: 'display_tolerance' });
+  });
+
+  it('C — 2:59am e 3am do mesmo dia são a mesma janela, por tolerância de exibição', () => {
+    expect(
+      matchResetLabels('Aug 11, 2:59am (America/Sao_Paulo)', 'Aug 11, 3am (America/Sao_Paulo)'),
+    ).toEqual({ same_window: true, method: 'display_tolerance' });
+  });
+
+  it('D — diferença de exatamente 60s ainda é a mesma janela', () => {
+    expect(withinDisplayTolerance(60)).toBe(true);
+    expect(withinDisplayTolerance(-60)).toBe(true);
+    // A borda vale nos dois sentidos de leitura do rótulo.
+    expect(
+      matchResetLabels('Aug 9, 7am (America/Sao_Paulo)', 'Aug 9, 6:59am (America/Sao_Paulo)'),
+    ).toEqual({ same_window: true, method: 'display_tolerance' });
+  });
+
+  it('E — 61s já está fora da tolerância', () => {
+    expect(withinDisplayTolerance(61)).toBe(false);
+    expect(withinDisplayTolerance(-61)).toBe(false);
+    // O rótulo tem granularidade de minuto, então o menor passo observável
+    // acima da borda são 120s — e ele também não casa.
+    expect(
+      matchResetLabels('Aug 9, 6:58am (America/Sao_Paulo)', 'Aug 9, 7am (America/Sao_Paulo)'),
+    ).toEqual({ same_window: false, method: 'mismatch' });
+  });
+
+  it('F — fuso diferente nunca é a mesma janela, mesmo com hora igual', () => {
+    expect(
+      matchResetLabels('Aug 9, 7am (America/Sao_Paulo)', 'Aug 9, 7am (America/New_York)'),
+    ).toEqual({ same_window: false, method: 'mismatch' });
+    expect(
+      matchResetLabels('Aug 9, 6:59am (America/Sao_Paulo)', 'Aug 9, 7am (UTC)'),
+    ).toEqual({ same_window: false, method: 'mismatch' });
+  });
+
+  it('G — reset de 5h de verdade continua sendo mismatch', () => {
+    expect(
+      matchResetLabels('Aug 9, 6:59am (America/Sao_Paulo)', 'Aug 9, 11:59am (America/Sao_Paulo)'),
+    ).toEqual({ same_window: false, method: 'mismatch' });
+    expect(windowFor(
+      'Aug 9, 6:59am (America/Sao_Paulo)',
+      'Aug 9, 11:59am (America/Sao_Paulo)',
+      [97, 3],
+    )).toMatchObject({
+      same_window: false,
+      consumed_pp: null,
+      window_match_method: 'mismatch',
+      reason_code: 'RATE_LIMIT_WINDOW_RESET',
+    });
+  });
+
+  it('H — reset semanal de verdade continua sendo mismatch', () => {
+    expect(
+      matchResetLabels('Aug 11, 2:59am (America/Sao_Paulo)', 'Aug 18, 2:59am (America/Sao_Paulo)'),
+    ).toEqual({ same_window: false, method: 'mismatch' });
+  });
+
+  it('I — rótulo malformado falha fechada: sem delta e com código próprio', () => {
+    expect(parseResetLabel('resets soon')).toBeNull();
+    expect(parseResetLabel('Aug 9, 25:00 (America/Sao_Paulo)')).toBeNull();
+    expect(parseResetLabel('Aug 9, 7am')).toBeNull();
+    expect(parseResetLabel('Foo 9, 7am (America/Sao_Paulo)')).toBeNull();
+
+    expect(matchResetLabels('Aug 9, 7am (America/Sao_Paulo)', 'resets soon')).toEqual({
+      same_window: false,
+      method: 'unparseable',
+    });
+    expect(windowFor('Aug 9, 7am (America/Sao_Paulo)', 'resets soon', [29, 32])).toMatchObject({
+      same_window: false,
+      consumed_pp: null,
+      window_match_method: 'unparseable',
+      reason_code: 'WINDOW_LABEL_UNPARSEABLE',
+    });
+  });
+
+  it('a hora cheia sem minuto é lida como :00', () => {
+    expect(parseResetLabel('Aug 9, 7am (America/Sao_Paulo)')?.seconds_in_year).toBe(
+      (parseResetLabel('Aug 9, 6:59am (America/Sao_Paulo)')?.seconds_in_year ?? 0) + 60,
+    );
+    // 12am é meia-noite e 12pm é meio-dia — 12 horas de distância, não zero.
+    const midnight = parseResetLabel('Aug 9, 12am (America/Sao_Paulo)')?.seconds_in_year ?? 0;
+    const noon = parseResetLabel('Aug 9, 12pm (America/Sao_Paulo)')?.seconds_in_year ?? 0;
+    expect(noon - midnight).toBe(12 * 3600);
+  });
+
+  it('a virada de ano falha fechada, nunca em same_window falso', () => {
+    // O rótulo não traz ano e ele não é inferido: a distância calculada fica
+    // grande demais e a comparação vira mismatch. É o preço documentado.
+    expect(
+      matchResetLabels('Dec 31, 11:59pm (America/Sao_Paulo)', 'Jan 1, 12am (America/Sao_Paulo)'),
+    ).toEqual({ same_window: false, method: 'mismatch' });
+  });
+});
+
+describe('fixture do incidente M33', () => {
+  it('J+K+L+N — 29→32 e 70→70 medem +3 pp e 0 pp, com rótulos crus preservados', async () => {
+    const cli = fakeUsageCli(
+      { stdout: JSON.stringify(usageResult({ result: M33_BEFORE_TEXT })) },
+      { stdout: JSON.stringify(usageResult({ result: M33_AFTER_TEXT })) },
+    );
+    const input = { binary: 'claude', env: { HOME: '/home/test-user' }, cwd: REPO_ROOT, runner: cli.runner };
+
+    const usage = buildSubscriptionUsage(
+      await probeClaudeUsage(input),
+      await probeClaudeUsage(input),
+    );
+
+    expect(usage.five_hour).toEqual({
+      before_used_pct: 29,
+      after_used_pct: 32,
+      // L — o rótulo cru dos dois lados continua no record, divergência inclusive.
+      before_reset_label: 'Aug 9, 6:59am (America/Sao_Paulo)',
+      after_reset_label: 'Aug 9, 7am (America/Sao_Paulo)',
+      same_window: true,
+      consumed_pp: 3,
+      window_match_method: 'display_tolerance',
+      reason_code: 'OK',
+    });
+    expect(usage.seven_day_all_models).toEqual({
+      before_used_pct: 70,
+      after_used_pct: 70,
+      before_reset_label: 'Aug 11, 2:59am (America/Sao_Paulo)',
+      after_reset_label: 'Aug 11, 3am (America/Sao_Paulo)',
+      same_window: true,
+      consumed_pp: 0,
+      window_match_method: 'display_tolerance',
+      reason_code: 'OK',
+    });
+
+    // N — nada além do probe local rodou: dois processos `claude /usage`, sem
+    // API key, com teto de gasto, e os dois provaram inferência zero.
+    expect(cli.calls).toHaveLength(2);
+    for (const argv of cli.calls) {
+      expect(argv.at(-1)).toBe(CLAUDE_USAGE_PROMPT);
+      expect(argv).toContain('--max-budget-usd');
+      expect(argv.join(' ')).not.toMatch(/api[-_]?key/i);
+    }
+    expect(usage.probe_contract.before.zero_inference_verified).toBe(true);
+    expect(usage.probe_contract.after.zero_inference_verified).toBe(true);
+  });
+
+  it('M — record histórico sem window_match_method continua válido, e sem virar "exact"', () => {
+    const historical = SubscriptionUsageWindow.parse({
+      before_used_pct: 29,
+      after_used_pct: 32,
+      before_reset_label: 'Aug 9, 6:59am (America/Sao_Paulo)',
+      after_reset_label: 'Aug 9, 7am (America/Sao_Paulo)',
+      same_window: false,
+      consumed_pp: null,
+      reason_code: 'RATE_LIMIT_WINDOW_RESET',
+    });
+
+    // Ausência é ausência: o artefato histórico não é reescrito nem reinterpretado.
+    expect(historical.window_match_method).toBeNull();
+    expect(historical.consumed_pp).toBeNull();
   });
 });
 
