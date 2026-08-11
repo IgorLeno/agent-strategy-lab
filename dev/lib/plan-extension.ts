@@ -1,7 +1,6 @@
 import { access, mkdtemp, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { canonicalJson } from './canonical.js';
 import { runValidation, toValidationResult } from './exec.js';
 import {
   changedFiles,
@@ -20,15 +19,21 @@ import {
 } from './maintenance.js';
 import type { HarnessPaths } from './paths.js';
 import { loadPlan, parsePlan, type LoadedPlan } from './plan.js';
+import {
+  assertAppendOnlyPlanExtension,
+  planSourceAtCommit,
+  verifyPlanExtensionCommit,
+} from './plan-extension-contract.js';
 import { readMaintenanceRecord, writeMaintenanceRecord } from './records.js';
 import { recover } from './recover.js';
 import {
   DEV_SCHEMA_VERSION,
   MaintenanceRecord,
-  type PlanFile,
   type ValidationResult,
 } from './schemas.js';
 import { readState, writeState } from './state.js';
+
+export { assertAppendOnlyPlanExtension } from './plan-extension-contract.js';
 
 export class PlanExtensionError extends Error {
   constructor(message: string) {
@@ -67,52 +72,6 @@ async function resolveCommitSha(repoRoot: string, raw: string): Promise<string> 
   }
 }
 
-async function planSourceAt(repoRoot: string, sha: string): Promise<string> {
-  try {
-    return await gitOrThrow(repoRoot, ['show', `${sha}:dev/plan.yaml`]);
-  } catch {
-    throw new PlanExtensionError(`dev/plan.yaml ausente em ${sha}`);
-  }
-}
-
-/**
- * Extensão append-only: prefixo histórico canonicamente idêntico, na mesma
- * ordem; somente tasks novas no sufixo. Comparação estrutural via JSON canônico.
- */
-export function assertAppendOnlyPlanExtension(
-  oldPlan: PlanFile,
-  newPlan: PlanFile,
-): readonly string[] {
-  if (oldPlan.schema_version !== newPlan.schema_version) {
-    throw new PlanExtensionError(
-      `schema_version divergente: ${oldPlan.schema_version} → ${newPlan.schema_version}`,
-    );
-  }
-  if (newPlan.tasks.length < oldPlan.tasks.length) {
-    throw new PlanExtensionError('plan extension recusada: task histórica removida');
-  }
-  for (let index = 0; index < oldPlan.tasks.length; index += 1) {
-    const previous = oldPlan.tasks[index];
-    const next = newPlan.tasks[index];
-    if (canonicalJson(previous) !== canonicalJson(next)) {
-      const previousId = previous?.id ?? '?';
-      const nextId = next?.id ?? '?';
-      if (previousId !== nextId) {
-        throw new PlanExtensionError(
-          `plan extension recusada: reorder ou remoção na posição ${index} (${previousId} → ${nextId})`,
-        );
-      }
-      throw new PlanExtensionError(
-        `plan extension recusada: task histórica alterada: ${previousId}`,
-      );
-    }
-  }
-  if (newPlan.tasks.length === oldPlan.tasks.length) {
-    throw new PlanExtensionError('plan extension exige ao menos uma task nova');
-  }
-  return newPlan.tasks.slice(oldPlan.tasks.length).map((task) => task.id);
-}
-
 async function assertNoLaterPlanEdits(
   repoRoot: string,
   target: string,
@@ -128,6 +87,19 @@ async function assertNoLaterPlanEdits(
         `commit posterior ${sha} também modificou dev/plan.yaml`,
       );
     }
+  }
+}
+
+async function assertCurrentPlanMatchesTarget(
+  paths: HarnessPaths,
+  target: string,
+): Promise<void> {
+  const currentPlan = await loadPlan(paths.planFile);
+  const targetPlan = parsePlan(await planSourceAtCommit(paths.repoRoot, target));
+  if (currentPlan.planSha256 !== targetPlan.planSha256) {
+    throw new PlanExtensionError(
+      'dev/plan.yaml atual não corresponde ao plano do target',
+    );
   }
 }
 
@@ -241,6 +213,7 @@ export async function adoptPlanExtension(
   };
 
   if (existing) {
+    // Não reroda validações caras já seladas; revalida fatos baratos + contrato Git.
     await verifyMaintenanceRecord(input.paths, existing);
     if (resolveAdoptionKind(existing) !== 'plan_extension') {
       throw new PlanExtensionError('record existente no target não é plan_extension');
@@ -250,9 +223,12 @@ export async function adoptPlanExtension(
         'MaintenanceRecord existente não começa no authorized_head_sha',
       );
     }
-    const oldPlan = parsePlan(await planSourceAt(input.paths.repoRoot, existing.previous_authorized_head_sha));
-    const newPlan = parsePlan(await planSourceAt(input.paths.repoRoot, target));
-    const addedTaskIds = assertAppendOnlyPlanExtension(oldPlan.plan, newPlan.plan);
+    if (!(await isAncestor(input.paths.repoRoot, target, head))) {
+      throw new PlanExtensionError('target não é ancestral do HEAD');
+    }
+    await assertNoLaterPlanEdits(input.paths.repoRoot, target, head);
+    await assertCurrentPlanMatchesTarget(input.paths, target);
+    const addedTaskIds = await verifyPlanExtensionCommit(input.paths.repoRoot, existing);
     return finish(existing, true, addedTaskIds);
   }
 
@@ -284,16 +260,10 @@ export async function adoptPlanExtension(
   }
 
   await assertNoLaterPlanEdits(input.paths.repoRoot, target, head);
+  await assertCurrentPlanMatchesTarget(input.paths, target);
 
-  const currentPlan = await loadPlan(input.paths.planFile);
-  const targetPlan = parsePlan(await planSourceAt(input.paths.repoRoot, target));
-  if (currentPlan.planSha256 !== targetPlan.planSha256) {
-    throw new PlanExtensionError(
-      'dev/plan.yaml atual não corresponde ao plano do target',
-    );
-  }
-
-  const oldPlan = parsePlan(await planSourceAt(input.paths.repoRoot, previous));
+  const oldPlan = parsePlan(await planSourceAtCommit(input.paths.repoRoot, previous));
+  const targetPlan = parsePlan(await planSourceAtCommit(input.paths.repoRoot, target));
   const addedTaskIds = assertAppendOnlyPlanExtension(oldPlan.plan, targetPlan.plan);
 
   const runner = input.validationRunner ?? defaultValidationRunner;

@@ -1,7 +1,11 @@
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { adoptMaintenance, type MaintenanceValidationRunner } from '../../dev/lib/maintenance.js';
+import {
+  adoptMaintenance,
+  verifyMaintenanceRecord,
+  type MaintenanceValidationRunner,
+} from '../../dev/lib/maintenance.js';
 import { headSha, parentSha } from '../../dev/lib/git.js';
 import {
   adoptPlanExtension,
@@ -512,5 +516,210 @@ tasks:
     expect((await readState(paths)).authorized_head_sha).toBe(target);
     expect(getTaskState(await readState(paths), 'M01')).toMatchObject({ status: 'PASS' });
     expect(getTaskState(await readState(paths), 'M03')).toMatchObject({ status: 'READY' });
+  });
+});
+
+describe('verificação independente de plan_extension no recovery', () => {
+  async function forgedMutatingPlanRecord(): Promise<{
+    target: string;
+    record: MaintenanceRecord;
+  }> {
+    await writePlan(EXTENDED_PLAN.replace('trabalho histórico', 'objetivo forjado'));
+    const target = await commitPlan('forged: mutate M01');
+    const record: MaintenanceRecord = {
+      schema_version: 1,
+      previous_authorized_head_sha: authorized,
+      adopted_head_sha: target,
+      commits: [
+        {
+          sha: target,
+          parent_sha: authorized,
+          changed_files: ['dev/plan.yaml'],
+        },
+      ],
+      changed_files: ['dev/plan.yaml'],
+      validation_results: successfulResults(authorized, target),
+      working_tree_clean: true,
+      bootstrap_range: false,
+      reason: 'forged plan_extension',
+      adopted_at: '2026-08-11T17:00:00.000Z',
+      adoption_kind: 'plan_extension',
+    };
+    return { target, record };
+  }
+
+  it('verifyMaintenanceRecord rejeita plan_extension que altera task histórica', async () => {
+    const { record } = await forgedMutatingPlanRecord();
+    await expect(verifyMaintenanceRecord(paths, record)).rejects.toThrow(/alterada: M01/);
+  });
+
+  it('recover/reconcile não avança authorized com record forjado', async () => {
+    const { target, record } = await forgedMutatingPlanRecord();
+    await writeMaintenanceRecord(paths, record);
+    const forgedLoaded = await loadPlan(paths.planFile);
+
+    await expect(recover(paths, forgedLoaded)).rejects.toThrow(/alterada: M01/);
+    expect((await readState(paths)).authorized_head_sha).toBe(authorized);
+    expect(await readMaintenanceRecord(paths, target)).toEqual(record);
+  });
+
+  it('record válido existente + target não ancestral do HEAD: rejeita sem mudar state', async () => {
+    const target = await commitValidExtension();
+    const record: MaintenanceRecord = {
+      schema_version: 1,
+      previous_authorized_head_sha: authorized,
+      adopted_head_sha: target,
+      commits: [
+        { sha: target, parent_sha: authorized, changed_files: ['dev/plan.yaml'] },
+      ],
+      changed_files: ['dev/plan.yaml'],
+      validation_results: successfulResults(authorized, target),
+      working_tree_clean: true,
+      bootstrap_range: false,
+      reason: 'válido',
+      adopted_at: '2026-08-11T17:00:00.000Z',
+      adoption_kind: 'plan_extension',
+    };
+    await writeMaintenanceRecord(paths, record);
+
+    await gitMust(['checkout', '-q', '-b', 'side', authorized]);
+    await createCommit('docs/side.md', 'side\n', 'side');
+    validationCalls = [];
+
+    await expect(adoptPlanExtension(planAdoptionInput(target))).rejects.toThrow(
+      /não é ancestral/,
+    );
+    expect((await readState(paths)).authorized_head_sha).toBe(authorized);
+    expect(validationCalls).toEqual([]);
+    await gitMust(['checkout', '-q', 'main']);
+  });
+
+  it('record válido existente + commit posterior altera plan.yaml: rejeita', async () => {
+    const target = await commitValidExtension();
+    const record: MaintenanceRecord = {
+      schema_version: 1,
+      previous_authorized_head_sha: authorized,
+      adopted_head_sha: target,
+      commits: [
+        { sha: target, parent_sha: authorized, changed_files: ['dev/plan.yaml'] },
+      ],
+      changed_files: ['dev/plan.yaml'],
+      validation_results: successfulResults(authorized, target),
+      working_tree_clean: true,
+      bootstrap_range: false,
+      reason: 'válido',
+      adopted_at: '2026-08-11T17:00:00.000Z',
+      adoption_kind: 'plan_extension',
+    };
+    await writeMaintenanceRecord(paths, record);
+
+    await writePlan(`${EXTENDED_PLAN}\n# later\n`);
+    await commitPlan('later plan edit');
+    const targetPlan = await gitMust(['show', `${target}:dev/plan.yaml`]);
+    await writeFile(paths.planFile, targetPlan, 'utf8');
+    await commitAll(sandbox.root, 'restore plan bytes to target');
+    validationCalls = [];
+
+    await expect(adoptPlanExtension(planAdoptionInput(target))).rejects.toThrow(
+      /posterior.*dev\/plan\.yaml/,
+    );
+    expect((await readState(paths)).authorized_head_sha).toBe(authorized);
+    expect(validationCalls).toEqual([]);
+  });
+
+  it('record válido existente + current plan ≠ target: rejeita', async () => {
+    const target = await commitValidExtension();
+    const record: MaintenanceRecord = {
+      schema_version: 1,
+      previous_authorized_head_sha: authorized,
+      adopted_head_sha: target,
+      commits: [
+        { sha: target, parent_sha: authorized, changed_files: ['dev/plan.yaml'] },
+      ],
+      changed_files: ['dev/plan.yaml'],
+      validation_results: successfulResults(authorized, target),
+      working_tree_clean: true,
+      bootstrap_range: false,
+      reason: 'válido',
+      adopted_at: '2026-08-11T17:00:00.000Z',
+      adoption_kind: 'plan_extension',
+    };
+    await writeMaintenanceRecord(paths, record);
+    await createCommit('docs/later.md', 'later\n', 'harness after target');
+
+    // assume-unchanged antes da escrita: status limpo com bytes divergentes do target.
+    await gitMust(['update-index', '--assume-unchanged', 'dev/plan.yaml']);
+    await writePlan(BASE_PLAN);
+    validationCalls = [];
+    try {
+      await expect(adoptPlanExtension(planAdoptionInput(target))).rejects.toThrow(
+        /não corresponde ao plano do target/,
+      );
+      expect((await readState(paths)).authorized_head_sha).toBe(authorized);
+      expect(validationCalls).toEqual([]);
+    } finally {
+      await gitMust(['update-index', '--no-assume-unchanged', 'dev/plan.yaml']);
+      await writeFile(paths.planFile, await gitMust(['show', 'HEAD:dev/plan.yaml']), 'utf8');
+    }
+  });
+
+  it('idempotência: record válido + HEAD descendant sem plan edit conclui sem rerodar validations', async () => {
+    const target = await commitValidExtension();
+    const record: MaintenanceRecord = {
+      schema_version: 1,
+      previous_authorized_head_sha: authorized,
+      adopted_head_sha: target,
+      commits: [
+        { sha: target, parent_sha: authorized, changed_files: ['dev/plan.yaml'] },
+      ],
+      changed_files: ['dev/plan.yaml'],
+      validation_results: successfulResults(authorized, target),
+      working_tree_clean: true,
+      bootstrap_range: false,
+      reason: 'idempotente',
+      adopted_at: '2026-08-11T17:00:00.000Z',
+      adoption_kind: 'plan_extension',
+    };
+    await writeMaintenanceRecord(paths, record);
+    const before = await readFile(maintenanceRecordPath(paths, target), 'utf8');
+    await createCommit('dev/fix.ts', 'export {};\n', 'harness after');
+    validationCalls = [];
+
+    const result = await adoptPlanExtension(planAdoptionInput(target));
+
+    expect(result.alreadyAdopted).toBe(true);
+    expect(validationCalls).toEqual([]);
+    expect((await readState(paths)).authorized_head_sha).toBe(target);
+    expect(await readFile(maintenanceRecordPath(paths, target), 'utf8')).toBe(before);
+  });
+
+  it('records históricos sem adoption_kind continuam parseando e no recovery', async () => {
+    const adopted = await createCommit('docs/legacy.md', 'legacy\n', 'manutenção legada');
+    const legacy = {
+      schema_version: 1,
+      previous_authorized_head_sha: authorized,
+      adopted_head_sha: adopted,
+      commits: [
+        { sha: adopted, parent_sha: authorized, changed_files: ['docs/legacy.md'] },
+      ],
+      changed_files: ['docs/legacy.md'],
+      validation_results: successfulResults(authorized, adopted),
+      working_tree_clean: true,
+      bootstrap_range: false,
+      reason: 'legado',
+      adopted_at: '2026-08-06T15:00:00.000Z',
+    };
+    await mkdir(paths.maintenanceDir, { recursive: true });
+    await writeFile(
+      maintenanceRecordPath(paths, adopted),
+      `${JSON.stringify(legacy, null, 2)}\n`,
+      'utf8',
+    );
+
+    const parsed = await readMaintenanceRecord(paths, adopted);
+    expect(parsed?.adoption_kind).toBeUndefined();
+    await expect(verifyMaintenanceRecord(paths, parsed!)).resolves.toBeUndefined();
+    const dry = await recover(paths, loaded);
+    expect(dry.state.authorized_head_sha).toBe(adopted);
   });
 });

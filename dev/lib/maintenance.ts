@@ -8,6 +8,10 @@ import {
   isWorkingTreeClean,
   parentShas,
 } from './git.js';
+import {
+  verifyPlanExtensionCommit,
+  PlanExtensionContractError,
+} from './plan-extension-contract.js';
 import type { HarnessPaths } from './paths.js';
 import {
   readMaintenanceRecord,
@@ -222,9 +226,18 @@ export async function verifyMaintenanceRecord(
     }
     assertPlanExtensionFiles(record.changed_files);
     for (const commit of record.commits) assertPlanExtensionFiles(commit.changed_files);
-  } else {
-    assertAllowedFiles(record.commits);
+    for (const commit of record.commits) await verifyRecordedCommit(paths, commit);
+    try {
+      await verifyPlanExtensionCommit(paths.repoRoot, record);
+    } catch (error) {
+      if (error instanceof PlanExtensionContractError) {
+        throw new MaintenanceError(error.message);
+      }
+      throw error;
+    }
+    return;
   }
+  assertAllowedFiles(record.commits);
   for (const commit of record.commits) await verifyRecordedCommit(paths, commit);
 }
 
