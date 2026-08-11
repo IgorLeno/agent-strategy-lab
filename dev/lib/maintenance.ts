@@ -1,10 +1,13 @@
-import { readdir } from 'node:fs/promises';
+import { access, mkdtemp, readdir, rm, symlink } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { runValidation, toValidationResult } from './exec.js';
 import {
   changedFiles,
   commitExists,
+  gitOrThrow,
   headSha,
+  isAncestor,
   isWorkingTreeClean,
   parentShas,
 } from './git.js';
@@ -50,6 +53,15 @@ export interface AdoptionInput {
 export interface AdoptionResult {
   readonly record: MaintenanceRecord;
   readonly alreadyAdopted: boolean;
+}
+
+export interface MaintenanceRangeInput {
+  readonly paths: HarnessPaths;
+  readonly target: string;
+  readonly maxCommits: number;
+  readonly reason: string;
+  readonly validationRunner?: MaintenanceValidationRunner;
+  readonly now?: () => string;
 }
 
 const VALIDATION_TIMEOUT_SECONDS = 3_600;
@@ -130,7 +142,7 @@ export function assertPlanExtensionFiles(files: readonly string[]): void {
 
 export function resolveAdoptionKind(
   record: Pick<MaintenanceRecord, 'adoption_kind'>,
-): 'maintenance' | 'plan_extension' {
+): 'maintenance' | 'plan_extension' | 'maintenance_range' {
   return record.adoption_kind ?? 'maintenance';
 }
 
@@ -149,21 +161,23 @@ async function collectCommitChain(
   paths: HarnessPaths,
   previous: string,
   adopted: string,
-  bootstrapRange: boolean,
+  mode: 'normal' | 'bootstrap' | 'maintenance_range',
   maxCommits: number | undefined,
 ): Promise<MaintenanceCommit[]> {
-  const maximum = bootstrapRange ? maxCommits : 1;
+  const maximum = mode === 'normal' ? 1 : maxCommits;
   if (!maximum || !Number.isInteger(maximum) || maximum < 1) {
-    throw new MaintenanceError('--bootstrap-range exige --max-commits inteiro e positivo');
+    const option = mode === 'bootstrap' ? '--bootstrap-range' : 'maintenance_range';
+    throw new MaintenanceError(`${option} exige --max-commits inteiro e positivo`);
   }
 
   const reversed: MaintenanceCommit[] = [];
   let current = adopted;
   while (current !== previous) {
     if (reversed.length >= maximum) {
-      const detail = bootstrapRange
-        ? `faixa contém mais de ${maximum} commits (--max-commits)`
-        : 'modo normal exige exatamente um commit';
+      const detail =
+        mode === 'normal'
+          ? 'modo normal exige exatamente um commit'
+          : `faixa contém mais de ${maximum} commits (--max-commits)`;
       throw new MaintenanceError(detail);
     }
     const parents = await parentShas(paths.repoRoot, current);
@@ -184,11 +198,73 @@ async function collectCommitChain(
 
   const commits = reversed.reverse();
   if (commits.length === 0) throw new MaintenanceError('HEAD não difere da base autorizada');
-  if (!bootstrapRange && commits.length !== 1) {
+  if (mode === 'normal' && commits.length !== 1) {
     throw new MaintenanceError('modo normal exige exatamente um commit');
+  }
+  if (mode === 'maintenance_range' && commits.length < 2) {
+    throw new MaintenanceError('maintenance_range exige pelo menos dois commits');
   }
   assertLinearCommitChain(previous, commits);
   return commits;
+}
+
+async function resolveCommitSha(repoRoot: string, raw: string): Promise<string> {
+  const trimmed = raw.trim();
+  if (trimmed === '') throw new MaintenanceError('--target é obrigatório');
+  try {
+    return (await gitOrThrow(repoRoot, ['rev-parse', '--verify', `${trimmed}^{commit}`])).trim();
+  } catch {
+    throw new MaintenanceError(`target não existe: ${trimmed}`);
+  }
+}
+
+/** Executa gates sobre os bytes do target sem trocar o HEAD principal. */
+async function withTargetValidationCwd<T>(
+  repoRoot: string,
+  target: string,
+  run: (cwd: string) => Promise<T>,
+): Promise<T> {
+  const head = await headSha(repoRoot);
+  if (head === target) return run(repoRoot);
+
+  const worktreeDir = await mkdtemp(path.join(tmpdir(), 'agentlab-maint-range-'));
+  try {
+    await gitOrThrow(repoRoot, ['worktree', 'add', '--detach', worktreeDir, target]);
+    const nodeModules = path.join(repoRoot, 'node_modules');
+    try {
+      await access(nodeModules);
+      await symlink(nodeModules, path.join(worktreeDir, 'node_modules'), 'dir');
+    } catch {
+      // Sem dependências compartilhadas, os gates falham de forma auditável.
+    }
+    return await run(worktreeDir);
+  } finally {
+    try {
+      await gitOrThrow(repoRoot, ['worktree', 'remove', '--force', worktreeDir]);
+    } catch {
+      await rm(worktreeDir, { recursive: true, force: true });
+      await gitOrThrow(repoRoot, ['worktree', 'prune']).catch(() => undefined);
+    }
+  }
+}
+
+async function runTargetValidations(
+  paths: HarnessPaths,
+  previous: string,
+  target: string,
+  runner: MaintenanceValidationRunner,
+): Promise<ValidationResult[]> {
+  return withTargetValidationCwd(paths.repoRoot, target, async (cwd) => {
+    const validationResults: ValidationResult[] = [];
+    for (const command of validationCommands(previous, target)) {
+      const result = await runner(command, cwd);
+      validationResults.push(result);
+      if (result.exit_code !== 0 || result.timed_out) {
+        throw new MaintenanceError(`validação falhou: ${command.argv.join(' ')}`);
+      }
+    }
+    return validationResults;
+  });
 }
 
 async function verifyRecordedCommit(
@@ -212,33 +288,50 @@ export async function verifyMaintenanceRecord(
   paths: HarnessPaths,
   record: MaintenanceRecord,
 ): Promise<void> {
+  MaintenanceRecord.parse(record);
   assertLinearCommitChain(record.previous_authorized_head_sha, record.commits);
   if (record.commits.at(-1)?.sha !== record.adopted_head_sha) {
     throw new MaintenanceError('MaintenanceRecord não termina no adopted_head_sha');
   }
   const kind = resolveAdoptionKind(record);
-  if (kind === 'plan_extension') {
-    if (record.bootstrap_range) {
-      throw new MaintenanceError('plan_extension não admite bootstrap_range');
-    }
-    if (record.commits.length !== 1) {
-      throw new MaintenanceError('plan_extension exige exatamente um commit');
-    }
-    assertPlanExtensionFiles(record.changed_files);
-    for (const commit of record.commits) assertPlanExtensionFiles(commit.changed_files);
-    for (const commit of record.commits) await verifyRecordedCommit(paths, commit);
-    try {
-      await verifyPlanExtensionCommit(paths.repoRoot, record);
-    } catch (error) {
-      if (error instanceof PlanExtensionContractError) {
-        throw new MaintenanceError(error.message);
+  switch (kind) {
+    case 'plan_extension': {
+      if (record.bootstrap_range) {
+        throw new MaintenanceError('plan_extension não admite bootstrap_range');
       }
-      throw error;
+      if (record.commits.length !== 1) {
+        throw new MaintenanceError('plan_extension exige exatamente um commit');
+      }
+      assertPlanExtensionFiles(record.changed_files);
+      for (const commit of record.commits) assertPlanExtensionFiles(commit.changed_files);
+      for (const commit of record.commits) await verifyRecordedCommit(paths, commit);
+      try {
+        await verifyPlanExtensionCommit(paths.repoRoot, record);
+      } catch (error) {
+        if (error instanceof PlanExtensionContractError) {
+          throw new MaintenanceError(error.message);
+        }
+        throw error;
+      }
+      return;
     }
-    return;
+    case 'maintenance_range': {
+      if (record.bootstrap_range) {
+        throw new MaintenanceError('maintenance_range não admite bootstrap_range');
+      }
+      if (record.commits.length < 2) {
+        throw new MaintenanceError('maintenance_range exige pelo menos dois commits');
+      }
+      assertAllowedFiles(record.commits);
+      for (const commit of record.commits) await verifyRecordedCommit(paths, commit);
+      return;
+    }
+    case 'maintenance': {
+      assertAllowedFiles(record.commits);
+      for (const commit of record.commits) await verifyRecordedCommit(paths, commit);
+      return;
+    }
   }
-  assertAllowedFiles(record.commits);
-  for (const commit of record.commits) await verifyRecordedCommit(paths, commit);
 }
 
 async function readAllMaintenanceRecords(paths: HarnessPaths): Promise<MaintenanceRecord[]> {
@@ -362,7 +455,7 @@ export async function adoptMaintenance(input: AdoptionInput): Promise<AdoptionRe
     input.paths,
     previous,
     adopted,
-    bootstrapRange,
+    bootstrapRange ? 'bootstrap' : 'normal',
     input.maxCommits,
   );
   const aggregate = assertAllowedFiles(commits);
@@ -395,5 +488,85 @@ export async function adoptMaintenance(input: AdoptionInput): Promise<AdoptionRe
   // Ordem transacional: evidence primeiro; state só avança depois do record.
   await writeMaintenanceRecord(input.paths, record);
   await writeState(input.paths, { ...state, authorized_head_sha: adopted });
+  return { record, alreadyAdopted: false };
+}
+
+export async function adoptMaintenanceRange(
+  input: MaintenanceRangeInput,
+): Promise<AdoptionResult> {
+  const reason = input.reason.trim();
+  if (reason === '') throw new MaintenanceError('--reason é obrigatório');
+  if (!Number.isInteger(input.maxCommits) || input.maxCommits < 1) {
+    throw new MaintenanceError('maintenance_range exige --max-commits inteiro e positivo');
+  }
+  if (!(await isWorkingTreeClean(input.paths.repoRoot))) {
+    throw new MaintenanceError('working tree suja; adoção recusada');
+  }
+
+  const state = await readState(input.paths);
+  const running = state.tasks.find((task) => task.status === 'RUNNING');
+  if (running) throw new MaintenanceError(`tarefa RUNNING: ${running.id}`);
+  const previous = state.authorized_head_sha;
+  if (previous === null) throw new MaintenanceError('authorized_head_sha ausente');
+
+  const target = await resolveCommitSha(input.paths.repoRoot, input.target);
+  const existing = await readMaintenanceRecord(input.paths, target);
+  if (existing) {
+    await verifyMaintenanceRecord(input.paths, existing);
+    if (resolveAdoptionKind(existing) !== 'maintenance_range') {
+      throw new MaintenanceError('record existente no target não é maintenance_range');
+    }
+    if (existing.previous_authorized_head_sha !== previous && previous !== target) {
+      throw new MaintenanceError('MaintenanceRecord existente não começa no authorized_head_sha');
+    }
+    if (previous !== target) {
+      await writeState(input.paths, { ...state, authorized_head_sha: target });
+    }
+    return { record: existing, alreadyAdopted: true };
+  }
+
+  if (previous === target) {
+    throw new MaintenanceError('target já autorizado; nenhuma faixa de manutenção a adotar');
+  }
+  if (!(await isAncestor(input.paths.repoRoot, previous, target))) {
+    throw new MaintenanceError('target não descende do authorized_head_sha');
+  }
+
+  const commits = await collectCommitChain(
+    input.paths,
+    previous,
+    target,
+    'maintenance_range',
+    input.maxCommits,
+  );
+  const aggregate = assertAllowedFiles(commits);
+  const runner = input.validationRunner ?? defaultValidationRunner;
+  const validationResults = await runTargetValidations(
+    input.paths,
+    previous,
+    target,
+    runner,
+  );
+  if (!(await isWorkingTreeClean(input.paths.repoRoot))) {
+    throw new MaintenanceError('working tree ficou suja durante as validações');
+  }
+
+  const record = MaintenanceRecord.parse({
+    schema_version: DEV_SCHEMA_VERSION,
+    previous_authorized_head_sha: previous,
+    adopted_head_sha: target,
+    commits,
+    changed_files: aggregate,
+    validation_results: validationResults,
+    working_tree_clean: true,
+    bootstrap_range: false,
+    reason,
+    adopted_at: (input.now ?? (() => new Date().toISOString()))(),
+    adoption_kind: 'maintenance_range',
+  });
+
+  // Ordem transacional: evidence primeiro; state só avança depois do record.
+  await writeMaintenanceRecord(input.paths, record);
+  await writeState(input.paths, { ...state, authorized_head_sha: target });
   return { record, alreadyAdopted: false };
 }

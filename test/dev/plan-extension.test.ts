@@ -324,7 +324,7 @@ tasks:
     await gitMust(['checkout', '-q', '-b', 'side', authorized]);
     await createCommit('docs/side.md', 'side\n', 'side');
     await gitMust(['checkout', '-q', 'main']);
-    // main está em target; side não contém target como ancestral de HEAD... 
+    // main está em target; side não contém target como ancestral de HEAD...
     // para HEAD sem target como ancestral: checkout side
     await gitMust(['checkout', '-q', 'side']);
     await expect(adoptPlanExtension(planAdoptionInput(target))).rejects.toThrow(

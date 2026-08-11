@@ -883,9 +883,14 @@ export type MaintenanceCommit = z.infer<typeof MaintenanceCommit>;
 /**
  * Discriminador de adoção. Ausência em records históricos ≡ `maintenance`.
  * `plan_extension` autoriza exatamente um commit que só toca `dev/plan.yaml`
- * sob as regras append-only do `dev-adopt-plan`.
+ * sob as regras append-only do `dev-adopt-plan`; `maintenance_range` sela uma
+ * faixa linear de manutenção validada como unidade.
  */
-export const AdoptionKind = z.enum(['maintenance', 'plan_extension']);
+export const AdoptionKind = z.enum([
+  'maintenance',
+  'plan_extension',
+  'maintenance_range',
+]);
 export type AdoptionKind = z.infer<typeof AdoptionKind>;
 
 export const MaintenanceRecord = z
@@ -906,7 +911,11 @@ export const MaintenanceRecord = z
   .strict()
   .superRefine((record, ctx) => {
     const kind = record.adoption_kind ?? 'maintenance';
-    if (!record.bootstrap_range && record.commits.length !== 1) {
+    if (
+      kind === 'maintenance' &&
+      !record.bootstrap_range &&
+      record.commits.length !== 1
+    ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: 'MaintenanceRecord normal exige exatamente um commit',
@@ -927,6 +936,29 @@ export const MaintenanceRecord = z
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           message: 'plan_extension exige exatamente um commit só com dev/plan.yaml',
+        });
+      }
+    }
+    if (kind === 'maintenance_range') {
+      if (record.bootstrap_range) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'maintenance_range não admite bootstrap_range',
+        });
+      }
+      if (record.commits.length < 2) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'maintenance_range exige pelo menos dois commits',
+        });
+      }
+      if (
+        record.changed_files.includes('dev/plan.yaml') ||
+        record.commits.some((commit) => commit.changed_files.includes('dev/plan.yaml'))
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'maintenance_range não admite dev/plan.yaml',
         });
       }
     }
