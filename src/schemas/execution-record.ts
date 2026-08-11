@@ -10,19 +10,30 @@ const identifier = z
 const nonEmpty = z.string().trim().min(1);
 const provenance = z.string().trim().min(1, 'provenance da métrica é obrigatória');
 
-const executionMetric = z
-  .object({
-    // Ausência de medição é null; zero continua reservado a uma medição real.
-    value: z.number().int().nonnegative().nullable(),
-    provenance,
-  })
-  .strict();
+const metricWithProvenance = (numberSchema: z.ZodNumber) =>
+  z
+    .object({
+      // Ausência de medição é null; zero continua reservado a uma medição real.
+      value: numberSchema.nullable(),
+      provenance,
+    })
+    .strict();
+
+const executionMetric = metricWithProvenance(z.number().int().nonnegative());
+const decimalMetric = metricWithProvenance(z.number().nonnegative());
 
 /** Métricas usadas pelos budgets de score que não são campos do próprio record. */
 export const ExecutionMetrics = z
   .object({
     tokens: executionMetric,
     changed_files: executionMetric,
+    // Campos opcionais: ausentes em ExecutionRecord de eras anteriores (M1).
+    // fresh_input_tokens não é armazenado — é derivado (input - cached) na camada de performance.
+    input_tokens: executionMetric.optional(),
+    cached_input_tokens: executionMetric.optional(),
+    output_tokens: executionMetric.optional(),
+    reasoning_tokens: executionMetric.optional(),
+    api_equivalent_usd: decimalMetric.optional(),
   })
   .strict();
 export type ExecutionMetrics = z.infer<typeof ExecutionMetrics>;
