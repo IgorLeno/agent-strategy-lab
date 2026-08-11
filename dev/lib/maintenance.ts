@@ -50,7 +50,10 @@ export interface AdoptionResult {
 
 const VALIDATION_TIMEOUT_SECONDS = 3_600;
 
-function validationCommands(previous: string, adopted: string): ValidationCommand[] {
+export function adoptionValidationCommands(
+  previous: string,
+  adopted: string,
+): ValidationCommand[] {
   return [
     { argv: ['pnpm', 'typecheck'], timeout_seconds: VALIDATION_TIMEOUT_SECONDS },
     { argv: ['pnpm', 'build'], timeout_seconds: VALIDATION_TIMEOUT_SECONDS },
@@ -60,6 +63,10 @@ function validationCommands(previous: string, adopted: string): ValidationComman
       timeout_seconds: VALIDATION_TIMEOUT_SECONDS,
     },
   ];
+}
+
+function validationCommands(previous: string, adopted: string): ValidationCommand[] {
+  return adoptionValidationCommands(previous, adopted);
 }
 
 const defaultValidationRunner: MaintenanceValidationRunner = async (command, cwd) =>
@@ -106,6 +113,21 @@ function assertAllowedFiles(commits: readonly MaintenanceCommit[]): string[] {
     assertAllowedMaintenanceFiles(commit.changed_files);
   }
   return [...new Set(commits.flatMap((commit) => commit.changed_files))].sort();
+}
+
+/** Paths permitidos só para records com `adoption_kind: plan_extension`. */
+export function assertPlanExtensionFiles(files: readonly string[]): void {
+  if (files.length !== 1 || files[0] !== 'dev/plan.yaml') {
+    throw new MaintenanceError(
+      `plan_extension exige exatamente [dev/plan.yaml]; recebido: ${JSON.stringify(files)}`,
+    );
+  }
+}
+
+export function resolveAdoptionKind(
+  record: Pick<MaintenanceRecord, 'adoption_kind'>,
+): 'maintenance' | 'plan_extension' {
+  return record.adoption_kind ?? 'maintenance';
 }
 
 async function maintenanceRecordFiles(paths: HarnessPaths): Promise<string[]> {
@@ -190,7 +212,19 @@ export async function verifyMaintenanceRecord(
   if (record.commits.at(-1)?.sha !== record.adopted_head_sha) {
     throw new MaintenanceError('MaintenanceRecord não termina no adopted_head_sha');
   }
-  assertAllowedFiles(record.commits);
+  const kind = resolveAdoptionKind(record);
+  if (kind === 'plan_extension') {
+    if (record.bootstrap_range) {
+      throw new MaintenanceError('plan_extension não admite bootstrap_range');
+    }
+    if (record.commits.length !== 1) {
+      throw new MaintenanceError('plan_extension exige exatamente um commit');
+    }
+    assertPlanExtensionFiles(record.changed_files);
+    for (const commit of record.commits) assertPlanExtensionFiles(commit.changed_files);
+  } else {
+    assertAllowedFiles(record.commits);
+  }
   for (const commit of record.commits) await verifyRecordedCommit(paths, commit);
 }
 

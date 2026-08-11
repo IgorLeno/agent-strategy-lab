@@ -25,6 +25,7 @@
     "dev-revalidate": "tsx dev/cli/dev-revalidate.ts",
     "dev-revalidation-bind": "tsx dev/cli/dev-revalidation-bind.ts",
     "dev-adopt-maintenance": "tsx dev/cli/dev-adopt-maintenance.ts",
+    "dev-adopt-plan": "tsx dev/cli/dev-adopt-plan.ts",
     "dev-orchestrate": "tsx dev/cli/dev-orchestrate.ts"
   },
   "devDependencies": {

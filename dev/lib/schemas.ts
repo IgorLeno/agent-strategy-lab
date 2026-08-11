@@ -880,6 +880,14 @@ export const MaintenanceCommit = z
   .strict();
 export type MaintenanceCommit = z.infer<typeof MaintenanceCommit>;
 
+/**
+ * Discriminador de adoção. Ausência em records históricos ≡ `maintenance`.
+ * `plan_extension` autoriza exatamente um commit que só toca `dev/plan.yaml`
+ * sob as regras append-only do `dev-adopt-plan`.
+ */
+export const AdoptionKind = z.enum(['maintenance', 'plan_extension']);
+export type AdoptionKind = z.infer<typeof AdoptionKind>;
+
 export const MaintenanceRecord = z
   .object({
     schema_version: z.literal(DEV_SCHEMA_VERSION),
@@ -892,14 +900,35 @@ export const MaintenanceRecord = z
     bootstrap_range: z.boolean(),
     reason: nonEmpty,
     adopted_at: z.string().datetime(),
+    /** Ausente em records históricos; equivalente a `maintenance`. */
+    adoption_kind: AdoptionKind.optional(),
   })
   .strict()
   .superRefine((record, ctx) => {
+    const kind = record.adoption_kind ?? 'maintenance';
     if (!record.bootstrap_range && record.commits.length !== 1) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: 'MaintenanceRecord normal exige exatamente um commit',
       });
+    }
+    if (kind === 'plan_extension') {
+      if (record.bootstrap_range) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'plan_extension não admite bootstrap_range',
+        });
+      }
+      if (
+        record.commits.length !== 1 ||
+        JSON.stringify(record.changed_files) !== JSON.stringify(['dev/plan.yaml']) ||
+        JSON.stringify(record.commits[0]?.changed_files) !== JSON.stringify(['dev/plan.yaml'])
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'plan_extension exige exatamente um commit só com dev/plan.yaml',
+        });
+      }
     }
     let expectedParent = record.previous_authorized_head_sha;
     for (const commit of record.commits) {
