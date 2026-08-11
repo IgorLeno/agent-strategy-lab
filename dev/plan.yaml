@@ -993,3 +993,501 @@ tasks:
         timeout_seconds: 300
       - argv: [pnpm, test]
         timeout_seconds: 900
+
+  # -------------------------------------------------------------------------
+  # PRE-M2 — Fundações (P1–P4). PARADA humana obrigatória após M52.
+  # O plano operacional TERMINA em M52 (M53+ exigem nova alteração aprovada).
+  # -------------------------------------------------------------------------
+  - id: M41
+    title: ADR-0002 e LAB_CHARTER
+    blocked_by: [M40B]
+    objective: >-
+      Criar docs/adr/ADR-0002-evidence-kernel.md ("AgentLab as Evidence Kernel
+      and Development Control Plane") e docs/LAB_CHARTER.md. Formalizar:
+      baseline histórico do M1 (commit 4b33817f141359ed8b802f4b119775ece43c9289;
+      evidência histórica nunca é reescrita); missão (plataforma de engenharia
+      de software orientada por evidência para selecionar, coordenar e melhorar
+      agentes de desenvolvimento); STABLE KERNEL (Task/Trial/Run, Evidence/
+      Metrics, Evaluation, Score, Qualification, Profiles, Envelopes) com os 4
+      critérios de inclusão (provider-independent; necessário para evidence/
+      reprodutibilidade; útil a múltiplas estratégias/projetos; remoção
+      quebraria a semântica Task/Trial/Run/Evidence); experiment plane vs
+      control plane; execution contract com agentes substituíveis (Claude,
+      Codex, Hermes e futuros nunca são autoridade de processo); extensions com
+      incubação DISCOVERED->CANDIDATE->SANDBOXED->BENCHMARKED->PROMOTED; modo
+      EXPERIMENTAL vs OPERATIONAL (dado operacional nunca vira benchmark
+      controlado silenciosamente); autoridades (humano = produto/design; lab =
+      processo/evidência); dev/ = bootstrap harness, não arquitetura do
+      produto; non-goals (dashboard, multi-user, auth, scheduler distribuído,
+      marketplace, memory system, workflow DSL, supervisor complexo,
+      auto-remoção de config de máquina, adaptive router, microservices).
+      Nenhum arquivo de src/ é alterado nesta tarefa.
+    initial_files:
+      - docs/ARCHITECTURE.md
+      - docs/adr/ADR-0001-stack.md
+    acceptance:
+      - ADR-0002 existe, registra o baseline sha do M1 e os 4 critérios de inclusão no kernel.
+      - LAB_CHARTER.md cobre missão, autoridades, dois modos, incubation lifecycle e non-goals em seções nomeadas.
+      - Nenhuma alteração em src/ ou test/.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+
+  - id: M42
+    title: Mapa kernel/planos e freeze do harness
+    blocked_by: [M41]
+    objective: >-
+      Atualizar docs/ARCHITECTURE.md com uma tabela mapeando cada área de src/
+      para STABLE KERNEL, EXPERIMENT PLANE, CONTROL PLANE, EXECUTION CONTRACT
+      ou EXTENSIONS, e registrar duas divergências documentais: (1) o índice
+      usa node:sqlite (DatabaseSync) e não better-sqlite3 — adendo apontando
+      ADR-0001 e o motivo (better-sqlite3 não instalável no sandbox; decisão
+      D1: manter node:sqlite); (2) src/reporting/ é placeholder e o relatório
+      de run vive em src/cli/report.ts (compare futuro nasce em reporting/).
+      Acrescentar em docs/HARNESS.md a política de freeze: manutenção em dev/
+      somente por defeito reproduzível, risco à validade experimental, perda/
+      corrupção de evidência ou incapacidade objetiva de executar o plano —
+      novas capacidades nascem em src/.
+    initial_files:
+      - docs/ARCHITECTURE.md
+      - docs/HARNESS.md
+    acceptance:
+      - Tabela área->camada presente em ARCHITECTURE.md cobrindo todas as áreas de src/.
+      - Texto do driver SQLite corrigido para node:sqlite com referência a ADR-0001.
+      - HARNESS.md contém a seção de freeze com as 4 condições.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+
+  - id: M43
+    title: Métrica genérica com provenance e ExecutionMetrics estendida
+    blocked_by: [M42]
+    objective: >-
+      Em src/schemas/execution-record.ts, generalizar a métrica-com-provenance
+      para números não negativos incluindo decimais (USD) e estender
+      ExecutionMetrics com campos OPCIONAIS input_tokens, cached_input_tokens,
+      output_tokens, reasoning_tokens (inteiros) e api_equivalent_usd
+      (decimal), cada um { value: number|null, provenance: string }.
+      Campo ausente continua válido: ExecutionRecord da era M1 (somente tokens
+      e changed_files) parseia sem mudança. fresh_input_tokens NÃO é
+      armazenado — é derivado (input - cached) na camada de performance.
+      Nenhum default zero em nenhum caminho; ausência de medição é null com
+      provenance, nunca zero silencioso.
+    initial_files:
+      - src/schemas/execution-record.ts
+      - test/schemas/execution-record.test.ts
+    acceptance:
+      - ExecutionRecord antigo (sem os campos novos) parseia com sucesso (teste de regressão).
+      - Campos novos aceitam null com provenance e rejeitam valor numérico sem provenance ou negativo.
+      - api_equivalent_usd aceita decimal; campos de token rejeitam não inteiro.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/schemas/execution-record.test.ts]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+
+  - id: M44
+    title: Schema QuotaUsage provider-neutro do produto
+    blocked_by: [M43]
+    objective: >-
+      Criar src/schemas/quota-usage.ts (produto; NUNCA importar de dev/lib):
+      QuotaWindow genérica com window_id string não vazia DEFINIDA PELO
+      PROVIDER (ex.: five_hour, seven_day — nunca campos fixos do stable
+      kernel), before_used_pct e after_used_pct (number|null), consumed_pp
+      (number|null), same_window (boolean|null) e reason_code (OK |
+      RATE_LIMIT_WINDOW_RESET | MEASUREMENT_UNAVAILABLE |
+      WINDOW_LABEL_UNPARSEABLE | OBSERVED_DELTA_NEGATIVE), mais provenance
+      por janela. QuotaUsage agrega provider (string não vazia), observation
+      { status: OBSERVED | UNAVAILABLE, reason_code, provenance } e windows
+      (lista de QuotaWindow). OBSERVED = probe executado e resultado
+      interpretável — windows pode legitimamente ser []; UNAVAILABLE = sem
+      fonte observável, probe falhou ou provider sem mecanismo verificável —
+      windows DEVE ser [] (PROIBIDO inventar QuotaWindow só para representar
+      indisponibilidade). windows=[] sozinho NÃO basta: o status de
+      observation distingue zero windows observadas de medição indisponível.
+      Documentar no schema: consumed_pp é pontos percentuais observados —
+      não é token, não é dinheiro, NUNCA é somado entre janelas incompatíveis
+      e só é comparável entre mesmo window_id e mesmo provider. Medição
+      indisponível de uma janela = null + reason_code na QuotaWindow, nunca
+      zero; indisponibilidade do conjunto = observation.status UNAVAILABLE.
+    initial_files:
+      - src/schemas/execution-record.ts
+      - src/schemas/index.ts
+    acceptance:
+      - Parse válido/inválido cobre cada reason_code de janela, window_id arbitrário não vazio, observation OBSERVED com windows [] e observation UNAVAILABLE com windows []; window_id vazio é rejeitado; UNAVAILABLE com windows não vazia é rejeitado.
+      - consumed_pp numérico com same_window false é rejeitado (delta entre janelas incompatíveis não existe).
+      - Docstrings do schema declaram a não-somabilidade entre janelas, a comparabilidade restrita a mesmo window_id+provider e a distinção OBSERVED([]) vs UNAVAILABLE([]).
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/schemas/quota-usage.test.ts]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+
+  - id: M45
+    title: InterventionRecord e fatos ortogonais de attempt
+    blocked_by: [M44]
+    objective: >-
+      Criar src/schemas/intervention.ts (InterventionRecord: intervention_id,
+      type: operational_cleanup | manual_fix | design_decision | other,
+      description não vazia, occurred_at ISO, affects_autonomy boolean) e a
+      área nova src/performance/ com a função pura deriveAttemptFacts que
+      produz, por attempt, dimensões ORTOGONAIS e não mutuamente exclusivas:
+      execution_status (o status do ExecutionRecord, inalterado);
+      had_inference true | false | null com provenance — true SOMENTE com
+      evidência positiva de inferência observada (eventos/model usage
+      objetivos, ou outra evidência objetiva comprovada do runtime/
+      orchestrator); false SOMENTE com evidência positiva/autoritativa de
+      ZERO inferência (ex.: usage/cost/tokens zero verificáveis e nenhum
+      modelo executado); null quando a evidência não permite afirmar true
+      nem false (sem eventos, transporte falhou cedo, métricas indisponíveis,
+      zero não comprovado). PROIBIDO: absence_of_event => false.
+      evaluation_outcome (PASS | FAIL | none quando não avaliado);
+      attempt_role (initial | repair | escalation | unknown — vem da
+      história fornecida, nunca é inferido do conteúdo); interventions
+      (lista possivelmente vazia OU null/unknown quando não há registro).
+      NÃO existe classificação binária INFRA vs INFERENCE_BEARING: um
+      attempt com execution_status INFRA_ERROR e had_inference true|false|null
+      é representável conforme a prova disponível. A derivação usa somente
+      evidência derivada pelo orquestrador — self-report do provider nunca
+      prova fato objetivo. Nenhum I/O em src/performance/ nesta tarefa.
+    initial_files:
+      - src/schemas/quota-usage.ts
+      - src/core/enums.ts
+    acceptance:
+      - INFRA_ERROR + nenhum evento + nenhuma prova autoritativa de zero inference produz had_inference null (nunca false).
+      - INFRA_ERROR + prova positiva autoritativa de zero inference produz had_inference false; INFRA_ERROR + prova positiva de inferência produz had_inference true; TIMED_OUT com eventos de modelo produz had_inference true.
+      - Evidência insuficiente produz had_inference null com provenance, nunca false por ausência; InterventionRecord rejeita description vazia e type fora do enum.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/performance/attempt-facts.test.ts]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+
+  - id: M46
+    title: Schemas RunPerformanceRecord e TaskPerformanceRecord
+    blocked_by: [M45]
+    objective: >-
+      Criar src/schemas/performance.ts com schema_version própria (1).
+      RunPerformanceRecord: IDENTITY (task_id, taxonomy quando presente,
+      stack, agent_cli, model, reasoning_effort { value|null, provenance },
+      strategy name+version, environment_profile id+mode,
+      execution_envelope_sha256, evaluation_envelope_sha256|null, e as
+      referências PINADAS evaluation_id|null e score_id|null usadas na
+      derivação); QUALITY (execution_status, evaluation_outcome,
+      qualification_status, score_profile_id|null, score_profile_version|null,
+      sub_scores|null, coverage|null — espelhando ScoreRecord; NÃO inventar
+      scalar score/aggregate_score/total_score/weighted_score; budgets_used
+      permanece somente no ScoreRecord autoritativo e NÃO é duplicado aqui;
+      campos de score ausentes/não selecionados = null com provenance);
+      FACTS (had_inference true|false|null com provenance, attempt_role,
+      interventions|null); COST (duration_ms, tokens breakdown incluindo
+      fresh_input_tokens DERIVADO, api_equivalent_usd, quota_usage
+      { value: QuotaUsage|null, provenance } — QuotaUsage do M44 quando
+      presente e válido; null + provenance quando ausente).
+      TaskPerformanceRecord (agregado por trial/task): ATTEMPTS com
+      contagens ORTOGONAIS — operational_attempts; attempts_with_inference +
+      attempts_without_inference + attempts_inference_unknown particionando
+      exatamente operational_attempts; infra_error_attempts (contagem por
+      execution_status, que PODE intersectar attempts_with_inference);
+      repair_attempts; escalations; attempts_role_unknown. NENHUMA
+      invariante do tipo attempts_with_inference + infra_error_attempts <=
+      operational_attempts. SUCCESS (first_operational_pass,
+      first_inference_bearing_pass — primeiro PASS com had_inference true —,
+      autonomous_first_pass, final_pass — todos boolean|null); INTERVENTION
+      (human_intervention boolean|null COM provenance — null quando não há
+      registro objetivo, NUNCA default false; intervention_types).
+      autonomous_first_pass true exige human_intervention false comprovado;
+      com human_intervention null, autonomous_first_pass é null. Records são
+      DERIVADOS e recomputáveis; a evidência primária em disco permanece
+      autoritativa e estes records nunca são gravados como fonte de verdade.
+    initial_files:
+      - src/schemas/intervention.ts
+      - src/performance/index.ts
+    acceptance:
+      - Parse válido/inválido de ambos os records, incluindo had_inference null, human_intervention null com provenance, e QUALITY sem campo scalar score (sub_scores/coverage/profile nulláveis).
+      - Partição attempts_with_inference + attempts_without_inference + attempts_inference_unknown == operational_attempts é validada; record com infra_error_attempts intersectando attempts_with_inference é aceito.
+      - autonomous_first_pass true com human_intervention true OU null é rejeitado; parse rejeita aggregate_score/total_score/weighted_score se presentes.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/schemas/performance.test.ts]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+
+  - id: M47
+    title: derivePerformance e fixtures históricas
+    blocked_by: [M46]
+    objective: >-
+      Função pura derivePerformance(history) em src/performance/ que produz
+      TaskPerformanceRecord a partir de uma AttemptHistory normalizada
+      (sequência de attempts com os fatos ortogonais do M45: execution
+      status, had_inference, evaluation outcome, attempt role e lista ou
+      null/unknown de InterventionRecord). Fixtures SINTÉTICAS
+      determinísticas em test/ (nunca acopladas a .dev/ nem ao runtime
+      local) reproduzindo a semântica dos casos históricos: M26-like — 1
+      attempt PASS com intervenção operacional registrada resulta em
+      final_pass true E autonomous_first_pass false; M33-like — attempt 1
+      INFRA_ERROR com prova positiva/autoritativa de ZERO inferência
+      (had_inference false), attempt 2 com inferência real e PASS resulta em
+      operational_attempts 2, attempts_with_inference 1,
+      attempts_without_inference 1, attempts_inference_unknown 0,
+      infra_error_attempts 1, first_operational_pass false,
+      first_inference_bearing_pass true, final_pass true;
+      infra-inference-unknown — attempt INFRA_ERROR sem eventos e sem prova
+      positiva de inferência nem de zero inference (had_inference null),
+      distinto do M33-like; M39B-like — attempt 1 FAIL legítimo
+      (self-report de sucesso ignorado), attempt 2 role repair PASS resulta
+      em repair_attempts 1, escalations 0, first_inference_bearing_pass
+      false, final_pass true; M23-like — repair no mesmo effort falhou e
+      attempt role escalation passou resulta em escalations 1, final_pass
+      true; infra-after-inference (INFRA-pós-inferência) — attempt 1
+      INFRA_ERROR com had_inference true, attempt 2 PASS resulta em
+      infra_error_attempts 1, attempts_with_inference 2,
+      attempts_without_inference 0 (distinto do M33-like e do
+      infra-inference-unknown); unknown-intervention — história sem
+      registro de intervenção resulta em human_intervention null com
+      provenance not_recorded e autonomous_first_pass null, nunca
+      false/true supostos. A regra da M45 permanece: absence_of_event !=
+      proof_of_zero_inference.
+    initial_files:
+      - src/schemas/performance.ts
+      - src/performance/index.ts
+    acceptance:
+      - As sete fixtures produzem records distintos exatamente como descrito no objective.
+      - >-
+          Três casos INFRA distintos — M33-like (had_inference false com zero
+          comprovado), infra-inference-unknown (null sem prova),
+          infra-after-inference (true com inferência comprovada);
+          absence_of_event nunca vira false; ausência de registro de
+          intervenção não vira false.
+      - derivePerformance é determinística (mesma entrada, mesmos bytes canônicos).
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/performance/derive.test.ts]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+
+  - id: M48
+    title: AttemptHistory a partir de data/runs com seleção pinada
+    blocked_by: [M47]
+    objective: >-
+      Leitor somente-leitura em src/performance/ que constrói AttemptHistory
+      de um trial a partir de data/runs/: agrupa runs por trial_id lido de
+      index-record.json, ordena por run_id ULID (ordem de attempt), lê
+      execution-record.json e deriva os fatos de attempt (M45). Um run pode
+      ter N evaluations e N scores: a derivação NUNCA escolhe "mais recente"
+      — recebe uma EvaluationSelection explícita (run_id -> evaluation_id e
+      score_id pinados) fornecida pelo chamador e grava as referências
+      pinadas no RunPerformanceRecord; run sem seleção fornecida produz
+      evaluation_outcome none e campos de score null com provenance
+      not_selected (score_profile_id/version, sub_scores, coverage — sem
+      scalar inventado). Adicionar uma avaliação ou score futuros a um run
+      JAMAIS altera o resultado derivado com a mesma seleção (teste explícito
+      de imutabilidade histórica). Helper listEvaluations(run) enumera os
+      candidatos para o chamador escolher — sem default automático. Campo de
+      métrica inexistente em record da era M1 vira null com provenance
+      schema_v1_absent; ausência de registro de intervenção vira
+      human_intervention null com provenance not_recorded, nunca false.
+      Quota usage: SE existir execution/quota-usage.json, verificar
+      integridade conforme o modelo de evidence existente, parsear
+      QuotaUsage (M44) e expor no RunPerformanceRecord derivado; SE NÃO
+      existir, quota_usage.value = null com provenance artifact_not_present
+      (NÃO inventar windows [] fingindo medição — runs M1/históricos não
+      têm o artifact; M48 deve funcionar antes e depois de M59 sem
+      redesign). Artifact presente mas inválido/adulterado: NÃO ignorar
+      silenciosamente — seguir o tratamento existente de evidence inválida
+      (reportar/excluir com motivo). Run com integridade violada é
+      reportado e excluído com motivo. Nenhuma escrita em disco.
+    initial_files:
+      - src/performance/derive.ts
+      - src/storage/index.ts
+    acceptance:
+      - Fixture com dois runs do mesmo trial (INFRA_ERROR depois COMPLETED/PASS) produz a semântica M33-like fim a fim a partir do disco, com seleção pinada gravada no record.
+      - Acrescentar uma segunda evaluation ao mesmo run não muda o record derivado com a seleção original; sem seleção, outcome é none/not_selected e QUALITY não inventa scalar score.
+      - Run histórico sem quota-usage.json produz quota_usage null com artifact_not_present; run com quota-usage.json válido expõe QuotaUsage parseado; run adulterado/invalid evidence aparece excluído com motivo.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/performance/history.test.ts]
+        timeout_seconds: 600
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+
+  - id: M49
+    title: Taxonomia v1 opcional e backward-compatible no TaskSpec
+    blocked_by: [M48]
+    objective: >-
+      Adicionar a src/schemas/task-spec.ts um bloco OPCIONAL e VERSIONADO
+      taxonomy com: version (literal 1), task_class (bugfix | feature |
+      refactor | test | docs | chore), difficulty_declared (trivial | easy |
+      medium | hard), e opcionais complexity (local | multi_file | subsystem
+      | cross_cutting), ambiguity (low | medium | high) e verification
+      (deterministic | partially_deterministic | subjective). Os campos
+      EXISTENTES task_class e difficulty do TaskSpec permanecem strings
+      livres e NENHUM campo existente é estreitado: todo TaskSpec histórico
+      continua parseando inalterado — o parsing histórico é preservado e a
+      mudança é aditiva de verdade. difficulty_declared nomeia a dificuldade
+      DECLARADA pelo autor da task; a dificuldade observada será derivada
+      dos experimentos no futuro e nunca entra neste bloco. Quando taxonomy
+      está presente, seus enums são estritos (.strict()). Registrar em
+      docs/ARCHITECTURE.md que a Capability Matrix é DERIVADA dos
+      experimentos — nenhuma matriz hardcoded e nenhuma categoria adicional
+      antes de existirem dados.
+    initial_files:
+      - src/schemas/task-spec.ts
+      - test/schemas/task-spec.test.ts
+    acceptance:
+      - TaskSpec da era M1 com task_class/difficulty strings livres e sem bloco taxonomy parseia inalterado (teste de regressão explícito).
+      - taxonomy presente rejeita version diferente de 1 e valores fora dos enums; ausente continua válido.
+      - Testes cobrem presença/ausência do bloco e valores válidos/inválidos de cada campo.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/schemas/task-spec.test.ts]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+
+  - id: M50
+    title: ExtensionManifest imutável e IncubationState separado
+    blocked_by: [M49]
+    objective: >-
+      Criar src/schemas/extension.ts com DOIS schemas separados:
+      ExtensionManifest — identidade/configuração IMUTÁVEL e versionada
+      (kind: strategy | skill | hook | mcp | review_protocol |
+      provider_integration; name e version com as mesmas regras de
+      identifier do StrategyDef; description; requires opcional), SEM nenhum
+      campo de lifecycle/status; e IncubationState — estado MUTÁVEL em
+      arquivo próprio (status: DISCOVERED | CANDIDATE | SANDBOXED |
+      BENCHMARKED | PROMOTED; updated_at ISO; referência à identidade
+      kind/name/version do manifest). Loader loadExtension(repoRoot, kind,
+      name, version) lê extensions/<kind>/<name>/<version>/extension.yaml
+      (manifest) e, se existir, incubation.yaml no mesmo diretório (estado;
+      ausente = DISCOVERED reportado como default em memória, nada gravado),
+      com a mesma guarda de identidade do loadStrategy (declaração
+      divergente do caminho falha). Mudar o status NUNCA altera o manifest
+      nem seu hash canônico. Nenhum registry além disso — contrato mínimo.
+      As estratégias existentes em strategies/ NÃO migram nesta tarefa.
+      Nenhuma prática é instalada globalmente por estar registrada.
+    initial_files:
+      - src/schemas/task-spec.ts
+      - src/strategies/index.ts
+    acceptance:
+      - Manifest válido carrega; identidade divergente do caminho falha nomeando o esperado; manifest contendo campo de status/lifecycle é rejeitado.
+      - incubation.yaml com status fora do enum ou identidade divergente é rejeitado; ausência produz DISCOVERED default sem escrita em disco.
+      - Hash canônico do manifest não muda quando incubation.yaml muda; strategies/direct/1 continua carregando pelo caminho antigo, inalterado.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/schemas/extension.test.ts]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+
+  - id: M51A
+    title: ProviderAdapter contract, registry e fake shape
+    blocked_by: [M50]
+    objective: >-
+      Criar src/adapters/contract.ts definindo o ProviderAdapter MÍNIMO —
+      identity (AdapterIdentity já existente em src/envelope), preflight
+      opcional (não implementado nesta tarefa), buildInvocation(options)
+      retornando { argv, env, stdin opcional } e contrato de parser/
+      observações de provider (stream bruto -> eventos normalizados da união
+      interna + observações: usage, custo, classificação terminal). Registry
+      resolveAdapter(cli: string) mapeia AgentProfile.cli para o adapter
+      registrado e falha com erro acionável para cli desconhecida. Adaptar
+      src/adapters/fake à FORMA do contrato (implementa
+      ProviderAdapter) SEM criar ainda o runtime comum completo
+      executeWithAdapter: runFakeAgent permanece exportado e o comportamento
+      observável atual é preservado nesta tarefa. Abstração mínima (YAGNI):
+      nenhum hook além dos exigidos pelo fake hoje e pelos adapters
+      claude/codex propostos. Nenhum provider real.
+    initial_files:
+      - src/adapters/fake/index.ts
+      - src/adapters/index.ts
+    acceptance:
+      - resolveAdapter('fake') retorna o ProviderAdapter fake registrado; cli desconhecida falha com erro acionável nomeando adapters/clis registrados.
+      - Fake implementa a forma ProviderAdapter (buildInvocation + observações) sem executeWithAdapter completo; runFakeAgent permanece exportado.
+      - Suíte existente de adapters verde sem mudança de comportamento observável nesta tarefa.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/adapters/contract.test.ts]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+
+  - id: M51B
+    title: executeWithAdapter runtime comum e equivalência fake
+    blocked_by: [M51A]
+    objective: >-
+      Implementar executeWithAdapter(adapter, options) sobre src/runner:
+      spawn, timeout, cleanup de process-group, fatos OBJETIVOS de processo
+      (exit code, sinal, duração, survivors) e montagem do ExecutionRecord
+      autoritativo (fatos de processo do runtime + observações do adapter,
+      com provenance separada). Nenhum adapter replica spawn/timeout/
+      cleanup/montagem de record. options cobre o que runFakeAgent já
+      recebe (argv, cwd, env completo, manifest do envelope sem o campo
+      adapter, gracePeriodMs, cleanupConfirmTimeoutMs). Executar o fake
+      através desse runtime e provar equivalência observável com o
+      comportamento anterior. Nenhum provider real ainda.
+    initial_files:
+      - src/adapters/contract.ts
+      - src/adapters/fake/index.ts
+    acceptance:
+      - resolveAdapter('fake') + executeWithAdapter reproduz o comportamento observável anterior do fake (teste de equivalência).
+      - A montagem do ExecutionRecord ocorre no runtime comum, não no adapter (teste estrutural).
+      - Suíte existente de adapters e e2e verde sem modificação de expectativa.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/adapters/execute-with-adapter.test.ts]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+
+  - id: M52
+    title: Revisão PRE-M2 (parada obrigatória)
+    blocked_by: [M51B]
+    objective: >-
+      Fechar o PRE-M2: docs/BACKLOG.md espelhando M41–M51B, docs/LESSONS.md com
+      correções acumuladas no formato datado, e docs/reviews/PRE-M2-REVIEW.md
+      com o pacote de revisão humana — contratos criados, as fixtures
+      sintéticas (M26/M33-like, infra-inference-unknown, M39B/M23-like,
+      infra-after-inference, unknown-intervention) e o que cada uma prova,
+      taxonomia v1 opcional, contratos de extension (manifest vs incubation),
+      ProviderAdapter (M51A) e runtime comum (M51B), QuotaUsage.observation,
+      leitura de quota-usage.json em M48, divergências documentais tratadas,
+      o plano do Marco 2 proposto como DOCUMENTO (M53–M68 não estão em
+      dev/plan.yaml) e o Pilot Benchmark proposto. Esta é a última task do
+      plano operacional: M53–M68 só entram em dev/plan.yaml por uma segunda
+      alteração após aprovação humana explícita. PARADA OBRIGATÓRIA para
+      revisão do usuário depois desta tarefa: o Marco 2 não inicia sem
+      aprovação humana explícita.
+    initial_files:
+      - docs/BACKLOG.md
+      - docs/LESSONS.md
+    acceptance:
+      - BACKLOG.md reflete o estado real de M41 a M51B.
+      - docs/reviews/PRE-M2-REVIEW.md existe com as seções do objective.
+      - Gates completos verdes.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, build]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
