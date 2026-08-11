@@ -29,3 +29,9 @@ export {
   ScoreRecord,
   SubScore,
 } from './evaluation-record.js';
+export {
+  QuotaObservationStatus,
+  QuotaReasonCode,
+  QuotaUsage,
+  QuotaWindow,
+} from './quota-usage.js';
