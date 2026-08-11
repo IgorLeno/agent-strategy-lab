@@ -20,6 +20,28 @@ de verdade é M21–M24, dentro de `src/runner/`.
 Como `.dev/` está fora do Git, o accepted_commit contém só a implementação e o
 `dev-close` grava estado sem sujar a working tree.
 
+## Política de freeze
+
+`dev/` é o harness que constrói o `agentlab` (ver topo deste documento); ele
+não é o produto e não deve crescer capacidade nova indefinidamente. Manutenção
+em `dev/` só é aceita quando pelo menos uma condição se aplica:
+
+1. **defeito reproduzível** — comportamento errado do harness, demonstrável
+   com passos ou log;
+2. **risco à validade experimental** — algo que contaminaria a comparação
+   entre estratégias/perfis (ex.: dimensão vazando para o agente, envelope
+   calculado errado);
+3. **perda ou corrupção de evidência** — qualquer caminho em que
+   `LaunchRecord`, `CompletionRecord`, `HandoffRecord` ou os logs do worker
+   possam sumir ou ficar inconsistentes;
+4. **incapacidade objetiva de executar o plano** — o harness trava, recusa
+   avançar ou não consegue processar uma tarefa `READY` legítima.
+
+Capacidade nova — um comando, um perfil de recurso, uma funcionalidade que o
+harness ainda não tem — **nasce em `src/`**, não em `dev/`. `dev/` é
+infraestrutura de sessão descartável para construir o produto; não é o lugar
+onde o produto ganha funcionalidade.
+
 ### O que a separação inbox/runtime garante — e o que não garante
 
 O worker recebe exatamente dois caminhos de escrita (`report.json` e

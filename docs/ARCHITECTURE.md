@@ -222,23 +222,59 @@ O workspace do agente nunca o vê, e M39A verifica isso por busca no snapshot.
 Uma área por diretório, com `index.ts` documentando responsabilidade e
 fronteira.
 
-| Área | Responsabilidade | Microtarefas |
-| --- | --- | --- |
-| `core` | enums das três dimensões, tipos base, hierarquia de erros. Zero I/O | M02 |
-| `schemas` | schemas zod de todos os contratos | M03–M09 |
-| `envelope` | serialização canônica e os dois hashes | M10 |
-| `storage` | run dir, JSONL, manifests, ledger, integridade, redaction, índice SQLite | M11–M17, M30, M31 |
-| `workspace` | clone descartável, cleanup, change bundle | M18–M20 |
-| `runner` | spawn por argv, captura, timeout, process group, sobreviventes | M21–M24B |
-| `adapters` | CLI de provider → interface interna | M25, M26 |
-| `strategies` | carga e validação das receitas em `strategies/` | M05 |
-| `evaluator` | workspace do evaluator, graders, orquestração da avaliação | M27A–M28 |
-| `scorer` | perfis de score, qualificação | M29 |
-| `reporting` | relatório de terminal e `--json` | M38 |
-| `project` | `.agentlab/project.yaml`, resolução do data dir | M11, M33 |
-| `cli` | comandos `agentlab` | M32–M38 |
+| Área | Responsabilidade | Camada | Microtarefas |
+| --- | --- | --- | --- |
+| `core` | enums das três dimensões, tipos base, hierarquia de erros. Zero I/O | STABLE KERNEL | M02 |
+| `schemas` | schemas zod de todos os contratos | STABLE KERNEL | M03–M09 |
+| `envelope` | serialização canônica e os dois hashes | STABLE KERNEL | M10 |
+| `storage` | run dir, JSONL, manifests, ledger, integridade, redaction, índice SQLite | EXECUTION CONTRACT | M11–M17, M30, M31 |
+| `workspace` | clone descartável, cleanup, change bundle | EXECUTION CONTRACT | M18–M20 |
+| `runner` | spawn por argv, captura, timeout, process group, sobreviventes | EXECUTION CONTRACT | M21–M24B |
+| `adapters` | CLI de provider → interface interna | EXECUTION CONTRACT | M25, M26 |
+| `strategies` | carga e validação das receitas em `strategies/` | EXPERIMENT PLANE | M05 |
+| `evaluator` | workspace do evaluator, graders, orquestração da avaliação | EXECUTION CONTRACT | M27A–M28 |
+| `scorer` | perfis de score, qualificação | EXECUTION CONTRACT | M29 |
+| `reporting` | relatório de terminal e `--json` | EXTENSIONS | M38 |
+| `project` | `.agentlab/project.yaml`, resolução do data dir | CONTROL PLANE | M11, M33 |
+| `cli` | comandos `agentlab` | CONTROL PLANE | M32–M38 |
+
+- **STABLE KERNEL** — vocabulário e contratos que todo o resto importa; zero
+  I/O ou serialização canônica, muda raramente e qualquer mudança é
+  cross-cutting por definição.
+- **EXECUTION CONTRACT** — a mecânica que produz e verifica evidência de um
+  trial: isolamento, captura, adapters, avaliação e score. É o que a Seção 3
+  a 5 deste documento descreve.
+- **EXPERIMENT PLANE** — as receitas declaráveis que variam entre trials
+  (`strategies/`); o que muda quando se testa uma estratégia nova, não o lab.
+- **CONTROL PLANE** — orquestração e config que amarram as outras camadas em
+  comandos (`cli`, resolução de `project`).
+- **EXTENSIONS** — funcionalidade fora do caminho crítico de execução/
+  avaliação, hoje placeholder ou em construção.
 
 Dependências apontam para baixo: `cli` → tudo; `core` não importa ninguém.
+
+### 6.1 Divergências entre este documento e o código
+
+Registradas aqui, em vez de silenciosamente corrigidas, porque cada uma tem
+uma decisão por trás que vale preservar.
+
+**Driver de SQLite.** A Seção 7 e o `package.json` originais previam
+`better-sqlite3` (addon nativo). `src/storage/sqlite-index.ts` usa
+`node:sqlite` (`DatabaseSync`) — decisão **D1**: manter `node:sqlite` porque
+`better-sqlite3` não é instalável no sandbox de execução dos workers (sem
+toolchain de compilação nem prebuild compatível disponível). O motivo e o
+trade-off aceito — API experimental na linha 22, sem paridade formal de
+migração — estão registrados em [ADR-0001](adr/ADR-0001-stack.md); esta seção
+só aponta que a implementação já vive no lado `node:sqlite` daquele ADR, e não
+no lado nomeado na Seção 7.
+
+**`reporting/` é placeholder.** `src/reporting/index.ts` (M38) ainda não
+implementa nada — `export {}`. O relatório de um run, hoje, vive inteiramente
+em `src/cli/report.ts` (formatação texto/`--json` a partir da evidência
+selada). `reporting/` existe como área reservada para quando o compare entre
+estratégias (fora do Marco 1, ver Seção 2.4) precisar de lógica de
+apresentação compartilhada entre múltiplos runs — é ali que ela nasce, não em
+`cli/`.
 
 ---
 
@@ -246,7 +282,8 @@ Dependências apontam para baixo: `cli` → tudo; `core` não importa ninguém.
 
 Node ≥ 22.13.0, TypeScript ESM (`NodeNext`), `zod` para schemas, `yaml` para
 receitas e config, `vitest` para testes, `pnpm`. Índice em SQLite via
-`better-sqlite3`, a partir de M30.
+`node:sqlite` (`DatabaseSync`), a partir de M30 — ver a divergência D1
+registrada na Seção 6.1.
 
 A escolha do driver de SQLite e o risco de addon nativo estão em
 [ADR-0001](adr/ADR-0001-stack.md).
