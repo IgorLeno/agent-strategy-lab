@@ -37,3 +37,11 @@ export {
 } from './quota-usage.js';
 export { InterventionRecord, InterventionType } from './intervention.js';
 export { RunPerformanceRecord, TaskPerformanceRecord } from './performance.js';
+export {
+  ExtensionKind,
+  ExtensionManifest,
+  IncubationState,
+  IncubationStatus,
+  loadExtension,
+} from './extension.js';
+export type { Extension } from './extension.js';
