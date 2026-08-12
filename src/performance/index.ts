@@ -12,3 +12,13 @@ export {
   type WithProvenance,
 } from './attempt-facts.js';
 export { derivePerformance, type AttemptHistory } from './derive-performance.js';
+export {
+  listEvaluations,
+  listScores,
+  readTrialHistory,
+  type EvaluationSelection,
+  type EvaluationSelectionEntry,
+  type ExcludedRun,
+  type RunReadResult,
+  type TrialHistoryResult,
+} from './history.js';
