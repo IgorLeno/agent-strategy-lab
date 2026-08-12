@@ -15,7 +15,8 @@ const DEFAULT_PROFILE = DEFAULT_WORKER_PROFILE_ID;
  * tarefa e não inicia a próxima — quem fecha é o dev-close, quem encadeia é o
  * dev-orchestrate.
  *
- * Exit codes: 0 processo terminou (aguarda fechamento) | 7 TIMED_OUT | 8 INFRA_ERROR.
+ * Exit codes: 0 processo terminou (aguarda fechamento) | 7 TIMED_OUT |
+ * 8 INFRA_ERROR | 9 PREFLIGHT_BLOCKED (nada foi lançado).
  */
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
@@ -54,7 +55,13 @@ async function main(): Promise<void> {
     billing_note: ESTIMATED_COST_LABEL,
   });
   process.exit(
-    result.classification === 'FINISHED' ? 0 : result.classification === 'TIMED_OUT' ? 7 : 8,
+    result.classification === 'FINISHED'
+      ? 0
+      : result.classification === 'TIMED_OUT'
+        ? 7
+        : result.classification === 'PREFLIGHT_BLOCKED'
+          ? 9
+          : 8,
   );
 }
 

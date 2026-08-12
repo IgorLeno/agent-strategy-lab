@@ -18,7 +18,9 @@ import {
   findStaleInboxOwner,
   readCurrentInboxArtifacts,
   releaseCurrentInboxArtifacts,
+  tryFinishPendingInboxRelease,
   type InboxArtifactPair,
+  type InboxReleaseHooks,
   type StaleInboxOwner,
 } from './inbox-artifacts.js';
 import type { HarnessPaths } from './paths.js';
@@ -74,6 +76,8 @@ export interface InfraRecoveryInput {
   readonly now?: () => string;
   /** Ponto de crash injetado pelos testes, entre migrar o inbox stale e a evidência. */
   readonly afterStaleInboxMigrated?: () => Promise<void>;
+  /** Hooks da liberação do inbox — fronteira entre os dois `rm` dos slots. */
+  readonly inboxReleaseHooks?: InboxReleaseHooks;
   /** Ponto de crash injetado pelos testes, entre evidência e record. */
   readonly afterEvidenceArchived?: () => Promise<void>;
   /** Ponto de crash injetado pelos testes, entre record e state. */
@@ -224,11 +228,27 @@ async function classifyInbox(
   attempt: number,
 ): Promise<StaleInbox | null> {
   const current = await readCurrentInboxArtifacts(paths, taskId);
-  if (current.report === null && current.handoff === null) return null;
-  if (current.handoff === null) {
-    throw new InfraRecoveryError('AgentCompletionReport presente; recuperação de infra recusada');
+  if (current.report === null && current.handoff === null) {
+    // Intent residual: release já tinha terminado os dois slots.
+    try {
+      await tryFinishPendingInboxRelease(paths, taskId);
+    } catch (error) {
+      if (error instanceof InboxArtifactError) throw new InfraRecoveryError(error.message);
+      throw error;
+    }
+    return null;
   }
-  if (current.report === null) {
+  if (current.report === null || current.handoff === null) {
+    // Meio par só converge quando há prova durável de release autorizada.
+    try {
+      if (await tryFinishPendingInboxRelease(paths, taskId)) return null;
+    } catch (error) {
+      if (error instanceof InboxArtifactError) throw new InfraRecoveryError(error.message);
+      throw error;
+    }
+    if (current.handoff === null) {
+      throw new InfraRecoveryError('AgentCompletionReport presente; recuperação de infra recusada');
+    }
     throw new InfraRecoveryError('HandoffDraft presente; recuperação de infra recusada');
   }
 
@@ -254,6 +274,7 @@ async function migrateStaleInbox(
   paths: HarnessPaths,
   taskId: string,
   stale: StaleInbox,
+  hooks?: InboxReleaseHooks,
 ): Promise<void> {
   try {
     await archiveInboxArtifacts({
@@ -263,11 +284,11 @@ async function migrateStaleInbox(
       bytes: stale.bytes,
       expected: stale.owner.hashes,
     });
+    await releaseCurrentInboxArtifacts(paths, taskId, stale.owner, hooks);
   } catch (error) {
     if (error instanceof InboxArtifactError) throw new InfraRecoveryError(error.message);
     throw error;
   }
-  await releaseCurrentInboxArtifacts(paths, taskId);
 }
 
 /**
@@ -520,7 +541,9 @@ export async function recoverInfraAttempt(
   // DELE e sai do caminho compartilhado. Um crash entre preservar e liberar
   // converge na repetição, porque o archive é append-only e a classificação
   // seguinte encontra o inbox limpo.
-  if (source.staleInbox) await migrateStaleInbox(paths, taskId, source.staleInbox);
+  if (source.staleInbox) {
+    await migrateStaleInbox(paths, taskId, source.staleInbox, input.inboxReleaseHooks);
+  }
   await input.afterStaleInboxMigrated?.();
 
   const evidence = await archiveEvidence(paths, taskId, source.attempt);

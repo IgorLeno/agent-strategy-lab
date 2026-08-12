@@ -1,6 +1,13 @@
 import { checkProgressionBase } from './base-guard.js';
 import { headSha } from './git.js';
-import { LaunchError, launchWorker, type LaunchOutcome } from './launch.js';
+import {
+  BillingPreflightError,
+  InboxProvenanceError,
+  LaunchError,
+  UsageMeasurementSafetyError,
+  launchWorker,
+  type LaunchOutcome,
+} from './launch.js';
 import { buildTaskPacket } from './packet.js';
 import type { HarnessPaths } from './paths.js';
 import type { LoadedPlan } from './plan.js';
@@ -61,15 +68,30 @@ export async function prepareNextTask(
 }
 
 export interface LaunchStepResult {
-  readonly classification: LaunchOutcome['classification'];
+  readonly classification: LaunchOutcome['classification'] | 'PREFLIGHT_BLOCKED';
   readonly reason: string;
   readonly outcome: LaunchOutcome | null;
+}
+
+/**
+ * Recusa ANTES do spawn: nenhum provider nasceu, nenhum attempt foi consumido,
+ * nenhum LaunchRecord existe. Não é INFRA_ERROR — a tarefa permanece READY.
+ */
+function isPreSpawnRefusal(error: unknown): boolean {
+  return (
+    error instanceof InboxProvenanceError ||
+    error instanceof BillingPreflightError ||
+    error instanceof UsageMeasurementSafetyError
+  );
 }
 
 /**
  * Lança o worker e move o state conforme o término. Processo encerrado com
  * fechamento pendente (RUNNING/FINALIZING) é legítimo e repetível — só
  * timeout e falha de infraestrutura param o fluxo aqui.
+ *
+ * Recusa de proveniência/billing/usage ANTES do spawn NÃO muda o status da
+ * tarefa: é blocker operacional pré-launch, não veredito de infraestrutura.
  */
 export async function launchTask(
   paths: HarnessPaths,
@@ -122,6 +144,9 @@ export async function launchTask(
     });
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
+    if (isPreSpawnRefusal(error)) {
+      return { classification: 'PREFLIGHT_BLOCKED', reason, outcome: null };
+    }
     const state = await readState(paths);
     await writeState(
       paths,

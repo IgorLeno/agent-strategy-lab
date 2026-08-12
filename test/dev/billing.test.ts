@@ -540,15 +540,16 @@ describe('preflight do launcher', () => {
       { ...fakeCliEnv('api'), AGENTLAB_DEV_DIR: sandbox.devDir, ANTHROPIC_API_KEY: FAKE_SECRET },
     );
 
-    expect(result.exitCode, `${result.stdout}|${result.stderr}`).toBe(8);
+    expect(result.exitCode, `${result.stdout}|${result.stderr}`).toBe(9);
     const output = JSON.parse(result.stdout) as { classification: string; reason: string };
-    expect(output.classification).toBe('INFRA_ERROR');
+    expect(output.classification).toBe('PREFLIGHT_BLOCKED');
     expect(output.reason).toMatch(/preflight de cobrança/);
 
-    // Recusa de cobrança não é veredito sobre o worker: nunca FAIL.
+    // Recusa de cobrança pré-spawn: tarefa permanece READY, nunca FAIL/INFRA.
     const task = getTaskState(await readState(paths), 'T1');
-    expect(task.status).toBe('INFRA_ERROR');
-    expect(task.status).not.toBe('FAIL');
+    expect(task.status).toBe('READY');
+    expect(task.attempts).toBe(0);
+    expect(task.process).toBeNull();
 
     // Nenhum processo nasceu: sem log de sessão, sem inbox, sem LaunchRecord.
     expect(await readLaunchRecord(paths, 'T1')).toBeNull();
@@ -566,8 +567,10 @@ describe('preflight do launcher', () => {
       ['--repo', sandbox.root, '--profile', id, '--task', 'T1'],
       { ...fakeCliEnv('logged_out'), AGENTLAB_DEV_DIR: sandbox.devDir },
     );
-    expect(result.exitCode).toBe(8);
+    expect(result.exitCode).toBe(9);
+    expect(JSON.parse(result.stdout).classification).toBe('PREFLIGHT_BLOCKED');
     expect(JSON.parse(result.stdout).reason).toContain(UNVERIFIABLE_CREDENTIAL_MESSAGE);
+    expect(getTaskState(await readState(paths), 'T1').status).toBe('READY');
     expect(await readLaunchRecord(paths, 'T1')).toBeNull();
   });
 

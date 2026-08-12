@@ -115,6 +115,11 @@ async function main(): Promise<void> {
         profileId,
         timeoutOverride === undefined ? undefined : Number(timeoutOverride),
       );
+      // Recusa pré-spawn: nenhum provider nasceu — não fabricar iteration.
+      if (launch.classification === 'PREFLIGHT_BLOCKED') {
+        stop = { status: 'PREFLIGHT_BLOCKED', reason: launch.reason };
+        break;
+      }
       // A tentativa é a do state, não uma contagem local: reparo e retry mexem
       // nela, e o relatório precisa dizer qual tentativa produziu este resultado.
       const attempt = getTaskState(await readState(paths), packet.task_id).attempts;

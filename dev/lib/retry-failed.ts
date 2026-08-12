@@ -24,6 +24,7 @@ import {
   readCurrentInboxArtifacts,
   releaseCurrentInboxArtifacts,
   type InboxArtifactPair,
+  type InboxReleaseHooks,
 } from './inbox-artifacts.js';
 import type { HarnessPaths } from './paths.js';
 import {
@@ -90,6 +91,8 @@ export interface RetryFailedAttemptInput {
   readonly afterCompletionArchived?: (record: ValidationFailedAttemptRecordType) => Promise<void>;
   /** Ponto de crash injetado pelos testes, entre archive do inbox e a liberação. */
   readonly afterInboxArchived?: (record: ValidationFailedAttemptRecordType) => Promise<void>;
+  /** Hooks da liberação do inbox — fronteira entre os dois `rm` dos slots. */
+  readonly inboxReleaseHooks?: InboxReleaseHooks;
   /** Ponto de crash injetado pelos testes, entre liberação dos slots e reset. */
   readonly afterCompletionReleased?: (record: ValidationFailedAttemptRecordType) => Promise<void>;
   /** Ponto de crash injetado pelos testes, entre o reset e a volta a READY. */
@@ -631,7 +634,13 @@ export async function retryFailedAttempt(
     const completionArchivePath = await archiveFailedCompletion(paths, source, archived);
     const inboxArchive = await archiveInboxEvidence(paths, source, archived);
     const releasedCurrentCompletion = await releaseCurrentCompletion(paths, taskId);
-    const releasedInbox = await releaseCurrentInboxArtifacts(paths, taskId);
+    const releasedInbox = await releaseCurrentInboxArtifacts(paths, taskId, {
+      attempt: archived.attempt,
+      hashes: {
+        reportSha256: archived.report_sha256,
+        handoffDraftSha256: archived.handoff_draft_sha256,
+      },
+    }, input.inboxReleaseHooks);
     await reopenTask(paths, taskId, archived);
     return {
       record: archived,
@@ -673,7 +682,13 @@ export async function retryFailedAttempt(
   // Bundle, record e os três archives publicados e conferidos: agora — e só
   // agora — os slots correntes podem ser liberados para o próximo attempt.
   const releasedCurrentCompletion = await releaseCurrentCompletion(paths, taskId);
-  const releasedInbox = await releaseCurrentInboxArtifacts(paths, taskId);
+  const releasedInbox = await releaseCurrentInboxArtifacts(paths, taskId, {
+    attempt: record.attempt,
+    hashes: {
+      reportSha256: record.report_sha256,
+      handoffDraftSha256: record.handoff_draft_sha256,
+    },
+  }, input.inboxReleaseHooks);
   await input.afterCompletionReleased?.(record);
 
   // Só depois de todo artifact append-only estar publicado o patch some do disco.

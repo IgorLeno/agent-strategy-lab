@@ -39,7 +39,9 @@ import {
   readState,
   writeState,
 } from '../../dev/lib/state.js';
+import { launchTask } from '../../dev/lib/steps.js';
 import { commitAll, makeSandboxRepo, runDevCli, runGit, type Sandbox } from './helpers.js';
+
 
 let sandbox: Sandbox;
 let paths: HarnessPaths;
@@ -483,5 +485,106 @@ describe('logs do launcher', () => {
     await launchCli(['--task', 'T1'], 'success');
     const stdout = await readFile(`${sandbox.devDir}/logs/T1.stdout.log`, 'utf8');
     expect(stdout).toBeTypeOf('string');
+  });
+});
+
+/**
+ * Recusa de proveniência ANTES do spawn não é INFRA_ERROR: nenhum provider
+ * nasceu, nenhum attempt foi consumido, a tarefa permanece READY.
+ */
+describe('launchTask: InboxProvenanceError é PREFLIGHT_BLOCKED', () => {
+  async function writeOrphanInbox(): Promise<void> {
+    await mkdir(path.dirname(reportPath(paths, 'T1')), { recursive: true });
+    await writeFile(reportPath(paths, 'T1'), '{"schema_version":1}\n', 'utf8');
+    await writeFile(handoffDraftPath(paths, 'T1'), '{"schema_version":1}\n', 'utf8');
+  }
+
+  it('1 — READY + inbox órfão: zero spawn, attempts inalterado, task READY', async () => {
+    await persistPacket();
+    await writeOrphanInbox();
+    const packet = buildTaskPacket({
+      task: loaded.byId.get('T1')!,
+      baseSha: await headSha(paths.repoRoot),
+      previousHandoff: null,
+    });
+
+    const before = getTaskState(await readState(paths), 'T1');
+    const result = await launchTask(paths, packet, 'fake-worker-v1');
+
+    expect(result.classification).toBe('PREFLIGHT_BLOCKED');
+    expect(result.outcome).toBeNull();
+    expect(await readLaunchRecord(paths, 'T1')).toBeNull();
+    const after = getTaskState(await readState(paths), 'T1');
+    expect(after.status).toBe('READY');
+    expect(after.attempts).toBe(before.attempts);
+    expect(after.process).toBeNull();
+  });
+
+  it('2 — dev-orchestrate para com PREFLIGHT_BLOCKED e iteration_count=0', async () => {
+    await writeOrphanInbox();
+    const result = await runDevCli(
+      'dev-orchestrate.ts',
+      ['--repo', sandbox.root, '--profile', 'fake-worker-v1', '--max-iterations', '2', '--skip-preflight'],
+      { AGENTLAB_DEV_DIR: sandbox.devDir, AGENTLAB_FAKE_MODE: 'success' },
+    );
+
+    expect(result.exitCode).toBe(9);
+    const output = JSON.parse(result.stdout) as {
+      stopped_by: string;
+      iteration_count: number;
+      iterations: unknown[];
+    };
+    expect(output.stopped_by).toBe('PREFLIGHT_BLOCKED');
+    expect(output.iteration_count).toBe(0);
+    expect(output.iterations).toEqual([]);
+    expect(getTaskState(await readState(paths), 'T1').status).toBe('READY');
+    expect(getTaskState(await readState(paths), 'T1').attempts).toBe(0);
+  });
+
+  it('3 — depois de limpar o inbox, a task READY lança normalmente', async () => {
+    await persistPacket();
+    await writeOrphanInbox();
+    const packet = buildTaskPacket({
+      task: loaded.byId.get('T1')!,
+      baseSha: await headSha(paths.repoRoot),
+      previousHandoff: null,
+    });
+    expect((await launchTask(paths, packet, 'fake-worker-v1')).classification).toBe(
+      'PREFLIGHT_BLOCKED',
+    );
+
+    await rm(reportPath(paths, 'T1'), { force: true });
+    await rm(handoffDraftPath(paths, 'T1'), { force: true });
+    const result = await launchTask(paths, packet, 'fake-worker-v1');
+    expect(result.classification).toBe('FINISHED');
+    expect(getTaskState(await readState(paths), 'T1').attempts).toBe(1);
+  });
+
+  it('4 — INFRA_ERROR real DEPOIS de spawn continua INFRA_ERROR', async () => {
+    await writeFile(
+      `${sandbox.root}/dev/profiles/inexistente-v1.yaml`,
+      [
+        'id: inexistente-v1',
+        'agent: fake',
+        'argv: [agentlab-comando-que-nao-existe]',
+        'prompt_delivery: argv',
+        'timeout_seconds: 30',
+        'forbidden_flags: []',
+        'env_allowlist: [PATH]',
+      ].join('\n'),
+      'utf8',
+    );
+    await commitAll(sandbox.root, 'perfil de teste');
+    await persistPacket();
+    const packet = buildTaskPacket({
+      task: loaded.byId.get('T1')!,
+      baseSha: await headSha(paths.repoRoot),
+      previousHandoff: null,
+    });
+
+    const result = await launchTask(paths, packet, 'inexistente-v1');
+    expect(result.classification).toBe('INFRA_ERROR');
+    expect(getTaskState(await readState(paths), 'T1').status).toBe('INFRA_ERROR');
+    expect(getTaskState(await readState(paths), 'T1').attempts).toBe(1);
   });
 });

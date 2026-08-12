@@ -661,6 +661,41 @@ describe('dev-recover-infra diante de output stale do attempt anterior', () => {
     await expect(recover()).rejects.toThrow(/HandoffDraft presente/i);
   });
 
+  it('F — retoma release parcial (crash entre os dois rm) e arquiva o INFRA attempt', async () => {
+    await runFailedAttempt();
+    const stale = await simulateStalePair();
+
+    await expect(
+      recover({
+        inboxReleaseHooks: {
+          afterReportRemoved: async () => {
+            throw new Error('crash entre os deletes do inbox');
+          },
+        },
+      }),
+    ).rejects.toThrow(/crash entre os deletes do inbox/);
+
+    // Archive do attempt dono publicado; report corrente sumiu; handoff + intent restam.
+    expect(await readFile(failedAttemptReportPath(paths, 'T1', 1), 'utf8')).toBe(stale.report);
+    expect(await exists(reportPath(paths, 'T1'))).toBe(false);
+    expect(await exists(handoffDraftPath(paths, 'T1'))).toBe(true);
+    expect(getTaskState(await readState(paths), 'T1').status).toBe('INFRA_ERROR');
+
+    const result = await recover();
+    expect(result.staleInboxOwnerAttempt).toBeNull();
+    expect(await exists(handoffDraftPath(paths, 'T1'))).toBe(false);
+    expect(await exists(failedAttemptReportPath(paths, 'T1', 1))).toBe(true);
+    expect(await readInfraFailedAttempt(paths, 'T1', 2)).toMatchObject({
+      attempt: 2,
+      launch_classification: 'INFRA_ERROR',
+      worker_output_present: false,
+    });
+    expect(getTaskState(await readState(paths), 'T1')).toMatchObject({
+      status: 'READY',
+      attempts: 2,
+    });
+  });
+
   it('recusa quando o par stale pertence ao PRÓPRIO attempt corrente', async () => {
     await runFailedAttempt();
     await simulateStalePair();

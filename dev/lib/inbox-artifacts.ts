@@ -1,12 +1,13 @@
 import { readFile, readdir, rm } from 'node:fs/promises';
 import path from 'node:path';
-import { writeFileOnce } from './atomic.js';
+import { jsonBytes, writeFileOnce } from './atomic.js';
 import { sha256Hex } from './canonical.js';
 import type { HarnessPaths } from './paths.js';
 import {
   failedAttemptHandoffDraftPath,
   failedAttemptReportPath,
   handoffDraftPath,
+  inboxReleaseIntentPath,
   readValidationFailedAttempt,
   reportPath,
 } from './records.js';
@@ -54,6 +55,32 @@ export interface ArchivedInboxArtifacts {
   readonly reportPath: string;
   readonly handoffPath: string;
   readonly bytes: InboxArtifactPair;
+}
+
+/** Autorização para liberar o slot corrente: attempt dono + hashes do par. */
+export interface InboxReleaseAuthorization {
+  readonly attempt: number;
+  readonly hashes: InboxArtifactHashes;
+}
+
+/**
+ * Pontos de crash injetados pelos testes. A fronteira entre os dois `rm` é
+ * `afterReportRemoved` — é ela que precisa morder a janela de meio par.
+ */
+export interface InboxReleaseHooks {
+  readonly afterReleaseIntentWritten?: () => Promise<void>;
+  readonly afterReportRemoved?: () => Promise<void>;
+  readonly afterHandoffRemoved?: () => Promise<void>;
+}
+
+/** Intent durável gravado antes do primeiro delete do slot corrente. */
+export interface InboxReleaseIntent {
+  readonly schema_version: 1;
+  readonly task_id: string;
+  readonly attempt: number;
+  readonly report_sha256: string;
+  readonly handoff_draft_sha256: string;
+  readonly authorized_at: string;
 }
 
 async function readIfPresent(file: string): Promise<Buffer | null> {
@@ -157,18 +184,177 @@ export async function readArchivedInboxArtifacts(
   return pair;
 }
 
+function buildReleaseIntent(
+  taskId: string,
+  authorized: InboxReleaseAuthorization,
+  authorizedAt: string,
+): InboxReleaseIntent {
+  return {
+    schema_version: 1,
+    task_id: taskId,
+    attempt: authorized.attempt,
+    report_sha256: authorized.hashes.reportSha256,
+    handoff_draft_sha256: authorized.hashes.handoffDraftSha256,
+    authorized_at: authorizedAt,
+  };
+}
+
+async function readReleaseIntent(
+  paths: HarnessPaths,
+  taskId: string,
+): Promise<InboxReleaseIntent | null> {
+  const bytes = await readIfPresent(inboxReleaseIntentPath(paths, taskId));
+  if (bytes === null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(bytes.toString('utf8'));
+  } catch {
+    throw new InboxArtifactError(`inbox-release.intent.json de ${taskId} é JSON inválido`);
+  }
+  if (
+    typeof parsed !== 'object' ||
+    parsed === null ||
+    (parsed as { schema_version?: unknown }).schema_version !== 1 ||
+    (parsed as { task_id?: unknown }).task_id !== taskId ||
+    typeof (parsed as { attempt?: unknown }).attempt !== 'number' ||
+    typeof (parsed as { report_sha256?: unknown }).report_sha256 !== 'string' ||
+    typeof (parsed as { handoff_draft_sha256?: unknown }).handoff_draft_sha256 !== 'string' ||
+    typeof (parsed as { authorized_at?: unknown }).authorized_at !== 'string'
+  ) {
+    throw new InboxArtifactError(`inbox-release.intent.json de ${taskId} é inválido`);
+  }
+  return parsed as InboxReleaseIntent;
+}
+
+/**
+ * Cada slot corrente presente precisa bater o hash autorizado. Slot ausente é
+ * ok (release parcial já em andamento). Slot presente com hash errado é
+ * evidência de outro attempt — nunca apagar.
+ */
+function assertCurrentSlotsMatchAuthorization(
+  current: CurrentInboxArtifacts,
+  hashes: InboxArtifactHashes,
+  label: string,
+): void {
+  if (current.report !== null && sha256Hex(current.report) !== hashes.reportSha256) {
+    throw new InboxArtifactError(`${label}: report.json no slot corrente diverge do archive autorizado`);
+  }
+  if (current.handoff !== null && sha256Hex(current.handoff) !== hashes.handoffDraftSha256) {
+    throw new InboxArtifactError(
+      `${label}: handoff-draft.json no slot corrente diverge do archive autorizado`,
+    );
+  }
+}
+
+async function clearReleaseIntent(paths: HarnessPaths, taskId: string): Promise<void> {
+  await rm(inboxReleaseIntentPath(paths, taskId), { force: true });
+}
+
+/**
+ * Completa uma release já autorizada (intent presente). Retorna `true` quando
+ * havia intent e o cleanup terminou; `false` quando não havia intent nenhum.
+ */
+export async function tryFinishPendingInboxRelease(
+  paths: HarnessPaths,
+  taskId: string,
+  hooks?: InboxReleaseHooks,
+): Promise<boolean> {
+  const intent = await readReleaseIntent(paths, taskId);
+  if (intent === null) return false;
+
+  const hashes: InboxArtifactHashes = {
+    reportSha256: intent.report_sha256,
+    handoffDraftSha256: intent.handoff_draft_sha256,
+  };
+  const preserved = await readArchivedInboxArtifacts(paths, taskId, intent.attempt, hashes);
+  if (preserved === null) {
+    throw new InboxArtifactError(
+      `release pendente de ${taskId} aponta attempt ${intent.attempt} sem archive completo`,
+    );
+  }
+
+  const current = await readCurrentInboxArtifacts(paths, taskId);
+  assertCurrentSlotsMatchAuthorization(current, hashes, `retomada da release de ${taskId}`);
+
+  const hadReport = current.report !== null;
+  const hadHandoff = current.handoff !== null;
+  if (hadReport) await rm(reportPath(paths, taskId), { force: true });
+  if (hadReport && hadHandoff) await hooks?.afterReportRemoved?.();
+  if (hadHandoff) await rm(handoffDraftPath(paths, taskId), { force: true });
+  if (hadHandoff) await hooks?.afterHandoffRemoved?.();
+  await clearReleaseIntent(paths, taskId);
+  return true;
+}
+
 /**
  * Libera os slots correntes do inbox para o PRÓXIMO attempt. Só pode ser
  * chamado depois que o archive do attempt dono existe e foi conferido.
+ *
+ * Crash-safe: grava intent append-only ANTES do primeiro `rm`. Se o processo
+ * morrer entre os dois deletes, a próxima execução comprova a release pendente
+ * e termina o cleanup — sem inferir ownership só porque um hash bate.
  */
 export async function releaseCurrentInboxArtifacts(
   paths: HarnessPaths,
   taskId: string,
+  authorized: InboxReleaseAuthorization,
+  hooks?: InboxReleaseHooks,
 ): Promise<{ readonly report: boolean; readonly handoff: boolean }> {
+  // Retomada de uma release já autorizada para o MESMO par.
+  const existingIntent = await readReleaseIntent(paths, taskId);
+  if (existingIntent !== null) {
+    if (
+      existingIntent.attempt !== authorized.attempt ||
+      existingIntent.report_sha256 !== authorized.hashes.reportSha256 ||
+      existingIntent.handoff_draft_sha256 !== authorized.hashes.handoffDraftSha256
+    ) {
+      throw new InboxArtifactError(
+        `release pendente de ${taskId} diverge da autorização do attempt ${authorized.attempt}`,
+      );
+    }
+    const currentBefore = await readCurrentInboxArtifacts(paths, taskId);
+    const hadReport = currentBefore.report !== null;
+    const hadHandoff = currentBefore.handoff !== null;
+    await tryFinishPendingInboxRelease(paths, taskId, hooks);
+    return { report: hadReport, handoff: hadHandoff };
+  }
+
+  const preserved = await readArchivedInboxArtifacts(
+    paths,
+    taskId,
+    authorized.attempt,
+    authorized.hashes,
+  );
+  if (preserved === null) {
+    throw new InboxArtifactError(
+      `liberação do inbox de ${taskId} exige archive completo do attempt ${authorized.attempt}`,
+    );
+  }
+
   const current = await readCurrentInboxArtifacts(paths, taskId);
+  assertCurrentSlotsMatchAuthorization(
+    current,
+    authorized.hashes,
+    `liberação do inbox de ${taskId}`,
+  );
+
+  // Inbox já limpo e sem intent: release concluída (idempotente).
+  if (current.report === null && current.handoff === null) {
+    return { report: false, handoff: false };
+  }
+
+  const intent = buildReleaseIntent(taskId, authorized, new Date().toISOString());
+  await writeFileOnce(inboxReleaseIntentPath(paths, taskId), jsonBytes(intent));
+  await hooks?.afterReleaseIntentWritten?.();
+
+  const hadReport = current.report !== null;
+  const hadHandoff = current.handoff !== null;
   await rm(reportPath(paths, taskId), { force: true });
+  await hooks?.afterReportRemoved?.();
   await rm(handoffDraftPath(paths, taskId), { force: true });
-  return { report: current.report !== null, handoff: current.handoff !== null };
+  await hooks?.afterHandoffRemoved?.();
+  await clearReleaseIntent(paths, taskId);
+  return { report: hadReport, handoff: hadHandoff };
 }
 
 /** Attempts com diretório em `.dev/failed-attempts/<task>`, do maior ao menor. */
@@ -215,14 +401,26 @@ export type InboxLaunchDisposition = 'clean' | 'released_preserved_artifacts';
  *   diretório dele: os slots são liberados, porque a evidência já está segura;
  * - qualquer outra coisa: RECUSA. Sem prova completa, apagar seria destruir
  *   evidência e sobrescrever seria falsificá-la.
+ *
+ * Meio par só é terminado automaticamente quando existe intent durável de que
+ * a release daquele par já havia sido autorizada (crash entre os dois `rm`).
  */
 export async function releaseInboxForLaunch(
   paths: HarnessPaths,
   taskId: string,
 ): Promise<InboxLaunchDisposition> {
   const current = await readCurrentInboxArtifacts(paths, taskId);
-  if (current.report === null && current.handoff === null) return 'clean';
+  if (current.report === null && current.handoff === null) {
+    // Intent residual de release já concluída (crash depois dos dois rm).
+    if (await tryFinishPendingInboxRelease(paths, taskId)) {
+      return 'released_preserved_artifacts';
+    }
+    return 'clean';
+  }
   if (current.report === null || current.handoff === null) {
+    if (await tryFinishPendingInboxRelease(paths, taskId)) {
+      return 'released_preserved_artifacts';
+    }
     throw new InboxArtifactError(
       `inbox de ${taskId} tem apenas ${current.report === null ? 'handoff-draft.json' : 'report.json'}` +
         ' — meio par não prova proveniência e o launch é recusado',
@@ -243,7 +441,7 @@ export async function releaseInboxForLaunch(
         ' dele — launch recusado',
     );
   }
-  await releaseCurrentInboxArtifacts(paths, taskId);
+  await releaseCurrentInboxArtifacts(paths, taskId, owner);
   return 'released_preserved_artifacts';
 }
 

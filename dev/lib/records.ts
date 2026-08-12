@@ -56,6 +56,15 @@ export function reportPath(paths: HarnessPaths, taskId: string): string {
   return path.join(taskInboxDir(paths, taskId), 'report.json');
 }
 
+/**
+ * Intent append-only de liberação do inbox: prova durável de que a release
+ * daquele par já foi autorizada (archive completo conferido) antes do primeiro
+ * `rm`. Sem este arquivo, um meio par no slot corrente permanece ambíguo.
+ */
+export function inboxReleaseIntentPath(paths: HarnessPaths, taskId: string): string {
+  return path.join(taskInboxDir(paths, taskId), 'inbox-release.intent.json');
+}
+
 export function completionPath(paths: HarnessPaths, taskId: string): string {
   return path.join(paths.completionsDir, `${taskId}.completion.json`);
 }
