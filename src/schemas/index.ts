@@ -36,3 +36,4 @@ export {
   QuotaWindow,
 } from './quota-usage.js';
 export { InterventionRecord, InterventionType } from './intervention.js';
+export { RunPerformanceRecord, TaskPerformanceRecord } from './performance.js';
