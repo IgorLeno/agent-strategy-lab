@@ -66,7 +66,7 @@ describe('derivePerformance', () => {
           inference_evidence: { model_events_observed: false, zero_inference_proven: true },
         }),
         attempt({
-          attempt_role: AttemptRole.REPAIR,
+          attempt_role: AttemptRole.INITIAL,
           evaluation_outcome: EvaluationOutcome.PASS,
           inference_evidence: { model_events_observed: true, zero_inference_proven: false },
         }),
@@ -78,6 +78,8 @@ describe('derivePerformance', () => {
     expect(record.attempts.attempts_without_inference).toBe(1);
     expect(record.attempts.attempts_inference_unknown).toBe(0);
     expect(record.attempts.infra_error_attempts).toBe(1);
+    expect(record.attempts.repair_attempts).toBe(0);
+    expect(record.attempts.escalations).toBe(0);
     expect(record.success.first_operational_pass).toBe(false);
     expect(record.success.first_inference_bearing_pass).toBe(true);
     expect(record.success.final_pass).toBe(true);
@@ -134,13 +136,35 @@ describe('derivePerformance', () => {
           evaluation_outcome: null,
           inference_evidence: { model_events_observed: true, zero_inference_proven: false },
         }),
-        attempt({ attempt_role: AttemptRole.REPAIR, evaluation_outcome: EvaluationOutcome.PASS }),
+        attempt({ attempt_role: AttemptRole.INITIAL, evaluation_outcome: EvaluationOutcome.PASS }),
       ]),
     );
 
     expect(record.attempts.infra_error_attempts).toBe(1);
     expect(record.attempts.attempts_with_inference).toBe(2);
     expect(record.attempts.attempts_without_inference).toBe(0);
+    expect(record.attempts.repair_attempts).toBe(0);
+  });
+
+  it('operational attempt number > 1 after INFRA_ERROR does not imply REPAIR', () => {
+    const record = derivePerformance(
+      history([
+        attempt({
+          execution_status: ExecutionStatus.INFRA_ERROR,
+          evaluation_outcome: null,
+          inference_evidence: { model_events_observed: false, zero_inference_proven: true },
+        }),
+        attempt({
+          attempt_role: AttemptRole.INITIAL,
+          evaluation_outcome: EvaluationOutcome.PASS,
+        }),
+      ]),
+    );
+
+    // Role comes from AttemptHistory, not from operational index/number.
+    expect(record.attempts.operational_attempts).toBe(2);
+    expect(record.attempts.repair_attempts).toBe(0);
+    expect(record.attempts.escalations).toBe(0);
   });
 
   it('unknown-intervention: no intervention record at all never becomes a proven zero', () => {
@@ -176,7 +200,7 @@ describe('derivePerformance', () => {
             inference_evidence: { model_events_observed: false, zero_inference_proven: true },
           }),
           attempt({
-            attempt_role: AttemptRole.REPAIR,
+            attempt_role: AttemptRole.INITIAL,
             evaluation_outcome: EvaluationOutcome.PASS,
             inference_evidence: { model_events_observed: true, zero_inference_proven: false },
           }),
@@ -210,7 +234,7 @@ describe('derivePerformance', () => {
             evaluation_outcome: null,
             inference_evidence: { model_events_observed: true, zero_inference_proven: false },
           }),
-          attempt({ attempt_role: AttemptRole.REPAIR, evaluation_outcome: EvaluationOutcome.PASS }),
+          attempt({ attempt_role: AttemptRole.INITIAL, evaluation_outcome: EvaluationOutcome.PASS }),
         ]),
       ),
       derivePerformance(history([attempt({ interventions: null })])),
