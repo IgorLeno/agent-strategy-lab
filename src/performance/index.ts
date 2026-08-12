@@ -11,3 +11,4 @@ export {
   type InferenceEvidence,
   type WithProvenance,
 } from './attempt-facts.js';
+export { derivePerformance, type AttemptHistory } from './derive-performance.js';
