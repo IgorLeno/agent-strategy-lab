@@ -17,14 +17,22 @@ import {
   stagedFiles,
   workingTreeFiles,
 } from './git.js';
+import {
+  InboxArtifactError,
+  archiveInboxArtifacts,
+  readArchivedInboxArtifacts,
+  readCurrentInboxArtifacts,
+  releaseCurrentInboxArtifacts,
+  type InboxArtifactPair,
+} from './inbox-artifacts.js';
 import type { HarnessPaths } from './paths.js';
 import {
   completionPath,
   failedAttemptCompletionPath,
-  handoffDraftPath,
+  failedAttemptHandoffDraftPath,
+  failedAttemptReportPath,
   launchRecordPath,
   readValidationFailedAttempt,
-  reportPath,
   sourceBindingPath,
   validationFailedAttemptPath,
   writeValidationFailedAttempt,
@@ -78,10 +86,14 @@ export interface RetryFailedAttemptInput {
   readonly now?: () => string;
   /** Ponto de crash injetado pelos testes, entre record e archive do completion. */
   readonly afterRecordWritten?: (record: ValidationFailedAttemptRecordType) => Promise<void>;
-  /** Ponto de crash injetado pelos testes, entre archive e liberação do slot. */
+  /** Ponto de crash injetado pelos testes, entre archive do completion e do inbox. */
   readonly afterCompletionArchived?: (record: ValidationFailedAttemptRecordType) => Promise<void>;
-  /** Ponto de crash injetado pelos testes, entre liberação do slot e reset. */
+  /** Ponto de crash injetado pelos testes, entre archive do inbox e a liberação. */
+  readonly afterInboxArchived?: (record: ValidationFailedAttemptRecordType) => Promise<void>;
+  /** Ponto de crash injetado pelos testes, entre liberação dos slots e reset. */
   readonly afterCompletionReleased?: (record: ValidationFailedAttemptRecordType) => Promise<void>;
+  /** Ponto de crash injetado pelos testes, entre o reset e a volta a READY. */
+  readonly afterPatchReset?: (record: ValidationFailedAttemptRecordType) => Promise<void>;
 }
 
 export interface RetryFailedAttemptResult {
@@ -93,8 +105,13 @@ export interface RetryFailedAttemptResult {
   readonly alreadyArchived: boolean;
   /** Onde os bytes do CompletionRecord FAIL ficaram preservados. */
   readonly completionArchivePath: string;
+  /** Onde os bytes do output do worker deste attempt ficaram preservados. */
+  readonly reportArchivePath: string;
+  readonly handoffArchivePath: string;
   /** `true` quando esta execução foi a que removeu o slot corrente. */
   readonly releasedCurrentCompletion: boolean;
+  /** `true` quando esta execução foi a que liberou os slots do inbox. */
+  readonly releasedCurrentInbox: boolean;
   /**
    * `true` quando o source binding não existia e foi derivado agora, por
    * compatibilidade com um FAIL anterior à selagem automática.
@@ -139,6 +156,7 @@ interface FailedSource {
   readonly completionSha256: string;
   /** Record já publicado deste attempt — presente só em retomada. */
   readonly archived: ValidationFailedAttemptRecordType | null;
+  readonly inboxBytes: InboxArtifactPair;
   readonly reportSha256: string;
   readonly handoffSha256: string;
   readonly launch: LaunchRecord;
@@ -172,6 +190,59 @@ async function loadCompletionEvidence(
     );
   }
   return bytes;
+}
+
+/**
+ * O output do worker vem dos slots correntes do inbox enquanto eles existirem.
+ * Depois que o archival preservou os bytes no diretório do attempt e liberou os
+ * slots, a fonte passa a ser esse archive — pelo mesmo motivo do CompletionRecord:
+ * uma retomada depois de crash não pode depender de arquivos que o próprio fluxo
+ * removeu de propósito.
+ *
+ * Um slot corrente que sobreviveu sozinho só é aceito se for byte-idêntico ao
+ * que já está arquivado; qualquer divergência é output de OUTRO attempt no
+ * caminho compartilhado, que é exatamente o defeito que este módulo isola.
+ */
+async function loadInboxEvidence(
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+  archived: ValidationFailedAttemptRecordType | null,
+): Promise<InboxArtifactPair> {
+  const current = await readCurrentInboxArtifacts(paths, taskId);
+  if (current.report !== null && current.handoff !== null) {
+    return { report: current.report, handoff: current.handoff };
+  }
+  if (archived === null) {
+    if (current.report === null) throw new RetryFailedAttemptError('AgentCompletionReport ausente');
+    throw new RetryFailedAttemptError('HandoffDraft ausente');
+  }
+
+  const expected = {
+    reportSha256: archived.report_sha256,
+    handoffDraftSha256: archived.handoff_draft_sha256,
+  };
+  let preserved: InboxArtifactPair | null;
+  try {
+    preserved = await readArchivedInboxArtifacts(paths, taskId, attempt, expected);
+  } catch (error) {
+    if (error instanceof InboxArtifactError) throw new RetryFailedAttemptError(error.message);
+    throw error;
+  }
+  if (preserved === null) {
+    throw new RetryFailedAttemptError(
+      'output do worker ausente no inbox e não preservado no attempt arquivado',
+    );
+  }
+  if (current.report !== null && !current.report.equals(preserved.report)) {
+    throw new RetryFailedAttemptError('report.json corrente diverge do archive deste attempt');
+  }
+  if (current.handoff !== null && !current.handoff.equals(preserved.handoff)) {
+    throw new RetryFailedAttemptError(
+      'handoff-draft.json corrente diverge do archive deste attempt',
+    );
+  }
+  return preserved;
 }
 
 /**
@@ -228,11 +299,12 @@ async function loadFailedSource(input: RetryFailedAttemptInput): Promise<FailedS
     throw new RetryFailedAttemptError('orchestrator evidence candidate/accepted deve ser null');
   }
 
-  const reportBytes = await readRequired(reportPath(paths, taskId), 'AgentCompletionReport');
+  const inboxBytes = await loadInboxEvidence(paths, taskId, attempt, archived);
+  const reportBytes = inboxBytes.report;
   const report = parseJson('AgentCompletionReport', reportBytes, (value) =>
     AgentCompletionReport.parse(value),
   );
-  const handoffBytes = await readRequired(handoffDraftPath(paths, taskId), 'HandoffDraft');
+  const handoffBytes = inboxBytes.handoff;
   const handoff = parseJson('HandoffDraft', handoffBytes, parseHandoffDraft);
   if (report.task_id !== taskId || handoff.task_id !== taskId) {
     throw new RetryFailedAttemptError('evidence do worker pertence a outra tarefa');
@@ -347,6 +419,7 @@ async function loadFailedSource(input: RetryFailedAttemptInput): Promise<FailedS
     completionBytes,
     completionSha256: sha256Hex(completionBytes),
     archived,
+    inboxBytes,
     reportSha256: sha256Hex(reportBytes),
     handoffSha256: sha256Hex(handoffBytes),
     launch,
@@ -466,6 +539,36 @@ async function archiveFailedCompletion(
 }
 
 /**
+ * Preserva os bytes exatos do output do worker deste attempt e confere o
+ * binding criptográfico contra os hashes do record — a mesma disciplina do
+ * CompletionRecord, pelo mesmo motivo: os caminhos correntes do inbox são do
+ * attempt MAIS RECENTE, e o que ficar lá depois do archival seria lido como
+ * output do próximo attempt.
+ */
+async function archiveInboxEvidence(
+  paths: HarnessPaths,
+  source: FailedSource,
+  record: ValidationFailedAttemptRecordType,
+): Promise<{ readonly reportPath: string; readonly handoffPath: string }> {
+  try {
+    const archived = await archiveInboxArtifacts({
+      paths,
+      taskId: record.task_id,
+      attempt: record.attempt,
+      bytes: source.inboxBytes,
+      expected: {
+        reportSha256: record.report_sha256,
+        handoffDraftSha256: record.handoff_draft_sha256,
+      },
+    });
+    return { reportPath: archived.reportPath, handoffPath: archived.handoffPath };
+  } catch (error) {
+    if (error instanceof InboxArtifactError) throw new RetryFailedAttemptError(error.message);
+    throw error;
+  }
+}
+
+/**
  * Libera o slot do fechamento corrente para que o PRÓXIMO attempt escreva o
  * CompletionRecord dele. Só é chamado depois que bundle, record e archive já
  * estão publicados e conferidos: até lá, o FAIL corrente é a única cópia.
@@ -526,7 +629,9 @@ export async function retryFailedAttempt(
   const treeClean = await isWorkingTreeClean(paths.repoRoot);
   if (archived && treeClean) {
     const completionArchivePath = await archiveFailedCompletion(paths, source, archived);
+    const inboxArchive = await archiveInboxEvidence(paths, source, archived);
     const releasedCurrentCompletion = await releaseCurrentCompletion(paths, taskId);
+    const releasedInbox = await releaseCurrentInboxArtifacts(paths, taskId);
     await reopenTask(paths, taskId, archived);
     return {
       record: archived,
@@ -536,7 +641,10 @@ export async function retryFailedAttempt(
       removed: [],
       alreadyArchived: true,
       completionArchivePath,
+      reportArchivePath: inboxArchive.reportPath,
+      handoffArchivePath: inboxArchive.handoffPath,
       releasedCurrentCompletion,
+      releasedCurrentInbox: releasedInbox.report || releasedInbox.handoff,
       bindingRecovered: source.bindingRecovered,
     };
   }
@@ -559,9 +667,13 @@ export async function retryFailedAttempt(
   const completionArchivePath = await archiveFailedCompletion(paths, source, record);
   await input.afterCompletionArchived?.(record);
 
-  // Bundle, record e archive publicados e conferidos: agora — e só agora — o
-  // slot do fechamento corrente pode ser liberado para o próximo attempt.
+  const inboxArchive = await archiveInboxEvidence(paths, source, record);
+  await input.afterInboxArchived?.(record);
+
+  // Bundle, record e os três archives publicados e conferidos: agora — e só
+  // agora — os slots correntes podem ser liberados para o próximo attempt.
   const releasedCurrentCompletion = await releaseCurrentCompletion(paths, taskId);
+  const releasedInbox = await releaseCurrentInboxArtifacts(paths, taskId);
   await input.afterCompletionReleased?.(record);
 
   // Só depois de todo artifact append-only estar publicado o patch some do disco.
@@ -579,6 +691,7 @@ export async function retryFailedAttempt(
   if ((await headSha(paths.repoRoot)) !== source.authorizedHead) {
     throw new RetryFailedAttemptError('HEAD mudou durante o reset');
   }
+  await input.afterPatchReset?.(record);
 
   await reopenTask(paths, taskId, record);
   return {
@@ -589,7 +702,10 @@ export async function retryFailedAttempt(
     removed: reset.removed,
     alreadyArchived: archived !== null,
     completionArchivePath,
+    reportArchivePath: inboxArchive.reportPath,
+    handoffArchivePath: inboxArchive.handoffPath,
     releasedCurrentCompletion,
+    releasedCurrentInbox: releasedInbox.report || releasedInbox.handoff,
     bindingRecovered: source.bindingRecovered,
   };
 }

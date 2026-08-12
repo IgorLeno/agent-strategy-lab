@@ -336,3 +336,22 @@ Mistake: derivar readiness apenas de `HEAD == authorized_head_sha`, omitindo a
 árvore limpa e a semântica de `authorized_head_sha: null` da guarda real.
 Rule: views de readiness consomem o resultado estruturado da mesma primitive que
 protege a progressão; nunca reimplementam parcialmente uma guarda operacional.
+
+[2026-08-12] Contexto: recuperar a M50, cujo attempt 1 foi reprovado pela
+validation oficial e arquivado, e cujo attempt 2 morreu com 401 do provider sem
+escrever nada.
+Mistake: o worker escreve em caminhos ESTÁVEIS por tarefa
+(`.dev-inbox/<task>/report.json` e `handoff-draft.json`), e o archival de um
+attempt preservava record, CompletionRecord e change bundle, mas deixava esse
+par no slot compartilhado. O `dev-recover-infra` leu output do attempt 1 como se
+fosse do attempt 2 e recusou a recuperação — evidência do attempt N atribuível
+ao attempt N+1, que é o mesmo defeito que ameaçaria classificação, retry,
+provenance e validade experimental.
+Rule: todo artifact que o worker escreve num caminho COMPARTILHADO entre
+attempts tem que ganhar cópia durável dentro do attempt dono antes de o slot ser
+liberado, e a transação precisa conseguir retomar A PARTIR dessa cópia — nunca
+depender de um arquivo que ela mesma apaga. Posse de artifact stale se decide
+por hash contra o record do attempt, com o par COMPLETO batendo no MESMO record;
+timestamp, `changed_files` e semelhança de conteúdo não são prova, e meia prova
+é recusa. Quem só cria caminho novo sem publicar a cópia antes da liberação
+apenas move o buraco de lugar.

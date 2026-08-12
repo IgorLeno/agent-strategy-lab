@@ -8,6 +8,8 @@ import { loadPlan, type LoadedPlan } from '../../dev/lib/plan.js';
 import {
   completionPath,
   failedAttemptCompletionPath,
+  failedAttemptHandoffDraftPath,
+  failedAttemptReportPath,
   handoffDraftPath,
   originalCompletionEvidencePath,
   preservedBundleManifestPath,
@@ -838,10 +840,16 @@ describe('dev-retry-failed libera o slot do CompletionRecord corrente', () => {
   it('um FAIL posterior não sobrescreve o archive do attempt anterior', async () => {
     const fixture = await setup();
     const original = await readFile(completionPath(fixture.paths, TASK));
+    const originalReport = await readFile(reportPath(fixture.paths, TASK));
+    const originalHandoff = await readFile(handoffDraftPath(fixture.paths, TASK));
     await retry(fixture);
 
-    // Attempt 3: mesma solução reprovada de novo, com evidence própria.
+    // Attempt 3: mesma solução reprovada de novo, com evidence própria. O
+    // worker do attempt novo reescreve o inbox, que o archival do anterior
+    // deixou vazio.
     await rewritePatch(fixture.sandbox.root);
+    await writeFile(reportPath(fixture.paths, TASK), originalReport);
+    await writeFile(handoffDraftPath(fixture.paths, TASK), originalHandoff);
     await writeFile(completionPath(fixture.paths, TASK), original);
     await writeRevalidationSourceBinding(fixture.paths, {
       schema_version: 1,
@@ -872,6 +880,150 @@ describe('dev-retry-failed libera o slot do CompletionRecord corrente', () => {
     expect(
       (await readState(fixture.paths)).tasks.find((task) => task.id === TASK)?.attempts,
     ).toBe(3);
+  });
+});
+
+/**
+ * O worker escreve em caminhos ESTÁVEIS por tarefa; o attempt seguinte recebe os
+ * mesmos. Sem cópia durável por attempt, o output do attempt N sobrevive no slot
+ * corrente e passa a ser indistinguível do output do attempt N+1 — foi o defeito
+ * que travou a recuperação de um attempt de infra depois de um FAIL arquivado.
+ */
+describe('dev-retry-failed isola o output do worker por attempt', () => {
+  function crashing(
+    fixture: Fixture,
+    hook: keyof Pick<
+      Parameters<typeof retryFailedAttempt>[0],
+      'afterRecordWritten' | 'afterCompletionArchived' | 'afterInboxArchived' | 'afterCompletionReleased' | 'afterPatchReset'
+    >,
+    message: string,
+  ) {
+    return retryFailedAttempt({
+      paths: fixture.paths,
+      taskId: TASK,
+      reasonCode: 'OFFICIAL_VALIDATION_FAILURE',
+      reason: REASON,
+      now: () => NOW,
+      [hook]: async () => {
+        throw new Error(message);
+      },
+    });
+  }
+
+  it('arquiva report e handoff byte a byte, com os hashes do próprio record', async () => {
+    const fixture = await setup();
+    const report = await readFile(reportPath(fixture.paths, TASK));
+    const handoff = await readFile(handoffDraftPath(fixture.paths, TASK));
+
+    const result = await retry(fixture);
+
+    expect(result.reportArchivePath).toBe(failedAttemptReportPath(fixture.paths, TASK, 2));
+    expect(result.handoffArchivePath).toBe(failedAttemptHandoffDraftPath(fixture.paths, TASK, 2));
+    expect(await readFile(result.reportArchivePath)).toEqual(report);
+    expect(await readFile(result.handoffArchivePath)).toEqual(handoff);
+    // O record do attempt é a única fonte desses hashes.
+    expect(result.record.report_sha256).toBe(digest(report));
+    expect(result.record.handoff_draft_sha256).toBe(digest(handoff));
+  });
+
+  it('libera os slots do inbox só depois de os archives existirem', async () => {
+    const fixture = await setup();
+    await expect(crashing(fixture, 'afterInboxArchived', 'crash após archive do inbox')).rejects.toThrow(
+      /crash após archive do inbox/,
+    );
+
+    // Archive publicado, slots ainda ocupados: até aqui o inbox era a única cópia.
+    expect(await exists(failedAttemptReportPath(fixture.paths, TASK, 2))).toBe(true);
+    expect(await exists(failedAttemptHandoffDraftPath(fixture.paths, TASK, 2))).toBe(true);
+    expect(await exists(reportPath(fixture.paths, TASK))).toBe(true);
+    expect(await exists(handoffDraftPath(fixture.paths, TASK))).toBe(true);
+
+    const result = await retry(fixture);
+    expect(result.releasedCurrentInbox).toBe(true);
+    expect(await exists(reportPath(fixture.paths, TASK))).toBe(false);
+    expect(await exists(handoffDraftPath(fixture.paths, TASK))).toBe(false);
+  });
+
+  it('não arquiva o inbox antes de o record do attempt existir', async () => {
+    const fixture = await setup();
+    await expect(crashing(fixture, 'afterRecordWritten', 'crash antes dos archives')).rejects.toThrow(
+      /crash antes dos archives/,
+    );
+
+    expect(await readValidationFailedAttempt(fixture.paths, TASK, 2)).not.toBeNull();
+    expect(await exists(failedAttemptReportPath(fixture.paths, TASK, 2))).toBe(false);
+    expect(await exists(reportPath(fixture.paths, TASK))).toBe(true);
+
+    const result = await retry(fixture);
+    expect(result.alreadyArchived).toBe(true);
+    expect(await exists(failedAttemptReportPath(fixture.paths, TASK, 2))).toBe(true);
+  });
+
+  it('retoma depois de crash entre a liberação do inbox e o reset', async () => {
+    const fixture = await setup();
+    const report = await readFile(reportPath(fixture.paths, TASK));
+    await expect(
+      crashing(fixture, 'afterCompletionReleased', 'crash depois da liberação'),
+    ).rejects.toThrow(/crash depois da liberação/);
+
+    // Slots liberados e patch ainda em disco: a retomada não pode depender do
+    // inbox que ela mesma esvaziou.
+    expect(await exists(reportPath(fixture.paths, TASK))).toBe(false);
+    expect((await runGit(fixture.sandbox.root, ['status', '--porcelain=v1'])).stdout.trim()).not.toBe(
+      '',
+    );
+
+    const result = await retry(fixture);
+    expect(result.alreadyArchived).toBe(true);
+    expect(await readFile(failedAttemptReportPath(fixture.paths, TASK, 2))).toEqual(report);
+    expect((await runGit(fixture.sandbox.root, ['status', '--porcelain=v1'])).stdout.trim()).toBe('');
+    expect((await readState(fixture.paths)).tasks.find((task) => task.id === TASK)?.status).toBe(
+      'READY',
+    );
+  });
+
+  it('retoma depois de crash entre o reset e a volta a READY', async () => {
+    const fixture = await setup();
+    await expect(crashing(fixture, 'afterPatchReset', 'crash depois do reset')).rejects.toThrow(
+      /crash depois do reset/,
+    );
+
+    expect((await readState(fixture.paths)).tasks.find((task) => task.id === TASK)?.status).toBe(
+      'FAIL',
+    );
+    const result = await retry(fixture);
+    expect(result.alreadyArchived).toBe(true);
+    expect(result.bundle).toBeNull();
+    expect((await readState(fixture.paths)).tasks.find((task) => task.id === TASK)?.status).toBe(
+      'READY',
+    );
+  });
+
+  it('recusa republicar o archive do inbox com outros bytes', async () => {
+    const fixture = await setup();
+    const archiveFile = failedAttemptReportPath(fixture.paths, TASK, 2);
+    await mkdir(path.dirname(archiveFile), { recursive: true });
+    await writeFile(archiveFile, '{"schema_version":1,"outro":"attempt"}\n', 'utf8');
+
+    await expect(retry(fixture)).rejects.toThrow(/archive do output do worker diverge/i);
+    // Enquanto o archive não fecha, o inbox continua sendo a evidência viva.
+    expect(await exists(reportPath(fixture.paths, TASK))).toBe(true);
+  });
+
+  it('o archive do attempt continua verificável depois do attempt seguinte', async () => {
+    const fixture = await setup();
+    const report = await readFile(reportPath(fixture.paths, TASK));
+    await retry(fixture);
+
+    // Próximo attempt escreve OUTRO output no mesmo caminho compartilhado.
+    await writeFile(reportPath(fixture.paths, TASK), '{"schema_version":1,"attempt":"3"}\n', 'utf8');
+    await writeFile(handoffDraftPath(fixture.paths, TASK), '{"schema_version":1}\n', 'utf8');
+
+    const archived = await readFile(failedAttemptReportPath(fixture.paths, TASK, 2));
+    expect(archived).toEqual(report);
+    expect(digest(archived)).toBe(
+      (await readValidationFailedAttempt(fixture.paths, TASK, 2))?.report_sha256,
+    );
   });
 });
 

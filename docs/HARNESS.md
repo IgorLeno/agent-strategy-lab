@@ -303,6 +303,14 @@ retentativa. É fail-closed — recusa se houver patch na árvore, commit sobre 
 `base_sha`, candidate commit, output do worker, timeout ou sobrevivente. Nada
 de `AgentCompletionReport`, patch ou candidate é inventado: não houve solução.
 
+Output do worker **deste** attempt continua bloqueando a recuperação — aquele
+caminho é do `dev-retry`. O que passa é o par `report.json` + `handoff-draft.json`
+que comprovadamente sobrou de um `ValidationFailedAttempt` ANTERIOR: os dois
+hashes precisam bater com o MESMO record, e aí os bytes são preservados no
+diretório daquele attempt antes de os slots correntes serem liberados. Meio par,
+um hash só ou nenhum record dono ⇒ recusa. Timestamp, `changed_files` e
+semelhança de conteúdo não decidem posse — só hash e record.
+
 LaunchRecord gravado ANTES do campo `provider_failure` não é reescrito à mão —
 isso seria fabricar evidência. A falha é DERIVADA do stdout preservado do
 próprio attempt, e só quando o transporte está íntegro (argv declarando

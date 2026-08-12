@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
-import { readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buildTaskPacket } from '../../dev/lib/packet.js';
@@ -16,12 +17,15 @@ import {
   type LauncherProfile,
 } from '../../dev/lib/profile.js';
 import {
+  failedAttemptHandoffDraftPath,
+  failedAttemptReportPath,
   handoffDraftPath,
   readHandoffDraft,
   readLaunchRecord,
   readReport,
   reportPath,
   writePacket,
+  writeValidationFailedAttempt,
 } from '../../dev/lib/records.js';
 import {
   PROCESS_GONE_START_TICKS,
@@ -267,6 +271,117 @@ describe('launchWorker', () => {
     const identity = await captureProcessIdentity(dead, dead, ['true'], new Date().toISOString());
     expect(identity.proc_start_ticks).toBe(PROCESS_GONE_START_TICKS);
     expect(await isSameProcessAlive(identity)).toBe(false);
+  });
+});
+
+/**
+ * O worker escreve num slot por tarefa, reusado por todo attempt. Começar um
+ * lançamento sobre output de outro attempt sobrescreveria evidência sem deixar
+ * rastro — e foi assim que um report de attempt reprovado passou a poder ser
+ * lido como output do attempt seguinte.
+ */
+describe('guarda de proveniência do inbox no launch', () => {
+  async function packetFor(taskId = 'T1') {
+    return buildTaskPacket({
+      task: loaded.byId.get(taskId)!,
+      baseSha: await headSha(paths.repoRoot),
+      previousHandoff: null,
+    });
+  }
+
+  /** Par de artifacts sem attempt dono nenhum. */
+  async function writeOrphanInbox(): Promise<void> {
+    await mkdir(path.dirname(reportPath(paths, 'T1')), { recursive: true });
+    await writeFile(reportPath(paths, 'T1'), '{"schema_version":1}\n', 'utf8');
+    await writeFile(handoffDraftPath(paths, 'T1'), '{"schema_version":1}\n', 'utf8');
+  }
+
+  it('recusa lançar sobre artifacts sem proveniência, antes de qualquer efeito', async () => {
+    await persistPacket();
+    await writeOrphanInbox();
+
+    await expect(launchWorker({ paths, profile, packet: await packetFor() })).rejects.toThrow(
+      /inbox recusou o lançamento/i,
+    );
+    // Nada foi lançado: sem LaunchRecord, e o output continua intacto.
+    expect(await readLaunchRecord(paths, 'T1')).toBeNull();
+    expect(await readFile(reportPath(paths, 'T1'), 'utf8')).toBe('{"schema_version":1}\n');
+  });
+
+  it('recusa meio par no inbox', async () => {
+    await persistPacket();
+    await mkdir(path.dirname(reportPath(paths, 'T1')), { recursive: true });
+    await writeFile(reportPath(paths, 'T1'), '{"schema_version":1}\n', 'utf8');
+
+    await expect(launchWorker({ paths, profile, packet: await packetFor() })).rejects.toThrow(
+      /meio par não prova proveniência/i,
+    );
+  });
+
+  it('libera o par já preservado no archive do attempt dono e segue o lançamento', async () => {
+    await persistPacket();
+    const report = '{"schema_version":1,"attempt":"1"}\n';
+    const handoff = '{"schema_version":1,"handoff":"1"}\n';
+    const digest = (value: string) => createHash('sha256').update(value).digest('hex');
+
+    await mkdir(path.dirname(reportPath(paths, 'T1')), { recursive: true });
+    await writeFile(reportPath(paths, 'T1'), report, 'utf8');
+    await writeFile(handoffDraftPath(paths, 'T1'), handoff, 'utf8');
+    // Cópia durável já publicada no attempt 1 — a evidência está segura.
+    await mkdir(path.dirname(failedAttemptReportPath(paths, 'T1', 1)), { recursive: true });
+    await writeFile(failedAttemptReportPath(paths, 'T1', 1), report, 'utf8');
+    await writeFile(failedAttemptHandoffDraftPath(paths, 'T1', 1), handoff, 'utf8');
+    await writeValidationFailedAttempt(paths, {
+      schema_version: 1,
+      task_id: 'T1',
+      attempt: 1,
+      source_base_sha: await headSha(paths.repoRoot),
+      profile_id: 'fake-worker-v1',
+      worker_self_reported_result: 'SUCCESS',
+      report_candidate_commit: null,
+      orchestrator_verdict: 'REJECTED_BY_OFFICIAL_VALIDATION',
+      finalization_mode: 'normal',
+      launch_record_sha256: digest('launch'),
+      original_completion_sha256: digest('completion'),
+      report_sha256: digest(report),
+      handoff_draft_sha256: digest(handoff),
+      source_binding_sha256: digest('binding'),
+      patch_fingerprint: digest('patch'),
+      changed_files: ['src/alvo.ts'],
+      original_validation_results: [
+        { argv: ['pnpm', 'test'], exit_code: 1, timed_out: false, duration_ms: 1 },
+      ],
+      change_bundle: {
+        manifest_path: 'failed-attempts/T1/attempt-1/changes-manifest.json',
+        manifest_sha256: digest('manifest'),
+        patch_path: 'failed-attempts/T1/attempt-1/changes.patch',
+        patch_sha256: digest('patch-bytes'),
+        patch_size_bytes: 12,
+      },
+      reason_code: 'OFFICIAL_VALIDATION_FAILURE',
+      reason: 'attempt 1 reprovado pela validation oficial',
+      archived_at: '2026-08-12T18:14:28.960Z',
+    });
+
+    const outcome = await launchWorker({ paths, profile, packet: await packetFor() });
+    expect(outcome.classification).toBe('FINISHED');
+    // O archive do attempt 1 continua byte a byte; o inbox é do attempt novo.
+    expect(await readFile(failedAttemptReportPath(paths, 'T1', 1), 'utf8')).toBe(report);
+    expect(await readFile(reportPath(paths, 'T1'), 'utf8')).not.toBe(report);
+  });
+
+  it('o attempt seguinte não herda report nem handoff do anterior', async () => {
+    await persistPacket();
+    const first = await launchWorker({ paths, profile, packet: await packetFor() });
+    expect(first.classification).toBe('FINISHED');
+    const inherited = await readFile(reportPath(paths, 'T1'), 'utf8');
+
+    // Sem archive do attempt anterior, o inbox ocupado é ambíguo e o launch
+    // seguinte é recusado em vez de sobrescrever o que está lá.
+    await expect(launchWorker({ paths, profile, packet: await packetFor() })).rejects.toThrow(
+      /inbox recusou o lançamento/i,
+    );
+    expect(await readFile(reportPath(paths, 'T1'), 'utf8')).toBe(inherited);
   });
 });
 

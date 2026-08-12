@@ -1,4 +1,5 @@
-import { copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { access, copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { headSha } from '../../dev/lib/git.js';
@@ -6,12 +7,17 @@ import { InfraRecoveryError, recoverInfraAttempt } from '../../dev/lib/infra-rec
 import { resolveHarnessPaths, type HarnessPaths } from '../../dev/lib/paths.js';
 import { loadPlan, type LoadedPlan } from '../../dev/lib/plan.js';
 import {
+  failedAttemptHandoffDraftPath,
+  failedAttemptReportPath,
   handoffDraftPath,
   infraAttemptEvidencePath,
   infraFailedAttemptPath,
   launchRecordPath,
   readInfraFailedAttempt,
+  readValidationFailedAttempt,
   reportPath,
+  validationFailedAttemptPath,
+  writeValidationFailedAttempt,
 } from '../../dev/lib/records.js';
 import {
   buildInitialState,
@@ -106,6 +112,15 @@ afterEach(async () => {
   else process.env['PATH'] = originalPath;
   await rm(sandbox.root, { recursive: true, force: true });
 });
+
+async function exists(file: string): Promise<boolean> {
+  try {
+    await access(file);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function devEnv(extra: Record<string, string> = {}): Record<string, string> {
   return {
@@ -449,6 +464,217 @@ describe('dev-recover-infra', () => {
     await expect(recover()).rejects.toThrow(/evidência arquivada foi alterada/i);
     expect(record.evidence).toHaveLength(3);
     expect(infraFailedAttemptPath(paths, 'T1', 1)).toMatch(/failed-attempts\/T1\/attempt-1\//);
+  });
+});
+
+/**
+ * O incidente REAL da M50: o attempt 1 foi reprovado pela validation oficial e
+ * arquivado, mas o par report/handoff dele continuou nos caminhos correntes do
+ * inbox. O attempt 2 morreu por 401 do provider sem escrever nada — e a
+ * recuperação foi recusada porque o harness leu output do attempt 1 como se
+ * fosse do attempt 2. A posse é decidida por hash, nunca por timestamp,
+ * `changed_files` ou semelhança de conteúdo.
+ */
+describe('dev-recover-infra diante de output stale do attempt anterior', () => {
+  const STALE_REPORT = `${JSON.stringify(
+    {
+      schema_version: 1,
+      task_id: 'T1',
+      self_reported_result: 'SUCCESS',
+      summary: 'solução do attempt 1, reprovada pela validation oficial',
+      candidate_commit: null,
+      changed_files: ['src/alvo.ts'],
+      validations: [],
+      decisions: [],
+      lessons: [],
+      relevant_files: ['src/alvo.ts'],
+    },
+    null,
+    2,
+  )}\n`;
+  const STALE_HANDOFF = `${JSON.stringify(
+    {
+      schema_version: 1,
+      task_id: 'T1',
+      result: 'PASS',
+      changed_files: ['src/alvo.ts'],
+      validations: [],
+      decisions: [],
+      lessons: [],
+      next_relevant_files: ['src/alvo.ts'],
+    },
+    null,
+    2,
+  )}\n`;
+
+  function digest(bytes: Buffer | string): string {
+    return createHash('sha256').update(bytes).digest('hex');
+  }
+
+  /**
+   * Reproduz o estado da M50: attempt 1 arquivado como ValidationFailedAttempt,
+   * attempt 2 morto por falha do provider, par stale nos slots correntes.
+   */
+  async function simulateStalePair(
+    overrides: { readonly report?: string; readonly handoff?: string } = {},
+  ): Promise<{ readonly report: string; readonly handoff: string }> {
+    const report = overrides.report ?? STALE_REPORT;
+    const handoff = overrides.handoff ?? STALE_HANDOFF;
+    await mkdir(path.dirname(reportPath(paths, 'T1')), { recursive: true });
+    await writeFile(reportPath(paths, 'T1'), report, 'utf8');
+    await writeFile(handoffDraftPath(paths, 'T1'), handoff, 'utf8');
+
+    // O record do attempt 1 é a ÚNICA autoridade sobre os hashes do par.
+    await writeValidationFailedAttempt(paths, {
+      schema_version: 1,
+      task_id: 'T1',
+      attempt: 1,
+      source_base_sha: await headSha(paths.repoRoot),
+      profile_id: PROFILE_ID,
+      worker_self_reported_result: 'SUCCESS',
+      report_candidate_commit: null,
+      orchestrator_verdict: 'REJECTED_BY_OFFICIAL_VALIDATION',
+      finalization_mode: 'normal',
+      launch_record_sha256: digest('launch'),
+      original_completion_sha256: digest('completion'),
+      report_sha256: digest(STALE_REPORT),
+      handoff_draft_sha256: digest(STALE_HANDOFF),
+      source_binding_sha256: digest('binding'),
+      patch_fingerprint: digest('patch'),
+      changed_files: ['src/alvo.ts'],
+      original_validation_results: [
+        { argv: ['pnpm', 'test'], exit_code: 1, timed_out: false, duration_ms: 1 },
+      ],
+      change_bundle: {
+        manifest_path: 'failed-attempts/T1/attempt-1/changes-manifest.json',
+        manifest_sha256: digest('manifest'),
+        patch_path: 'failed-attempts/T1/attempt-1/changes.patch',
+        patch_sha256: digest('patch-bytes'),
+        patch_size_bytes: 12,
+      },
+      reason_code: 'OFFICIAL_VALIDATION_FAILURE',
+      reason: 'attempt 1 reprovado pela validation oficial',
+      archived_at: '2026-08-12T18:14:28.960Z',
+    });
+
+    // O attempt vivo é o 2: mesmo desenho da M50, com attempts preservado.
+    const state = await readState(paths);
+    await writeState(paths, withTaskState(state, 'T1', { attempts: 2 }));
+    return { report, handoff };
+  }
+
+  it('recupera o attempt de infra e preserva o par no attempt dono', async () => {
+    await runFailedAttempt();
+    const stale = await simulateStalePair();
+
+    const result = await recover();
+
+    expect(result.staleInboxOwnerAttempt).toBe(1);
+    // Preservado byte a byte no diretório do attempt 1 — não do 2.
+    expect(await readFile(failedAttemptReportPath(paths, 'T1', 1), 'utf8')).toBe(stale.report);
+    expect(await readFile(failedAttemptHandoffDraftPath(paths, 'T1', 1), 'utf8')).toBe(stale.handoff);
+    expect(await exists(failedAttemptReportPath(paths, 'T1', 2))).toBe(false);
+    // Slots correntes liberados para o próximo attempt.
+    expect(await exists(reportPath(paths, 'T1'))).toBe(false);
+    expect(await exists(handoffDraftPath(paths, 'T1'))).toBe(false);
+
+    // Semântica histórica preservada: attempt 2 é INFRA, sem report próprio.
+    const record = await readInfraFailedAttempt(paths, 'T1', 2);
+    expect(record).toMatchObject({
+      attempt: 2,
+      launch_classification: 'INFRA_ERROR',
+      worker_output_present: false,
+      reason_code: 'PROVIDER_TERMINAL_FAILURE',
+    });
+    expect(await readValidationFailedAttempt(paths, 'T1', 1)).not.toBeNull();
+    expect(getTaskState(await readState(paths), 'T1')).toMatchObject({
+      status: 'READY',
+      attempts: 2,
+      candidate_commit: null,
+    });
+  });
+
+  it('preserva o par ANTES de liberar os slots — crash no meio converge', async () => {
+    await runFailedAttempt();
+    const stale = await simulateStalePair();
+
+    await expect(
+      recover({
+        afterStaleInboxMigrated: async () => {
+          throw new Error('crash injetado');
+        },
+      }),
+    ).rejects.toThrow('crash injetado');
+
+    // Archive publicado; o inbox já foi liberado porque a preservação veio antes.
+    expect(await readFile(failedAttemptReportPath(paths, 'T1', 1), 'utf8')).toBe(stale.report);
+    expect(getTaskState(await readState(paths), 'T1').status).toBe('INFRA_ERROR');
+
+    const result = await recover();
+    expect(result.staleInboxOwnerAttempt).toBeNull();
+    expect(getTaskState(await readState(paths), 'T1')).toMatchObject({
+      status: 'READY',
+      attempts: 2,
+    });
+  });
+
+  it('recusa par sem attempt dono comprovado: esse output pode ser deste attempt', async () => {
+    await runFailedAttempt();
+    await simulateStalePair();
+    // Sem record anterior nenhum, o par não tem proveniência.
+    await rm(validationFailedAttemptPath(paths, 'T1', 1));
+
+    await expect(recover()).rejects.toThrow(/sem pertencer comprovadamente a um attempt anterior/i);
+    expect(await exists(reportPath(paths, 'T1'))).toBe(true);
+    expect(getTaskState(await readState(paths), 'T1').status).toBe('INFRA_ERROR');
+  });
+
+  it('recusa quando só o report bate com o record do attempt anterior', async () => {
+    await runFailedAttempt();
+    await simulateStalePair({ handoff: `${JSON.stringify({ schema_version: 1 })}\n` });
+
+    await expect(recover()).rejects.toThrow(/sem pertencer comprovadamente a um attempt anterior/i);
+    expect(await exists(failedAttemptReportPath(paths, 'T1', 1))).toBe(false);
+  });
+
+  it('recusa quando só o handoff bate com o record do attempt anterior', async () => {
+    await runFailedAttempt();
+    await simulateStalePair({ report: `${JSON.stringify({ schema_version: 1 })}\n` });
+
+    await expect(recover()).rejects.toThrow(/sem pertencer comprovadamente a um attempt anterior/i);
+    expect(await exists(failedAttemptHandoffDraftPath(paths, 'T1', 1))).toBe(false);
+  });
+
+  it('recusa meio par: só o report stale em disco', async () => {
+    await runFailedAttempt();
+    await simulateStalePair();
+    await rm(handoffDraftPath(paths, 'T1'));
+
+    await expect(recover()).rejects.toThrow(/AgentCompletionReport presente/i);
+  });
+
+  it('recusa meio par: só o handoff stale em disco', async () => {
+    await runFailedAttempt();
+    await simulateStalePair();
+    await rm(reportPath(paths, 'T1'));
+
+    await expect(recover()).rejects.toThrow(/HandoffDraft presente/i);
+  });
+
+  it('recusa quando o par stale pertence ao PRÓPRIO attempt corrente', async () => {
+    await runFailedAttempt();
+    await simulateStalePair();
+    // O record passa a ser do attempt 2: já não há attempt anterior dono.
+    const record = await readFile(validationFailedAttemptPath(paths, 'T1', 1), 'utf8');
+    await rm(validationFailedAttemptPath(paths, 'T1', 1));
+    await mkdir(path.dirname(validationFailedAttemptPath(paths, 'T1', 2)), { recursive: true });
+    await writeFile(
+      validationFailedAttemptPath(paths, 'T1', 2),
+      record.replace('"attempt": 1', '"attempt": 2'),
+      'utf8',
+    );
+
+    await expect(recover()).rejects.toThrow(/sem pertencer comprovadamente a um attempt anterior/i);
   });
 });
 

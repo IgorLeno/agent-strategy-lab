@@ -41,7 +41,10 @@ async function main(): Promise<void> {
     change_bundle: result.record.change_bundle,
     failed_attempt_record: result.recordPath,
     archived_completion: result.completionArchivePath,
+    archived_report: result.reportArchivePath,
+    archived_handoff_draft: result.handoffArchivePath,
     released_current_completion: result.releasedCurrentCompletion,
+    released_current_inbox: result.releasedCurrentInbox,
     source_binding_recovered: result.bindingRecovered,
   });
 }

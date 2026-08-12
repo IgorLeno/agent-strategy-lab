@@ -164,6 +164,29 @@ export function failedAttemptCompletionPath(
 }
 
 /**
+ * Bytes EXATOS do `AgentCompletionReport` que o worker deixou no inbox neste
+ * attempt. O inbox é um slot por tarefa (`reportPath`), reusado pelo attempt
+ * seguinte: sem esta cópia, o output do attempt N sobrevive no caminho corrente
+ * e pode ser lido como se fosse do attempt N+1.
+ */
+export function failedAttemptReportPath(
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+): string {
+  return path.join(failedAttemptDir(paths, taskId, attempt), 'report.json');
+}
+
+/** Bytes exatos do `HandoffDraft` do attempt, pelo mesmo motivo do report. */
+export function failedAttemptHandoffDraftPath(
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+): string {
+  return path.join(failedAttemptDir(paths, taskId, attempt), 'handoff-draft.json');
+}
+
+/**
  * Attempt encerrado por falha de infraestrutura do provider. Mora no diretório
  * do próprio attempt, ao lado da evidência de um attempt reprovado pela
  * validation: o diretório é "tudo o que sobrou deste attempt", e o nome do

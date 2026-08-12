@@ -31,6 +31,7 @@ import {
 } from './claude-usage.js';
 import { TIMEOUT_EXIT_CODE } from './exec.js';
 import { executionPolicyOf } from './execution-policy.js';
+import { InboxArtifactError, releaseInboxForLaunch } from './inbox-artifacts.js';
 import type { HarnessPaths } from './paths.js';
 import { killSurvivors } from './process-audit.js';
 import { captureProcessIdentity } from './process-identity.js';
@@ -95,6 +96,18 @@ export class BillingPreflightError extends LaunchError {
 }
 
 /**
+ * Recusa de PROVENIÊNCIA: o inbox da tarefa tem output de worker que este
+ * lançamento não pode sobrescrever sem destruir evidência. Nada foi lançado e
+ * nenhum token foi gasto — não é veredito sobre o worker.
+ */
+export class InboxProvenanceError extends LaunchError {
+  constructor(reason: string) {
+    super(`inbox recusou o lançamento — ${reason}`);
+    this.name = 'InboxProvenanceError';
+  }
+}
+
+/**
  * Recusa da MEDIÇÃO, não do worker: o probe `/usage` de baseline não provou ter
  * rodado sem inferência, então ele mesmo pode ter consumido franquia. Nada foi
  * lançado; a tarefa não vai para FAIL por causa disto.
@@ -118,6 +131,17 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
   const { paths, profile, packet } = input;
   const timeoutSeconds = input.timeoutSecondsOverride ?? profile.timeout_seconds;
   const executionPolicy = executionPolicyOf(profile);
+
+  // ANTES de qualquer efeito — inclusive antes do preflight de cobrança: o
+  // worker escreve num slot por tarefa, e um artifact de attempt anterior
+  // parado ali seria sobrescrito sem deixar rastro. Só sai daqui inbox limpo
+  // ou par já preservado no archive do attempt dono.
+  try {
+    await releaseInboxForLaunch(paths, packet.task_id);
+  } catch (error) {
+    if (error instanceof InboxArtifactError) throw new InboxProvenanceError(error.message);
+    throw error;
+  }
 
   const io = {
     repoRoot: paths.repoRoot,

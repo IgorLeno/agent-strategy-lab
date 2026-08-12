@@ -12,17 +12,24 @@ import {
   type ClaudeProviderFailure,
 } from './claude-stream.js';
 import { stagedFiles } from './git.js';
+import {
+  InboxArtifactError,
+  archiveInboxArtifacts,
+  findStaleInboxOwner,
+  readCurrentInboxArtifacts,
+  releaseCurrentInboxArtifacts,
+  type InboxArtifactPair,
+  type StaleInboxOwner,
+} from './inbox-artifacts.js';
 import type { HarnessPaths } from './paths.js';
 import { isSameProcessAlive } from './process-identity.js';
 import {
   completionPath,
-  handoffDraftPath,
   infraAttemptEvidencePath,
   infraFailedAttemptPath,
   launchRecordPath,
   readInfraFailedAttempt,
   readLaunchRecord,
-  reportPath,
   writeInfraFailedAttempt,
 } from './records.js';
 import {
@@ -65,6 +72,8 @@ export interface InfraRecoveryInput {
   readonly reason: string;
   readonly allowPendingMaintenance?: boolean;
   readonly now?: () => string;
+  /** Ponto de crash injetado pelos testes, entre migrar o inbox stale e a evidência. */
+  readonly afterStaleInboxMigrated?: () => Promise<void>;
   /** Ponto de crash injetado pelos testes, entre evidência e record. */
   readonly afterEvidenceArchived?: () => Promise<void>;
   /** Ponto de crash injetado pelos testes, entre record e state. */
@@ -77,6 +86,11 @@ export interface InfraRecoveryResult {
   readonly state: DevelopmentState;
   /** `true` quando o record já existia e esta execução apenas convergiu. */
   readonly alreadyArchived: boolean;
+  /**
+   * Attempt anterior a que o par stale do inbox pertencia, quando esta execução
+   * o preservou e liberou os slots; `null` quando o inbox já estava limpo.
+   */
+  readonly staleInboxOwnerAttempt: number | null;
 }
 
 const EVIDENCE_SOURCES = [
@@ -167,6 +181,16 @@ async function assertArchivedEvidence(
   }
 }
 
+/**
+ * Par report/handoff que sobrou no inbox e comprovadamente pertence a um
+ * ValidationFailedAttempt ANTERIOR — não ao attempt de infra que está sendo
+ * recuperado agora.
+ */
+interface StaleInbox {
+  readonly owner: StaleInboxOwner;
+  readonly bytes: InboxArtifactPair;
+}
+
 interface InfraSource {
   readonly attempt: number;
   readonly task: TaskState;
@@ -176,6 +200,74 @@ interface InfraSource {
   readonly providerFailureSource: 'launch_record' | 'stdout_stream';
   readonly baseSha: string;
   readonly headSha: string;
+  /** `null` quando o inbox está limpo — o caso normal de uma falha de infra. */
+  readonly staleInbox: StaleInbox | null;
+}
+
+/**
+ * De quem é o output que está no inbox.
+ *
+ * Output DESTE attempt significa que o protocolo do worker COMEÇOU, e aquele
+ * caminho é do dev-retry: continua recusado. O que este classificador
+ * acrescenta é o caso em que o par não é deste attempt nenhum — ele é a sobra
+ * de um ValidationFailedAttempt anterior no caminho compartilhado do inbox, e
+ * bloquear a recuperação por causa dele seria atribuir a um attempt output que
+ * outro produziu.
+ *
+ * A prova é criptográfica e completa ou não existe: os DOIS hashes precisam
+ * bater com o MESMO record anterior. Timestamp, `changed_files` e semelhança de
+ * conteúdo não são consultados — meia prova é ambiguidade, e ambiguidade recusa.
+ */
+async function classifyInbox(
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+): Promise<StaleInbox | null> {
+  const current = await readCurrentInboxArtifacts(paths, taskId);
+  if (current.report === null && current.handoff === null) return null;
+  if (current.handoff === null) {
+    throw new InfraRecoveryError('AgentCompletionReport presente; recuperação de infra recusada');
+  }
+  if (current.report === null) {
+    throw new InfraRecoveryError('HandoffDraft presente; recuperação de infra recusada');
+  }
+
+  const bytes = { report: current.report, handoff: current.handoff };
+  const owner = await findStaleInboxOwner(paths, taskId, bytes, attempt - 1);
+  if (owner === null) {
+    throw new InfraRecoveryError(
+      'output do worker presente no inbox sem pertencer comprovadamente a um attempt ' +
+        'anterior; recuperação de infra recusada',
+    );
+  }
+  return { owner, bytes };
+}
+
+/**
+ * Preserva o par stale no attempt DONO e só então libera os slots correntes.
+ * Append-only e idempotente: repetir com os mesmos bytes converge, com bytes
+ * diferentes é recusado. Nada é escrito no attempt de infra — ele não produziu
+ * output nenhum, e copiar o report do attempt anterior para dentro dele seria
+ * fabricar uma solução que nunca existiu.
+ */
+async function migrateStaleInbox(
+  paths: HarnessPaths,
+  taskId: string,
+  stale: StaleInbox,
+): Promise<void> {
+  try {
+    await archiveInboxArtifacts({
+      paths,
+      taskId,
+      attempt: stale.owner.attempt,
+      bytes: stale.bytes,
+      expected: stale.owner.hashes,
+    });
+  } catch (error) {
+    if (error instanceof InboxArtifactError) throw new InfraRecoveryError(error.message);
+    throw error;
+  }
+  await releaseCurrentInboxArtifacts(paths, taskId);
 }
 
 /**
@@ -240,14 +332,10 @@ async function loadInfraSource(
       ? await deriveProviderFailureFromStdout(paths, taskId, launch)
       : { failure: launch.provider_failure, source: 'launch_record' as const };
 
-  // Output do worker presente significa que o protocolo COMEÇOU: aquele caminho
-  // é do dev-retry, que sabe amarrar report e handoff à evidência.
-  if (await exists(reportPath(paths, taskId))) {
-    throw new InfraRecoveryError('AgentCompletionReport presente; recuperação de infra recusada');
-  }
-  if (await exists(handoffDraftPath(paths, taskId))) {
-    throw new InfraRecoveryError('HandoffDraft presente; recuperação de infra recusada');
-  }
+  // Output do worker DESTE attempt significa que o protocolo COMEÇOU: aquele
+  // caminho é do dev-retry, que sabe amarrar report e handoff à evidência. Só
+  // um par provadamente herdado de um attempt anterior passa daqui.
+  const staleInbox = await classifyInbox(paths, taskId, task.attempts);
   if (await exists(completionPath(paths, taskId))) {
     throw new InfraRecoveryError('CompletionRecord presente; recuperação de infra recusada');
   }
@@ -277,6 +365,7 @@ async function loadInfraSource(
     providerFailureSource: providerFailure.source,
     baseSha: task.base_sha,
     headSha: head,
+    staleInbox,
   };
 }
 
@@ -420,11 +509,19 @@ export async function recoverInfraAttempt(
       recordPath: infraFailedAttemptPath(paths, taskId, archived.attempt),
       state,
       alreadyArchived: true,
+      staleInboxOwnerAttempt: null,
     };
   }
 
   const source = await loadInfraSource(input, state);
   const existing = await readInfraFailedAttempt(paths, taskId, source.attempt);
+
+  // Antes de tudo: o par stale herdado do attempt anterior vai para o archive
+  // DELE e sai do caminho compartilhado. Um crash entre preservar e liberar
+  // converge na repetição, porque o archive é append-only e a classificação
+  // seguinte encontra o inbox limpo.
+  if (source.staleInbox) await migrateStaleInbox(paths, taskId, source.staleInbox);
+  await input.afterStaleInboxMigrated?.();
 
   const evidence = await archiveEvidence(paths, taskId, source.attempt);
   await input.afterEvidenceArchived?.();
@@ -446,5 +543,6 @@ export async function recoverInfraAttempt(
     recordPath: infraFailedAttemptPath(paths, taskId, record.attempt),
     state: nextState,
     alreadyArchived: existing !== null,
+    staleInboxOwnerAttempt: source.staleInbox?.owner.attempt ?? null,
   };
 }

@@ -36,6 +36,7 @@ async function main(): Promise<void> {
     exit_code: result.record.exit_code,
     billing: result.record.billing,
     subscription_usage: result.record.subscription_usage,
+    stale_inbox_owner_attempt: result.staleInboxOwnerAttempt,
     head_sha: result.record.head_sha,
     authorized_head_sha: result.state.authorized_head_sha,
   });
