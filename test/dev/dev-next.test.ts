@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { checkProgressionBase } from '../../dev/lib/base-guard.js';
+import { resolveHarnessPaths } from '../../dev/lib/paths.js';
 import {
   MAXIMUM_TASK_PACKET_BYTES,
   byteSize,
@@ -10,7 +12,8 @@ import {
 } from '../../dev/lib/schemas.js';
 import { buildTaskPacket } from '../../dev/lib/packet.js';
 import { loadPlan } from '../../dev/lib/plan.js';
-import { REPO_ROOT, makeSandboxRepo, runDevCli, type Sandbox } from './helpers.js';
+import { readState } from '../../dev/lib/state.js';
+import { REPO_ROOT, makeSandboxRepo, runDevCli, runGit, type Sandbox } from './helpers.js';
 
 const created: string[] = [];
 
@@ -69,6 +72,28 @@ describe('dev-next', () => {
     expect(JSON.parse(result.stdout)).not.toHaveProperty('initial_files');
 
     expect(await fingerprint(sandbox.devDir)).toBe(before);
+  });
+
+  it('mantém SELECTED com exit 0, mas bloqueia lançamento quando a árvore está suja', async () => {
+    const sandbox = await initializedSandbox();
+    const statePath = path.join(sandbox.devDir, 'state.json');
+    await writeFile(path.join(sandbox.root, 'residuo.txt'), 'trabalho não commitado\n', 'utf8');
+    const stateBefore = await readFile(statePath, 'utf8');
+    const statusBefore = (await runGit(sandbox.root, ['status', '--porcelain'])).stdout;
+
+    const result = await runDevCli('dev-next.ts', ['--repo', sandbox.root], {
+      AGENTLAB_DEV_DIR: sandbox.devDir,
+    });
+
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      status: 'SELECTED',
+      ready_to_launch: false,
+      task_id: 'T1',
+      blocker: 'DIRTY_WORKTREE',
+    });
+    expect(await readFile(statePath, 'utf8')).toBe(stateBefore);
+    expect((await runGit(sandbox.root, ['status', '--porcelain'])).stdout).toBe(statusBefore);
   });
 
   it('--verbose preserva reason e o TaskPacket completo', async () => {
@@ -190,6 +215,31 @@ describe('dev-next', () => {
       blocker: 'BASE_DIVERGED',
     });
     expect(JSON.parse(result.stdout).base_sha).not.toBe('a'.repeat(40));
+  });
+
+  it('concorda com a guarda quando authorized_head_sha é null e a árvore está limpa', async () => {
+    const sandbox = await initializedSandbox();
+    const statePath = path.join(sandbox.devDir, 'state.json');
+    const state = JSON.parse(await readFile(statePath, 'utf8')) as {
+      authorized_head_sha: string | null;
+    };
+    state.authorized_head_sha = null;
+    await writeFile(statePath, JSON.stringify(state));
+
+    const paths = resolveHarnessPaths(sandbox.root);
+    expect(await checkProgressionBase(paths, await readState(paths))).toBeNull();
+
+    const result = await runDevCli('dev-next.ts', ['--repo', sandbox.root], {
+      AGENTLAB_DEV_DIR: sandbox.devDir,
+    });
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      status: 'SELECTED',
+      ready_to_launch: true,
+      task_id: 'T1',
+      authorized_head_sha: null,
+    });
+    expect(JSON.parse(result.stdout)).not.toHaveProperty('blocker');
   });
 
   it('todo packet do plano real cabe no budget, mesmo com handoff cheio', async () => {

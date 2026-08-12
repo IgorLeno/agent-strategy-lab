@@ -1,4 +1,5 @@
 #!/usr/bin/env tsx
+import { inspectProgressionBase } from '../lib/base-guard.js';
 import { emit, isVerbose, parseArgs, runMain } from '../lib/cli.js';
 import { headSha } from '../lib/git.js';
 import { buildTaskPacket } from '../lib/packet.js';
@@ -52,6 +53,7 @@ async function main(): Promise<void> {
     selection.task.id,
     task?.attempts ?? 0,
   );
+  const progressionBase = await inspectProgressionBase(paths, state);
   const baseSha = await headSha(paths.repoRoot);
   const packet = buildTaskPacket({
     task: selection.task,
@@ -59,7 +61,7 @@ async function main(): Promise<void> {
     previousHandoff,
     previousAttemptDiagnostics,
   });
-  const readyToLaunch = baseSha === state.authorized_head_sha;
+  const readyToLaunch = progressionBase.blocker === null;
 
   if (isVerbose(args)) {
     emit({
@@ -81,7 +83,7 @@ async function main(): Promise<void> {
     attempt_kind: previousAttemptDiagnostics === null ? 'FIRST_PASS' : 'REPAIR',
     base_sha: baseSha,
     authorized_head_sha: state.authorized_head_sha,
-    ...(!readyToLaunch ? { blocker: 'BASE_DIVERGED' } : {}),
+    ...(progressionBase.blocker === null ? {} : { blocker: progressionBase.blocker }),
   });
 }
 

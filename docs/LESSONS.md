@@ -329,3 +329,10 @@ saída padrão um campo detalhado movido para `--verbose`.
 Rule: ao mover campos entre views de uma CLI, procurar todos os consumidores das
 chaves; diagnóstico opta por `--verbose`, enquanto uso operacional valida apenas
 os campos compactos.
+
+[2026-08-11] Contexto: resumir na view do `dev-next` se a próxima task pode ser
+lançada.
+Mistake: derivar readiness apenas de `HEAD == authorized_head_sha`, omitindo a
+árvore limpa e a semântica de `authorized_head_sha: null` da guarda real.
+Rule: views de readiness consomem o resultado estruturado da mesma primitive que
+protege a progressão; nunca reimplementam parcialmente uma guarda operacional.

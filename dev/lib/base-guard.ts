@@ -21,23 +21,44 @@ export function expectedBaseSha(state: DevelopmentState): string | null {
   return state.authorized_head_sha;
 }
 
+export type ProgressionBaseBlocker = 'DIRTY_WORKTREE' | 'BASE_DIVERGED';
+
+export interface ProgressionBaseCheck {
+  readonly blocker: ProgressionBaseBlocker | null;
+  readonly reason: string | null;
+}
+
+/** Inspeção estruturada compartilhada pela guarda e pelas views operacionais. */
+export async function inspectProgressionBase(
+  paths: HarnessPaths,
+  state: DevelopmentState,
+): Promise<ProgressionBaseCheck> {
+  if (!(await isWorkingTreeClean(paths.repoRoot))) {
+    return {
+      blocker: 'DIRTY_WORKTREE',
+      reason: 'working tree suja — a próxima tarefa precisa partir de uma base limpa',
+    };
+  }
+
+  const expected = expectedBaseSha(state);
+  if (expected === null) return { blocker: null, reason: null };
+
+  const head = await headSha(paths.repoRoot);
+  if (head !== expected) {
+    return {
+      blocker: 'BASE_DIVERGED',
+      reason: `HEAD (${head}) não é a base esperada (${expected}) — houve trabalho fora do harness`,
+    };
+  }
+  return { blocker: null, reason: null };
+}
+
 /** Devolve o motivo do bloqueio, ou `null` quando a base está íntegra. */
 export async function checkProgressionBase(
   paths: HarnessPaths,
   state: DevelopmentState,
 ): Promise<string | null> {
-  if (!(await isWorkingTreeClean(paths.repoRoot))) {
-    return 'working tree suja — a próxima tarefa precisa partir de uma base limpa';
-  }
-
-  const expected = expectedBaseSha(state);
-  if (expected === null) return null;
-
-  const head = await headSha(paths.repoRoot);
-  if (head !== expected) {
-    return `HEAD (${head}) não é a base esperada (${expected}) — houve trabalho fora do harness`;
-  }
-  return null;
+  return (await inspectProgressionBase(paths, state)).reason;
 }
 
 export class AttemptHeadError extends Error {
