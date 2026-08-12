@@ -57,6 +57,20 @@ export interface RecoveryOptions {
 }
 
 /**
+ * Definição única de "nada a reconciliar": o `dev-recover` compacto e o
+ * pre-flight do `dev-orchestrate` precisam concordar sobre o que é CLEAN, ou
+ * um deles autorizaria fluxo que o outro recusa.
+ */
+export function isRecoveryClean(result: RecoveryResult, head: string): boolean {
+  return (
+    !result.stateWasMissing &&
+    !result.planChanged &&
+    result.reconciliations.length === 0 &&
+    head === result.state.authorized_head_sha
+  );
+}
+
+/**
  * Reconcilia plano + commits + completions + runtime existente. O plano é a
  * fonte autoritativa; o runtime é reconstruível. Nenhuma tarefa pode ficar
  * RUNNING para sempre: processo morto em EXECUTING vira INFRA_ERROR, e em

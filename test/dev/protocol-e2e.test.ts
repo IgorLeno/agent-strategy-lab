@@ -13,6 +13,7 @@ import {
   readLaunchRecord,
   readPacket,
 } from '../../dev/lib/records.js';
+import { headSha } from '../../dev/lib/git.js';
 import { findSurvivors } from '../../dev/lib/process-audit.js';
 import { isSameProcessAlive } from '../../dev/lib/process-identity.js';
 import { buildInitialState, ensureRuntimeDirs, readState, writeState } from '../../dev/lib/state.js';
@@ -27,7 +28,12 @@ beforeEach(async () => {
   paths = resolveHarnessPaths(sandbox.root);
   loaded = await loadPlan(paths.planFile);
   await ensureRuntimeDirs(paths);
-  await writeState(paths, buildInitialState(loaded.plan, loaded.planSha256));
+  // Mesmo state que o dev-init produz: ele SEMPRE registra o HEAD como baseline,
+  // e o pre-flight recusa base autorizada ausente.
+  await writeState(
+    paths,
+    buildInitialState(loaded.plan, loaded.planSha256, { baselineSha: await headSha(sandbox.root) }),
+  );
 });
 
 afterEach(async () => {

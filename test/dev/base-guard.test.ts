@@ -108,19 +108,41 @@ describe('base da próxima tarefa', () => {
 });
 
 describe('base divergente para o fluxo', () => {
-  it('dev-orchestrate para em BASE_DIVERGED sem mudar o status da tarefa', async () => {
+  it('dev-orchestrate para no pre-flight sem mudar o status da tarefa', async () => {
     await writeFile(path.join(sandbox.root, 'externo.txt'), 'trabalho externo\n', 'utf8');
     await commitAll(sandbox.root, 'commit manual entre sessões');
 
     const result = await orchestrate('success');
     expect(result.exitCode).toBe(9);
-    const summary = JSON.parse(result.stdout) as { stopped_by: string; reason: string };
-    expect(summary.stopped_by).toBe('BASE_DIVERGED');
-    expect(summary.reason).toMatch(/não é a base esperada/);
+    const summary = JSON.parse(result.stdout) as {
+      stopped_by: string;
+      reason: string;
+      iteration_count: number;
+      preflight: { status: string; blocker: string };
+    };
+    // Commit externo não é manutenção adotável: o pre-flight recusa antes de o
+    // loop chegar à guarda de base, e nenhum provider é lançado.
+    expect(summary.stopped_by).toBe('PREFLIGHT_BLOCKED');
+    expect(summary.preflight.status).toBe('BLOCKED');
+    expect(summary.preflight.blocker).toBe('MAINTENANCE_BLOCKED');
+    expect(summary.reason).toMatch(/fora do escopo de manutenção/);
+    expect(summary.iteration_count).toBe(0);
 
     // Divergência de base é problema do repositório, não veredito da tarefa.
     const state = await readState(paths);
     expect(state.tasks.map((task) => task.status)).toEqual(['READY', 'READY']);
+  }, 60_000);
+
+  it('a guarda do loop continua parando em BASE_DIVERGED com --skip-preflight', async () => {
+    await writeFile(path.join(sandbox.root, 'externo.txt'), 'trabalho externo\n', 'utf8');
+    await commitAll(sandbox.root, 'commit manual entre sessões');
+
+    const result = await orchestrate('success', ['--skip-preflight']);
+    expect(result.exitCode).toBe(9);
+    const summary = JSON.parse(result.stdout) as { stopped_by: string; reason: string };
+    expect(summary.stopped_by).toBe('BASE_DIVERGED');
+    expect(summary.reason).toMatch(/não é a base esperada/);
+    expect((await readState(paths)).tasks.map((task) => task.status)).toEqual(['READY', 'READY']);
   }, 60_000);
 
   it('árvore suja para o fluxo antes de gerar packet', async () => {
@@ -128,7 +150,13 @@ describe('base divergente para o fluxo', () => {
 
     const result = await orchestrate('success');
     expect(result.exitCode).toBe(9);
-    expect((JSON.parse(result.stdout) as { stopped_by: string }).stopped_by).toBe('BASE_DIVERGED');
+    const summary = JSON.parse(result.stdout) as {
+      stopped_by: string;
+      preflight: { blocker: string; next: { ready_to_launch: boolean } };
+    };
+    expect(summary.stopped_by).toBe('PREFLIGHT_BLOCKED');
+    expect(summary.preflight.blocker).toBe('DIRTY_WORKTREE');
+    expect(summary.preflight.next.ready_to_launch).toBe(false);
     expect((await readState(paths)).tasks[0]?.status).toBe('READY');
   }, 60_000);
 

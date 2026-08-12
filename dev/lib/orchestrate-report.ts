@@ -1,3 +1,4 @@
+import type { PreflightResult } from './orchestrate-preflight.js';
 import type {
   LaunchRecord,
   ProviderTerminalFailure,
@@ -116,6 +117,96 @@ export function summarizeIteration(input: IterationInput): IterationSummary {
     // Falha do provider entra sem `--verbose`: descobrir por que a sessão morreu
     // não pode custar uma segunda execução paga.
     ...(failure === null ? {} : { provider_failure: failure }),
+  };
+}
+
+/**
+ * Bloco `preflight` da saída padrão: três linhas de estágio e, quando o fluxo
+ * parou, o código e o motivo. Detalhe (commits, validações, reconciliações,
+ * razão da seleção) fica para `--verbose` e para os records.
+ */
+export function summarizePreflight(result: PreflightResult): Record<string, unknown> {
+  const maintenance = result.maintenance;
+  const recovery = result.recover;
+  const next = result.next;
+  return {
+    status: result.status,
+    maintenance: {
+      status: maintenance.status,
+      // NOOP não moveu base nenhuma: repetir os dois SHAs iguais seria ruído.
+      ...(maintenance.status === 'NOOP'
+        ? {}
+        : {
+            previous_authorized_head_sha: maintenance.previous_authorized_head_sha,
+            authorized_head_sha: maintenance.authorized_head_sha,
+          }),
+      commit_count: maintenance.commit_count,
+      // Descobrir POR QUE a adoção foi recusada não pode exigir --verbose.
+      ...(maintenance.reason === null ? {} : { reason: maintenance.reason }),
+    },
+    recover:
+      recovery === null
+        ? null
+        : {
+            status: recovery.status,
+            reconciliation_count: recovery.reconciliation_count,
+            ...(recovery.reason === null ? {} : { reason: recovery.reason }),
+          },
+    next:
+      next === null
+        ? null
+        : {
+            status: next.status,
+            task_id: next.task_id,
+            attempt: next.attempt,
+            attempt_kind: next.attempt_kind,
+            ready_to_launch: next.ready_to_launch,
+            ...(next.blocker === null ? {} : { blocker: next.blocker }),
+          },
+    ...(result.blocker === null ? {} : { blocker: result.blocker, reason: result.reason }),
+  };
+}
+
+/** `--verbose` ACRESCENTA: mesmos campos do resumo, mais a evidência por trás. */
+export function detailPreflight(result: PreflightResult): Record<string, unknown> {
+  const summary = summarizePreflight(result);
+  const maintenance = summary['maintenance'] as Record<string, unknown>;
+  const recovery = summary['recover'] as Record<string, unknown> | null;
+  const next = summary['next'] as Record<string, unknown> | null;
+  return {
+    ...summary,
+    maintenance: {
+      ...maintenance,
+      adoption_kind: result.maintenance.adoption_kind,
+      commits: result.maintenance.commits,
+      validation_summary: result.maintenance.validation_results.map((entry) => ({
+        argv: entry.argv,
+        exit_code: entry.exit_code,
+        timed_out: entry.timed_out,
+      })),
+    },
+    recover:
+      recovery === null || result.recover === null
+        ? null
+        : {
+            ...recovery,
+            plan_changed: result.recover.plan_changed,
+            state_was_missing: result.recover.state_was_missing,
+            head_matches_authorized: result.recover.head_matches_authorized,
+            authorized_head_sha: result.recover.authorized_head_sha,
+            reconciliations: result.recover.reconciliations,
+          },
+    next:
+      next === null || result.next === null
+        ? null
+        : {
+            ...next,
+            title: result.next.title,
+            base_sha: result.next.base_sha,
+            authorized_head_sha: result.next.authorized_head_sha,
+            selection_reason: result.next.reason,
+            progression_base_reason: result.next.blocker_reason,
+          },
   };
 }
 

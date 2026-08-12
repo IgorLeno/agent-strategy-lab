@@ -6,8 +6,14 @@ import { DEFAULT_WORKER_PROFILE_ID } from '../lib/defaults.js';
 import { experimentFactsOf } from '../lib/doctor.js';
 import { withHarnessLock } from '../lib/lock.js';
 import {
+  runOrchestrationPreflight,
+  type PreflightResult,
+} from '../lib/orchestrate-preflight.js';
+import {
   detailIteration,
+  detailPreflight,
   summarizeIteration,
+  summarizePreflight,
   type IterationInput,
 } from '../lib/orchestrate-report.js';
 import { resolveHarnessPaths } from '../lib/paths.js';
@@ -20,23 +26,35 @@ import { launchTask, prepareNextTask, type LaunchStepResult } from '../lib/steps
 const DEFAULT_PROFILE = DEFAULT_WORKER_PROFILE_ID;
 
 /**
+ * Diagnóstico/manutenção APENAS. Pula o pre-flight automático, e com ele a
+ * garantia de que maintenance, recover e readiness foram conferidos antes do
+ * launch. Nenhuma execução normal de benchmark deve usar esta flag.
+ */
+const SKIP_PREFLIGHT_FLAG = 'skip-preflight';
+
+/**
  * O loop externo: next -> persistir packet -> launch (processo NOVO) -> wait ->
  * close -> PASS? continua : para. O worker nunca executa este loop; ele encerra
  * e o orquestrador decide o que vem depois.
  *
- * Saída padrão: o resultado experimental de cada tarefa (perfil, veredito,
- * tempo de implementação, equivalência em dólar e quota da assinatura).
- * `--verbose` acrescenta os records completos por trás desses números.
+ * Antes do loop roda o PRE-FLIGHT (maintenance -> recover dry-run -> readiness),
+ * dentro do MESMO lock: verificar sob um lock e lançar sob outro deixaria uma
+ * janela em que HEAD e state mudam entre a conferência e o launch.
+ *
+ * Saída padrão: o bloco `preflight` mais o resultado experimental de cada
+ * tarefa (perfil, veredito, tempo de implementação, equivalência em dólar e
+ * quota da assinatura). `--verbose` acrescenta os records completos por trás
+ * desses números.
  *
  * Exit codes: 0 fluxo terminou sem pendência | 9 fluxo parado (inclui
- * LIMIT_REACHED) | 10 harness ocupado.
+ * LIMIT_REACHED e PREFLIGHT_BLOCKED) | 10 harness ocupado.
  */
 function recordOf(launch: LaunchStepResult) {
   return launch.outcome?.record ?? null;
 }
 
 async function main(): Promise<void> {
-  const args = parseArgs(process.argv.slice(2), [VERBOSE_FLAG]);
+  const args = parseArgs(process.argv.slice(2), [VERBOSE_FLAG, SKIP_PREFLIGHT_FLAG]);
   const paths = resolveHarnessPaths(args.options.get('repo') ?? process.cwd());
   const loaded = await loadPlan(paths.planFile);
   await ensureRuntimeDirs(paths);
@@ -56,11 +74,28 @@ async function main(): Promise<void> {
   const iterations: IterationInput[] = [];
   let stop = { status: 'ALL_DONE', reason: 'nenhuma tarefa pendente' };
 
-  // O lock cobre o loop INTEIRO: um segundo orquestrador não pode selecionar
-  // nem lançar nada enquanto este ciclo estiver em andamento.
+  // O lock cobre o pre-flight E o loop INTEIRO: um segundo orquestrador não
+  // pode selecionar nem lançar nada enquanto este ciclo estiver em andamento,
+  // e nada muda entre o que o pre-flight conferiu e o que o loop lança.
   let exhausted = false;
+  let preflight: PreflightResult | null = null;
 
   await withHarnessLock(paths, 'dev-orchestrate', async () => {
+    if (!args.flags.has(SKIP_PREFLIGHT_FLAG)) {
+      preflight = await runOrchestrationPreflight({ paths, loaded });
+      if (preflight.status === 'BLOCKED') {
+        // Bloqueio de pre-flight é problema do repositório, não veredito de
+        // tarefa: nenhum provider é lançado, nenhum attempt é consumido e
+        // nenhum status de tarefa muda.
+        stop = { status: 'PREFLIGHT_BLOCKED', reason: preflight.reason ?? 'pre-flight bloqueado' };
+        return;
+      }
+      if (preflight.status === 'ALL_DONE') {
+        stop = { status: 'ALL_DONE', reason: preflight.reason ?? 'nenhuma tarefa pendente' };
+        return;
+      }
+    }
+
     for (let index = 0; index < maxIterations; index += 1) {
       const { selection, packet, baseViolation } = await prepareNextTask(paths, loaded);
       if (baseViolation) {
@@ -136,7 +171,13 @@ async function main(): Promise<void> {
   // reportou número. Continua não sendo cobrança.
   const total = estimates.length ? estimates.reduce((sum, value) => sum + value, 0) : null;
 
+  const preflightReport: PreflightResult | null = preflight;
   emit({
+    ...(preflightReport === null
+      ? {}
+      : {
+          preflight: verbose ? detailPreflight(preflightReport) : summarizePreflight(preflightReport),
+        }),
     stopped_by: stop.status,
     reason: stop.reason,
     // O perfil é único na invocação: repetir agente/modelo/effort em cada

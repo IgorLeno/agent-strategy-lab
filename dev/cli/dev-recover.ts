@@ -4,7 +4,7 @@ import { headSha } from '../lib/git.js';
 import { withHarnessLock } from '../lib/lock.js';
 import { resolveHarnessPaths } from '../lib/paths.js';
 import { loadPlan } from '../lib/plan.js';
-import { recover } from '../lib/recover.js';
+import { isRecoveryClean, recover } from '../lib/recover.js';
 import { ensureRuntimeDirs, writeState } from '../lib/state.js';
 
 /**
@@ -36,11 +36,7 @@ async function main(): Promise<void> {
     for (const task of result.state.tasks) {
       taskCounts[task.status] = (taskCounts[task.status] ?? 0) + 1;
     }
-    const clean =
-      !result.stateWasMissing &&
-      !result.planChanged &&
-      result.reconciliations.length === 0 &&
-      headMatchesAuthorized;
+    const clean = isRecoveryClean(result, head);
 
     emit({
       status: clean ? 'CLEAN' : 'ATTENTION',

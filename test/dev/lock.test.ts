@@ -1,5 +1,6 @@
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { headSha } from '../../dev/lib/git.js';
 import { LockBusyError, acquireLock, lockPath, withHarnessLock } from '../../dev/lib/lock.js';
 import { resolveHarnessPaths, type HarnessPaths } from '../../dev/lib/paths.js';
 import { loadPlan, type LoadedPlan } from '../../dev/lib/plan.js';
@@ -15,7 +16,12 @@ beforeEach(async () => {
   paths = resolveHarnessPaths(sandbox.root);
   loaded = await loadPlan(paths.planFile);
   await ensureRuntimeDirs(paths);
-  await writeState(paths, buildInitialState(loaded.plan, loaded.planSha256));
+  // Igual ao que o dev-init grava: o pre-flight do dev-orchestrate recusa state
+  // sem base autorizada, e o teste de concorrência precisa do fluxo real.
+  await writeState(
+    paths,
+    buildInitialState(loaded.plan, loaded.planSha256, { baselineSha: await headSha(sandbox.root) }),
+  );
 });
 
 afterEach(async () => {
