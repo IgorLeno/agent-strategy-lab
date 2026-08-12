@@ -355,3 +355,21 @@ por hash contra o record do attempt, com o par COMPLETO batendo no MESMO record;
 timestamp, `changed_files` e semelhança de conteúdo não são prova, e meia prova
 é recusa. Quem só cria caminho novo sem publicar a cópia antes da liberação
 apenas move o buraco de lugar.
+
+[2026-08-12] Contexto: recuperar a M50 depois de adotar a manutenção que
+consertou o próprio harness.
+Mistake: a guarda de HEAD do encerramento conhecia dois mundos — HEAD igual ao
+`base_sha` e UM commit de manutenção pendente sobre ele. Adotar a manutenção
+avançava `authorized_head_sha` de `A` para `C` e tornava o attempt de `A`
+permanentemente irrecuperável: consertar o harness passava a ser incompatível
+com usar o conserto.
+Rule: quando um caminho de recuperação encontra o repositório à frente da base
+histórica do attempt, a diferença só é aceitável se estiver INTEGRALMENTE
+explicada por `MaintenanceRecord`s adotados e verificados
+(`maintenanceChainBetween`) — ancestralidade, `merge-base` ou "descendente do
+base_sha" não são prova, porque admitem trabalho externo não auditado. Cadeia
+ausente, incompleta, ambígua ou adulterada recusa, e `plan_extension` não é
+atravessado por política. Ampliar isso dentro da guarda global seria mudar
+outros encerramentos de graça: o caminho histórico ganha primitive própria, e a
+evidência registra os dois fatos separados — base histórica em
+`source_base_sha`, HEAD real em `head_sha`.

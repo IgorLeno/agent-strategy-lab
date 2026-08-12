@@ -1,7 +1,11 @@
 import { access, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { writeFileOnce } from './atomic.js';
-import { assertAttemptHead } from './base-guard.js';
+import {
+  assertAttemptRecoveryHead,
+  type AttemptRecoveryHead,
+  type AttemptRecoveryHeadMode,
+} from './base-guard.js';
 import { canonicalJson, sha256Hex } from './canonical.js';
 import {
   STREAM_JSON_OUTPUT_FORMAT,
@@ -90,6 +94,13 @@ export interface InfraRecoveryResult {
   readonly state: DevelopmentState;
   /** `true` quando o record já existia e esta execução apenas convergiu. */
   readonly alreadyArchived: boolean;
+  /**
+   * Como o HEAD se relacionava com a base histórica do attempt; `null` na
+   * retomada de uma tarefa já READY, em que nada foi reavaliado.
+   */
+  readonly headMode: AttemptRecoveryHeadMode | null;
+  /** Manutenções adotadas atravessadas para permitir a recuperação, em ordem. */
+  readonly adoptedMaintenance: readonly string[];
   /**
    * Attempt anterior a que o par stale do inbox pertencia, quando esta execução
    * o preservou e liberou os slots; `null` quando o inbox já estava limpo.
@@ -204,6 +215,9 @@ interface InfraSource {
   readonly providerFailureSource: 'launch_record' | 'stdout_stream';
   readonly baseSha: string;
   readonly headSha: string;
+  readonly headMode: AttemptRecoveryHeadMode;
+  /** `adopted_head_sha` de cada manutenção que explica base → HEAD, em ordem. */
+  readonly adoptedMaintenance: readonly string[];
   /** `null` quando o inbox está limpo — o caso normal de uma falha de infra. */
   readonly staleInbox: StaleInbox | null;
 }
@@ -364,10 +378,10 @@ async function loadInfraSource(
   if ((await stagedFiles(paths.repoRoot)).length > 0) {
     throw new InfraRecoveryError('index contém mudanças staged');
   }
-  let head: string;
+  let head: AttemptRecoveryHead;
   try {
-    head = await assertAttemptHead({
-      repoRoot: paths.repoRoot,
+    head = await assertAttemptRecoveryHead({
+      paths,
       baseSha: task.base_sha,
       authorizedHeadSha: state.authorized_head_sha,
       allowPendingMaintenance: input.allowPendingMaintenance === true,
@@ -384,8 +398,12 @@ async function loadInfraSource(
     launchSha256: sha256Hex(launchBytes),
     providerFailure: providerFailure.failure,
     providerFailureSource: providerFailure.source,
+    // A base do attempt é a HISTÓRICA; o head é o REAL do instante da
+    // recuperação. Igualar os dois fingiria que o attempt nasceu na base nova.
     baseSha: task.base_sha,
-    headSha: head,
+    headSha: head.headSha,
+    headMode: head.mode,
+    adoptedMaintenance: head.adoptedChain.map((record) => record.adopted_head_sha),
     staleInbox,
   };
 }
@@ -530,6 +548,8 @@ export async function recoverInfraAttempt(
       recordPath: infraFailedAttemptPath(paths, taskId, archived.attempt),
       state,
       alreadyArchived: true,
+      headMode: null,
+      adoptedMaintenance: [],
       staleInboxOwnerAttempt: null,
     };
   }
@@ -566,6 +586,8 @@ export async function recoverInfraAttempt(
     recordPath: infraFailedAttemptPath(paths, taskId, record.attempt),
     state: nextState,
     alreadyArchived: existing !== null,
+    headMode: source.headMode,
+    adoptedMaintenance: source.adoptedMaintenance,
     staleInboxOwnerAttempt: source.staleInbox?.owner.attempt ?? null,
   };
 }

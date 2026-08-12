@@ -37,7 +37,10 @@ async function main(): Promise<void> {
     billing: result.record.billing,
     subscription_usage: result.record.subscription_usage,
     stale_inbox_owner_attempt: result.staleInboxOwnerAttempt,
+    source_base_sha: result.record.source_base_sha,
     head_sha: result.record.head_sha,
+    head_mode: result.headMode,
+    adopted_maintenance: result.adoptedMaintenance,
     authorized_head_sha: result.state.authorized_head_sha,
   });
 }

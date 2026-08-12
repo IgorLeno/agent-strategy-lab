@@ -1,7 +1,18 @@
-import { changedFiles, gitOrThrow, headSha, isWorkingTreeClean, parentShas } from './git.js';
-import { assertAllowedMaintenanceFiles } from './maintenance.js';
+import {
+  changedFiles,
+  gitOrThrow,
+  headSha,
+  isAncestor,
+  isWorkingTreeClean,
+  parentShas,
+} from './git.js';
+import {
+  assertAllowedMaintenanceFiles,
+  maintenanceChainBetween,
+  resolveAdoptionKind,
+} from './maintenance.js';
 import type { HarnessPaths } from './paths.js';
-import type { DevelopmentState } from './schemas.js';
+import type { DevelopmentState, MaintenanceRecord } from './schemas.js';
 
 /**
  * Guarda da BASE da próxima tarefa.
@@ -126,4 +137,118 @@ export async function assertAttemptHead(input: AttemptHeadGuardInput): Promise<s
   }
   assertAllowedMaintenanceFiles(await changedFiles(input.repoRoot, head));
   return head;
+}
+
+/**
+ * Como o HEAD atual se relaciona com a base HISTÓRICA do attempt encerrado.
+ *
+ * - `plain`: base do attempt, base autorizada e HEAD são o mesmo commit;
+ * - `pending_maintenance`: um commit de manutenção AINDA NÃO adotado sobre a base;
+ * - `adopted_maintenance`: a base autorizada avançou além da base do attempt, e
+ *   toda a diferença está explicada por MaintenanceRecords adotados.
+ */
+export type AttemptRecoveryHeadMode = 'plain' | 'pending_maintenance' | 'adopted_maintenance';
+
+export interface AttemptRecoveryHeadInput {
+  readonly paths: HarnessPaths;
+  /** `base_sha` histórico do attempt — nunca reescrito por este caminho. */
+  readonly baseSha: string;
+  readonly authorizedHeadSha: string | null;
+  readonly allowPendingMaintenance: boolean;
+  readonly label: string;
+}
+
+export interface AttemptRecoveryHead {
+  readonly headSha: string;
+  readonly mode: AttemptRecoveryHeadMode;
+  /** Records que explicam `base_sha` → `authorized_head_sha`; vazio nos outros modos. */
+  readonly adoptedChain: readonly MaintenanceRecord[];
+}
+
+/**
+ * Manutenção adotada não pode tornar irrecuperável um attempt anterior a ela.
+ *
+ * O caso real da M50: o attempt nasceu em A, morreu por falha de infraestrutura
+ * do provider, e enquanto ninguém o arquivava a manutenção auditada avançou a
+ * base autorizada de A até C. O attempt continua sendo de A — reescrever seu
+ * `base_sha` seria fabricar história —, mas `assertAttemptHead` só conhecia
+ * HEAD == base_sha e a exceção de UM commit pendente, e recusava para sempre.
+ *
+ * A diferença entre a base do attempt e o HEAD só é legítima quando alguém já
+ * respondeu integralmente por ela: `maintenanceChainBetween` é a única fonte
+ * dessa prova, e ela já verifica cada record contra o Git (parent único,
+ * `changed_files` idênticos, allowlist de manutenção). Descendência não é
+ * argumento: um descendente qualquer pode carregar trabalho externo que
+ * ninguém auditou, então ancestralidade é conferida como fail-fast e a cadeia
+ * completa é a condição.
+ *
+ * Política conservadora para este caminho: só `maintenance` e
+ * `maintenance_range`. Atravessar `plan_extension` mudaria o próprio plano por
+ * baixo de um attempt histórico — decisão de quem lê o plano, não deste guard.
+ */
+export async function assertAttemptRecoveryHead(
+  input: AttemptRecoveryHeadInput,
+): Promise<AttemptRecoveryHead> {
+  const { paths, authorizedHeadSha: authorized } = input;
+  const legacy = async (mode: AttemptRecoveryHeadMode): Promise<AttemptRecoveryHead> => ({
+    headSha: await assertAttemptHead({
+      repoRoot: paths.repoRoot,
+      baseSha: input.baseSha,
+      authorizedHeadSha: authorized,
+      allowPendingMaintenance: input.allowPendingMaintenance,
+      label: input.label,
+    }),
+    mode,
+    adoptedChain: [],
+  });
+
+  // Manutenção pendente e base intocada continuam sob o contrato antigo, letra
+  // por letra: ampliá-lo aqui mudaria silenciosamente outros encerramentos.
+  if (input.allowPendingMaintenance) return legacy('pending_maintenance');
+  if (authorized === null || authorized === input.baseSha) return legacy('plain');
+
+  const head = await headSha(paths.repoRoot);
+  if (!(await isWorkingTreeClean(paths.repoRoot))) {
+    throw new AttemptHeadError(`working tree suja; ${input.label} recusado`);
+  }
+  if (head !== authorized) {
+    throw new AttemptHeadError(`HEAD ${head} diverge de authorized_head_sha ${authorized}`);
+  }
+  if (!(await isAncestor(paths.repoRoot, input.baseSha, authorized))) {
+    throw new AttemptHeadError(
+      `base_sha ${input.baseSha} não é ancestral da base autorizada ${authorized}`,
+    );
+  }
+
+  let chain: readonly MaintenanceRecord[];
+  try {
+    chain = await maintenanceChainBetween(paths, input.baseSha, authorized);
+  } catch (error) {
+    throw new AttemptHeadError(
+      `manutenção adotada não explica a diferença entre base_sha ${input.baseSha} e ` +
+        `authorized_head_sha ${authorized}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+    );
+  }
+  for (const record of chain) assertRecoverableAdoption(record);
+  return { headSha: head, mode: 'adopted_maintenance', adoptedChain: chain };
+}
+
+function assertRecoverableAdoption(record: MaintenanceRecord): void {
+  const kind = resolveAdoptionKind(record);
+  switch (kind) {
+    case 'maintenance':
+    case 'maintenance_range':
+      return;
+    case 'plan_extension':
+      throw new AttemptHeadError(
+        `cadeia de manutenção contém plan_extension (${record.adopted_head_sha}); ` +
+          'recuperação de attempt histórico recusada',
+      );
+    default: {
+      const unreachable: never = kind;
+      throw new AttemptHeadError(`adoption_kind desconhecido: ${String(unreachable)}`);
+    }
+  }
 }

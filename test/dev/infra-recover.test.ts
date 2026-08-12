@@ -4,6 +4,10 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { headSha } from '../../dev/lib/git.js';
 import { InfraRecoveryError, recoverInfraAttempt } from '../../dev/lib/infra-recover.js';
+import {
+  adoptMaintenanceRange,
+  type MaintenanceValidationRunner,
+} from '../../dev/lib/maintenance.js';
 import { resolveHarnessPaths, type HarnessPaths } from '../../dev/lib/paths.js';
 import { loadPlan, type LoadedPlan } from '../../dev/lib/plan.js';
 import {
@@ -181,6 +185,97 @@ async function simulateLegacyFinalizingState(): Promise<void> {
       finished_at: null,
     }),
   );
+}
+
+/**
+ * Par report/handoff que o attempt 1 deixou nos caminhos correntes do inbox
+ * depois de ser reprovado pela validation oficial. O record do attempt 1 é a
+ * ÚNICA autoridade sobre os hashes desse par.
+ */
+const STALE_REPORT = `${JSON.stringify(
+  {
+    schema_version: 1,
+    task_id: 'T1',
+    self_reported_result: 'SUCCESS',
+    summary: 'solução do attempt 1, reprovada pela validation oficial',
+    candidate_commit: null,
+    changed_files: ['src/alvo.ts'],
+    validations: [],
+    decisions: [],
+    lessons: [],
+    relevant_files: ['src/alvo.ts'],
+  },
+  null,
+  2,
+)}\n`;
+const STALE_HANDOFF = `${JSON.stringify(
+  {
+    schema_version: 1,
+    task_id: 'T1',
+    result: 'PASS',
+    changed_files: ['src/alvo.ts'],
+    validations: [],
+    decisions: [],
+    lessons: [],
+    next_relevant_files: ['src/alvo.ts'],
+  },
+  null,
+  2,
+)}\n`;
+
+function digest(bytes: Buffer | string): string {
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
+/**
+ * Reproduz o estado da M50: attempt 1 arquivado como ValidationFailedAttempt,
+ * attempt 2 morto por falha do provider, par stale nos slots correntes.
+ */
+async function simulateStalePair(
+  overrides: { readonly report?: string; readonly handoff?: string } = {},
+): Promise<{ readonly report: string; readonly handoff: string }> {
+  const report = overrides.report ?? STALE_REPORT;
+  const handoff = overrides.handoff ?? STALE_HANDOFF;
+  await mkdir(path.dirname(reportPath(paths, 'T1')), { recursive: true });
+  await writeFile(reportPath(paths, 'T1'), report, 'utf8');
+  await writeFile(handoffDraftPath(paths, 'T1'), handoff, 'utf8');
+
+  await writeValidationFailedAttempt(paths, {
+    schema_version: 1,
+    task_id: 'T1',
+    attempt: 1,
+    source_base_sha: await headSha(paths.repoRoot),
+    profile_id: PROFILE_ID,
+    worker_self_reported_result: 'SUCCESS',
+    report_candidate_commit: null,
+    orchestrator_verdict: 'REJECTED_BY_OFFICIAL_VALIDATION',
+    finalization_mode: 'normal',
+    launch_record_sha256: digest('launch'),
+    original_completion_sha256: digest('completion'),
+    report_sha256: digest(STALE_REPORT),
+    handoff_draft_sha256: digest(STALE_HANDOFF),
+    source_binding_sha256: digest('binding'),
+    patch_fingerprint: digest('patch'),
+    changed_files: ['src/alvo.ts'],
+    original_validation_results: [
+      { argv: ['pnpm', 'test'], exit_code: 1, timed_out: false, duration_ms: 1 },
+    ],
+    change_bundle: {
+      manifest_path: 'failed-attempts/T1/attempt-1/changes-manifest.json',
+      manifest_sha256: digest('manifest'),
+      patch_path: 'failed-attempts/T1/attempt-1/changes.patch',
+      patch_sha256: digest('patch-bytes'),
+      patch_size_bytes: 12,
+    },
+    reason_code: 'OFFICIAL_VALIDATION_FAILURE',
+    reason: 'attempt 1 reprovado pela validation oficial',
+    archived_at: '2026-08-12T18:14:28.960Z',
+  });
+
+  // O attempt vivo é o 2: mesmo desenho da M50, com attempts preservado.
+  const state = await readState(paths);
+  await writeState(paths, withTaskState(state, 'T1', { attempts: 2 }));
+  return { report, handoff };
 }
 
 describe('orquestrador diante de falha terminal do provider', () => {
@@ -476,93 +571,6 @@ describe('dev-recover-infra', () => {
  * `changed_files` ou semelhança de conteúdo.
  */
 describe('dev-recover-infra diante de output stale do attempt anterior', () => {
-  const STALE_REPORT = `${JSON.stringify(
-    {
-      schema_version: 1,
-      task_id: 'T1',
-      self_reported_result: 'SUCCESS',
-      summary: 'solução do attempt 1, reprovada pela validation oficial',
-      candidate_commit: null,
-      changed_files: ['src/alvo.ts'],
-      validations: [],
-      decisions: [],
-      lessons: [],
-      relevant_files: ['src/alvo.ts'],
-    },
-    null,
-    2,
-  )}\n`;
-  const STALE_HANDOFF = `${JSON.stringify(
-    {
-      schema_version: 1,
-      task_id: 'T1',
-      result: 'PASS',
-      changed_files: ['src/alvo.ts'],
-      validations: [],
-      decisions: [],
-      lessons: [],
-      next_relevant_files: ['src/alvo.ts'],
-    },
-    null,
-    2,
-  )}\n`;
-
-  function digest(bytes: Buffer | string): string {
-    return createHash('sha256').update(bytes).digest('hex');
-  }
-
-  /**
-   * Reproduz o estado da M50: attempt 1 arquivado como ValidationFailedAttempt,
-   * attempt 2 morto por falha do provider, par stale nos slots correntes.
-   */
-  async function simulateStalePair(
-    overrides: { readonly report?: string; readonly handoff?: string } = {},
-  ): Promise<{ readonly report: string; readonly handoff: string }> {
-    const report = overrides.report ?? STALE_REPORT;
-    const handoff = overrides.handoff ?? STALE_HANDOFF;
-    await mkdir(path.dirname(reportPath(paths, 'T1')), { recursive: true });
-    await writeFile(reportPath(paths, 'T1'), report, 'utf8');
-    await writeFile(handoffDraftPath(paths, 'T1'), handoff, 'utf8');
-
-    // O record do attempt 1 é a ÚNICA autoridade sobre os hashes do par.
-    await writeValidationFailedAttempt(paths, {
-      schema_version: 1,
-      task_id: 'T1',
-      attempt: 1,
-      source_base_sha: await headSha(paths.repoRoot),
-      profile_id: PROFILE_ID,
-      worker_self_reported_result: 'SUCCESS',
-      report_candidate_commit: null,
-      orchestrator_verdict: 'REJECTED_BY_OFFICIAL_VALIDATION',
-      finalization_mode: 'normal',
-      launch_record_sha256: digest('launch'),
-      original_completion_sha256: digest('completion'),
-      report_sha256: digest(STALE_REPORT),
-      handoff_draft_sha256: digest(STALE_HANDOFF),
-      source_binding_sha256: digest('binding'),
-      patch_fingerprint: digest('patch'),
-      changed_files: ['src/alvo.ts'],
-      original_validation_results: [
-        { argv: ['pnpm', 'test'], exit_code: 1, timed_out: false, duration_ms: 1 },
-      ],
-      change_bundle: {
-        manifest_path: 'failed-attempts/T1/attempt-1/changes-manifest.json',
-        manifest_sha256: digest('manifest'),
-        patch_path: 'failed-attempts/T1/attempt-1/changes.patch',
-        patch_sha256: digest('patch-bytes'),
-        patch_size_bytes: 12,
-      },
-      reason_code: 'OFFICIAL_VALIDATION_FAILURE',
-      reason: 'attempt 1 reprovado pela validation oficial',
-      archived_at: '2026-08-12T18:14:28.960Z',
-    });
-
-    // O attempt vivo é o 2: mesmo desenho da M50, com attempts preservado.
-    const state = await readState(paths);
-    await writeState(paths, withTaskState(state, 'T1', { attempts: 2 }));
-    return { report, handoff };
-  }
-
   it('recupera o attempt de infra e preserva o par no attempt dono', async () => {
     await runFailedAttempt();
     const stale = await simulateStalePair();
@@ -710,6 +718,131 @@ describe('dev-recover-infra diante de output stale do attempt anterior', () => {
     );
 
     await expect(recover()).rejects.toThrow(/sem pertencer comprovadamente a um attempt anterior/i);
+  });
+});
+
+/**
+ * O blocker que sobrava na M50: a manutenção auditada avançou a base autorizada
+ * de A até C enquanto o attempt de infra continuava sem ser arquivado. O attempt
+ * é de A e continua sendo — o que muda é que a diferença até C está inteiramente
+ * explicada por MaintenanceRecords adotados, e recusar isso deixaria a tarefa
+ * permanentemente irrecuperável.
+ */
+describe('dev-recover-infra atravessando manutenção adotada', () => {
+  const passingValidations: MaintenanceValidationRunner = async (command) => ({
+    argv: [...command.argv],
+    exit_code: 0,
+    timed_out: false,
+    duration_ms: 1,
+  });
+
+  async function maintenanceCommit(file: string, contents: string): Promise<string> {
+    await mkdir(path.dirname(path.join(sandbox.root, file)), { recursive: true });
+    await writeFile(path.join(sandbox.root, file), contents, 'utf8');
+    await runGit(sandbox.root, ['add', '-A']);
+    await runGit(sandbox.root, ['commit', '-q', '-m', `manutenção: ${file}`]);
+    return headSha(sandbox.root);
+  }
+
+  /** Dois commits de manutenção adotados como faixa pela primitive oficial. */
+  async function adoptRange(): Promise<string> {
+    await maintenanceCommit('docs/manutencao-um.md', 'primeiro conserto\n');
+    const target = await maintenanceCommit('test/dev/manutencao-dois.test.ts', 'export {};\n');
+    await adoptMaintenanceRange({
+      paths,
+      target,
+      maxCommits: 3,
+      reason: 'faixa de manutenção auditada antes de recuperar a M50',
+      validationRunner: passingValidations,
+      now: () => '2026-08-12T19:00:00.000Z',
+    });
+    return target;
+  }
+
+  it('caso M50 — attempt nascido em A é recuperado com a base autorizada em C', async () => {
+    await runFailedAttempt();
+    const stale = await simulateStalePair();
+    const base = getTaskState(await readState(paths), 'T1').base_sha;
+    const authorized = await adoptRange();
+    expect((await readState(paths)).authorized_head_sha).toBe(authorized);
+    expect(base).not.toBe(authorized);
+
+    const result = await recover();
+
+    expect(result.headMode).toBe('adopted_maintenance');
+    expect(result.adoptedMaintenance).toEqual([authorized]);
+    // O attempt continua sendo de A; o HEAD registrado é o REAL da recuperação.
+    expect(result.record.source_base_sha).toBe(base);
+    expect(result.record.head_sha).toBe(authorized);
+    expect(result.record.attempt).toBe(2);
+
+    // O par stale do attempt 1 foi preservado no attempt DONO e os slots
+    // correntes ficaram livres, exatamente como sem manutenção no caminho.
+    expect(result.staleInboxOwnerAttempt).toBe(1);
+    expect(await readFile(failedAttemptReportPath(paths, 'T1', 1), 'utf8')).toBe(stale.report);
+    expect(await readFile(failedAttemptHandoffDraftPath(paths, 'T1', 1), 'utf8')).toBe(stale.handoff);
+    expect(await exists(reportPath(paths, 'T1'))).toBe(false);
+    expect(await exists(handoffDraftPath(paths, 'T1'))).toBe(false);
+
+    const task = getTaskState(await readState(paths), 'T1');
+    expect(task).toMatchObject({ status: 'READY', attempts: 2, candidate_commit: null });
+    // A base histórica do attempt não foi reescrita para o head novo.
+    expect(task.base_sha).toBe(base);
+  });
+
+  it('a CLI publica a base histórica, o head real e a cadeia atravessada', async () => {
+    await runFailedAttempt();
+    const base = getTaskState(await readState(paths), 'T1').base_sha;
+    const authorized = await adoptRange();
+
+    const result = await recoverCli();
+    expect(result.exitCode).toBe(0);
+
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      status: 'READY',
+      attempt: 1,
+      source_base_sha: base,
+      head_sha: authorized,
+      head_mode: 'adopted_maintenance',
+      adopted_maintenance: [authorized],
+      authorized_head_sha: authorized,
+    });
+  });
+
+  it('manutenção ainda NÃO adotada continua recusada: HEAD avançou sem record', async () => {
+    await runFailedAttempt();
+    await maintenanceCommit('docs/manutencao-pendente.md', 'sem adoção\n');
+
+    // Sem adoção, `authorized_head_sha` ainda é a base do attempt: a recusa é a
+    // antiga, e nada aqui passou a aceitar descendente por descendência.
+    await expect(recover()).rejects.toThrow(/HEAD.*diverge do base_sha/i);
+    expect(getTaskState(await readState(paths), 'T1').status).toBe('INFRA_ERROR');
+  });
+
+  it('commit externo depois da manutenção adotada bloqueia a recuperação', async () => {
+    await runFailedAttempt();
+    const authorized = await adoptRange();
+    await writeFile(path.join(sandbox.root, 'externo.txt'), 'trabalho externo\n', 'utf8');
+    await runGit(sandbox.root, ['add', '-A']);
+    await runGit(sandbox.root, ['commit', '-q', '-m', 'trabalho externo']);
+
+    await expect(recover()).rejects.toThrow(/diverge de authorized_head_sha/i);
+    expect((await readState(paths)).authorized_head_sha).toBe(authorized);
+    expect(getTaskState(await readState(paths), 'T1').status).toBe('INFRA_ERROR');
+  });
+
+  it('repetir depois da manutenção continua idempotente e attempts não muda', async () => {
+    await runFailedAttempt();
+    await simulateStalePair();
+    await adoptRange();
+
+    const first = await recover();
+    const second = await recover();
+
+    expect(second.alreadyArchived).toBe(true);
+    expect(second.record).toEqual(first.record);
+    expect(second.headMode).toBeNull();
+    expect(getTaskState(await readState(paths), 'T1').attempts).toBe(2);
   });
 });
 

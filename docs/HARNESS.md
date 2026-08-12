@@ -303,6 +303,17 @@ retentativa. É fail-closed — recusa se houver patch na árvore, commit sobre 
 `base_sha`, candidate commit, output do worker, timeout ou sobrevivente. Nada
 de `AgentCompletionReport`, patch ou candidate é inventado: não houve solução.
 
+Manutenção adotada no meio do caminho não torna o attempt irrecuperável. Um
+attempt nascido em `A` continua sendo de `A` — `base_sha` NUNCA é reescrito —,
+mas a recuperação é aceita quando `HEAD == authorized_head_sha` e a diferença
+entre a base do attempt e a base autorizada está INTEIRAMENTE explicada por
+`MaintenanceRecord`s adotados (`maintenanceChainBetween`, já verificada contra o
+Git). Descendência não é argumento: `git merge-base` aceitaria trabalho externo
+que ninguém auditou. Cadeia ausente, incompleta, ambígua, adulterada ou com
+`plan_extension` ⇒ recusa. O record registra os dois fatos separados:
+`source_base_sha` é a base HISTÓRICA do attempt, `head_sha` é o HEAD REAL do
+instante da recuperação.
+
 Output do worker **deste** attempt continua bloqueando a recuperação — aquele
 caminho é do `dev-retry`. O que passa é o par `report.json` + `handoff-draft.json`
 que comprovadamente sobrou de um `ValidationFailedAttempt` ANTERIOR: os dois
