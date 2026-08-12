@@ -35,3 +35,4 @@ export {
   QuotaUsage,
   QuotaWindow,
 } from './quota-usage.js';
+export { InterventionRecord, InterventionType } from './intervention.js';

@@ -235,6 +235,7 @@ fronteira.
 | `evaluator` | workspace do evaluator, graders, orquestração da avaliação | EXECUTION CONTRACT | M27A–M28 |
 | `scorer` | perfis de score, qualificação | EXECUTION CONTRACT | M29 |
 | `reporting` | relatório de terminal e `--json` | EXTENSIONS | M38 |
+| `performance` | fatos de attempt e records de performance derivados, sem I/O | EXTENSIONS | M45–M48 |
 | `project` | `.agentlab/project.yaml`, resolução do data dir | CONTROL PLANE | M11, M33 |
 | `cli` | comandos `agentlab` | CONTROL PLANE | M32–M38 |
 

@@ -14,6 +14,7 @@ const AREAS = [
   'core',
   'envelope',
   'evaluator',
+  'performance',
   'project',
   'reporting',
   'runner',
