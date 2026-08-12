@@ -33,6 +33,7 @@ import {
   failedAttemptHandoffDraftPath,
   failedAttemptReportPath,
   launchRecordPath,
+  readInfraFailedAttempt,
   readValidationFailedAttempt,
   sourceBindingPath,
   validationFailedAttemptPath,
@@ -76,6 +77,17 @@ export class RetryFailedAttemptError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'RetryFailedAttemptError';
+  }
+}
+
+/**
+ * O mesmo attempt não pode ser, ao mesmo tempo, um FAIL de validation e um
+ * INFRA_ERROR. Escolher um silenciosamente apagaria a outra evidência.
+ */
+export class InconsistentAttemptEvidenceError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InconsistentAttemptEvidenceError';
   }
 }
 
@@ -768,8 +780,14 @@ export function previousAttemptDiagnosticsFrom(
 }
 
 /**
- * Diagnóstico do attempt imediatamente anterior, quando ele foi arquivado por
- * este comando. Ausente em qualquer outro caminho — inclusive no attempt 1.
+ * Diagnóstico do último ValidationFailedAttemptRecord alcançável a partir de
+ * `attempts`. INFRA_ERROR é capability-neutral: a travessia só continua enquanto
+ * cada gap intermediário estiver comprovado por InfraFailedAttemptRecord.
+ * Qualquer outro gap interrompe a cadeia. Ausente quando não há FAIL de
+ * validation conectado — inclusive no primeiro capability launch depois de
+ * só infraestrutura.
+ *
+ * Validation e Infra no mesmo attempt é evidência inconsistente: fail closed.
  */
 export async function readPreviousAttemptDiagnostics(
   paths: HarnessPaths,
@@ -777,6 +795,21 @@ export async function readPreviousAttemptDiagnostics(
   attempts: number,
 ): Promise<PreviousAttemptDiagnostics | null> {
   if (attempts < 1) return null;
-  const record = await readValidationFailedAttempt(paths, taskId, attempts);
-  return record === null ? null : previousAttemptDiagnosticsFrom(record);
+  let current = attempts;
+  while (current >= 1) {
+    const validation = await readValidationFailedAttempt(paths, taskId, current);
+    const infra = await readInfraFailedAttempt(paths, taskId, current);
+    if (validation !== null && infra !== null) {
+      throw new InconsistentAttemptEvidenceError(
+        `attempt ${current} de ${taskId} tem ValidationFailedAttemptRecord e InfraFailedAttemptRecord simultâneos`,
+      );
+    }
+    if (validation !== null) return previousAttemptDiagnosticsFrom(validation);
+    if (infra !== null) {
+      current -= 1;
+      continue;
+    }
+    return null;
+  }
+  return null;
 }

@@ -12,6 +12,7 @@ import {
 } from '../../dev/lib/schemas.js';
 import { buildTaskPacket } from '../../dev/lib/packet.js';
 import { loadPlan } from '../../dev/lib/plan.js';
+import { writeInfraFailedAttempt, writeValidationFailedAttempt } from '../../dev/lib/records.js';
 import { readState } from '../../dev/lib/state.js';
 import { REPO_ROOT, makeSandboxRepo, runDevCli, runGit, type Sandbox } from './helpers.js';
 
@@ -191,6 +192,123 @@ describe('dev-next', () => {
       attempt: 1,
       reason: 'pnpm test falhou',
       failed_validations: [{ argv: ['pnpm', 'test'], exit_code: 1 }],
+    });
+  });
+
+  it('M50-like: INFRA depois de validation FAIL continua REPAIR no próximo launch', async () => {
+    const sandbox = await initializedSandbox();
+    const statePath = path.join(sandbox.devDir, 'state.json');
+    const state = JSON.parse(await readFile(statePath, 'utf8')) as {
+      authorized_head_sha: string;
+      tasks: { id: string; attempts: number }[];
+    };
+    state.tasks.find((task) => task.id === 'T1')!.attempts = 2;
+    await writeFile(statePath, JSON.stringify(state));
+
+    const paths = resolveHarnessPaths(sandbox.root);
+    const hex = (ch: string) => ch.repeat(64);
+    await writeValidationFailedAttempt(paths, {
+      schema_version: 1,
+      task_id: 'T1',
+      attempt: 1,
+      source_base_sha: state.authorized_head_sha,
+      profile_id: 'test-profile',
+      worker_self_reported_result: 'SUCCESS',
+      report_candidate_commit: null,
+      orchestrator_verdict: 'REJECTED_BY_OFFICIAL_VALIDATION',
+      finalization_mode: 'normal',
+      launch_record_sha256: hex('a'),
+      original_completion_sha256: hex('b'),
+      report_sha256: hex('c'),
+      handoff_draft_sha256: hex('d'),
+      source_binding_sha256: hex('e'),
+      patch_fingerprint: hex('f'),
+      changed_files: ['dev/cli/example.ts'],
+      original_validation_results: [
+        { argv: ['pnpm', 'test'], exit_code: 1, timed_out: false, duration_ms: 1 },
+      ],
+      change_bundle: {
+        manifest_path: 'failed-attempts/T1/attempt-1/changes-manifest.json',
+        manifest_sha256: hex('1'),
+        patch_path: 'failed-attempts/T1/attempt-1/changes.patch',
+        patch_sha256: hex('2'),
+        patch_size_bytes: 1,
+      },
+      reason_code: 'OFFICIAL_VALIDATION_FAILURE',
+      reason: 'pnpm test falhou',
+      archived_at: '2026-08-11T12:00:00.000Z',
+    });
+    await writeInfraFailedAttempt(paths, {
+      schema_version: 1,
+      task_id: 'T1',
+      attempt: 2,
+      source_base_sha: state.authorized_head_sha,
+      profile_id: 'test-profile',
+      process: {
+        pid: 4242,
+        pgid: 4242,
+        started_at: '2026-08-12T18:00:00.000Z',
+        proc_start_ticks: 1,
+        command_sha256: hex('c'),
+      },
+      launch_id: '00000000-0000-4000-8000-000000000002',
+      launch_classification: 'INFRA_ERROR',
+      launch_record_sha256: hex('d'),
+      exit_code: 1,
+      timed_out: false,
+      started_at: '2026-08-12T18:00:00.000Z',
+      finished_at: '2026-08-12T18:00:01.000Z',
+      provider_failure: {
+        is_error: true,
+        terminal_reason: 'authentication_failed',
+        api_error_status: 401,
+        subtype: null,
+        num_turns: null,
+        message: 'OAuth 401',
+        message_sha256: hex('e'),
+        signals: ['http_401'],
+      },
+      provider_failure_source: 'launch_record',
+      billing: null,
+      subscription_usage: null,
+      rate_limit_observations: null,
+      worker_output_present: false,
+      candidate_commit: null,
+      working_tree_clean: true,
+      head_sha: state.authorized_head_sha,
+      evidence: [
+        {
+          path: 'failed-attempts/T1/attempt-2/launch.infra.json',
+          source_path: 'logs/T1.launch.json',
+          sha256: hex('f'),
+          size_bytes: 1,
+        },
+      ],
+      reason_code: 'PROVIDER_TERMINAL_FAILURE',
+      reason: 'OAuth 401',
+      archived_at: '2026-08-12T18:14:28.960Z',
+    });
+
+    const compact = await runDevCli('dev-next.ts', ['--repo', sandbox.root], {
+      AGENTLAB_DEV_DIR: sandbox.devDir,
+    });
+    expect(compact.exitCode, compact.stderr).toBe(0);
+    expect(JSON.parse(compact.stdout)).toMatchObject({
+      status: 'SELECTED',
+      ready_to_launch: true,
+      task_id: 'T1',
+      attempt: 3,
+      attempt_kind: 'REPAIR',
+    });
+
+    const verbose = await runDevCli('dev-next.ts', ['--repo', sandbox.root, '--verbose'], {
+      AGENTLAB_DEV_DIR: sandbox.devDir,
+    });
+    expect(verbose.exitCode, verbose.stderr).toBe(0);
+    expect(JSON.parse(verbose.stdout).packet.previous_attempt_diagnostics).toMatchObject({
+      attempt: 1,
+      reason: 'pnpm test falhou',
+      changed_files: ['dev/cli/example.ts'],
     });
   });
 

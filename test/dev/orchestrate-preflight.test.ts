@@ -21,7 +21,12 @@ import {
 } from '../../dev/lib/orchestrate-report.js';
 import { resolveHarnessPaths, type HarnessPaths } from '../../dev/lib/paths.js';
 import { loadPlan, type LoadedPlan } from '../../dev/lib/plan.js';
-import { readLaunchRecord, readMaintenanceRecord } from '../../dev/lib/records.js';
+import {
+  readLaunchRecord,
+  readMaintenanceRecord,
+  writeInfraFailedAttempt,
+  writeValidationFailedAttempt,
+} from '../../dev/lib/records.js';
 import type { ValidationCommand } from '../../dev/lib/schemas.js';
 import {
   buildInitialState,
@@ -710,5 +715,149 @@ describe('projeção do bloco preflight', () => {
     expect(detail['adoption_kind']).toBe('maintenance');
     expect(detail['commits']).toHaveLength(1);
     expect(detail['validation_summary']).toHaveLength(4);
+  });
+});
+
+function hex64(seed: string): string {
+  const hex = [...seed].map((ch) => (/[0-9a-f]/.test(ch) ? ch : 'a')).join('');
+  return hex.padEnd(64, '0').slice(0, 64);
+}
+
+function seedValidationFailed(taskId: string, attempt: number, baseSha: string) {
+  return {
+    schema_version: 1 as const,
+    task_id: taskId,
+    attempt,
+    source_base_sha: baseSha,
+    profile_id: 'fake-worker-v1',
+    worker_self_reported_result: 'SUCCESS' as const,
+    report_candidate_commit: null,
+    orchestrator_verdict: 'REJECTED_BY_OFFICIAL_VALIDATION' as const,
+    finalization_mode: 'normal' as const,
+    launch_record_sha256: hex64('a'),
+    original_completion_sha256: hex64('b'),
+    report_sha256: hex64('c'),
+    handoff_draft_sha256: hex64('d'),
+    source_binding_sha256: hex64('e'),
+    patch_fingerprint: hex64('f'),
+    changed_files: ['src/alvo.ts'],
+    original_validation_results: [
+      { argv: ['pnpm', 'test'], exit_code: 1, timed_out: false, duration_ms: 1 },
+    ],
+    change_bundle: {
+      manifest_path: `failed-attempts/${taskId}/attempt-${attempt}/changes-manifest.json`,
+      manifest_sha256: hex64('1'),
+      patch_path: `failed-attempts/${taskId}/attempt-${attempt}/changes.patch`,
+      patch_sha256: hex64('2'),
+      patch_size_bytes: 12,
+    },
+    reason_code: 'OFFICIAL_VALIDATION_FAILURE' as const,
+    reason: 'attempt 1 reprovado pela validation oficial',
+    archived_at: '2026-08-12T18:14:28.960Z',
+  };
+}
+
+function seedInfraFailed(taskId: string, attempt: number, baseSha: string) {
+  return {
+    schema_version: 1 as const,
+    task_id: taskId,
+    attempt,
+    source_base_sha: baseSha,
+    profile_id: 'fake-worker-v1',
+    process: {
+      pid: 4242,
+      pgid: 4242,
+      started_at: '2026-08-12T18:00:00.000Z',
+      proc_start_ticks: 1,
+      command_sha256: hex64('cmd'),
+    },
+    launch_id: `00000000-0000-4000-8000-00000000000${attempt}`,
+    launch_classification: 'INFRA_ERROR' as const,
+    launch_record_sha256: hex64('launch'),
+    exit_code: 1,
+    timed_out: false as const,
+    started_at: '2026-08-12T18:00:00.000Z',
+    finished_at: '2026-08-12T18:00:01.000Z',
+    provider_failure: {
+      is_error: true,
+      terminal_reason: 'authentication_failed',
+      api_error_status: 401,
+      subtype: null,
+      num_turns: null,
+      message: 'OAuth 401',
+      message_sha256: hex64('oauth'),
+      signals: ['http_401'],
+    },
+    provider_failure_source: 'launch_record' as const,
+    billing: null,
+    subscription_usage: null,
+    rate_limit_observations: null,
+    worker_output_present: false as const,
+    candidate_commit: null,
+    working_tree_clean: true as const,
+    head_sha: baseSha,
+    evidence: [
+      {
+        path: `failed-attempts/${taskId}/attempt-${attempt}/launch.infra.json`,
+        source_path: `logs/${taskId}.launch.json`,
+        sha256: hex64('ev'),
+        size_bytes: 1,
+      },
+    ],
+    reason_code: 'PROVIDER_TERMINAL_FAILURE' as const,
+    reason: 'OAuth 401',
+    archived_at: '2026-08-12T18:14:28.960Z',
+  };
+}
+
+describe('pre-flight: repair diagnostics across infra attempts', () => {
+  it('8 — M46-like: só INFRA no attempt 1 => próximo launch FIRST_PASS', async () => {
+    await writeInfraFailedAttempt(paths, seedInfraFailed('T1', 1, baseline));
+    await writeState(
+      paths,
+      withTaskState(await readState(paths), 'T1', {
+        status: 'READY',
+        attempts: 1,
+        candidate_commit: null,
+        accepted_commit: null,
+      }),
+    );
+
+    const result = await runOrchestrationPreflight(preflightInput());
+    expect(result.status).toBe('READY');
+    expect(result.next).toMatchObject({
+      status: 'SELECTED',
+      task_id: 'T1',
+      attempt: 2,
+      attempt_kind: 'FIRST_PASS',
+      ready_to_launch: true,
+    });
+    expect(await packetCount()).toBe(0);
+  });
+
+  it('9 — M50-like: validation 1 + infra 2, READY attempts=2 => attempt 3 REPAIR, sem provider', async () => {
+    await writeValidationFailedAttempt(paths, seedValidationFailed('T1', 1, baseline));
+    await writeInfraFailedAttempt(paths, seedInfraFailed('T1', 2, baseline));
+    await writeState(
+      paths,
+      withTaskState(await readState(paths), 'T1', {
+        status: 'READY',
+        attempts: 2,
+        candidate_commit: null,
+        accepted_commit: null,
+      }),
+    );
+
+    const result = await runOrchestrationPreflight(preflightInput());
+    expect(result.status).toBe('READY');
+    expect(result.next).toMatchObject({
+      status: 'SELECTED',
+      task_id: 'T1',
+      attempt: 3,
+      attempt_kind: 'REPAIR',
+      ready_to_launch: true,
+    });
+    expect(await packetCount()).toBe(0);
+    expect(await readLaunchRecord(paths, 'T1')).toBeNull();
   });
 });

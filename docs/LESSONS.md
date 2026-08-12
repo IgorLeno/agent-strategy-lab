@@ -373,3 +373,12 @@ atravessado por política. Ampliar isso dentro da guarda global seria mudar
 outros encerramentos de graça: o caminho histórico ganha primitive própria, e a
 evidência registra os dois fatos separados — base histórica em
 `source_base_sha`, HEAD real em `head_sha`.
+
+[2026-08-12] Contexto: M50 — ValidationFailedAttempt no attempt 1, InfraFailedAttempt
+no attempt 2, próximo launch seria attempt 3.
+Mistake: `readPreviousAttemptDiagnostics` lia só o `attempts` corrente. INFRA_ERROR
+no topo apagava os diagnostics do FAIL oficial e o próximo launch virava FIRST_PASS.
+Rule: INFRA_ERROR é capability-neutral. A busca de PreviousAttemptDiagnostics
+atravessa somente gaps comprovados por InfraFailedAttemptRecord; qualquer outro
+gap interrompe a cadeia. Validation e Infra no mesmo attempt é fail closed.
+REPAIR significa diagnostics conectados por evidência, não `attempt > 1`.

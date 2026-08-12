@@ -50,8 +50,8 @@ export async function prepareNextTask(
   const previousHandoff = selection.handoffSourceTaskId
     ? await readHandoff(paths, selection.handoffSourceTaskId)
     : null;
-  // Reparo: a tarefa voltou a READY sem perder attempts, então o attempt já
-  // arquivado é exatamente `attempts` — e é dele que vem o diagnóstico.
+  // Diagnostics do repair: a primitive atravessa gaps de INFRA_ERROR
+  // (capability-neutral) até o ValidationFailedAttemptRecord que alimenta o reparo.
   const previousAttemptDiagnostics = await readPreviousAttemptDiagnostics(
     paths,
     selection.task.id,

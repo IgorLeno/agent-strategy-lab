@@ -21,11 +21,14 @@ import {
   sourceBindingPath,
   validationFailedAttemptPath,
   writeCompletion,
+  writeInfraFailedAttempt,
   writeLaunchRecord,
   writePacket,
   writeRevalidationSourceBinding,
+  writeValidationFailedAttempt,
 } from '../../dev/lib/records.js';
 import {
+  InconsistentAttemptEvidenceError,
   previousAttemptDiagnosticsFrom,
   readPreviousAttemptDiagnostics,
   retryFailedAttempt,
@@ -322,6 +325,139 @@ function retry(fixture: Fixture, reason = REASON) {
     reason,
     now: () => NOW,
   });
+}
+
+function hash(label: string): string {
+  return digest(label);
+}
+
+function validationFailedRecord(
+  taskId: string,
+  attempt: number,
+  baseSha: string,
+  options: { readonly changedFiles?: readonly string[]; readonly reason?: string } = {},
+) {
+  const changed = [...(options.changedFiles ?? ['src/alvo.ts'])].sort();
+  return {
+    schema_version: 1 as const,
+    task_id: taskId,
+    attempt,
+    source_base_sha: baseSha,
+    profile_id: PROFILE,
+    worker_self_reported_result: 'SUCCESS' as const,
+    report_candidate_commit: null,
+    orchestrator_verdict: 'REJECTED_BY_OFFICIAL_VALIDATION' as const,
+    finalization_mode: 'normal' as const,
+    launch_record_sha256: hash(`launch-v-${taskId}-${attempt}`),
+    original_completion_sha256: hash(`completion-${taskId}-${attempt}`),
+    report_sha256: hash(`report-${taskId}-${attempt}`),
+    handoff_draft_sha256: hash(`handoff-${taskId}-${attempt}`),
+    source_binding_sha256: hash(`binding-${taskId}-${attempt}`),
+    patch_fingerprint: hash(`patch-${taskId}-${attempt}`),
+    changed_files: changed,
+    original_validation_results: [
+      { argv: ['pnpm', 'test'], exit_code: 1, timed_out: false, duration_ms: 1 },
+    ],
+    original_validation_evidence: [
+      {
+        argv: ['pnpm', 'test'],
+        exit_code: 1,
+        timed_out: false,
+        duration_ms: 1,
+        sequence: 1,
+        stdout_sha256: hash(`stdout-${taskId}-${attempt}`),
+        stderr_sha256: hash(`stderr-${taskId}-${attempt}`),
+        stdout_bytes: 1,
+        stderr_bytes: 0,
+        stdout_path: `validation-logs/${taskId}/attempt-${attempt}/0001.stdout.log`,
+        stderr_path: `validation-logs/${taskId}/attempt-${attempt}/0001.stderr.log`,
+      },
+    ],
+    change_bundle: {
+      manifest_path: `failed-attempts/${taskId}/attempt-${attempt}/changes-manifest.json`,
+      manifest_sha256: hash(`manifest-${taskId}-${attempt}`),
+      patch_path: `failed-attempts/${taskId}/attempt-${attempt}/changes.patch`,
+      patch_sha256: hash(`patch-bytes-${taskId}-${attempt}`),
+      patch_size_bytes: 12,
+    },
+    reason_code: 'OFFICIAL_VALIDATION_FAILURE' as const,
+    reason: options.reason ?? `attempt ${attempt} reprovado pela validation oficial`,
+    archived_at: NOW,
+  };
+}
+
+function infraFailedRecord(taskId: string, attempt: number, baseSha: string) {
+  return {
+    schema_version: 1 as const,
+    task_id: taskId,
+    attempt,
+    source_base_sha: baseSha,
+    profile_id: PROFILE,
+    process: {
+      pid: 1000 + attempt,
+      pgid: 1000 + attempt,
+      started_at: NOW,
+      proc_start_ticks: attempt,
+      command_sha256: hash(`command-${taskId}-${attempt}`),
+    },
+    launch_id: `00000000-0000-4000-8000-00000000000${attempt}`,
+    launch_classification: 'INFRA_ERROR' as const,
+    launch_record_sha256: hash(`launch-i-${taskId}-${attempt}`),
+    exit_code: 1,
+    timed_out: false as const,
+    started_at: NOW,
+    finished_at: NOW,
+    provider_failure: {
+      is_error: true,
+      terminal_reason: 'authentication_failed',
+      api_error_status: 401,
+      subtype: null,
+      num_turns: null,
+      message: 'OAuth 401',
+      message_sha256: hash(`oauth-401-${attempt}`),
+      signals: ['http_401', 'oauth'],
+    },
+    provider_failure_source: 'launch_record' as const,
+    billing: null,
+    subscription_usage: null,
+    rate_limit_observations: null,
+    worker_output_present: false as const,
+    candidate_commit: null,
+    working_tree_clean: true as const,
+    head_sha: baseSha,
+    evidence: [
+      {
+        path: `failed-attempts/${taskId}/attempt-${attempt}/launch.infra.json`,
+        source_path: `logs/${taskId}.launch.json`,
+        sha256: hash(`evidence-${taskId}-${attempt}`),
+        size_bytes: 1,
+      },
+    ],
+    reason_code: 'PROVIDER_TERMINAL_FAILURE' as const,
+    reason: `OAuth 401 no attempt ${attempt}`,
+    archived_at: NOW,
+  };
+}
+
+async function lifecycleFixture(attempts: number) {
+  const sandbox = await makeSandboxRepo(PLAN);
+  roots.push(sandbox.root);
+  const paths = resolveHarnessPaths(sandbox.root);
+  await ensureRuntimeDirs(paths);
+  const loaded = await loadPlan(paths.planFile);
+  const baseSha = await headSha(sandbox.root);
+  let state = buildInitialState(loaded.plan, loaded.planSha256, { baselineSha: baseSha });
+  state = withTaskState(state, TASK, {
+    status: 'READY',
+    phase: null,
+    attempts,
+    process: null,
+    base_sha: baseSha,
+    candidate_commit: null,
+    accepted_commit: null,
+  });
+  await writeState(paths, { ...state, authorized_head_sha: baseSha });
+  return { sandbox, paths, loaded, baseSha };
 }
 
 describe('dev-retry-failed preconditions', () => {
@@ -1154,5 +1290,156 @@ describe('dev-retry-failed feedback para o attempt de reparo', () => {
       previousAttemptDiagnosticsFrom(result.record),
     );
     expect(await exists(validationFailedAttemptPath(fixture.paths, TASK, 2))).toBe(true);
+  });
+});
+
+describe('readPreviousAttemptDiagnostics atravessa INFRA capability-neutral', () => {
+  it('1 — validation attempt 1, attempts=1 => diagnostics do attempt 1', async () => {
+    const fixture = await lifecycleFixture(1);
+    await writeValidationFailedAttempt(
+      fixture.paths,
+      validationFailedRecord(TASK, 1, fixture.baseSha),
+    );
+
+    const diagnostics = await readPreviousAttemptDiagnostics(fixture.paths, TASK, 1);
+    expect(diagnostics?.attempt).toBe(1);
+  });
+
+  it('2 — validation attempt 1 + infra attempt 2 => diagnostics do attempt 1', async () => {
+    const fixture = await lifecycleFixture(2);
+    await writeValidationFailedAttempt(
+      fixture.paths,
+      validationFailedRecord(TASK, 1, fixture.baseSha),
+    );
+    await writeInfraFailedAttempt(fixture.paths, infraFailedRecord(TASK, 2, fixture.baseSha));
+
+    const diagnostics = await readPreviousAttemptDiagnostics(fixture.paths, TASK, 2);
+    expect(diagnostics?.attempt).toBe(1);
+  });
+
+  it('3 — validation attempt 1 + infra 2 + infra 3 => diagnostics do attempt 1', async () => {
+    const fixture = await lifecycleFixture(3);
+    await writeValidationFailedAttempt(
+      fixture.paths,
+      validationFailedRecord(TASK, 1, fixture.baseSha),
+    );
+    await writeInfraFailedAttempt(fixture.paths, infraFailedRecord(TASK, 2, fixture.baseSha));
+    await writeInfraFailedAttempt(fixture.paths, infraFailedRecord(TASK, 3, fixture.baseSha));
+
+    const diagnostics = await readPreviousAttemptDiagnostics(fixture.paths, TASK, 3);
+    expect(diagnostics?.attempt).toBe(1);
+  });
+
+  it('4 — infra attempt 1 apenas => diagnostics null', async () => {
+    const fixture = await lifecycleFixture(1);
+    await writeInfraFailedAttempt(fixture.paths, infraFailedRecord(TASK, 1, fixture.baseSha));
+
+    expect(await readPreviousAttemptDiagnostics(fixture.paths, TASK, 1)).toBeNull();
+  });
+
+  it('5 — validation attempt 1 + validation attempt 2 => diagnostics do attempt 2', async () => {
+    const fixture = await lifecycleFixture(2);
+    await writeValidationFailedAttempt(
+      fixture.paths,
+      validationFailedRecord(TASK, 1, fixture.baseSha, { reason: 'fail 1' }),
+    );
+    await writeValidationFailedAttempt(
+      fixture.paths,
+      validationFailedRecord(TASK, 2, fixture.baseSha, { reason: 'fail 2' }),
+    );
+
+    const diagnostics = await readPreviousAttemptDiagnostics(fixture.paths, TASK, 2);
+    expect(diagnostics?.attempt).toBe(2);
+    expect(diagnostics?.reason).toBe('fail 2');
+  });
+
+  it('6 — validation attempt 1 + gap sem record no attempt 2 => diagnostics null', async () => {
+    const fixture = await lifecycleFixture(2);
+    await writeValidationFailedAttempt(
+      fixture.paths,
+      validationFailedRecord(TASK, 1, fixture.baseSha),
+    );
+
+    expect(await readPreviousAttemptDiagnostics(fixture.paths, TASK, 2)).toBeNull();
+  });
+
+  it('7 — validation e infra no mesmo attempt => FAIL CLOSED', async () => {
+    const fixture = await lifecycleFixture(1);
+    await writeValidationFailedAttempt(
+      fixture.paths,
+      validationFailedRecord(TASK, 1, fixture.baseSha),
+    );
+    await writeInfraFailedAttempt(fixture.paths, infraFailedRecord(TASK, 1, fixture.baseSha));
+
+    await expect(readPreviousAttemptDiagnostics(fixture.paths, TASK, 1)).rejects.toThrow(
+      InconsistentAttemptEvidenceError,
+    );
+    await expect(readPreviousAttemptDiagnostics(fixture.paths, TASK, 1)).rejects.toThrow(
+      /ValidationFailedAttemptRecord e InfraFailedAttemptRecord/,
+    );
+  });
+
+  it('8 — M46-like: só infra attempt 1 => prepareNextTask sem diagnostics (FIRST_PASS)', async () => {
+    const fixture = await lifecycleFixture(1);
+    await writeInfraFailedAttempt(fixture.paths, infraFailedRecord(TASK, 1, fixture.baseSha));
+
+    expect(await readPreviousAttemptDiagnostics(fixture.paths, TASK, 1)).toBeNull();
+    const prepared = await prepareNextTask(fixture.paths, fixture.loaded);
+    expect(prepared.selection.status).toBe('SELECTED');
+    expect(prepared.packet?.task_id).toBe(TASK);
+    expect(prepared.packet?.previous_attempt_diagnostics).toBeUndefined();
+  });
+
+  it('10/11 — M50-like: packet traz diagnostics do attempt 1, sem modificar changed_files/failed_validations', async () => {
+    const fixture = await lifecycleFixture(2);
+    const original = validationFailedRecord(TASK, 1, fixture.baseSha, {
+      changedFiles: ['src/alvo.ts', 'test/alvo.test.ts'],
+    });
+    await writeValidationFailedAttempt(fixture.paths, original);
+    await writeInfraFailedAttempt(fixture.paths, infraFailedRecord(TASK, 2, fixture.baseSha));
+
+    const diagnostics = await readPreviousAttemptDiagnostics(fixture.paths, TASK, 2);
+    expect(diagnostics).toMatchObject({
+      attempt: 1,
+      changed_files: ['src/alvo.ts', 'test/alvo.test.ts'],
+      failed_validations: [
+        {
+          argv: ['pnpm', 'test'],
+          exit_code: 1,
+          timed_out: false,
+          stdout_path: `validation-logs/${TASK}/attempt-1/0001.stdout.log`,
+          stderr_path: `validation-logs/${TASK}/attempt-1/0001.stderr.log`,
+        },
+      ],
+    });
+
+    const prepared = await prepareNextTask(fixture.paths, fixture.loaded);
+    expect(prepared.selection.status).toBe('SELECTED');
+    expect(prepared.packet?.previous_attempt_diagnostics?.attempt).toBe(1);
+    expect(prepared.packet?.previous_attempt_diagnostics).toEqual(diagnostics);
+  });
+
+  it('12 — diagnostics não incluem transcript nem conversa do provider', async () => {
+    const fixture = await lifecycleFixture(2);
+    await writeValidationFailedAttempt(
+      fixture.paths,
+      validationFailedRecord(TASK, 1, fixture.baseSha),
+    );
+    await writeInfraFailedAttempt(fixture.paths, infraFailedRecord(TASK, 2, fixture.baseSha));
+
+    const prepared = await prepareNextTask(fixture.paths, fixture.loaded);
+    const serialized = JSON.stringify(prepared.packet);
+    expect(serialized).not.toContain('transcript');
+    expect(serialized).not.toContain('conversation');
+    expect(Object.keys(prepared.packet?.previous_attempt_diagnostics ?? {}).sort()).toEqual([
+      'attempt',
+      'changed_files',
+      'failed_validations',
+      'profile_id',
+      'reason',
+      'reason_code',
+      'validation_logs_dir',
+      'worker_self_reported_result',
+    ]);
   });
 });
