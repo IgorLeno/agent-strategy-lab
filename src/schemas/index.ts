@@ -9,7 +9,7 @@
  *
  * Preenchido por M03, M03B, M04, M05, M06, M07, M08 e M09.
  */
-export { TaskBudget, TaskBudgets, TaskSpec } from './task-spec.js';
+export { TaskBudget, TaskBudgets, TaskSpec, TaskTaxonomy } from './task-spec.js';
 export { EvaluationPlan } from './evaluation-plan.js';
 export {
   AgentProfile,

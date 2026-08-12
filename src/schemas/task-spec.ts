@@ -37,6 +37,27 @@ export const TaskBudgets = z
 export type TaskBudgets = z.infer<typeof TaskBudgets>;
 
 /**
+ * Bloco opcional e versionado de taxonomia. `task_class` e `difficulty` no
+ * TaskSpec permanecem strings livres para não quebrar specs históricas;
+ * `taxonomy` é aditivo e, quando presente, usa enums estritos.
+ * `difficulty_declared` é a dificuldade declarada pelo autor da task — a
+ * dificuldade observada é derivada de experimentos e nunca entra aqui.
+ */
+export const TaskTaxonomy = z
+  .object({
+    version: z.literal(1),
+    task_class: z.enum(['bugfix', 'feature', 'refactor', 'test', 'docs', 'chore']),
+    difficulty_declared: z.enum(['trivial', 'easy', 'medium', 'hard']),
+    complexity: z.enum(['local', 'multi_file', 'subsystem', 'cross_cutting']).optional(),
+    ambiguity: z.enum(['low', 'medium', 'high']).optional(),
+    verification: z
+      .enum(['deterministic', 'partially_deterministic', 'subjective'])
+      .optional(),
+  })
+  .strict();
+export type TaskTaxonomy = z.infer<typeof TaskTaxonomy>;
+
+/**
  * Contrato público da tarefa. O objeto é estrito para que metadados privados
  * de avaliação não sejam aceitos e depois encaminhados ao workspace do agente.
  */
@@ -50,6 +71,7 @@ export const TaskSpec = z
     stack: z.array(nonEmpty).min(1),
     public_graders: z.array(identifier).min(1),
     budgets: TaskBudgets,
+    taxonomy: TaskTaxonomy.optional(),
   })
   .strict();
 export type TaskSpec = z.infer<typeof TaskSpec>;

@@ -68,4 +68,90 @@ describe('TaskSpec', () => {
   ])('rejects private evaluation field %s', (field, value) => {
     expect(TaskSpec.safeParse({ ...validTaskSpec(), [field]: value }).success).toBe(false);
   });
+
+  it('parses a historical M1-era spec without a taxonomy block and with free-form strings', () => {
+    const input = {
+      ...validTaskSpec(),
+      task_class: 'some-legacy-class-string',
+      difficulty: 'super-hard-ish',
+    };
+
+    expect(TaskSpec.parse(input)).toEqual(input);
+  });
+
+  it('accepts a taxonomy block with only required fields', () => {
+    const input = {
+      ...validTaskSpec(),
+      taxonomy: {
+        version: 1 as const,
+        task_class: 'feature' as const,
+        difficulty_declared: 'medium' as const,
+      },
+    };
+
+    expect(TaskSpec.parse(input)).toEqual(input);
+  });
+
+  it('accepts a taxonomy block with all optional fields set', () => {
+    const input = {
+      ...validTaskSpec(),
+      taxonomy: {
+        version: 1 as const,
+        task_class: 'refactor' as const,
+        difficulty_declared: 'hard' as const,
+        complexity: 'cross_cutting' as const,
+        ambiguity: 'high' as const,
+        verification: 'subjective' as const,
+      },
+    };
+
+    expect(TaskSpec.parse(input)).toEqual(input);
+  });
+
+  it('rejects a taxonomy block with a version other than 1', () => {
+    const input = {
+      ...validTaskSpec(),
+      taxonomy: {
+        version: 2,
+        task_class: 'feature',
+        difficulty_declared: 'medium',
+      },
+    };
+
+    expect(TaskSpec.safeParse(input).success).toBe(false);
+  });
+
+  it.each([
+    ['task_class', 'not-a-real-class'],
+    ['difficulty_declared', 'impossible'],
+    ['complexity', 'entire_universe'],
+    ['ambiguity', 'extreme'],
+    ['verification', 'vibes'],
+  ])('rejects an invalid taxonomy.%s value', (field, value) => {
+    const input = {
+      ...validTaskSpec(),
+      taxonomy: {
+        version: 1,
+        task_class: 'feature',
+        difficulty_declared: 'medium',
+        [field]: value,
+      },
+    };
+
+    expect(TaskSpec.safeParse(input).success).toBe(false);
+  });
+
+  it('rejects unknown fields inside the taxonomy block', () => {
+    const input = {
+      ...validTaskSpec(),
+      taxonomy: {
+        version: 1,
+        task_class: 'feature',
+        difficulty_declared: 'medium',
+        extra_field: 'nope',
+      },
+    };
+
+    expect(TaskSpec.safeParse(input).success).toBe(false);
+  });
 });

@@ -62,6 +62,17 @@ o que **não** foi controlado, em vez de omitir. Perfil que não desliga
 descoberta de instruction files é `real-world` — mesmo que a intenção fosse
 outra.
 
+`TaskSpec.taxonomy` é um bloco opcional e versionado (`version: 1`) com
+enums estritos para `task_class`, `difficulty_declared` e, opcionalmente,
+`complexity`, `ambiguity` e `verification`. Os campos `task_class` e
+`difficulty` originais do `TaskSpec` continuam strings livres — nenhum
+TaskSpec histórico deixa de parsear. `difficulty_declared` é a dificuldade
+que o autor da task declarou; não é a dificuldade observada. A **Capability
+Matrix** (o que cada perfil consegue em cada categoria de taxonomia) é
+**derivada** dos experimentos rodados — não existe matriz hardcoded no
+código, e nenhuma categoria nova entra na taxonomia antes de haver dados de
+experimentos que a justifiquem.
+
 ### 2.2 Planejamento e execução
 
 ```
