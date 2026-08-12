@@ -3,7 +3,12 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { headSha } from '../../dev/lib/git.js';
 import { acquireLock } from '../../dev/lib/lock.js';
-import type { MaintenanceValidationRunner } from '../../dev/lib/maintenance.js';
+import {
+  adoptMaintenance,
+  maintenanceChainBetween,
+  reconcileMaintenanceRecords,
+  type MaintenanceValidationRunner,
+} from '../../dev/lib/maintenance.js';
 import {
   AUTO_MAINTENANCE_MAX_COMMITS,
   AUTO_MAINTENANCE_REASON,
@@ -279,6 +284,127 @@ describe('pre-flight: maintenance automática', () => {
     expect(result.blocker).toBe('MAINTENANCE_BLOCKED');
     expect(result.reason).toMatch(/não descende do authorized_head_sha/);
   });
+});
+
+// ---------------------------------------------------------------------------
+// Estágio 1 — records intermediários (janela de crash)
+// ---------------------------------------------------------------------------
+
+/**
+ * Um record gravado sem o avanço correspondente do state é a janela de crash
+ * que o harness suporta. A regra destes testes: o preflight nunca cria uma
+ * SEGUNDA saída a partir da mesma base — ou conclui exatamente a adoção pendente
+ * já registrada, ou para e devolve o caso a um humano.
+ */
+describe('pre-flight: MaintenanceRecord pendente de crash', () => {
+  /** Adota pelo primitive oficial e depois recua o state: crash reproduzido. */
+  async function adoptPending(): Promise<string> {
+    const result = await adoptMaintenance({
+      paths,
+      reason: 'fixture de janela de crash',
+      validationRunner: passingValidation,
+      now: () => '2026-08-12T14:00:00.000Z',
+    });
+    return result.record.adopted_head_sha;
+  }
+
+  async function rewindAuthorizedHead(sha: string): Promise<void> {
+    await writeState(paths, { ...(await readState(paths)), authorized_head_sha: sha });
+  }
+
+  it('record A→B com HEAD em B conclui a adoção pendente sem duplicar evidência', async () => {
+    const recordHead = await createCommit('docs/nota.md', 'manutenção\n', 'manutenção permitida');
+    expect(await adoptPending()).toBe(recordHead);
+    await rewindAuthorizedHead(baseline);
+    validationCalls = [];
+
+    const result = await runOrchestrationPreflight(preflightInput());
+
+    expect(result.maintenance.status).toBe('ALREADY_ADOPTED');
+    expect(result.maintenance.previous_authorized_head_sha).toBe(baseline);
+    expect(result.maintenance.authorized_head_sha).toBe(recordHead);
+    // Evidência imutável: nenhum record novo, nenhuma validação reexecutada.
+    expect(await maintenanceRecordCount()).toBe(1);
+    expect(validationCalls).toEqual([]);
+    expect((await readState(paths)).authorized_head_sha).toBe(recordHead);
+  });
+
+  it('record A→B com novo commit C bloqueia em vez de criar a faixa A→C', async () => {
+    const recordHead = await createCommit('docs/nota.md', 'manutenção\n', 'manutenção permitida');
+    await adoptPending();
+    await rewindAuthorizedHead(baseline);
+    const head = await createCommit('docs/depois.md', 'depois\n', 'manutenção posterior');
+    validationCalls = [];
+
+    const result = await runOrchestrationPreflight(preflightInput());
+
+    expect(result.status).toBe('BLOCKED');
+    expect(result.blocker).toBe('MAINTENANCE_BLOCKED');
+    expect(result.maintenance.status).toBe('BLOCKED');
+    expect(result.reason).toMatch(/recuperação manual/);
+    expect(result.recover).toBeNull();
+    expect(result.next).toBeNull();
+
+    // Nenhuma faixa A→C, nenhum gate rodado, state intacto.
+    expect(await readMaintenanceRecord(paths, head)).toBeNull();
+    expect(await maintenanceRecordCount()).toBe(1);
+    expect(validationCalls).toEqual([]);
+    expect((await readState(paths)).authorized_head_sha).toBe(baseline);
+    expect(await packetCount()).toBe(0);
+
+    // E a cadeia continua sem ambiguidade: o bloqueio não sujou a história.
+    expect(await reconcileMaintenanceRecords(paths, baseline)).toBe(recordHead);
+    expect(await maintenanceChainBetween(paths, baseline, recordHead)).toHaveLength(1);
+  });
+
+  it('cadeia A→B→C já publicada com state em A bloqueia sem record agregado', async () => {
+    const first = await createCommit('docs/um.md', 'um\n', 'manutenção 1');
+    await adoptPending();
+    const head = await createCommit('test/dois.md', 'dois\n', 'manutenção 2');
+    await adoptPending();
+    await rewindAuthorizedHead(baseline);
+    validationCalls = [];
+
+    const result = await runOrchestrationPreflight(preflightInput());
+
+    expect(result.status).toBe('BLOCKED');
+    expect(result.blocker).toBe('MAINTENANCE_BLOCKED');
+    expect(result.reason).toMatch(/recuperação manual/);
+
+    // Continuam existindo dois records encadeados — nenhum terceiro agregado.
+    expect(await maintenanceRecordCount()).toBe(2);
+    expect((await readMaintenanceRecord(paths, head))?.previous_authorized_head_sha).toBe(first);
+    expect(validationCalls).toEqual([]);
+    expect((await readState(paths)).authorized_head_sha).toBe(baseline);
+    expect(await reconcileMaintenanceRecords(paths, baseline)).toBe(head);
+    expect(await maintenanceChainBetween(paths, baseline, head)).toHaveLength(2);
+  });
+
+  it('dev-orchestrate no bloqueio: exit 9, nenhum provider, nenhum attempt', async () => {
+    await createCommit('docs/nota.md', 'manutenção\n', 'manutenção permitida');
+    await adoptPending();
+    await rewindAuthorizedHead(baseline);
+    await createCommit('docs/depois.md', 'depois\n', 'manutenção posterior');
+
+    const result = await orchestrate('success');
+    expect(result.exitCode).toBe(9);
+
+    const output = JSON.parse(result.stdout) as {
+      stopped_by: string;
+      iteration_count: number;
+      preflight: { status: string; blocker: string };
+    };
+    expect(output.stopped_by).toBe('PREFLIGHT_BLOCKED');
+    expect(output.preflight.blocker).toBe('MAINTENANCE_BLOCKED');
+    expect(output.iteration_count).toBe(0);
+
+    expect(await readLaunchRecord(paths, 'T1')).toBeNull();
+    const state = await readState(paths);
+    expect(state.tasks.every((task) => task.attempts === 0)).toBe(true);
+    expect(state.authorized_head_sha).toBe(baseline);
+    expect(await maintenanceRecordCount()).toBe(1);
+    expect(await packetCount()).toBe(0);
+  }, 60_000);
 });
 
 // ---------------------------------------------------------------------------

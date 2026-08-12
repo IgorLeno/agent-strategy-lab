@@ -4,6 +4,7 @@ import {
   MaintenanceError,
   adoptMaintenance,
   adoptMaintenanceRange,
+  reconcileMaintenanceRecords,
   resolveAdoptionKind,
   type MaintenanceValidationRunner,
 } from './maintenance.js';
@@ -204,6 +205,34 @@ async function runMaintenanceStage(input: PreflightInput): Promise<PreflightMain
   const existing = await readMaintenanceRecord(paths, head).catch(() => null);
   if (existing && resolveAdoptionKind(existing) === 'plan_extension') {
     return blockedMaintenance(previous, pending, 'adoção de plan_extension nunca é automática');
+  }
+
+  // Crash entre gravar o record e avançar o state deixa uma cadeia JÁ publicada
+  // partindo da base atual. Adotar por cima dela criaria uma SEGUNDA saída a
+  // partir da mesma base — exatamente as candidates ambíguas que
+  // `reconcileMaintenanceRecords`/`maintenanceChainBetween` recusam depois.
+  // Concluir a adoção pendente só é seguro quando o record que já existe é o
+  // mesmo que o preflight fecharia: começa na base e termina no HEAD. Qualquer
+  // outra forma é recuperação humana, não automação — fail-closed.
+  let reconciled: string | null;
+  try {
+    reconciled = await reconcileMaintenanceRecords(paths, previous);
+  } catch (error) {
+    if (error instanceof MaintenanceError) {
+      return blockedMaintenance(previous, pending, error.message);
+    }
+    throw error;
+  }
+  if (reconciled !== previous) {
+    const resumable = reconciled === head && existing?.previous_authorized_head_sha === previous;
+    if (!resumable) {
+      return blockedMaintenance(
+        previous,
+        pending,
+        `MaintenanceRecord pendente já adota até ${reconciled} sem estar refletido no state; ` +
+          'recuperação manual é necessária antes de qualquer adoção automática',
+      );
+    }
   }
 
   try {
