@@ -46,6 +46,66 @@ const DEAD_PROCESS = {
 };
 
 describe('dev-recover', () => {
+  it('CLI --dry-run emite visão compacta CLEAN com contagens dinâmicas', async () => {
+    const dry = await runDevCli('dev-recover.ts', ['--repo', sandbox.root, '--dry-run'], {
+      AGENTLAB_DEV_DIR: sandbox.devDir,
+    });
+    expect(dry.exitCode, dry.stderr).toBe(0);
+
+    const output = JSON.parse(dry.stdout) as Record<string, unknown>;
+    expect(output).toEqual({
+      status: 'CLEAN',
+      mode: 'dry-run',
+      authorized_head_sha: await headSha(sandbox.root),
+      head_matches_authorized: true,
+      plan_changed: false,
+      reconciliation_count: 0,
+      task_counts: { READY: 2 },
+    });
+    expect(output).not.toHaveProperty('statuses');
+  });
+
+  it('CLI compacta sinaliza ATTENTION quando HEAD diverge do autorizado', async () => {
+    const authorized = await headSha(sandbox.root);
+    await writeState(paths, {
+      ...(await readState(paths)),
+      baseline_sha: authorized,
+      authorized_head_sha: authorized,
+    });
+    await writeFile(`${sandbox.root}/README.md`, '# manutenção não adotada\n', 'utf8');
+    await commitAll(sandbox.root, 'manutenção não adotada');
+
+    const dry = await runDevCli('dev-recover.ts', ['--repo', sandbox.root, '--dry-run'], {
+      AGENTLAB_DEV_DIR: sandbox.devDir,
+    });
+    expect(dry.exitCode, dry.stderr).toBe(0);
+
+    expect(JSON.parse(dry.stdout)).toMatchObject({
+      status: 'ATTENTION',
+      head_matches_authorized: false,
+      reconciliation_count: 0,
+    });
+  });
+
+  it('CLI compacta sinaliza ATTENTION quando o plano mudou', async () => {
+    await writeFile(
+      paths.planFile,
+      `${await readPlan()}\n  - id: T3\n    title: nova\n    blocked_by: [T2]\n    objective: fazer T3\n    acceptance: [ok]\n    validation: [{ argv: ['true'], timeout_seconds: 30 }]\n`,
+      'utf8',
+    );
+
+    const dry = await runDevCli('dev-recover.ts', ['--repo', sandbox.root, '--dry-run'], {
+      AGENTLAB_DEV_DIR: sandbox.devDir,
+    });
+    expect(dry.exitCode, dry.stderr).toBe(0);
+
+    expect(JSON.parse(dry.stdout)).toMatchObject({
+      status: 'ATTENTION',
+      plan_changed: true,
+      task_counts: { READY: 3 },
+    });
+  });
+
   it('runtime antigo sem authorized_head_sha deriva o último accepted_commit', async () => {
     const accepted = await commitAll(sandbox.root, 'trabalho já aceito');
     const legacy = {
@@ -207,13 +267,35 @@ describe('dev-recover', () => {
       AGENTLAB_DEV_DIR: sandbox.devDir,
     });
     expect(dry.exitCode, dry.stderr).toBe(0);
-    expect(JSON.parse(dry.stdout).statuses.T1).toBe('INFRA_ERROR');
+    expect(JSON.parse(dry.stdout)).toMatchObject({
+      status: 'ATTENTION',
+      mode: 'dry-run',
+      reconciliation_count: 1,
+      task_counts: { INFRA_ERROR: 1, READY: 1 },
+    });
+    expect(JSON.parse(dry.stdout)).not.toHaveProperty('statuses');
     expect((await readState(paths)).tasks[0]?.status).toBe('RUNNING');
+
+    const verbose = await runDevCli(
+      'dev-recover.ts',
+      ['--repo', sandbox.root, '--dry-run', '--verbose'],
+      { AGENTLAB_DEV_DIR: sandbox.devDir },
+    );
+    expect(verbose.exitCode, verbose.stderr).toBe(0);
+    expect(JSON.parse(verbose.stdout)).toMatchObject({
+      dry_run: true,
+      state_was_missing: false,
+      plan_changed: false,
+      authorized_head_sha: await headSha(sandbox.root),
+      statuses: { T1: 'INFRA_ERROR', T2: 'READY' },
+    });
+    expect(JSON.parse(verbose.stdout).reconciliations).toHaveLength(1);
 
     const applied = await runDevCli('dev-recover.ts', ['--repo', sandbox.root], {
       AGENTLAB_DEV_DIR: sandbox.devDir,
     });
     expect(applied.exitCode, applied.stderr).toBe(0);
+    expect(JSON.parse(applied.stdout)).toMatchObject({ mode: 'apply' });
     expect((await readState(paths)).tasks[0]?.status).toBe('INFRA_ERROR');
   });
 });

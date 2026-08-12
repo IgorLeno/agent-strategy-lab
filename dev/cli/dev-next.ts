@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-import { emit, parseArgs, runMain } from '../lib/cli.js';
+import { emit, isVerbose, parseArgs, runMain } from '../lib/cli.js';
 import { headSha } from '../lib/git.js';
 import { buildTaskPacket } from '../lib/packet.js';
 import { resolveHarnessPaths } from '../lib/paths.js';
@@ -23,17 +23,22 @@ async function main(): Promise<void> {
   const state = await readState(paths);
 
   if (state.plan_sha256 !== loaded.planSha256) {
-    emit({
-      status: 'BLOCKED',
-      reason: 'dev/plan.yaml mudou desde o dev-init — rode dev-recover para reconciliar',
-      packet: null,
-    });
+    const reason = 'dev/plan.yaml mudou desde o dev-init — rode dev-recover para reconciliar';
+    emit(
+      isVerbose(args)
+        ? { status: 'BLOCKED', reason, packet: null }
+        : { status: 'BLOCKED', ready_to_launch: false, reason },
+    );
     process.exit(4);
   }
 
   const selection = selectNextTask(loaded, state);
   if (selection.status !== 'SELECTED' || !selection.task) {
-    emit({ status: selection.status, reason: selection.reason, packet: null });
+    emit(
+      isVerbose(args)
+        ? { status: selection.status, reason: selection.reason, packet: null }
+        : { status: selection.status, ready_to_launch: false, reason: selection.reason },
+    );
     process.exit(selection.status === 'ALL_DONE' ? 0 : 4);
   }
 
@@ -42,18 +47,42 @@ async function main(): Promise<void> {
     : null;
 
   const task = state.tasks.find((candidate) => candidate.id === selection.task?.id);
+  const previousAttemptDiagnostics = await readPreviousAttemptDiagnostics(
+    paths,
+    selection.task.id,
+    task?.attempts ?? 0,
+  );
+  const baseSha = await headSha(paths.repoRoot);
   const packet = buildTaskPacket({
     task: selection.task,
-    baseSha: await headSha(paths.repoRoot),
+    baseSha,
     previousHandoff,
-    previousAttemptDiagnostics: await readPreviousAttemptDiagnostics(
-      paths,
-      selection.task.id,
-      task?.attempts ?? 0,
-    ),
+    previousAttemptDiagnostics,
   });
+  const readyToLaunch = baseSha === state.authorized_head_sha;
 
-  emit({ status: 'SELECTED', reason: selection.reason, packet });
+  if (isVerbose(args)) {
+    emit({
+      status: 'SELECTED',
+      reason: selection.reason,
+      packet,
+      ready_to_launch: readyToLaunch,
+      authorized_head_sha: state.authorized_head_sha,
+    });
+    return;
+  }
+
+  emit({
+    status: 'SELECTED',
+    ready_to_launch: readyToLaunch,
+    task_id: selection.task.id,
+    title: selection.task.title,
+    attempt: (task?.attempts ?? 0) + 1,
+    attempt_kind: previousAttemptDiagnostics === null ? 'FIRST_PASS' : 'REPAIR',
+    base_sha: baseSha,
+    authorized_head_sha: state.authorized_head_sha,
+    ...(!readyToLaunch ? { blocker: 'BASE_DIVERGED' } : {}),
+  });
 }
 
 await runMain(main);

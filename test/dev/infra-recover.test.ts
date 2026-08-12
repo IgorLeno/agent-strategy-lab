@@ -459,7 +459,7 @@ describe('dev-recover depois da recuperação de infra', () => {
 
     const result = await runDevCli(
       'dev-recover.ts',
-      ['--repo', sandbox.root, '--dry-run'],
+      ['--repo', sandbox.root, '--dry-run', '--verbose'],
       devEnv(),
     );
     const output = JSON.parse(result.stdout) as { reconciliations: unknown[] };

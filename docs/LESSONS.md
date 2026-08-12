@@ -313,3 +313,19 @@ artifact existia no instante original; (4) guarda de HEAD em código de reparo
 tem que declarar CONTRA QUAL commit observa — exigir a base histórica quebra o
 reparo assim que uma manutenção adotada move o authorized head, que foi
 exatamente o segundo modo de falha deste mesmo incidente.
+
+[2026-08-11] Contexto: teste da view compacta de divergência entre HEAD e base
+autorizada no `dev-recover`.
+Mistake: mover o HEAD sobre um state de fixture com `authorized_head_sha: null`;
+o recovery legado deriva o autorizado do HEAD atual e eliminou a divergência
+que o teste pretendia criar.
+Rule: fixture de `BASE_DIVERGED` fixa explicitamente `baseline_sha` e
+`authorized_head_sha` antes de avançar o HEAD; `null` testa migração legada, não
+uma base autorizada pinada.
+
+[2026-08-11] Contexto: separar a saída compacta e verbose de uma CLI do harness.
+Mistake: atualizar os testes focados, mas deixar um teste de integração lendo na
+saída padrão um campo detalhado movido para `--verbose`.
+Rule: ao mover campos entre views de uma CLI, procurar todos os consumidores das
+chaves; diagnóstico opta por `--verbose`, enquanto uso operacional valida apenas
+os campos compactos.
