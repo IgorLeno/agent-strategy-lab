@@ -226,13 +226,12 @@ export function detailIteration(input: IterationInput): Record<string, unknown> 
     ...summarizeIteration(input),
     launch: input.launch,
     close: input.close,
-    ...(input.attemptKind === 'REPAIR' || input.automaticRepair
+    ...(input.automaticRepair === true
       ? {
-          automatic_repair: input.automaticRepair ?? true,
+          automatic_repair: true,
           ...(input.repairSourceAttempt === undefined
             ? {}
             : { repair_source_attempt: input.repairSourceAttempt }),
-          automatic_repair_consumed: true,
         }
       : {}),
     provider_estimated_api_equivalent_usd:

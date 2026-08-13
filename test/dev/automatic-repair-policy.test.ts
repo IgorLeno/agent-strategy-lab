@@ -7,6 +7,7 @@ import { resolveHarnessPaths, type HarnessPaths } from '../../dev/lib/paths.js';
 import { loadPlan, type LoadedPlan } from '../../dev/lib/plan.js';
 import {
   validationFailedAttemptPath,
+  writeAttemptAbandonment,
   writeCompletion,
   writeInfraFailedAttempt,
   writeLaunchRecord,
@@ -146,6 +147,34 @@ function infraFailed(attempt: number) {
   };
 }
 
+function abandoned(attempt: number) {
+  return {
+    schema_version: 1 as const,
+    task_id: TASK,
+    attempt,
+    base_sha: baseSha,
+    process: {
+      pid: 2000 + attempt,
+      pgid: 2000 + attempt,
+      started_at: NOW,
+      proc_start_ticks: attempt,
+      command_sha256: hex64(`abandoned-command-${attempt}`),
+    },
+    launch_classification: 'FINISHED' as const,
+    exit_code: 0,
+    started_at: NOW,
+    finished_at: NOW,
+    reason: `attempt ${attempt} abandonado manualmente`,
+    previous_diagnostics: null,
+    candidate_commit: null,
+    working_tree_clean: true as const,
+    head_sha: baseSha,
+    report_present: false as const,
+    handoff_present: false as const,
+    abandoned_at: NOW,
+  };
+}
+
 async function setTask(
   status: 'READY' | 'FAIL' | 'TIMED_OUT' | 'INFRA_ERROR' | 'RUNNING',
   attempts: number,
@@ -252,13 +281,21 @@ describe('decideAutomaticRepair — autorização por ValidationFailedAttemptRec
     });
   });
 
-  it('B — dois ValidationFailedAttemptRecords => REPAIR_EXHAUSTED', async () => {
+  it('B — task FAIL com dois ValidationFailedAttemptRecords => REPAIR_EXHAUSTED', async () => {
+    await writeValidationFailedAttempt(paths, validationFailed(1));
+    await writeValidationFailedAttempt(paths, validationFailed(2));
+    await setTask('FAIL', 2);
+
+    const decision = await decideAutomaticRepair(paths, TASK);
+    expect(decision.action).toBe('REPAIR_EXHAUSTED');
+  });
+
+  it('READY com dois ValidationFailedAttemptRecords é intervenção humana e não bloqueia', async () => {
     await writeValidationFailedAttempt(paths, validationFailed(1));
     await writeValidationFailedAttempt(paths, validationFailed(2));
     await setTask('READY', 2);
 
-    const decision = await decideAutomaticRepair(paths, TASK);
-    expect(decision.action).toBe('REPAIR_EXHAUSTED');
+    expect(await decideAutomaticRepair(paths, TASK)).toEqual({ action: 'NOT_APPLICABLE' });
   });
 
   it('C — validation 1 + infra 2 + validation FAIL 3 => segundo capability FAIL, STOP', async () => {
@@ -362,6 +399,21 @@ describe('decideAutomaticRepair — caminhos que esta automação não cobre', (
     await setTask('FAIL', 1);
     expect(await decideAutomaticRepair(paths, TASK)).toEqual({ action: 'NOT_APPLICABLE' });
   });
+
+  it('AttemptAbandonmentRecord é fronteira conhecida, não gap histórico', async () => {
+    await writeAttemptAbandonment(paths, abandoned(1));
+    await setTask('READY', 1);
+
+    expect(await decideAutomaticRepair(paths, TASK)).toEqual({ action: 'NOT_APPLICABLE' });
+  });
+
+  it('validation anterior não é atravessada depois de AttemptAbandonmentRecord', async () => {
+    await writeValidationFailedAttempt(paths, validationFailed(1));
+    await writeAttemptAbandonment(paths, abandoned(2));
+    await setTask('READY', 2);
+
+    expect(await decideAutomaticRepair(paths, TASK)).toEqual({ action: 'NOT_APPLICABLE' });
+  });
 });
 
 describe('decideAutomaticRepair — fail closed', () => {
@@ -375,6 +427,24 @@ describe('decideAutomaticRepair — fail closed', () => {
     if (decision.action === 'BLOCKED') {
       expect(decision.code).toBe('INCONSISTENT_EVIDENCE');
     }
+  });
+
+  it('Validation + AttemptAbandonment no mesmo attempt => BLOCKED', async () => {
+    await writeValidationFailedAttempt(paths, validationFailed(1));
+    await writeAttemptAbandonment(paths, abandoned(1));
+    await setTask('READY', 1);
+
+    const decision = await decideAutomaticRepair(paths, TASK);
+    expect(decision).toMatchObject({ action: 'BLOCKED', code: 'INCONSISTENT_EVIDENCE' });
+  });
+
+  it('Infra + AttemptAbandonment no mesmo attempt => BLOCKED', async () => {
+    await writeInfraFailedAttempt(paths, infraFailed(1));
+    await writeAttemptAbandonment(paths, abandoned(1));
+    await setTask('READY', 1);
+
+    const decision = await decideAutomaticRepair(paths, TASK);
+    expect(decision).toMatchObject({ action: 'BLOCKED', code: 'INCONSISTENT_EVIDENCE' });
   });
 
   it('gap histórico sem record => BLOCKED, sem repair automático', async () => {

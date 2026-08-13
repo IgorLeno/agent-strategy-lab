@@ -10,6 +10,7 @@
  *   orchestrator-success  produz patch e SUCCESS com candidate null, sem tocar no Git
  *   official-fail         SUCCESS + patch que falha a validation oficial (grep repaired)
  *   official-fail-then-repair  FIRST_PASS falha a validation; REPAIR escreve 'repaired'
+ *   official-fail-then-worker-failure  FIRST_PASS falha a validation; REPAIR reporta FAILURE
  *   dirty      commita e ainda deixa arquivo não rastreado na árvore
  *   out-of-scope  commita alterando dev/plan.yaml
  *   timeout    ignora SIGTERM e nunca termina
@@ -64,7 +65,8 @@ function main() {
     mode === 'no-commit' ||
     mode === 'orchestrator-success' ||
     mode === 'official-fail' ||
-    mode === 'official-fail-then-repair';
+    mode === 'official-fail-then-repair' ||
+    mode === 'official-fail-then-worker-failure';
 
   if (mode === 'out-of-scope') {
     const planFile = path.join(repoRoot, 'dev', 'plan.yaml');
@@ -76,9 +78,11 @@ function main() {
     const contents =
       mode === 'official-fail'
         ? 'broken\n'
-        : mode === 'official-fail-then-repair'
+        : mode === 'official-fail-then-repair' || mode === 'official-fail-then-worker-failure'
           ? repairAttempt
-            ? 'repaired\n'
+            ? mode === 'official-fail-then-repair'
+              ? 'repaired\n'
+              : 'broken\n'
             : 'broken\n'
           : `feito por ${packet.task_id}\n`;
     writeFileSync(path.join(repoRoot, relative), contents);
@@ -95,7 +99,8 @@ function main() {
     writeFileSync(path.join(repoRoot, 'src', 'nao-commitado.txt'), 'sujeira\n');
   }
 
-  const failed = mode === 'failure';
+  const failed =
+    mode === 'failure' || (mode === 'official-fail-then-worker-failure' && repairAttempt);
   const validations = packet.validation.map((command) => ({
     argv: command.argv,
     exit_code: failed ? 1 : 0,

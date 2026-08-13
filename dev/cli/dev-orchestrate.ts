@@ -1,7 +1,10 @@
 #!/usr/bin/env tsx
 import {
   AUTOMATIC_REPAIR_EXHAUSTED,
+  AUTOMATIC_REPAIR_PROFILE_MISMATCH,
+  decideAutomaticRepair,
   haltFromAutomaticRepair,
+  haltFromAutomaticRepairProfile,
   reconcileAutomaticRepair,
 } from '../lib/automatic-repair.js';
 import { ESTIMATED_COST_LABEL } from '../lib/billing.js';
@@ -163,7 +166,11 @@ async function main(): Promise<void> {
 
   await withHarnessLock(paths, 'dev-orchestrate', async () => {
     if (!args.flags.has(SKIP_PREFLIGHT_FLAG)) {
-      preflight = await runOrchestrationPreflight({ paths, loaded });
+      preflight = await runOrchestrationPreflight({
+        paths,
+        loaded,
+        requestedProfileId: profileId,
+      });
       if (preflight.status === 'BLOCKED') {
         // Bloqueio de pre-flight é problema do repositório, não veredito de
         // tarefa: nenhum provider é lançado, nenhum attempt é consumido e
@@ -172,6 +179,11 @@ async function main(): Promise<void> {
         stop = { status: 'PREFLIGHT_BLOCKED', reason: preflight.reason ?? 'pre-flight bloqueado' };
         if (preflight.blocker === AUTOMATIC_REPAIR_EXHAUSTED) {
           stop = { status: AUTOMATIC_REPAIR_EXHAUSTED, reason: preflight.reason ?? AUTOMATIC_REPAIR_EXHAUSTED };
+        } else if (preflight.blocker === AUTOMATIC_REPAIR_PROFILE_MISMATCH) {
+          stop = {
+            status: AUTOMATIC_REPAIR_PROFILE_MISMATCH,
+            reason: preflight.reason ?? AUTOMATIC_REPAIR_PROFILE_MISMATCH,
+          };
         } else if (
           preflight.blocker === 'INCONSISTENT_EVIDENCE' ||
           preflight.blocker === 'HISTORICAL_GAP' ||
@@ -190,6 +202,16 @@ async function main(): Promise<void> {
     for (let index = 0; index < maxIterations; index += 1) {
       const failed = (await readState(paths)).tasks.find((task) => task.status === 'FAIL');
       if (failed) {
+        const pendingDecision = await decideAutomaticRepair(paths, failed.id);
+        const profileHalt = haltFromAutomaticRepairProfile(
+          pendingDecision,
+          failed.id,
+          profileId,
+        );
+        if (profileHalt) {
+          stop = profileHalt;
+          break;
+        }
         const rec = await reconcileAutomaticRepair({ paths, taskId: failed.id });
         const halt = haltFromAutomaticRepair(rec.decision);
         if (halt) {
@@ -207,6 +229,16 @@ async function main(): Promise<void> {
       let launchProfile = profileId;
       let repairMeta: { automaticRepair: boolean; repairSourceAttempt: number } | null = null;
       if (subjectId) {
+        const pendingDecision = await decideAutomaticRepair(paths, subjectId);
+        const profileHalt = haltFromAutomaticRepairProfile(
+          pendingDecision,
+          subjectId,
+          profileId,
+        );
+        if (profileHalt) {
+          stop = profileHalt;
+          break;
+        }
         const rec = await reconcileAutomaticRepair({ paths, taskId: subjectId });
         const halt = haltFromAutomaticRepair(rec.decision);
         if (halt) {
@@ -240,6 +272,16 @@ async function main(): Promise<void> {
 
       // FIRST official validation FAIL: um repair bounded na mesma invocação,
       // mesmo profile, sem consumir outro ciclo primário de max-iterations.
+      const pendingDecision = await decideAutomaticRepair(paths, executed.iteration.taskId);
+      const profileHalt = haltFromAutomaticRepairProfile(
+        pendingDecision,
+        executed.iteration.taskId,
+        profileId,
+      );
+      if (profileHalt) {
+        stop = profileHalt;
+        break;
+      }
       const rec = await reconcileAutomaticRepair({ paths, taskId: executed.iteration.taskId });
       const halt = haltFromAutomaticRepair(rec.decision);
       if (halt) {
@@ -269,12 +311,13 @@ async function main(): Promise<void> {
         continue;
       }
       if (repair.closeKind === 'FAIL') {
-        stop = {
-          status: AUTOMATIC_REPAIR_EXHAUSTED,
-          reason:
-            `${AUTOMATIC_REPAIR_EXHAUSTED}: o reparo automático bounded de ` +
-            `${repair.iteration.taskId} também falhou na validation oficial`,
-        };
+        const repairDecision = await decideAutomaticRepair(paths, repair.iteration.taskId);
+        stop =
+          haltFromAutomaticRepair(repairDecision) ??
+          repair.stop ?? {
+            status: repair.closeKind,
+            reason: repair.iteration.reason,
+          };
         break;
       }
       stop = repair.stop ?? { status: repair.closeKind ?? 'FAIL', reason: repair.iteration.reason };

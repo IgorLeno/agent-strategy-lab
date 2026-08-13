@@ -1,5 +1,8 @@
 import {
   AUTOMATIC_REPAIR_EXHAUSTED,
+  AUTOMATIC_REPAIR_PROFILE_MISMATCH,
+  decideAutomaticRepair,
+  haltFromAutomaticRepairProfile,
   reconcileAutomaticRepair,
 } from './automatic-repair.js';
 import { inspectProgressionBase, type ProgressionBaseBlocker } from './base-guard.js';
@@ -91,6 +94,7 @@ export type PreflightBlocker =
   | 'RECOVERY_ATTENTION'
   | 'SELECTION_BLOCKED'
   | 'AUTOMATIC_REPAIR_EXHAUSTED'
+  | 'AUTOMATIC_REPAIR_PROFILE_MISMATCH'
   | 'INCONSISTENT_EVIDENCE'
   | 'HISTORICAL_GAP'
   | 'INVALID_EVIDENCE'
@@ -111,6 +115,7 @@ export interface PreflightResult {
 export interface PreflightInput {
   readonly paths: HarnessPaths;
   readonly loaded: LoadedPlan;
+  readonly requestedProfileId: string;
   /**
    * Injetável SÓ para teste. Em produção a adoção roda os gates oficiais —
    * relaxar isso aqui seria criar uma adoção de segunda classe.
@@ -409,6 +414,15 @@ async function runAutomaticRepairStage(
   const taskId = halted?.id ?? selected?.task?.id ?? null;
   if (taskId === null) return null;
 
+  const pendingDecision = await decideAutomaticRepair(input.paths, taskId);
+  const profileHalt = haltFromAutomaticRepairProfile(
+    pendingDecision,
+    taskId,
+    input.requestedProfileId,
+  );
+  if (profileHalt) {
+    return { blocker: AUTOMATIC_REPAIR_PROFILE_MISMATCH, reason: profileHalt.reason };
+  }
   const { decision } = await reconcileAutomaticRepair({ paths: input.paths, taskId });
   return haltFromRepairDecision(decision);
 }

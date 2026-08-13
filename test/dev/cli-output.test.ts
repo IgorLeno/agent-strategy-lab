@@ -398,6 +398,46 @@ describe('resumo da iteração: quota, tempo e dólar', () => {
     expect(detail['subscription_usage_record']).toEqual(USAGE);
     expect(detail['provider_estimated_api_equivalent_usd']).toBe(0.9016);
   });
+
+  it('REPAIR manual não recebe metadados de reparo automático', () => {
+    const detail = detailIteration(iterationInput({ attemptKind: 'REPAIR' }));
+
+    expect(detail['attempt_kind']).toBe('REPAIR');
+    expect(detail).not.toHaveProperty('automatic_repair');
+    expect(detail).not.toHaveProperty('repair_source_attempt');
+    expect(detail).not.toHaveProperty('automatic_repair_consumed');
+  });
+
+  it('REPAIR automático reporta somente o fato e o attempt fonte', () => {
+    const detail = detailIteration(
+      iterationInput({
+        attemptKind: 'REPAIR',
+        automaticRepair: true,
+        repairSourceAttempt: 1,
+      }),
+    );
+
+    expect(detail).toMatchObject({
+      automatic_repair: true,
+      repair_source_attempt: 1,
+    });
+    expect(detail).not.toHaveProperty('automatic_repair_consumed');
+  });
+
+  it('REPAIR automático com INFRA_ERROR não inventa consumo capability', () => {
+    const detail = detailIteration(
+      iterationInput({
+        attemptKind: 'REPAIR',
+        automaticRepair: true,
+        repairSourceAttempt: 1,
+        launch: 'INFRA_ERROR',
+        close: null,
+      }),
+    );
+
+    expect(detail['automatic_repair']).toBe(true);
+    expect(detail).not.toHaveProperty('automatic_repair_consumed');
+  });
 });
 
 // ---------------------------------------------------------------------------

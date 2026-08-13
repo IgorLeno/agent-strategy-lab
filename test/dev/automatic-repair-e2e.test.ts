@@ -15,7 +15,10 @@ import {
   reportPath,
   writeLaunchRecord,
   writePacket,
+  writeValidationFailedAttempt,
 } from '../../dev/lib/records.js';
+import { retryAbandonedAttempt } from '../../dev/lib/retry.js';
+import { retryFailedAttempt } from '../../dev/lib/retry-failed.js';
 import {
   buildInitialState,
   ensureRuntimeDirs,
@@ -26,6 +29,7 @@ import {
 import { commitAll, makeSandboxRepo, runDevCli, type Sandbox } from './helpers.js';
 
 const PROFILE = 'fake-orchestrator-v2';
+const OTHER_PROFILE = 'fake-orchestrator-manual-v3';
 const PLAN = `
 schema_version: 1
 tasks:
@@ -69,7 +73,14 @@ beforeEach(async () => {
   sandbox = await makeSandboxRepo(PLAN);
   paths = resolveHarnessPaths(sandbox.root);
   await mkdir(path.join(sandbox.root, 'dev', 'profiles'), { recursive: true });
-  await writeFile(path.join(sandbox.root, 'dev', 'profiles', `${PROFILE}.yaml`), PROFILE_YAML, 'utf8');
+  await Promise.all([
+    writeFile(path.join(sandbox.root, 'dev', 'profiles', `${PROFILE}.yaml`), PROFILE_YAML, 'utf8'),
+    writeFile(
+      path.join(sandbox.root, 'dev', 'profiles', `${OTHER_PROFILE}.yaml`),
+      PROFILE_YAML.replace(`id: ${PROFILE}`, `id: ${OTHER_PROFILE}`),
+      'utf8',
+    ),
+  ]);
   const baseline = await commitAll(sandbox.root, 'perfil orchestrator-owned');
   loaded = await loadPlan(paths.planFile);
   await ensureRuntimeDirs(paths);
@@ -83,11 +94,67 @@ afterEach(async () => {
   await rm(sandbox.root, { recursive: true, force: true });
 });
 
-function orchestrate(mode: string, extra: readonly string[] = []) {
+function orchestrate(mode: string, extra: readonly string[] = [], profile = PROFILE) {
   return runDevCli(
     'dev-orchestrate.ts',
-    ['--repo', sandbox.root, '--profile', PROFILE, ...extra],
+    ['--repo', sandbox.root, '--profile', profile, ...extra],
     { AGENTLAB_DEV_DIR: sandbox.devDir, AGENTLAB_FAKE_MODE: mode },
+  );
+}
+
+function hex64(seed: string): string {
+  const hex = [...seed].map((character) => (/[0-9a-f]/i.test(character) ? character : 'a')).join('');
+  return hex.padEnd(64, '0').slice(0, 64);
+}
+
+async function seedArchivedValidationFail(attempt: number, profile = PROFILE): Promise<void> {
+  const baseSha = (await readState(paths)).authorized_head_sha!;
+  await writeValidationFailedAttempt(paths, {
+    schema_version: 1,
+    task_id: 'T1',
+    attempt,
+    source_base_sha: baseSha,
+    profile_id: profile,
+    worker_self_reported_result: 'SUCCESS',
+    report_candidate_commit: null,
+    orchestrator_verdict: 'REJECTED_BY_OFFICIAL_VALIDATION',
+    finalization_mode: 'normal',
+    launch_record_sha256: hex64(`launch-${attempt}`),
+    original_completion_sha256: hex64(`completion-${attempt}`),
+    report_sha256: hex64(`report-${attempt}`),
+    handoff_draft_sha256: hex64(`handoff-${attempt}`),
+    source_binding_sha256: hex64(`binding-${attempt}`),
+    patch_fingerprint: hex64(`patch-${attempt}`),
+    changed_files: ['src/t1.txt'],
+    original_validation_results: [
+      {
+        argv: ['grep', '-qx', 'repaired', 'src/t1.txt'],
+        exit_code: 1,
+        timed_out: false,
+        duration_ms: 1,
+      },
+    ],
+    change_bundle: {
+      manifest_path: `failed-attempts/T1/attempt-${attempt}/changes-manifest.json`,
+      manifest_sha256: hex64(`manifest-${attempt}`),
+      patch_path: `failed-attempts/T1/attempt-${attempt}/changes.patch`,
+      patch_sha256: hex64(`patch-bytes-${attempt}`),
+      patch_size_bytes: 12,
+    },
+    reason_code: 'OFFICIAL_VALIDATION_FAILURE',
+    reason: `attempt ${attempt} reprovado pela validation oficial`,
+    archived_at: '2026-08-13T18:00:00.000Z',
+  });
+  await writeState(
+    paths,
+    withTaskState(await readState(paths), 'T1', {
+      status: 'READY',
+      phase: null,
+      attempts: attempt,
+      process: null,
+      candidate_commit: null,
+      accepted_commit: null,
+    }),
   );
 }
 
@@ -328,5 +395,173 @@ describe('dev-orchestrate — reparo automático bounded da validation oficial',
       automatic_repair: true,
       repair_source_attempt: 1,
     });
+  }, 60_000);
+
+  it('segundo FAIL permanece bloqueado até dev-retry-failed reabrir a escalada manual', async () => {
+    const exhausted = await orchestrate('official-fail', ['--max-iterations', '1']);
+    expect(JSON.parse(exhausted.stdout).stopped_by).toBe(AUTOMATIC_REPAIR_EXHAUSTED);
+    expect((await readState(paths)).tasks[0]?.status).toBe('FAIL');
+
+    await retryFailedAttempt({
+      paths,
+      taskId: 'T1',
+      reasonCode: 'OFFICIAL_VALIDATION_FAILURE',
+      reason: 'humano aprovou nova tentativa com perfil escalado',
+    });
+    expect((await readState(paths)).tasks[0]).toMatchObject({ status: 'READY', attempts: 2 });
+    expect(await readValidationFailedAttempt(paths, 'T1', 2)).not.toBeNull();
+
+    const escalated = await orchestrate(
+      'official-fail-then-repair',
+      ['--max-iterations', '1', '--verbose'],
+      OTHER_PROFILE,
+    );
+    const output = JSON.parse(escalated.stdout) as {
+      profile_id: string;
+      iterations: {
+        attempt_kind: string;
+        automatic_repair?: boolean;
+        repair_source_attempt?: number;
+      }[];
+    };
+    expect(output.profile_id).toBe(OTHER_PROFILE);
+    expect(output.iterations[0]).toMatchObject({ attempt_kind: 'REPAIR' });
+    expect(output.iterations[0]).not.toHaveProperty('automatic_repair');
+    expect(output.iterations[0]).not.toHaveProperty('repair_source_attempt');
+    expect((await readLaunchRecord(paths, 'T1'))?.profile_id).toBe(OTHER_PROFILE);
+  }, 60_000);
+
+  it('automatic repair com worker FAILURE para como FAIL normal', async () => {
+    const result = await orchestrate('official-fail-then-worker-failure', [
+      '--max-iterations',
+      '1',
+    ]);
+    const output = JSON.parse(result.stdout) as {
+      stopped_by: string;
+      iteration_count: number;
+      iterations: { result: string }[];
+    };
+
+    expect(output.stopped_by).toBe('FAIL');
+    expect(output.iteration_count).toBe(2);
+    expect(output.iterations.map((iteration) => iteration.result)).toEqual(['FAIL', 'FAIL']);
+    expect(output.stopped_by).not.toBe(AUTOMATIC_REPAIR_EXHAUSTED);
+  }, 60_000);
+
+  it('profile divergente do repair pendente bloqueia antes do spawn', async () => {
+    await seedArchivedValidationFail(1, PROFILE);
+
+    const result = await orchestrate('official-fail-then-repair', ['--max-iterations', '1'], OTHER_PROFILE);
+    const output = JSON.parse(result.stdout) as {
+      stopped_by: string;
+      iteration_count: number;
+      preflight: { blocker: string };
+    };
+
+    expect(output.stopped_by).toBe('AUTOMATIC_REPAIR_PROFILE_MISMATCH');
+    expect(output.preflight.blocker).toBe('AUTOMATIC_REPAIR_PROFILE_MISMATCH');
+    expect(output.iteration_count).toBe(0);
+    expect((await readState(paths)).tasks[0]).toMatchObject({ status: 'READY', attempts: 1 });
+    expect(await readLaunchRecord(paths, 'T1')).toBeNull();
+
+    const skipped = await orchestrate(
+      'official-fail-then-repair',
+      ['--max-iterations', '1', '--skip-preflight'],
+      OTHER_PROFILE,
+    );
+    const skippedOutput = JSON.parse(skipped.stdout) as {
+      stopped_by: string;
+      iteration_count: number;
+    };
+    expect(skippedOutput.stopped_by).toBe('AUTOMATIC_REPAIR_PROFILE_MISMATCH');
+    expect(skippedOutput.iteration_count).toBe(0);
+    expect((await readState(paths)).tasks[0]).toMatchObject({ status: 'READY', attempts: 1 });
+    expect(await readLaunchRecord(paths, 'T1')).toBeNull();
+  }, 60_000);
+
+  it('profile exigido pelo repair pendente é aceito', async () => {
+    await seedArchivedValidationFail(1, PROFILE);
+
+    const result = await orchestrate('official-fail-then-repair', ['--max-iterations', '1'], PROFILE);
+    const output = JSON.parse(result.stdout) as {
+      profile_id: string;
+      iteration_count: number;
+      iterations: { attempt_kind: string; result: string }[];
+    };
+
+    expect(output.profile_id).toBe(PROFILE);
+    expect(output.iteration_count).toBe(1);
+    expect(output.iterations[0]).toMatchObject({ attempt_kind: 'REPAIR', result: 'PASS' });
+    expect((await readLaunchRecord(paths, 'T1'))?.profile_id).toBe(PROFILE);
+  }, 60_000);
+
+  it('uma invocação não mistura o profile do repair com o das iterações seguintes', async () => {
+    await seedArchivedValidationFail(1, PROFILE);
+
+    const result = await orchestrate('official-fail-then-repair', ['--max-iterations', '2'], PROFILE);
+    const output = JSON.parse(result.stdout) as {
+      profile_id: string;
+      iterations: { task_id: string }[];
+    };
+
+    expect(output.profile_id).toBe(PROFILE);
+    expect(output.iterations.some((iteration) => iteration.task_id === 'T2')).toBe(true);
+    expect((await readLaunchRecord(paths, 'T1'))?.profile_id).toBe(PROFILE);
+    expect((await readLaunchRecord(paths, 'T2'))?.profile_id).toBe(PROFILE);
+  }, 60_000);
+
+  it('retryAbandonedAttempt reabre READY sem criar HISTORICAL_GAP na orquestração', async () => {
+    const baseSha = (await readState(paths)).authorized_head_sha!;
+    const process = {
+      pid: 999_999,
+      pgid: 999_999,
+      started_at: '2026-08-13T18:00:00.000Z',
+      proc_start_ticks: 1,
+      command_sha256: hex64('abandoned-process'),
+    };
+    await writeState(
+      paths,
+      withTaskState(await readState(paths), 'T1', {
+        status: 'RUNNING',
+        phase: 'FINALIZING',
+        attempts: 1,
+        base_sha: baseSha,
+        process,
+        candidate_commit: null,
+        accepted_commit: null,
+      }),
+    );
+    await writeLaunchRecord(paths, {
+      schema_version: 1,
+      task_id: 'T1',
+      profile_id: PROFILE,
+      execution_policy: {
+        commit_owner: 'orchestrator',
+        official_validation_owner: 'orchestrator',
+        worker_validation_policy: 'targeted',
+      },
+      argv: ['node', 'fixtures/fake-worker.mjs'],
+      process,
+      launch_id: '123e4567-e89b-42d3-a456-426614174000',
+      survivors_killed: [],
+      survivors_remaining: [],
+      started_at: process.started_at,
+      finished_at: '2026-08-13T18:00:01.000Z',
+      duration_ms: 1,
+      exit_code: 0,
+      timed_out: false,
+      controlled: {},
+      billing: null,
+    });
+    await retryAbandonedAttempt({
+      paths,
+      taskId: 'T1',
+      reason: 'abandono manual antes de nova tentativa',
+    });
+
+    const result = await orchestrate('official-fail-then-repair', ['--max-iterations', '1']);
+    const output = JSON.parse(result.stdout) as { stopped_by: string; iteration_count: number };
+    expect(output.stopped_by).not.toBe('HISTORICAL_GAP');
+    expect(output.iteration_count).toBeGreaterThan(0);
   }, 60_000);
 });

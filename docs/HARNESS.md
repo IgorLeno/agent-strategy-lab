@@ -96,6 +96,23 @@ profile**. Se esse repair também falhar na validation oficial, o fluxo para
 (`AUTOMATIC_REPAIR_EXHAUSTED`) e exige intervenção humana. Não existe terceiro
 repair automático.
 
+A tarefa permanece `FAIL` depois do segundo FAIL oficial. Para uma nova
+tentativa ou escalada, o humano precisa inspecionar a evidência e reabrir
+explicitamente o lifecycle:
+
+```bash
+pnpm dev-retry-failed --task <task> \
+  --reason-code OFFICIAL_VALIDATION_FAILURE \
+  --reason '<decisão humana>'
+pnpm dev-orchestrate --profile <profile escolhido pelo humano>
+```
+
+O `READY` produzido por `dev-retry-failed` é o gate humano: com dois
+`ValidationFailedAttemptRecord`s, a policy automática fica esgotada, mas não
+bloqueia a orquestração normal nem dispara outro repair automático. O próximo
+packet continua `REPAIR`, usando os diagnostics do último FAIL oficial, e o
+profile é o escolhido nessa nova invocação.
+
 A autorização sai dos `ValidationFailedAttemptRecord`s conectados, não do
 número operacional do attempt. `INFRA_ERROR` é capability-neutral: um INFRA
 antes do primeiro FAIL oficial não consome o repair, e um INFRA durante o
@@ -103,6 +120,17 @@ repair não o consome como falha de capability. Worker FAILURE, PENDING,
 TIMED_OUT, PREFLIGHT_BLOCKED e evidência inconsistente/gap **não** entram
 nesta automação — mantêm as políticas atuais. Evidência corrupta falha
 fechada: nenhum provider é lançado.
+
+`AttemptAbandonmentRecord` é uma fronteira manual conhecida, não um gap nem
+um INFRA: a policy automática não atravessa esse attempt para reativar um FAIL
+oficial anterior. Ausência de qualquer lifecycle record conhecido continua
+`HISTORICAL_GAP`; records incompatíveis no mesmo attempt continuam fail-closed.
+
+Enquanto houver exatamente um repair automático pendente, o `--profile`
+solicitado precisa ser o mesmo do `ValidationFailedAttemptRecord` fonte.
+Divergência para em `AUTOMATIC_REPAIR_PROFILE_MISMATCH` antes de spawn ou novo
+attempt e orienta a rerodar com o profile exigido. Assim uma invocação nunca
+mistura profiles enquanto reporta um único `profile_id` no topo.
 
 O repair é um subciclo da tentativa primária. `--max-iterations` limita
 tarefas/ciclos primários, não impede o único repair bounded da mesma tarefa:

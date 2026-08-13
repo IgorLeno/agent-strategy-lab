@@ -79,6 +79,7 @@ function preflightInput(overrides: Partial<PreflightInput> = {}): PreflightInput
   return {
     paths,
     loaded,
+    requestedProfileId: 'fake-worker-v1',
     validationRunner: passingValidation,
     now: () => '2026-08-12T15:00:00.000Z',
     ...overrides,
@@ -861,7 +862,7 @@ describe('pre-flight: repair diagnostics across infra attempts', () => {
     expect(await readLaunchRecord(paths, 'T1')).toBeNull();
   });
 
-  it('dois ValidationFailedAttemptRecords => AUTOMATIC_REPAIR_EXHAUSTED, zero provider', async () => {
+  it('READY com dois ValidationFailedAttemptRecords preserva a escalada manual', async () => {
     await writeValidationFailedAttempt(paths, seedValidationFailed('T1', 1, baseline));
     await writeValidationFailedAttempt(paths, seedValidationFailed('T1', 2, baseline));
     await writeState(
@@ -875,8 +876,14 @@ describe('pre-flight: repair diagnostics across infra attempts', () => {
     );
 
     const result = await runOrchestrationPreflight(preflightInput());
-    expect(result.status).toBe('BLOCKED');
-    expect(result.blocker).toBe('AUTOMATIC_REPAIR_EXHAUSTED');
+    expect(result.status).toBe('READY');
+    expect(result.blocker).toBeNull();
+    expect(result.next).toMatchObject({
+      task_id: 'T1',
+      attempt: 3,
+      attempt_kind: 'REPAIR',
+      ready_to_launch: true,
+    });
     expect(await packetCount()).toBe(0);
     expect(await readLaunchRecord(paths, 'T1')).toBeNull();
   });

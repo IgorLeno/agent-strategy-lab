@@ -5,6 +5,7 @@ import {
 } from './retry-failed.js';
 import type { HarnessPaths } from './paths.js';
 import {
+  readAttemptAbandonment,
   readCompletion,
   readInfraFailedAttempt,
   readLaunchRecord,
@@ -27,6 +28,7 @@ export const AUTOMATIC_REPAIR_REASON =
   'reparo automático bounded após a primeira falha da validation oficial';
 
 export const AUTOMATIC_REPAIR_EXHAUSTED = 'AUTOMATIC_REPAIR_EXHAUSTED';
+export const AUTOMATIC_REPAIR_PROFILE_MISMATCH = 'AUTOMATIC_REPAIR_PROFILE_MISMATCH';
 
 export type AutomaticRepairBlockCode =
   | 'INCONSISTENT_EVIDENCE'
@@ -55,6 +57,7 @@ export type AutomaticRepairDecision =
 
 type HistoryWalk =
   | { readonly status: 'ok'; readonly records: readonly ValidationFailedAttemptRecord[] }
+  | { readonly status: 'boundary'; readonly attempt: number }
   | { readonly status: 'inconsistent'; readonly attempt: number; readonly reason: string }
   | { readonly status: 'gap'; readonly attempt: number; readonly reason: string }
   | { readonly status: 'invalid'; readonly attempt: number; readonly reason: string };
@@ -83,9 +86,10 @@ function errorMessage(error: unknown): string {
 }
 
 /**
- * Caminha de `fromAttempt` até 1. Cada attempt precisa de Validation OU Infra.
- * Os dois no mesmo attempt é inconsistência. Ausência é gap. A ordem dos
- * records devolvidos é cronológica (attempt crescente).
+ * Caminha de `fromAttempt` até 1. Cada attempt precisa de exatamente um record
+ * conhecido. Validation conta capability; Infra é neutro; Abandonment é uma
+ * fronteira manual e encerra a automação sem atravessar o histórico anterior.
+ * Mais de um record no mesmo attempt é inconsistência; ausência é gap.
  */
 async function walkValidationFails(
   paths: HarnessPaths,
@@ -97,9 +101,11 @@ async function walkValidationFails(
   for (let current = fromAttempt; current >= 1; current -= 1) {
     let validation: ValidationFailedAttemptRecord | null;
     let infra;
+    let abandonment;
     try {
       validation = await readValidationFailedAttempt(paths, taskId, current);
       infra = await readInfraFailedAttempt(paths, taskId, current);
+      abandonment = await readAttemptAbandonment(paths, taskId, current);
     } catch (error) {
       return {
         status: 'invalid',
@@ -107,13 +113,15 @@ async function walkValidationFails(
         reason: `attempt ${current} de ${taskId} tem record ilegível: ${errorMessage(error)}`,
       };
     }
-    if (validation !== null && infra !== null) {
+    const recordCount = [validation, infra, abandonment].filter((record) => record !== null).length;
+    if (recordCount > 1) {
       return {
         status: 'inconsistent',
         attempt: current,
-        reason: `attempt ${current} de ${taskId} tem ValidationFailedAttemptRecord e InfraFailedAttemptRecord simultâneos`,
+        reason: `attempt ${current} de ${taskId} tem lifecycle records incompatíveis simultâneos`,
       };
     }
+    if (abandonment !== null) return { status: 'boundary', attempt: current };
     if (validation !== null) {
       found.push(validation);
       continue;
@@ -122,7 +130,7 @@ async function walkValidationFails(
     return {
       status: 'gap',
       attempt: current,
-      reason: `attempt ${current} de ${taskId} sem record de validation nem de infra`,
+      reason: `attempt ${current} de ${taskId} sem lifecycle record conhecido`,
     };
   }
   return { status: 'ok', records: found.reverse() };
@@ -130,6 +138,7 @@ async function walkValidationFails(
 
 function fromWalk(walk: HistoryWalk): AutomaticRepairDecision | null {
   if (walk.status === 'ok') return null;
+  if (walk.status === 'boundary') return { action: 'NOT_APPLICABLE' };
   if (walk.status === 'inconsistent') return blocked('INCONSISTENT_EVIDENCE', walk.reason);
   if (walk.status === 'gap') return blocked('HISTORICAL_GAP', walk.reason);
   return blocked('INVALID_EVIDENCE', walk.reason);
@@ -247,21 +256,27 @@ export async function decideAutomaticRepair(
 
     let currentValidation;
     let currentInfra;
+    let currentAbandonment;
     try {
       currentValidation = await readValidationFailedAttempt(paths, taskId, task.attempts);
       currentInfra = await readInfraFailedAttempt(paths, taskId, task.attempts);
+      currentAbandonment = await readAttemptAbandonment(paths, taskId, task.attempts);
     } catch (error) {
       return blocked(
         'INVALID_EVIDENCE',
         `attempt ${task.attempts} de ${taskId} tem record ilegível: ${errorMessage(error)}`,
       );
     }
-    if (currentValidation !== null && currentInfra !== null) {
+    const currentRecordCount = [currentValidation, currentInfra, currentAbandonment].filter(
+      (record) => record !== null,
+    ).length;
+    if (currentRecordCount > 1) {
       return blocked(
         'INCONSISTENT_EVIDENCE',
-        `attempt ${task.attempts} de ${taskId} tem ValidationFailedAttemptRecord e InfraFailedAttemptRecord simultâneos`,
+        `attempt ${task.attempts} de ${taskId} tem lifecycle records incompatíveis simultâneos`,
       );
     }
+    if (currentAbandonment !== null) return { action: 'NOT_APPLICABLE' };
     if (currentInfra !== null) return { action: 'NOT_APPLICABLE' };
     if (currentValidation !== null) {
       const history = await walkValidationFails(paths, taskId, task.attempts - 1);
@@ -273,11 +288,13 @@ export async function decideAutomaticRepair(
     return decideFromUnarchivedFail(paths, taskId, task.attempts);
   }
 
-  // READY: a cadeia 1..attempts tem que estar explicada por records.
+  // READY com dois FAILs oficiais só existe após `dev-retry-failed`: essa
+  // reabertura explícita é o gate humano para uma tentativa/escalada normal.
   const history = await walkValidationFails(paths, taskId, task.attempts);
   if (history.status !== 'ok') {
     return fromWalk(history) ?? { action: 'NOT_APPLICABLE' };
   }
+  if (history.records.length >= 2) return { action: 'NOT_APPLICABLE' };
   return allowedFromRecords(history.records, false);
 }
 
@@ -291,6 +308,22 @@ export function haltFromAutomaticRepair(
     return { status: decision.code, reason: decision.reason };
   }
   return null;
+}
+
+export function haltFromAutomaticRepairProfile(
+  decision: AutomaticRepairDecision,
+  taskId: string,
+  requestedProfileId: string,
+): { readonly status: typeof AUTOMATIC_REPAIR_PROFILE_MISMATCH; readonly reason: string } | null {
+  if (decision.action !== 'REPAIR_ALLOWED' || decision.profile_id === requestedProfileId) {
+    return null;
+  }
+  return {
+    status: AUTOMATIC_REPAIR_PROFILE_MISMATCH,
+    reason:
+      `automatic repair de ${taskId} exige profile ${decision.profile_id}; ` +
+      `rerode com --profile ${decision.profile_id}`,
+  };
 }
 
 export interface AutomaticRepairReconciliation {
