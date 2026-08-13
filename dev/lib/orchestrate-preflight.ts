@@ -1,3 +1,7 @@
+import {
+  AUTOMATIC_REPAIR_EXHAUSTED,
+  reconcileAutomaticRepair,
+} from './automatic-repair.js';
 import { inspectProgressionBase, type ProgressionBaseBlocker } from './base-guard.js';
 import { gitOrThrow, headSha, isAncestor, isWorkingTreeClean } from './git.js';
 import {
@@ -12,7 +16,7 @@ import type { HarnessPaths } from './paths.js';
 import type { LoadedPlan } from './plan.js';
 import { readMaintenanceRecord } from './records.js';
 import { isRecoveryClean, recover, type Reconciliation } from './recover.js';
-import { readPreviousAttemptDiagnostics } from './retry-failed.js';
+import { InconsistentAttemptEvidenceError, readPreviousAttemptDiagnostics } from './retry-failed.js';
 import type { MaintenanceCommit, ValidationResult } from './schemas.js';
 import { selectNextTask, type SelectionStatus } from './select.js';
 import { getTaskState, readState } from './state.js';
@@ -86,6 +90,10 @@ export type PreflightBlocker =
   | 'MAINTENANCE_BLOCKED'
   | 'RECOVERY_ATTENTION'
   | 'SELECTION_BLOCKED'
+  | 'AUTOMATIC_REPAIR_EXHAUSTED'
+  | 'INCONSISTENT_EVIDENCE'
+  | 'HISTORICAL_GAP'
+  | 'INVALID_EVIDENCE'
   | ProgressionBaseBlocker;
 
 export type PreflightStatus = 'READY' | 'BLOCKED' | 'ALL_DONE';
@@ -333,11 +341,31 @@ async function runNextStage(input: PreflightInput): Promise<PreflightNext> {
   }
 
   const task = getTaskState(state, selection.task.id);
-  const previousAttemptDiagnostics = await readPreviousAttemptDiagnostics(
-    paths,
-    selection.task.id,
-    task.attempts,
-  );
+  let previousAttemptDiagnostics;
+  try {
+    previousAttemptDiagnostics = await readPreviousAttemptDiagnostics(
+      paths,
+      selection.task.id,
+      task.attempts,
+    );
+  } catch (error) {
+    if (error instanceof InconsistentAttemptEvidenceError) {
+      return {
+        status: selection.status,
+        reason: error.message,
+        task_id: selection.task.id,
+        title: selection.task.title,
+        attempt: task.attempts + 1,
+        attempt_kind: null,
+        base_sha: await headSha(paths.repoRoot),
+        authorized_head_sha: state.authorized_head_sha,
+        ready_to_launch: false,
+        blocker: null,
+        blocker_reason: error.message,
+      };
+    }
+    throw error;
+  }
   const progression = await inspectProgressionBase(paths, state);
 
   return {
@@ -353,6 +381,36 @@ async function runNextStage(input: PreflightInput): Promise<PreflightNext> {
     blocker: progression.blocker,
     blocker_reason: progression.reason,
   };
+}
+
+function haltFromRepairDecision(
+  decision: Awaited<ReturnType<typeof reconcileAutomaticRepair>>['decision'],
+): { blocker: PreflightBlocker; reason: string } | null {
+  if (decision.action === 'REPAIR_EXHAUSTED') {
+    return { blocker: AUTOMATIC_REPAIR_EXHAUSTED, reason: decision.reason };
+  }
+  if (decision.action === 'BLOCKED') {
+    return { blocker: decision.code, reason: decision.reason };
+  }
+  return null;
+}
+
+/**
+ * Conclui o archival/reopen do PRIMEIRO FAIL oficial quando a política autoriza,
+ * e recusa o terceiro capability-bearing attempt automático. Usa a mesma
+ * primitive que o loop do orquestrador.
+ */
+async function runAutomaticRepairStage(
+  input: PreflightInput,
+): Promise<{ blocker: PreflightBlocker; reason: string } | null> {
+  const state = await readState(input.paths);
+  const halted = state.tasks.find((task) => task.status === 'FAIL');
+  const selected = halted ? null : selectNextTask(input.loaded, state);
+  const taskId = halted?.id ?? selected?.task?.id ?? null;
+  if (taskId === null) return null;
+
+  const { decision } = await reconcileAutomaticRepair({ paths: input.paths, taskId });
+  return haltFromRepairDecision(decision);
 }
 
 /**
@@ -384,6 +442,19 @@ export async function runOrchestrationPreflight(
       next: null,
       blocker: 'RECOVERY_ATTENTION',
       reason: recovery.reason,
+    };
+  }
+
+  const repairHalt = await runAutomaticRepairStage(input);
+  if (repairHalt) {
+    const next = await runNextStage(input);
+    return {
+      status: 'BLOCKED',
+      maintenance,
+      recover: recovery,
+      next,
+      blocker: repairHalt.blocker,
+      reason: repairHalt.reason,
     };
   }
 

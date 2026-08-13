@@ -860,4 +860,42 @@ describe('pre-flight: repair diagnostics across infra attempts', () => {
     expect(await packetCount()).toBe(0);
     expect(await readLaunchRecord(paths, 'T1')).toBeNull();
   });
+
+  it('dois ValidationFailedAttemptRecords => AUTOMATIC_REPAIR_EXHAUSTED, zero provider', async () => {
+    await writeValidationFailedAttempt(paths, seedValidationFailed('T1', 1, baseline));
+    await writeValidationFailedAttempt(paths, seedValidationFailed('T1', 2, baseline));
+    await writeState(
+      paths,
+      withTaskState(await readState(paths), 'T1', {
+        status: 'READY',
+        attempts: 2,
+        candidate_commit: null,
+        accepted_commit: null,
+      }),
+    );
+
+    const result = await runOrchestrationPreflight(preflightInput());
+    expect(result.status).toBe('BLOCKED');
+    expect(result.blocker).toBe('AUTOMATIC_REPAIR_EXHAUSTED');
+    expect(await packetCount()).toBe(0);
+    expect(await readLaunchRecord(paths, 'T1')).toBeNull();
+  });
+
+  it('gap histórico sem record => fail closed, zero provider', async () => {
+    await writeValidationFailedAttempt(paths, seedValidationFailed('T1', 1, baseline));
+    await writeState(
+      paths,
+      withTaskState(await readState(paths), 'T1', {
+        status: 'READY',
+        attempts: 2,
+        candidate_commit: null,
+        accepted_commit: null,
+      }),
+    );
+
+    const result = await runOrchestrationPreflight(preflightInput());
+    expect(result.status).toBe('BLOCKED');
+    expect(result.blocker).toBe('HISTORICAL_GAP');
+    expect(await packetCount()).toBe(0);
+  });
 });

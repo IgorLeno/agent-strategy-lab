@@ -89,7 +89,31 @@ dev-recover      reconcilia plano + commits + completions + runtime
   commit não localizado ou fora do escopo deixam a tarefa em
   `RUNNING/FINALIZING` com diagnóstico. Retry é legítimo.
 
-`FAIL`, `TIMED_OUT`, `MISSCOPED` e `INFRA_ERROR` **param o fluxo**.
+`FAIL`, `TIMED_OUT`, `MISSCOPED` e `INFRA_ERROR` **param o fluxo**, com uma
+exceção bounded do harness: a **primeira** falha capability-bearing causada
+pela validation oficial recebe exatamente um reparo automático no **mesmo
+profile**. Se esse repair também falhar na validation oficial, o fluxo para
+(`AUTOMATIC_REPAIR_EXHAUSTED`) e exige intervenção humana. Não existe terceiro
+repair automático.
+
+A autorização sai dos `ValidationFailedAttemptRecord`s conectados, não do
+número operacional do attempt. `INFRA_ERROR` é capability-neutral: um INFRA
+antes do primeiro FAIL oficial não consome o repair, e um INFRA durante o
+repair não o consome como falha de capability. Worker FAILURE, PENDING,
+TIMED_OUT, PREFLIGHT_BLOCKED e evidência inconsistente/gap **não** entram
+nesta automação — mantêm as políticas atuais. Evidência corrupta falha
+fechada: nenhum provider é lançado.
+
+O repair é um subciclo da tentativa primária. `--max-iterations` limita
+tarefas/ciclos primários, não impede o único repair bounded da mesma tarefa:
+`--max-iterations 1` pode produzir iteration 1 = FIRST_PASS FAIL e iteration 2
+= REPAIR, sem lançar a próxima tarefa do plano. Depois do repair, se o budget
+primário acabou, a próxima tarefa não entra; se o repair falhou, o fluxo para
+na hora.
+
+`dev-orchestrate` também para em `LIMIT_REACHED` (exit 9) quando esgota
+`--max-iterations` com tarefa ainda pendente — sair com 0 e `ALL_DONE` ali
+esconderia trabalho que ninguém fez.
 
 ### Falha terminal do provider ≠ guarda operacional
 
@@ -115,10 +139,6 @@ A evidência fica em `LaunchRecord.provider_failure` (`terminal_reason`,
 `api_error_status`, texto do erro truncado + hash da íntegra, e os `signals` que
 motivaram a classificação), ao lado de `billing`, `subscription_usage` e
 `rate_limit_observations` — que continuam intactos.
-
-`dev-orchestrate` também para em `LIMIT_REACHED` (exit 9) quando esgota
-`--max-iterations` com tarefa ainda pendente — sair com 0 e `ALL_DONE` ali
-esconderia trabalho que ninguém fez.
 
 O plano precisa ser um DAG: ciclo de dependências é recusado no carregamento,
 porque um ciclo deixaria o seletor `BLOCKED` para sempre sem explicar por quê.
@@ -338,12 +358,15 @@ acompanhar uma implementação, e aceitam `--verbose` para o payload detalhado.
   `billing_mode`, `credential_source`), `warnings` e `failures`. Os ~20 checks
   que passaram só aparecem com `--verbose`; **check FAIL nunca depende dele**.
 - `dev-orchestrate`: perfil no topo (único na invocação) e, por iteração,
-  `task_id`, `attempt`, `result`, `reason`, `implementation_duration_ms`
+  `task_id`, `attempt`, `attempt_kind` (`FIRST_PASS` | `REPAIR`), `result`,
+  `reason`, `implementation_duration_ms`
   (= `LaunchRecord.duration_ms`, tempo do worker — sem probe, validação oficial
   nem fechamento), `api_equivalent_usd` (= `provider_estimated_api_equivalent_usd`,
   equivalência estimada, não cobrança) e `subscription_usage` reduzido a
   `current_used_pct` + `consumed_pp` por janela. Falha terminal do provider entra
-  resumida **sem** `--verbose`.
+  resumida **sem** `--verbose`. FIRST_PASS e o único REPAIR automático bounded
+  contam em iterações e em `total_api_equivalent_usd` separados — o custo do
+  repair não é escondido dentro do primeiro attempt.
 
 `--verbose` ACRESCENTA: probe, hashes, rótulos de janela, `rate_limit_observations`
 e identidade do processo voltam em chaves próprias, e nenhum campo do resumo muda

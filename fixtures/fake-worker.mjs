@@ -8,6 +8,8 @@
  *   failure    trabalha, commita, reporta FAILURE
  *   no-commit  reporta SUCCESS sem criar commit
  *   orchestrator-success  produz patch e SUCCESS com candidate null, sem tocar no Git
+ *   official-fail         SUCCESS + patch que falha a validation oficial (grep repaired)
+ *   official-fail-then-repair  FIRST_PASS falha a validation; REPAIR escreve 'repaired'
  *   dirty      commita e ainda deixa arquivo não rastreado na árvore
  *   out-of-scope  commita alterando dev/plan.yaml
  *   timeout    ignora SIGTERM e nunca termina
@@ -57,6 +59,12 @@ function main() {
 
   let changedFiles = [];
   let candidateCommit = null;
+  const repairAttempt = packet.previous_attempt_diagnostics != null;
+  const skipGit =
+    mode === 'no-commit' ||
+    mode === 'orchestrator-success' ||
+    mode === 'official-fail' ||
+    mode === 'official-fail-then-repair';
 
   if (mode === 'out-of-scope') {
     const planFile = path.join(repoRoot, 'dev', 'plan.yaml');
@@ -65,11 +73,19 @@ function main() {
   } else if (mode !== 'no-commit') {
     const relative = path.join('src', `${packet.task_id.toLowerCase()}.txt`);
     mkdirSync(path.join(repoRoot, 'src'), { recursive: true });
-    writeFileSync(path.join(repoRoot, relative), `feito por ${packet.task_id}\n`);
+    const contents =
+      mode === 'official-fail'
+        ? 'broken\n'
+        : mode === 'official-fail-then-repair'
+          ? repairAttempt
+            ? 'repaired\n'
+            : 'broken\n'
+          : `feito por ${packet.task_id}\n`;
+    writeFileSync(path.join(repoRoot, relative), contents);
     changedFiles = [relative];
   }
 
-  if (mode !== 'no-commit' && mode !== 'orchestrator-success') {
+  if (!skipGit) {
     git(['add', '-A']);
     git(['commit', '-q', '-m', `${packet.task_id}: ${packet.title}`]);
     candidateCommit = git(['rev-parse', 'HEAD']);

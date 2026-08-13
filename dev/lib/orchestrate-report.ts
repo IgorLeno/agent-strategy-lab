@@ -42,6 +42,7 @@ export interface ProviderFailureSummary {
 export interface IterationSummary {
   readonly task_id: string;
   readonly attempt: number;
+  readonly attempt_kind: 'FIRST_PASS' | 'REPAIR';
   /** Veredito da tarefa: o fechamento quando houve, senão a classificação do launch. */
   readonly result: string;
   readonly reason: string;
@@ -100,6 +101,9 @@ export interface IterationInput {
   readonly close: string | null;
   readonly reason: string;
   readonly record: LaunchRecord | null;
+  readonly attemptKind?: 'FIRST_PASS' | 'REPAIR';
+  readonly automaticRepair?: boolean;
+  readonly repairSourceAttempt?: number;
 }
 
 export function summarizeIteration(input: IterationInput): IterationSummary {
@@ -108,6 +112,7 @@ export function summarizeIteration(input: IterationInput): IterationSummary {
   return {
     task_id: input.taskId,
     attempt: input.attempt,
+    attempt_kind: input.attemptKind ?? 'FIRST_PASS',
     result: input.close ?? input.launch,
     reason: input.reason,
     implementation_duration_ms: durationMs,
@@ -221,6 +226,15 @@ export function detailIteration(input: IterationInput): Record<string, unknown> 
     ...summarizeIteration(input),
     launch: input.launch,
     close: input.close,
+    ...(input.attemptKind === 'REPAIR' || input.automaticRepair
+      ? {
+          automatic_repair: input.automaticRepair ?? true,
+          ...(input.repairSourceAttempt === undefined
+            ? {}
+            : { repair_source_attempt: input.repairSourceAttempt }),
+          automatic_repair_consumed: true,
+        }
+      : {}),
     provider_estimated_api_equivalent_usd:
       record?.billing?.provider_estimated_api_equivalent_usd ?? null,
     billing: record?.billing ?? null,
