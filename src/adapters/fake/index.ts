@@ -34,21 +34,17 @@
  * bruto sanitizado (mesma redação de segredo do `runner/capture.ts`, porque
  * aqui o texto NÃO é a interface interna já tipada — é texto arbitrário que
  * falhou o parse, exatamente o caso para o qual aquela redação existe).
+ *
+ * `runFakeAgent` (M51B): não roda mais o processo por conta própria — delega
+ * inteiro para `executeWithAdapter` (`runner/execute.ts`), o runtime comum
+ * que qualquer `ProviderAdapter` compartilha. Esta função sobrevive como uma
+ * conveniência de teste com o shape antigo (`FakeAgentRun`), não como uma
+ * segunda implementação de spawn/timeout/cleanup/montagem de record.
  */
 import path from 'node:path';
-import type { Readable } from 'node:stream';
 
-import { ExecutionStatus } from '../../core/enums.js';
-import {
-  executionEnvelopeSha256,
-  type ExecutionEnvelopeManifest,
-} from '../../envelope/index.js';
 import type { ExecutionRecord } from '../../schemas/index.js';
-import {
-  scheduleTimeoutEscalation,
-  startProcess,
-  type SpawnProcessOptions,
-} from '../../runner/index.js';
+import { executeWithAdapter, type ExecuteWithAdapterOptions } from '../../runner/index.js';
 import { redactString } from '../../storage/index.js';
 import type {
   AdapterInvocation,
@@ -63,6 +59,13 @@ import { AgentEvent } from '../events.js';
 export const FAKE_ADAPTER_IDENTITY = { name: 'fake', version: '1.0.0' } as const;
 
 /**
+ * Provenance registrada nas métricas lidas do evento `result` do fake agent —
+ * distinta de `identity.name` ('fake') porque descreve especificamente a
+ * origem da leitura (o fake agent), não o adapter que a interpretou.
+ */
+const FAKE_AGENT_PROVENANCE = 'fake_agent';
+
+/**
  * Prazo padrão entre o SIGTERM do timeout e o SIGKILL da escalada. Menor que
  * o default de produção (`runner/capture.ts`, 10s): o fake adapter existe
  * para testes rápidos, e um teste de timeout não deveria esperar 10s pela
@@ -70,13 +73,9 @@ export const FAKE_ADAPTER_IDENTITY = { name: 'fake', version: '1.0.0' } as const
  */
 const DEFAULT_GRACE_PERIOD_MS = 200;
 
-export interface RunFakeAgentOptions extends SpawnProcessOptions {
-  /** Tudo que compõe o envelope de execução, exceto o adapter — este módulo é quem o preenche. */
-  readonly manifest: Omit<ExecutionEnvelopeManifest, 'adapter'>;
+export interface RunFakeAgentOptions extends Omit<ExecuteWithAdapterOptions, 'gracePeriodMs'> {
   /** Prazo entre o SIGTERM do timeout e o SIGKILL da escalada. Default: 200ms. */
   readonly gracePeriodMs?: number;
-  /** Teto de `confirmCleanup` depois do kill do group. Default: o de `runner/process-group.ts`. */
-  readonly cleanupConfirmTimeoutMs?: number;
 }
 
 /** Linha de stdout que não corresponde à interface interna — preservada, não descartada. */
@@ -89,107 +88,22 @@ export interface FakeAgentRun {
   readonly events: FakeAgentEvent[];
 }
 
-/** Provenance registrada nas métricas lidas do evento `result` do fake agent. */
-const FAKE_AGENT_PROVENANCE = 'fake_agent';
-
 /**
  * Executa o fake agent até o fim e devolve `ExecutionRecord` + os eventos
  * normalizados que ele emitiu.
  *
- * `TIMED_OUT` tem precedência sobre qualquer outra leitura do stream: se o
- * timeout venceu, o que o processo chegou a emitir antes do sinal não muda a
- * dimensão de execução. Sem timeout, `COMPLETED` exige as duas coisas: o
- * processo saiu com exit code 0 *e* o último evento é um `result` — de
- * outcome `success` ou `failure`, os dois igualmente completos. Um exit 0
- * sem esse evento, ou qualquer exit code diferente de 0, não é evidência de
- * execução completa — vira `CRASHED`.
+ * Conveniência de teste sobre `executeWithAdapter(fakeAdapter, options)`
+ * (M51B): o shape (`FakeAgentRun`, default de `gracePeriodMs`) é o que os
+ * testes de M25/M26 já esperavam, mas spawn, timeout, cleanup e a montagem
+ * do `ExecutionRecord` são inteiramente do runtime comum — nada disso é
+ * reimplementado aqui.
  */
 export async function runFakeAgent(options: RunFakeAgentOptions): Promise<FakeAgentRun> {
-  const manifest: ExecutionEnvelopeManifest = {
-    ...options.manifest,
-    adapter: FAKE_ADAPTER_IDENTITY,
-  };
-  const envelopeSha256 = executionEnvelopeSha256(manifest);
-
-  const startedAt = Date.now();
-  const started = await startProcess({
-    argv: options.argv,
-    cwd: options.cwd,
-    ...(options.env === undefined ? {} : { env: options.env }),
+  const run = await executeWithAdapter(fakeAdapter, {
+    ...options,
+    gracePeriodMs: options.gracePeriodMs ?? DEFAULT_GRACE_PERIOD_MS,
   });
-  const escalation = scheduleTimeoutEscalation(
-    started.child,
-    started.pgid,
-    options.manifest.timeout_ms,
-    options.gracePeriodMs ?? DEFAULT_GRACE_PERIOD_MS,
-    options.cleanupConfirmTimeoutMs,
-  );
-  const [stdout, , outcome] = await Promise.all([
-    readAll(started.stdout),
-    readAll(started.stderr),
-    started.result,
-  ]);
-  const durationMs = Date.now() - startedAt;
-
-  // Depois do desfecho do alvo, nunca antes — ver `runner/capture.ts`. Rejeita
-  // com `ProcessGroupSurvivorError` quando um descendente sobrevive fora do
-  // process group; propaga para quem chama, do mesmo jeito que
-  // `ProcessSpawnError` propaga.
-  await escalation.confirmCleanup();
-
-  const timedOut = escalation.timedOut();
-  const events = parseAgentEventsLenient(stdout);
-  const result = events.at(-1);
-  const succeeded = !timedOut && outcome.exitCode === 0 && result?.type === 'result';
-
-  const record: ExecutionRecord = {
-    status: timedOut
-      ? ExecutionStatus.TIMED_OUT
-      : succeeded
-        ? ExecutionStatus.COMPLETED
-        : ExecutionStatus.CRASHED,
-    exit_code: outcome.exitCode,
-    duration_ms: durationMs,
-    execution_envelope_sha256: envelopeSha256,
-    metrics: {
-      tokens: {
-        value: result?.type === 'result' ? result.tokens : null,
-        provenance: FAKE_AGENT_PROVENANCE,
-      },
-      changed_files: {
-        value: result?.type === 'result' ? result.changed_files : null,
-        provenance: FAKE_AGENT_PROVENANCE,
-      },
-    },
-  };
-
-  return { record, events };
-}
-
-async function readAll(stream: Readable): Promise<string> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of stream) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
-  }
-  return Buffer.concat(chunks).toString('utf8');
-}
-
-/**
- * Interpreta cada linha não vazia de stdout como a interface interna —
- * tolerante ao contrário de `events.ts#parseAgentEvents`: uma linha que não é
- * JSON, ou que não casa com nenhuma variante de `AgentEvent`, não derruba o
- * run. Ela vira um evento `unknown` com o texto bruto sanitizado, e o parse
- * segue para a próxima linha.
- */
-function parseAgentEventsLenient(ndjson: string): FakeAgentEvent[] {
-  return ndjson
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0)
-    .map((line): FakeAgentEvent => {
-      const parsed = AgentEvent.safeParse(safeJsonParse(line));
-      return parsed.success ? parsed.data : { type: 'unknown', raw: redactString(line) };
-    });
+  return run;
 }
 
 function safeJsonParse(text: string): unknown {
@@ -204,14 +118,14 @@ function safeJsonParse(text: string): unknown {
 const FAKE_AGENT_ENTRY = path.join('fixtures', 'fake-agent', 'index.mjs');
 
 /**
- * Forma `ProviderAdapter` do fake adapter (M51A): identidade, `buildInvocation` e o parser de
- * linha. Não é o que `runFakeAgent` chama hoje — `runFakeAgent` continua lendo stdout bruto
- * direto, sem passar por este objeto — só a forma que os adapters reais (claude, codex)
- * vão seguir, exercitada aqui sem custo de provider real. Sem `executeWithAdapter` ainda: nada
- * chama `buildInvocation`/`parseLine` deste objeto em produção nesta tarefa.
+ * Forma `ProviderAdapter` do fake adapter: identidade, `buildInvocation` e o parser de linha —
+ * a mesma forma que os adapters reais (claude, codex) vão seguir. `runFakeAgent` roda este
+ * objeto através de `executeWithAdapter` (M51B); `resolveAdapter('fake')` devolve o mesmo
+ * objeto para quem quiser chamar `executeWithAdapter` diretamente.
  */
 export const fakeAdapter: ProviderAdapter = {
   identity: FAKE_ADAPTER_IDENTITY,
+  metricsProvenance: FAKE_AGENT_PROVENANCE,
   buildInvocation(options: BuildInvocationOptions): AdapterInvocation {
     return {
       argv: [process.execPath, path.join(options.cwd, FAKE_AGENT_ENTRY)],

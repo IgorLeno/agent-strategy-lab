@@ -32,6 +32,11 @@ export {
 } from './spawn.js';
 export { scheduleTimeoutEscalation, type TimeoutEscalation } from './timeout.js';
 export {
+  executeWithAdapter,
+  type AdapterExecutionRun,
+  type ExecuteWithAdapterOptions,
+} from './execute.js';
+export {
   confirmGroupCleanup,
   listDescendantPids,
   ProcessGroupSurvivorError,
