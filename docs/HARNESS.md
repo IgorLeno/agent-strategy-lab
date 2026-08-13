@@ -123,7 +123,8 @@ fechada: nenhum provider é lançado.
 
 `AttemptAbandonmentRecord` é uma fronteira manual conhecida, não um gap nem
 um INFRA: a policy automática não atravessa esse attempt para reativar um FAIL
-oficial anterior. Ausência de qualquer lifecycle record conhecido continua
+oficial anterior, mas preserva os FAILs oficiais posteriores à boundary no
+segmento atual. Ausência de qualquer lifecycle record conhecido continua
 `HISTORICAL_GAP`; records incompatíveis no mesmo attempt continuam fail-closed.
 
 Enquanto houver exatamente um repair automático pendente, o `--profile`

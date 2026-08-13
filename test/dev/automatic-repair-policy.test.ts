@@ -365,6 +365,98 @@ describe('decideAutomaticRepair — autorização por ValidationFailedAttemptRec
     const decision = await decideAutomaticRepair(paths, TASK);
     expect(decision).toMatchObject({ action: 'REPAIR_ALLOWED', profile_id: OTHER_PROFILE });
   });
+
+  it('abandonment 1 + validation arquivada 2 preserva o primeiro FAIL do segmento atual', async () => {
+    await writeAttemptAbandonment(paths, abandoned(1));
+    await writeValidationFailedAttempt(paths, validationFailed(2));
+    await setTask('READY', 2);
+
+    expect(await decideAutomaticRepair(paths, TASK)).toMatchObject({
+      action: 'REPAIR_ALLOWED',
+      source_attempt: 2,
+      profile_id: PROFILE,
+      needs_archival: false,
+    });
+  });
+
+  it('abandonment 1 + validation oficial não arquivada 2 permite archival automático', async () => {
+    await writeAttemptAbandonment(paths, abandoned(1));
+    await setTask('FAIL', 2);
+    await writeOfficialFailCompletion();
+    await writeLaunch();
+
+    expect(await decideAutomaticRepair(paths, TASK)).toMatchObject({
+      action: 'REPAIR_ALLOWED',
+      source_attempt: 2,
+      profile_id: PROFILE,
+      needs_archival: true,
+    });
+  });
+
+  it('validation 1 + abandonment 2 + validation arquivada 3 usa somente source 3', async () => {
+    await writeValidationFailedAttempt(paths, validationFailed(1));
+    await writeAttemptAbandonment(paths, abandoned(2));
+    await writeValidationFailedAttempt(paths, validationFailed(3));
+    await setTask('READY', 3);
+
+    expect(await decideAutomaticRepair(paths, TASK)).toMatchObject({
+      action: 'REPAIR_ALLOWED',
+      source_attempt: 3,
+      needs_archival: false,
+    });
+  });
+
+  it('validation 1 + abandonment 2 + validation oficial não arquivada 3 usa source 3', async () => {
+    await writeValidationFailedAttempt(paths, validationFailed(1));
+    await writeAttemptAbandonment(paths, abandoned(2));
+    await setTask('FAIL', 3);
+    await writeOfficialFailCompletion();
+    await writeLaunch();
+
+    expect(await decideAutomaticRepair(paths, TASK)).toMatchObject({
+      action: 'REPAIR_ALLOWED',
+      source_attempt: 3,
+      profile_id: PROFILE,
+      needs_archival: true,
+    });
+  });
+
+  it('abandonment 1 + validation 2 + infra 3 mantém source 2 conectado', async () => {
+    await writeAttemptAbandonment(paths, abandoned(1));
+    await writeValidationFailedAttempt(paths, validationFailed(2));
+    await writeInfraFailedAttempt(paths, infraFailed(3));
+    await setTask('READY', 3);
+
+    expect(await decideAutomaticRepair(paths, TASK)).toMatchObject({
+      action: 'REPAIR_ALLOWED',
+      source_attempt: 2,
+      needs_archival: false,
+    });
+  });
+
+  it('dois validation FAILs pós-boundary esgotam o repair automático', async () => {
+    await writeAttemptAbandonment(paths, abandoned(1));
+    await writeValidationFailedAttempt(paths, validationFailed(2));
+    await writeInfraFailedAttempt(paths, infraFailed(3));
+    await setTask('FAIL', 4);
+    await writeOfficialFailCompletion();
+    await writeLaunch();
+
+    expect(await decideAutomaticRepair(paths, TASK)).toMatchObject({
+      action: 'REPAIR_EXHAUSTED',
+      source_attempt: 2,
+      validation_fail_count: 2,
+    });
+  });
+
+  it('READY com dois validation FAILs pós-boundary mantém a escalada manual', async () => {
+    await writeAttemptAbandonment(paths, abandoned(1));
+    await writeValidationFailedAttempt(paths, validationFailed(2));
+    await writeValidationFailedAttempt(paths, validationFailed(3));
+    await setTask('READY', 3);
+
+    expect(await decideAutomaticRepair(paths, TASK)).toEqual({ action: 'NOT_APPLICABLE' });
+  });
 });
 
 describe('decideAutomaticRepair — caminhos que esta automação não cobre', () => {
@@ -456,6 +548,17 @@ describe('decideAutomaticRepair — fail closed', () => {
     if (decision.action === 'BLOCKED') {
       expect(decision.code).toBe('HISTORICAL_GAP');
     }
+  });
+
+  it('gap no segmento atual depois da boundary continua HISTORICAL_GAP', async () => {
+    await writeAttemptAbandonment(paths, abandoned(1));
+    await writeValidationFailedAttempt(paths, validationFailed(3));
+    await setTask('READY', 3);
+
+    expect(await decideAutomaticRepair(paths, TASK)).toMatchObject({
+      action: 'BLOCKED',
+      code: 'HISTORICAL_GAP',
+    });
   });
 
   it('record de validation inválido => BLOCKED', async () => {

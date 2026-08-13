@@ -57,7 +57,6 @@ export type AutomaticRepairDecision =
 
 type HistoryWalk =
   | { readonly status: 'ok'; readonly records: readonly ValidationFailedAttemptRecord[] }
-  | { readonly status: 'boundary'; readonly attempt: number }
   | { readonly status: 'inconsistent'; readonly attempt: number; readonly reason: string }
   | { readonly status: 'gap'; readonly attempt: number; readonly reason: string }
   | { readonly status: 'invalid'; readonly attempt: number; readonly reason: string };
@@ -87,9 +86,9 @@ function errorMessage(error: unknown): string {
 
 /**
  * Caminha de `fromAttempt` até 1. Cada attempt precisa de exatamente um record
- * conhecido. Validation conta capability; Infra é neutro; Abandonment é uma
- * fronteira manual e encerra a automação sem atravessar o histórico anterior.
- * Mais de um record no mesmo attempt é inconsistência; ausência é gap.
+ * conhecido. Validation conta capability; Infra é neutro; Abandonment encerra
+ * a travessia sem apagar os records já encontrados no segmento posterior à
+ * boundary. Mais de um record no mesmo attempt é inconsistência; ausência é gap.
  */
 async function walkValidationFails(
   paths: HarnessPaths,
@@ -121,7 +120,7 @@ async function walkValidationFails(
         reason: `attempt ${current} de ${taskId} tem lifecycle records incompatíveis simultâneos`,
       };
     }
-    if (abandonment !== null) return { status: 'boundary', attempt: current };
+    if (abandonment !== null) return { status: 'ok', records: found.reverse() };
     if (validation !== null) {
       found.push(validation);
       continue;
@@ -138,7 +137,6 @@ async function walkValidationFails(
 
 function fromWalk(walk: HistoryWalk): AutomaticRepairDecision | null {
   if (walk.status === 'ok') return null;
-  if (walk.status === 'boundary') return { action: 'NOT_APPLICABLE' };
   if (walk.status === 'inconsistent') return blocked('INCONSISTENT_EVIDENCE', walk.reason);
   if (walk.status === 'gap') return blocked('HISTORICAL_GAP', walk.reason);
   return blocked('INVALID_EVIDENCE', walk.reason);

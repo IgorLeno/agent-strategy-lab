@@ -510,7 +510,7 @@ describe('dev-orchestrate — reparo automático bounded da validation oficial',
     expect((await readLaunchRecord(paths, 'T2'))?.profile_id).toBe(PROFILE);
   }, 60_000);
 
-  it('retryAbandonedAttempt reabre READY sem criar HISTORICAL_GAP na orquestração', async () => {
+  it('abandonment 1 + primeiro validation FAIL 2 recebe REPAIR 3 automático no mesmo profile', async () => {
     const baseSha = (await readState(paths)).authorized_head_sha!;
     const process = {
       pid: 999_999,
@@ -560,8 +560,20 @@ describe('dev-orchestrate — reparo automático bounded da validation oficial',
     });
 
     const result = await orchestrate('official-fail-then-repair', ['--max-iterations', '1']);
-    const output = JSON.parse(result.stdout) as { stopped_by: string; iteration_count: number };
-    expect(output.stopped_by).not.toBe('HISTORICAL_GAP');
-    expect(output.iteration_count).toBeGreaterThan(0);
+    const output = JSON.parse(result.stdout) as {
+      stopped_by: string;
+      iteration_count: number;
+      profile_id: string;
+      iterations: { attempt: number; attempt_kind: string; result: string }[];
+    };
+    expect(output.stopped_by).toBe('LIMIT_REACHED');
+    expect(output.iteration_count).toBe(2);
+    expect(output.profile_id).toBe(PROFILE);
+    expect(output.iterations).toMatchObject([
+      { attempt: 2, attempt_kind: 'FIRST_PASS', result: 'FAIL' },
+      { attempt: 3, attempt_kind: 'REPAIR', result: 'PASS' },
+    ]);
+    expect(await readValidationFailedAttempt(paths, 'T1', 2)).not.toBeNull();
+    expect((await readLaunchRecord(paths, 'T1'))?.profile_id).toBe(PROFILE);
   }, 60_000);
 });
