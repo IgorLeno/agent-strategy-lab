@@ -10,11 +10,22 @@
  * Preenchido por M25 e M26 (adapter fake); adapters reais são fase posterior.
  */
 export { AgentEvent, parseAgentEvents } from './events.js';
+export type {
+  AdapterInvocation,
+  BuildInvocationOptions,
+  ParsedProviderLine,
+  ProviderAdapter,
+  ProviderEvent,
+  ProviderObservation,
+  UnknownProviderEvent,
+} from './contract.js';
 export {
   FAKE_ADAPTER_IDENTITY,
+  fakeAdapter,
   runFakeAgent,
   type FakeAgentEvent,
   type FakeAgentRun,
   type RunFakeAgentOptions,
   type UnknownAgentEvent,
 } from './fake/index.js';
+export { resolveAdapter } from './registry.js';

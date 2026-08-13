@@ -35,6 +35,7 @@
  * aqui o texto NÃO é a interface interna já tipada — é texto arbitrário que
  * falhou o parse, exatamente o caso para o qual aquela redação existe).
  */
+import path from 'node:path';
 import type { Readable } from 'node:stream';
 
 import { ExecutionStatus } from '../../core/enums.js';
@@ -49,6 +50,13 @@ import {
   type SpawnProcessOptions,
 } from '../../runner/index.js';
 import { redactString } from '../../storage/index.js';
+import type {
+  AdapterInvocation,
+  BuildInvocationOptions,
+  ParsedProviderLine,
+  ProviderAdapter,
+  UnknownProviderEvent,
+} from '../contract.js';
 import { AgentEvent } from '../events.js';
 
 /** Identidade deste adapter — entra no envelope de execução, nunca inventada por quem chama. */
@@ -72,11 +80,7 @@ export interface RunFakeAgentOptions extends SpawnProcessOptions {
 }
 
 /** Linha de stdout que não corresponde à interface interna — preservada, não descartada. */
-export interface UnknownAgentEvent {
-  readonly type: 'unknown';
-  /** Texto bruto da linha, sanitizado da mesma forma que `runner/capture.ts` redige stdout. */
-  readonly raw: string;
-}
+export type UnknownAgentEvent = UnknownProviderEvent;
 
 export type FakeAgentEvent = AgentEvent | UnknownAgentEvent;
 
@@ -195,3 +199,36 @@ function safeJsonParse(text: string): unknown {
     return undefined;
   }
 }
+
+/** Caminho do fake agent relativo à raiz do repo — o que `buildInvocation` do fake adapter aponta. */
+const FAKE_AGENT_ENTRY = path.join('fixtures', 'fake-agent', 'index.mjs');
+
+/**
+ * Forma `ProviderAdapter` do fake adapter (M51A): identidade, `buildInvocation` e o parser de
+ * linha. Não é o que `runFakeAgent` chama hoje — `runFakeAgent` continua lendo stdout bruto
+ * direto, sem passar por este objeto — só a forma que os adapters reais (claude, codex)
+ * vão seguir, exercitada aqui sem custo de provider real. Sem `executeWithAdapter` ainda: nada
+ * chama `buildInvocation`/`parseLine` deste objeto em produção nesta tarefa.
+ */
+export const fakeAdapter: ProviderAdapter = {
+  identity: FAKE_ADAPTER_IDENTITY,
+  buildInvocation(options: BuildInvocationOptions): AdapterInvocation {
+    return {
+      argv: [process.execPath, path.join(options.cwd, FAKE_AGENT_ENTRY)],
+      stdin: options.manifest.compiled_prompt,
+    };
+  },
+  parseLine(raw: string): ParsedProviderLine {
+    const parsed = AgentEvent.safeParse(safeJsonParse(raw));
+    if (!parsed.success) {
+      return { event: { type: 'unknown', raw: redactString(raw) } };
+    }
+    const observation: ParsedProviderLine['observation'] =
+      parsed.data.type === 'result'
+        ? { usage: { tokens: parsed.data.tokens }, terminal: parsed.data.outcome }
+        : undefined;
+    return observation === undefined
+      ? { event: parsed.data }
+      : { event: parsed.data, observation };
+  },
+};
