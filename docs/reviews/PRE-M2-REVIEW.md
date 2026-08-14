@@ -4,7 +4,7 @@ Pacote de revisão humana ao final de M41–M51B, corrigido em M52A (gap
 semântico do runtime comum), M52B (revisão após auditoria humana) e M52C
 (fronteira entre a prova E2E, o checklist e o pilot real).
 **Parada obrigatória**: este documento fecha o plano operacional atual
-(`dev/plan.yaml` termina em M52B). M53–M68, aprovados abaixo como sequência
+(`dev/plan.yaml` termina em M52C). M53–M68, aprovados abaixo como sequência
 final do Marco 2, só entram em `dev/plan.yaml` por uma segunda alteração após
 aprovação humana explícita a este pacote. Nada neste documento autoriza, por
 si, o início do Marco 2; depois de M68 haverá uma nova parada humana
@@ -341,7 +341,7 @@ aprovado do experimento.
 
 M52C cria uma nova parada obrigatória. **O Marco 2 (M53–M68 acima) não inicia
 sem aprovação humana explícita** a este pacote corrigido. Até lá,
-`dev/plan.yaml` permanece com M52B como última entrada. Se M53–M68 forem
+`dev/plan.yaml` permanece com M52C como última entrada. Se M53–M68 forem
 posteriormente aprovados e concluídos, M68 encerra com outra parada humana
 obrigatória: o pilot real de 12 slots só começa após aprovação explícita nova,
 posterior a M68.
