@@ -1491,3 +1491,128 @@ tasks:
         timeout_seconds: 300
       - argv: [pnpm, test]
         timeout_seconds: 900
+
+  - id: M52A
+    title: Provider observations preservadas no runtime comum
+    blocked_by: [M52]
+    objective: >-
+      Fechar o gap semântico encontrado pela revisão humana de M52: o runtime
+      comum executeWithAdapter chama adapter.parseLine(raw), que devolve
+      ParsedProviderLine { event, observation? }, mas preserva apenas .event e
+      descarta .observation. Preservar a ProviderObservation (usage, cost,
+      terminal) produzida pelo adapter através do RESULTADO do runtime comum,
+      sem misturá-la com os fatos objetivos do processo — timeout, exit code,
+      sinal, duração, cleanup/survivors, ExecutionStatus. A solução mínima
+      pode estender AdapterExecutionRun com observations ou usar representação
+      equivalente e auditável (inclusive preservar ParsedProviderLine ou
+      correlação equivalente, se for mais auditável), desde que a associação
+      entre observation e a linha/evento de origem NÃO fique ambígua quando
+      houver múltiplas observations. O ExecutionRecord continua sendo montado
+      pelo runtime com fatos objetivos e métricas normalizadas: usage.tokens
+      válido PODE alimentar metrics.tokens com provenance explícita (ausência
+      vira null + provenance, nunca zero; zero observado é zero real); cost
+      explicitamente USD/API-equivalent e compatível com o schema atual PODE
+      alimentar api_equivalent_usd com provenance, sem conversão de moeda
+      (cost incompatível permanece observation); terminal PERMANECE
+      observation, não precisa ser campo do ExecutionRecord e nunca altera
+      ExecutionStatus — terminal=failure do provider pode coexistir com
+      ExecutionStatus.COMPLETED, porque o processo completou e o resultado
+      lógico do provider foi failure. NÃO expandir
+      src/schemas/execution-record.ts apenas para armazenar terminal ou um
+      blob de provider; se a implementação revelar necessidade arquitetural
+      real de alterar o schema estável, isso exige decisão humana explícita e
+      não pode ser consequência implícita desta tarefa. Tarefa LOW-LEVEL:
+      recebe argv/cwd/env/manifest/gracePeriodMs/cleanupConfirmTimeoutMs
+      explicitamente e NÃO chama buildInvocation. A integração
+      resolveAdapter(profile.cli) -> adapter.buildInvocation(...) ->
+      argv/env/stdin -> executeWithAdapter(...) permanece diferida para M62.
+      Nenhum provider real, nenhum quota-usage.json.
+    initial_files:
+      - src/runner/execute.ts
+      - src/adapters/contract.ts
+    acceptance:
+      - ParsedProviderLine.observation não é descartada pelo runtime comum.
+      - usage, cost e terminal permanecem acessíveis no resultado da execução através de representação auditável, sem ambiguidade sobre de qual parse cada observation veio.
+      - usage.tokens válido pode alimentar ExecutionRecord.metrics.tokens com provenance explícita; ausência vira null + provenance, nunca zero.
+      - cost explicitamente USD/API-equivalent pode alimentar api_equivalent_usd; outras moedas não são convertidas e permanecem observation.
+      - terminal do provider permanece observation e não altera ExecutionStatus.
+      - ExecutionStatus continua exclusivamente derivado de fatos objetivos do processo.
+      - O fake mantém record/events observavelmente backward-compatible.
+      - Um adapter customizado prova que as observations vêm do adapter e não são inventadas pelo runtime.
+      - buildInvocation continua fora deste runtime low-level; a integração segue diferida para M62.
+      - Nenhum provider real executado e nenhum quota-usage.json lido ou escrito.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/adapters/provider-observations.test.ts]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+
+  - id: M52B
+    title: Revisão PRE-M2 corrigida após auditoria humana
+    blocked_by: [M52A]
+    objective: >-
+      Corrigir docs/reviews/PRE-M2-REVIEW.md, docs/BACKLOG.md e
+      docs/LESSONS.md após a auditoria humana do pacote M52. O documento de
+      revisão passa a descrever corretamente M51B e M52A (runtime comum
+      preservando observations, com fatos objetivos e observações de provider
+      em famílias distintas) e SUBSTITUI a proposta de Marco 2 anterior, que
+      estava superdimensionada — o documento final não pode conter duas
+      propostas de M2 concorrentes. Saem da sequência inicial e, quando
+      úteis, ficam registrados como candidatos a Marco 3 ou follow-up
+      pós-piloto: perfil de score v2 informado por taxonomy, intervalo de
+      confiança como requisito, suite de 8–12 tasks, estratégia nova ou
+      incubação como pré-requisito, sandbox de incubação, promoção
+      BENCHMARKED -> PROMOTED, Capability Matrix completa e
+      marketplace/extensions. O M2 enxuto aprovado é exatamente: M53 corpus
+      experimental inicial, M54 billing guard, M55 credential proof, M56
+      Claude invocation, M57 Claude stream parser, M58 Claude ProviderAdapter,
+      M59 Claude quota probe, M60 Codex invocation, M61 Codex ProviderAdapter,
+      M62 executeRun / integração de adapter, M63 CLI experimental, M64
+      ExperimentSpec freeze, M65 experiment runner seeded/counterbalanced, M66
+      compare, M67 E2E, M68 revisão M2 + pilot checklist. O piloto preservado
+      é Claude Sonnet 5 Medium vs Claude Sonnet 5 High, 2 arms, 3 tasks, 2
+      repetições por task/arm, 12 slots inference-bearing planejados,
+      execução sequential, seeded e interleaved/counterbalanced, mesmo
+      TaskSpec, mesma Strategy e mesmo EnvironmentProfile controlled; somente
+      QUALIFIED entra no compare; INFRA consome retry slot e NÃO vira
+      capability FAIL; resultados por task antes de agregado global; quota
+      stop em >=80%; billing guard pode impedir novo launch; Codex apenas
+      smoke real mínimo e NÃO um segundo braço completo do primeiro
+      benchmark; nenhuma execução adicional sem billing authorization. Além
+      disso, registrar em docs/LESSONS.md uma lesson DATADA sobre
+      semantic/contract coverage: equivalência de output e full suite verdes
+      não provam que todas as partes de um contrato abstrato estão realmente
+      sendo consumidas — o caso concreto é ProviderAdapter.parseLine
+      devolvendo { event, observation }, testes verificando apenas
+      record/events, executeWithAdapter descartando observation, full suite
+      verde e a lacuna só detectada pela revisão humana de M52; contratos
+      abstratos novos exigem testes de consumo/semantic coverage, não apenas
+      testes de shape e de equivalência da saída antiga. M53–M68 continuam
+      AUSENTES de dev/plan.yaml: só entram por outra alteração de plano após
+      aprovação humana explícita. Nova PARADA OBRIGATÓRIA para revisão humana
+      depois desta tarefa.
+    initial_files:
+      - docs/reviews/PRE-M2-REVIEW.md
+      - docs/BACKLOG.md
+      - docs/LESSONS.md
+    acceptance:
+      - PRE-M2-REVIEW descreve corretamente M51B e M52A, incluindo a preservação das observations no runtime comum.
+      - PRE-M2-REVIEW não contém duas propostas M2 concorrentes; a proposta antiga é substituída pela sequência M53–M68 aprovada.
+      - O M2 final usa exatamente M53 corpus, M54 billing guard, M55 credential proof, M56 Claude invocation, M57 Claude stream parser, M58 Claude ProviderAdapter, M59 Claude quota probe, M60 Codex invocation, M61 Codex ProviderAdapter, M62 executeRun / integração de adapter, M63 CLI experimental, M64 ExperimentSpec freeze, M65 experiment runner seeded/counterbalanced, M66 compare, M67 E2E e M68 revisão M2 + pilot checklist.
+      - Itens de score v2, intervalo de confiança, suite de 8–12 tasks, incubação/sandbox, promoção BENCHMARKED para PROMOTED, Capability Matrix completa e marketplace não aparecem como requisitos deste M2 inicial; quando úteis, ficam registrados como candidatos a Marco 3 ou follow-up pós-piloto.
+      - O piloto documentado usa 12 slots inference-bearing, 2 arms Sonnet 5 Medium vs High, 3 tasks e 2 repetições, sequential, seeded e counterbalanced, com mesmo TaskSpec, mesma Strategy e mesmo EnvironmentProfile controlled.
+      - O documento registra que só QUALIFIED entra no compare, que INFRA usa retry slot sem virar capability FAIL, resultados por task antes do agregado global, quota stop em >=80% e billing guard capaz de impedir novo launch.
+      - O documento registra Codex como smoke real mínimo, explicitamente não um segundo braço completo do primeiro benchmark, e que nenhuma execução adicional ocorre sem billing authorization.
+      - docs/BACKLOG.md inclui M52A e M52B.
+      - docs/LESSONS.md contém lesson datada de semantic/contract coverage, com o caso concreto de parseLine e observation descartada por executeWithAdapter sob full suite verde.
+      - M53–M68 permanecem ausentes de dev/plan.yaml e a nova parada obrigatória para revisão humana está registrada.
+      - Gates completos verdes.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, build]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
