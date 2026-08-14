@@ -841,4 +841,77 @@ documento (M53–M68 fora de `dev/plan.yaml`) e o Pilot Benchmark proposto.
 
 - BACKLOG.md reflete o estado real de M41 a M51B.
 - `docs/reviews/PRE-M2-REVIEW.md` existe com as seções do objective.
+
+A revisão humana de M52 encontrou um gap semântico em M51B (§ M52A) e uma
+proposta de Marco 2 superdimensionada com duas propostas concorrentes no
+documento (§ M52B) — corrigidos pelas duas tarefas a seguir.
+
+### M52A — Provider observations preservadas no runtime comum
+**Depende de:** M52 · **Teste:** `test/adapters/provider-observations.test.ts`
+
+Corrige o gap encontrado pela revisão humana de M52: `executeWithAdapter`
+chamava `adapter.parseLine(raw)` — que devolve `ParsedProviderLine { event,
+observation? }` — mas preservava só `.event`, descartando `.observation`
+antes de alimentar o resultado do runtime comum. `AdapterExecutionRun` ganha
+`parsedLines: ParsedProviderLine[]`, uma entrada por linha não vazia de
+stdout, na mesma ordem/índice de `events`, para que a correlação entre uma
+`ProviderObservation` e a linha de origem nunca fique ambígua mesmo com
+várias observations. `ExecutionRecord` continua reunindo só fatos objetivos
+de processo (exit code, sinal, duração, survivors, `ExecutionStatus`) vindos
+do runtime; `metrics.tokens` e `metrics.api_equivalent_usd` passam a vir da
+observation do último evento `result` (ausência vira `null` com provenance,
+custo só alimenta a métrica quando já expresso em USD/API-equivalent, sem
+conversão de moeda); `terminal` permanece observation e nunca sobrescreve
+`ExecutionStatus`. Nenhum adapter replica spawn/timeout/cleanup/montagem de
+record; `src/schemas/execution-record.ts` não é expandido para armazenar
+`terminal` ou um blob de provider. Integração real
+`resolveAdapter → buildInvocation → executeWithAdapter` continua diferida
+para M62.
+
+- `ParsedProviderLine.observation` não é descartada pelo runtime comum.
+- `usage`, `cost` e `terminal` permanecem acessíveis no resultado da
+  execução via `parsedLines`, sem ambiguidade sobre a origem de cada
+  observation.
+- Suíte existente de adapters e e2e verde sem modificação de expectativa.
+
+### M52B — Revisão PRE-M2 corrigida após auditoria humana
+**Depende de:** M52A · **Gate:** `pnpm build`
+
+Corrige `docs/reviews/PRE-M2-REVIEW.md`, `docs/BACKLOG.md` e
+`docs/LESSONS.md` após a auditoria humana de M52. O documento de revisão
+passa a descrever corretamente M51B e M52A e substitui a proposta de Marco 2
+anterior (superdimensionada, com duas propostas de M2 concorrentes) por uma
+única sequência final: M53 corpus experimental inicial, M54 billing guard,
+M55 credential proof, M56 Claude invocation, M57 Claude stream parser, M58
+Claude ProviderAdapter, M59 Claude quota probe, M60 Codex invocation, M61
+Codex ProviderAdapter, M62 executeRun / integração de adapter, M63 CLI
+experimental, M64 ExperimentSpec freeze, M65 experiment runner
+seeded/counterbalanced, M66 compare, M67 E2E, M68 revisão M2 + pilot
+checklist. Score v2, intervalo de confiança, suite de 8–12 tasks,
+incubação/sandbox, promoção `BENCHMARKED → PROMOTED`, Capability Matrix
+completa e marketplace saem da sequência inicial e ficam registrados como
+candidatos a Marco 3 ou follow-up pós-piloto. O piloto preservado é Claude
+Sonnet 5 Medium vs Claude Sonnet 5 High, 2 arms, 3 tasks, 2 repetições por
+task/arm, 12 slots inference-bearing planejados, sequential, seeded e
+interleaved/counterbalanced, mesmo `TaskSpec`/`Strategy`/`EnvironmentProfile`
+`controlled`; só `QUALIFIED` entra no compare; `INFRA` consome retry slot
+sem virar capability FAIL; resultados por task antes do agregado global;
+quota stop em ≥80%; billing guard pode impedir novo launch; Codex é smoke
+real mínimo, não um segundo braço completo; nenhuma execução adicional sem
+billing authorization. `docs/LESSONS.md` ganha uma lesson datada sobre
+semantic/contract coverage (caso concreto: `parseLine`/observation
+descartada por `executeWithAdapter` sob full suite verde). M53–M68
+continuam ausentes de `dev/plan.yaml`. **Nova parada obrigatória para
+revisão humana depois desta tarefa.**
+
+- `docs/reviews/PRE-M2-REVIEW.md` descreve corretamente M51B e M52A e não
+  contém duas propostas de M2 concorrentes.
+- O M2 final usa exatamente a sequência M53–M68 acima; itens de score v2,
+  intervalo de confiança, suite de 8–12 tasks, incubação/sandbox, promoção
+  `BENCHMARKED → PROMOTED`, Capability Matrix completa e marketplace não
+  aparecem como requisitos.
+- BACKLOG.md inclui M52A e M52B; `docs/LESSONS.md` contém a lesson datada de
+  semantic/contract coverage.
+- M53–M68 permanecem ausentes de `dev/plan.yaml`; nova parada obrigatória
+  registrada. Gates completos verdes.
 - Gates completos verdes.

@@ -382,3 +382,23 @@ Rule: INFRA_ERROR é capability-neutral. A busca de PreviousAttemptDiagnostics
 atravessa somente gaps comprovados por InfraFailedAttemptRecord; qualquer outro
 gap interrompe a cadeia. Validation e Infra no mesmo attempt é fail closed.
 REPAIR significa diagnostics conectados por evidência, não `attempt > 1`.
+
+[2026-08-14] Contexto: revisão humana de M52 — `ProviderAdapter.parseLine`
+(M51A) devolve `{ event, observation? }`; `executeWithAdapter` (M51B) monta o
+`ExecutionRecord` a partir dos eventos.
+Mistake: `executeWithAdapter` preservava só `.event` e descartava
+`.observation` (usage/cost/terminal). O teste de equivalência de M51B
+verificava apenas `record`/`events` contra o comportamento anterior do fake —
+equivalência de output, não consumo do contrato inteiro — e a suíte completa
+ficou verde com metade de `ParsedProviderLine` sendo jogada fora. A lacuna só
+foi detectada pela revisão humana de M52, não por nenhum teste automatizado;
+corrigida em M52A.
+Rule: equivalência de output e `pnpm test` verde não provam que todas as
+partes de um contrato abstrato novo estão sendo realmente consumidas. Todo
+contrato abstrato que introduz uma forma nova (aqui, `ParsedProviderLine`)
+exige teste de CONSUMO/semantic coverage — que cada campo do tipo devolvido
+chega a algum lugar observável no resultado — além dos testes de shape (o
+tipo tem os campos certos) e de equivalência da saída antiga (o comportamento
+histórico não regrediu). Shape e equivalência provam que nada quebrou; só o
+teste de consumo prova que o novo campo não está sendo silenciosamente
+descartado.

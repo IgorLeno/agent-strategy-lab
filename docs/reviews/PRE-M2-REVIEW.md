@@ -1,14 +1,16 @@
 # Revisão PRE-M2 (M52)
 
-Pacote de revisão humana ao final de M41–M51B. **Parada obrigatória**: este
-documento fecha o plano operacional atual (`dev/plan.yaml` termina em M52).
-M53–M68, propostos abaixo como documento, só entram em `dev/plan.yaml` por
-uma segunda alteração após aprovação humana explícita a este pacote. Nada
-neste documento autoriza, por si, o início do Marco 2.
+Pacote de revisão humana ao final de M41–M51B, corrigido em M52A (gap
+semântico do runtime comum) e M52B (esta revisão, após auditoria humana).
+**Parada obrigatória**: este documento fecha o plano operacional atual
+(`dev/plan.yaml` termina em M52B). M53–M68, aprovados abaixo como sequência
+final do Marco 2, só entram em `dev/plan.yaml` por uma segunda alteração após
+aprovação humana explícita a este pacote. Nada neste documento autoriza, por
+si, o início do Marco 2.
 
 ---
 
-## 1. O que foi construído em M41–M51B
+## 1. O que foi construído em M41–M52A
 
 | Tarefa | Entrega | Onde |
 | --- | --- | --- |
@@ -24,10 +26,11 @@ neste documento autoriza, por si, o início do Marco 2.
 | M50 | `ExtensionManifest` imutável + `IncubationState` separado | `src/schemas/extension.ts` |
 | M51A | `ProviderAdapter` contract + registry + fake shape | `src/adapters/contract.ts`, `src/adapters/index.ts` |
 | M51B | `executeWithAdapter` runtime comum + equivalência fake | `src/runner/execute.ts` |
+| M52A | Correção do gap semântico apontado pela revisão de M52: `ProviderObservation` (usage/cost/terminal) deixa de ser descartada pelo runtime comum | `src/runner/execute.ts`, `test/adapters/provider-observations.test.ts` |
 
-Todas as doze tarefas fecharam com `pnpm typecheck`, o teste alvo e
+Todas as treze tarefas fecharam com `pnpm typecheck`, o teste alvo e
 `pnpm test` verdes (evidência em `.dev/completions/` e nos commits
-`feat(M41)`…`feat(M51B)`).
+`feat(M41)`…`feat(M52A)`).
 
 ---
 
@@ -102,7 +105,7 @@ Dois schemas deliberadamente separados, cada um em arquivo próprio:
   default em memória — nunca escreve o arquivo por conta própria.
   `strategies/` existentes não migraram para este contrato nesta tarefa.
 
-### 2.5 `ProviderAdapter` e runtime comum (M51A/M51B) — `src/adapters/contract.ts`,
+### 2.5 `ProviderAdapter` e runtime comum (M51A/M51B/M52A) — `src/adapters/contract.ts`,
 `src/runner/execute.ts`
 
 - M51A define a **forma**: `identity`, `buildInvocation(options) → {argv,
@@ -113,12 +116,31 @@ Dois schemas deliberadamente separados, cada um em arquivo próprio:
   runtime).
 - M51B implementa `executeWithAdapter(adapter, options)` como o único lugar
   que faz spawn, timeout, cleanup de process-group e monta o
-  `ExecutionRecord` — fatos objetivos de processo (exit code, sinal,
-  duração, survivors) vindos do runtime, observações (usage, custo,
-  terminal) vindas do adapter, com provenance mantida separada entre as
-  duas fontes. Nenhum adapter replica essa mecânica. O fake passa a
-  executar através do runtime comum e um teste de equivalência prova que o
-  comportamento observável não mudou.
+  `ExecutionRecord`. Na primeira versão desta tarefa, a montagem usava
+  apenas `ParsedProviderLine.event` — `.observation` (usage/cost/terminal)
+  chegava a ser produzida pelo `parseLine` do adapter, mas era descartada
+  antes de alimentar o resultado do runtime. O fake passou a executar
+  através do runtime comum e um teste de equivalência provou que o
+  comportamento observável do fake não mudou; esse teste, porém, cobria
+  só `record`/`events` e não detectou o descarte de `.observation` (ver
+  lesson datada em `docs/LESSONS.md`).
+- M52A fecha esse gap: `AdapterExecutionRun` passa a expor `parsedLines`
+  (`ParsedProviderLine[]`), uma entrada por linha não vazia de stdout, na
+  mesma ordem/índice de `events` — a correlação entre uma
+  `ProviderObservation` e a linha que a produziu nunca fica ambígua, mesmo
+  com várias linhas carregando observation. `ExecutionRecord` continua
+  reunindo fatos OBJETIVOS de processo (exit code, sinal, duração,
+  survivors, `ExecutionStatus`) vindos só do runtime, e métricas
+  normalizadas derivadas da observation do último evento `result`:
+  `usage.tokens` alimenta `metrics.tokens` (ausência vira `null` com
+  provenance, nunca zero); `cost` só alimenta `metrics.api_equivalent_usd`
+  quando já expresso em USD/API-equivalent — sem conversão de moeda, custo
+  incompatível permanece só na observation; `terminal` permanece
+  observation e nunca sobrescreve `ExecutionStatus` (`terminal: failure`
+  do provider pode coexistir com `ExecutionStatus.COMPLETED`). Nenhum
+  adapter replica spawn/timeout/cleanup/montagem de record; `src/schemas/
+  execution-record.ts` não foi expandido para armazenar `terminal` ou um
+  blob de provider.
 - `preflight` (checar CLI instalada/autenticada) e qualquer adapter de
   provider real (Claude, Codex) continuam fora do escopo do PRE-M2 —
   YAGNI documentado no próprio `contract.ts`: nenhum hook além do que o
@@ -170,98 +192,131 @@ Nenhuma divergência nova foi introduzida em M41–M51B.
 
 ---
 
-## 5. Plano do Marco 2 — proposto como documento (M53–M68 fora de `dev/plan.yaml`)
+## 5. Plano do Marco 2 — aprovado após auditoria humana (M53–M68 fora de `dev/plan.yaml`)
 
-O que segue é uma **proposta**, não um plano adotado: nenhuma destas tarefas
-existe em `dev/plan.yaml`. Elas só entram lá por uma segunda alteração após
-aprovação humana explícita a este documento — é a parada obrigatória que M52
-declara.
+Esta seção **substitui** a proposta original de M52 (que incluía score v2,
+intervalo de confiança, suite de 8–12 tasks, incubação/sandbox, promoção
+`BENCHMARKED → PROMOTED`, Capability Matrix completa e marketplace/extensions
+como requisitos do Marco 2). A auditoria humana considerou essa proposta
+superdimensionada para um primeiro Marco 2; o documento final contém **uma
+única** sequência de M2, a lista abaixo. Nenhuma destas tarefas existe em
+`dev/plan.yaml` ainda — elas só entram lá por uma segunda alteração após
+aprovação humana explícita a este documento, que é a parada obrigatória que
+M52B declara.
 
-O Marco 2 usa o kernel de performance construído em M43–M48 e os contratos de
-M49–M51B para produzir a primeira comparação real entre agentes/modelos sob o
-control plane completo. Numeração provisória, sequencial por dependência:
+O Marco 2 enxuto usa o kernel de performance construído em M43–M48 e os
+contratos de M49–M52A para produzir a primeira comparação real entre dois
+perfis Claude, com um smoke mínimo em Codex. Sequência final, sequencial por
+dependência:
 
-| # | Título proposto | Objetivo em uma frase |
+| # | Título | Objetivo em uma frase |
 | --- | --- | --- |
-| M53 | Adapter Claude real (`preflight` + `buildInvocation` + `parseLine`) | Primeiro `ProviderAdapter` não-fake, sobre `executeWithAdapter` (M51B), com `preflight` verificando CLI/autenticação antes do spawn. |
-| M54 | Adapter Codex real | Segundo adapter real, provando que o contrato do M51A generaliza além de um único provider. |
-| M55 | `quota-usage.json` — probe e escrita no runtime | Runtime grava `execution/quota-usage.json` quando o provider expõe consumo de cota, fechando o lado de escrita que M48 já lê. |
-| M56 | Perfil de score v2 informado por `taxonomy` | Sub-scores que usam `TaskSpec.taxonomy` (M49) para normalizar por classe/dificuldade declarada, sem hardcode de categoria. |
-| M57 | `agentlab compare` — agregação entre trials | Primeiro comando de comparação: agrega `TaskPerformanceRecord` (M46–M48) de N trials sob o mesmo `TaskSpec`. |
-| M58 | Intervalo de confiança e variância no compare | Estatística agregada (explicitamente fora do M29/score de run individual) entra aqui, não antes. |
-| M59 | Task suite piloto — 8–12 tasks com `taxonomy` completa | Conjunto real de tasks cobrindo as classes/dificuldades declaradas, base do Pilot Benchmark (§6). |
-| M60 | Registro de extensão incubada — primeira estratégia além de `direct@1` | Usa `ExtensionManifest`/`IncubationState` (M50) fim a fim: uma estratégia nova nasce `DISCOVERED`. |
-| M61 | Sandbox de incubação | Execução `SANDBOXED` isolada, que não conta como benchmark nem entra em `compare`. |
-| M62 | Promoção `BENCHMARKED → PROMOTED` com evidência | Critério objetivo e auditável de promoção, ligado a `compare` (M57/M58). |
-| M63 | Capability Matrix derivada | Primeira materialização real da matriz descrita em ARCHITECTURE.md §2.1 — derivada de `TaskPerformanceRecord` agregados, nunca hardcoded. |
-| M64 | Redação de custo agregado por trial/task | `api_equivalent_usd` (M43) e `quota_usage` (M44/M55) agregados no `compare`, sem confundir estimativa com cobrança real (ver LESSONS.md 2026-08-06). |
-| M65 | `agentlab report --compare` | Relatório humano do resultado de M57/M58/M63, terminal + `--json`. |
-| M66 | Pilot Benchmark: execução real | Roda a suite do M59 contra os adapters do M53/M54, sob `EXPERIMENTAL`, gera evidência qualificada real. |
-| M67 | Pilot Benchmark: análise e relatório | Relatório do resultado do M66 — o primeiro artefato do lab que compara agentes com evidência ponta a ponta. |
-| M68 | Revisão do Marco 2 (parada obrigatória) | Mesmo padrão de M40B/M52: BACKLOG, LESSONS, ARCHITECTURE conferidos, gates verdes, parada para revisão humana antes de qualquer Marco 3. |
+| M53 | Corpus experimental inicial | Corpus fixo de tasks para o piloto do §6 — sem ampliar para suite de 8–12 tasks nesta fase. |
+| M54 | Billing guard | Guarda capaz de impedir novo launch quando o consumo de cota/billing não permite mais execução real. |
+| M55 | Credential proof | Prova de que a CLI de um provider está instalada e autenticada antes do primeiro spawn real. |
+| M56 | Claude invocation | `buildInvocation` real para a CLI Claude, sobre `executeWithAdapter` (M51B/M52A). |
+| M57 | Claude stream parser | `parseLine` real da CLI Claude — eventos normalizados + `ProviderObservation` (usage/cost/terminal). |
+| M58 | Claude ProviderAdapter | Primeiro `ProviderAdapter` não-fake completo (identity + preflight + buildInvocation + parseLine), registrado em `resolveAdapter`. |
+| M59 | Claude quota probe | Probe de consumo de cota do Claude, escrevendo `execution/quota-usage.json` (fecha o lado de escrita que M48 já lê). |
+| M60 | Codex invocation | `buildInvocation` real para a CLI Codex. |
+| M61 | Codex ProviderAdapter | Segundo `ProviderAdapter` real, provando que o contrato do M51A generaliza além de um único provider — apenas para o smoke do §6, não um segundo braço completo do piloto. |
+| M62 | executeRun / integração de adapter | Fecha a integração diferida em M52A: `resolveAdapter(profile.cli) → adapter.buildInvocation(...) → executeWithAdapter(...)` ponta a ponta. |
+| M63 | CLI experimental | Comando `agentlab` para lançar o piloto do §6 sob modo `EXPERIMENTAL`. |
+| M64 | ExperimentSpec freeze | `ExperimentSpec` do piloto (arms, tasks, repetições, seed, counterbalancing) congelada antes de qualquer execução real. |
+| M65 | Experiment runner seeded/counterbalanced | Runner que executa o `ExperimentSpec` congelado — sequential, seeded, interleaved/counterbalanced entre arms. |
+| M66 | Compare | Agregação de `TaskPerformanceRecord` (M46–M48) entre arms do piloto — só `QUALIFIED` entra; resultado por task antes do agregado global. |
+| M67 | E2E | Execução real ponta a ponta do piloto do §6, sob billing authorization explícita. |
+| M68 | Revisão M2 + pilot checklist | Mesmo padrão de M40B/M52B: BACKLOG, LESSONS, ARCHITECTURE conferidos, gates verdes, checklist do piloto fechado, parada para revisão humana antes de qualquer Marco 3. |
+
+Itens que saem da sequência inicial do Marco 2 e, quando úteis, ficam
+registrados como candidatos a **Marco 3 ou follow-up pós-piloto** (não são
+requisito de M53–M68):
+
+- Perfil de score v2 informado por `taxonomy` (era M56 na proposta antiga).
+- Intervalo de confiança/variância como requisito do compare (era M58).
+- Suite de 8–12 tasks cobrindo todas as classes/dificuldades declaradas (era
+  M59) — o corpus do piloto (M53) fica menor e fixo.
+- Estratégia nova ou incubação como pré-requisito do Marco 2 (era M60).
+- Sandbox de incubação (era M61).
+- Promoção `BENCHMARKED → PROMOTED` (era M62).
+- Capability Matrix completa derivada (era M63) — o compare do piloto (M66)
+  produz resultado por task/arm, não a matriz inteira.
+- Marketplace/extensions.
 
 Riscos e decisões em aberto que a aprovação humana precisa resolver antes de
 M53 virar packet real:
 
 - **Custo de rodar adapters reais** (billing real, não fake) — política de
   quando/quantas vezes o pilot roda, dado o precedente de LESSONS.md
-  2026-08-06 (estimativa ≠ cobrança).
-- **Escopo da task suite piloto (M59)** — quantas classes de `taxonomy`
-  cobrir na primeira rodada; sub-dimensionar é reversível, super-dimensionar
-  não é (cada task nova custa autoria + validação).
-- **Se M60–M63 (incubação/capability matrix) entram no mesmo Marco 2 ou
-  ficam para um Marco 3** — são desacopláveis do pilot (M53–M59, M64–M68) e
-  podem ser aprovados separadamente.
+  2026-08-06 (estimativa ≠ cobrança); M54 (billing guard) é pré-requisito
+  bloqueante de qualquer execução real.
+- **Escopo do corpus piloto (M53)** — fixo em 3 tasks para o piloto atual
+  (§6); ampliar para suite maior fica para o follow-up listado acima.
+- **Codex como smoke, não segundo braço** — M60/M61 provam que o contrato
+  generaliza, mas o primeiro benchmark comparativo real (§6) é só
+  Claude Sonnet 5 Medium vs High; nenhuma decisão de produto sobre Codex sai
+  deste Marco 2.
 
 ---
 
-## 6. Pilot Benchmark — proposto
+## 6. Pilot Benchmark — preservado da proposta original
 
-Objetivo do piloto: produzir a **primeira comparação real** entre pelo menos
-dois adapters (Claude, Codex — M53/M54) sob o control plane completo, com
-evidência qualificada suficiente para validar que o kernel de performance
-(M43–M48) e o compare (M57/M58) produzem um resultado legível e defensável —
-antes de investir em escala.
+Objetivo do piloto: produzir a **primeira comparação real** entre dois
+perfis do mesmo provider (Claude Sonnet 5 Medium vs Claude Sonnet 5 High)
+sob o control plane completo, com evidência qualificada suficiente para
+validar que o kernel de performance (M43–M48) e o compare (M66) produzem um
+resultado legível e defensável — antes de investir em escala ou em um
+segundo provider como braço completo.
 
-Desenho proposto:
+Desenho aprovado:
 
-1. **Suite fixa e pequena** (M59): 8–12 tasks cobrindo pelo menos
-   `bugfix`, `feature` e `refactor` em `task_class`, e as três faixas de
-   `difficulty_declared` (`easy`/`medium`/`hard`), com `EvaluationPlan`
-   fixado antes de qualquer execução — modo `EXPERIMENTAL` por definição do
-   LAB_CHARTER §3.
-2. **Dois agentes, mesma task, mesma strategy** (`direct@1` — nenhuma
-   estratégia nova é pré-requisito do piloto): cada `Trial` varia só
-   `AgentProfile`, mantendo `EnvironmentProfile` `controlled` idêntico entre
-   os dois.
-3. **N ≥ 3 repetições por (task × agente)** para que M58 (intervalo de
-   confiança) tenha o que agregar sem inventar significância estatística
-   sobre N=1.
-4. **Relatório de saída** (M67): `TaskPerformanceRecord` agregado por
-   agente, custo estimado (`api_equivalent_usd`) e consumo de cota
-   (`quota_usage`) por agente, taxa de `autonomous_first_pass`, e a
-   Capability Matrix (M63) preenchida só para as células com dado real —
-   célula sem trial correspondente fica ausente, nunca extrapolada.
-5. **Fora de escopo do piloto**: qualquer decisão de produto sobre "qual
-   agente usar" — o piloto produz evidência; a leitura de valor sobre ela é
-   humana (LAB_CHARTER §2).
+1. **2 arms**: Claude Sonnet 5 Medium vs Claude Sonnet 5 High — mesmo
+   `TaskSpec`, mesma `Strategy` (`direct@1`) e mesmo `EnvironmentProfile`
+   `controlled` entre os dois; só `AgentProfile`/reasoning effort varia.
+2. **3 tasks × 2 repetições por (task × arm)** — corpus fixo do M53 (§5),
+   não a suite de 8–12 tasks da proposta antiga.
+3. **12 slots inference-bearing planejados** (2 arms × 3 tasks × 2
+   repetições), execução **sequential**, **seeded** e
+   **interleaved/counterbalanced** entre arms — nunca todos os slots de um
+   arm antes do outro, para não confundir efeito de ordem com efeito de
+   arm.
+4. **Só `QUALIFIED` entra no compare** (M66); `INFRA_ERROR` consome um slot
+   de retry e **não** vira capability FAIL — é capability-neutral, mesma
+   regra de `deriveAttemptFacts` (M45/§3).
+5. **Resultados por task antes do agregado global** — o compare reporta
+   cada task individualmente primeiro; o agregado entre as 3 tasks vem
+   depois, nunca substitui a leitura por task.
+6. **Quota stop em ≥80%** de consumo de cota observado (`QuotaUsage`,
+   M44/M59) interrompe o lançamento de novos slots do piloto.
+7. **Billing guard (M54) pode impedir novo launch** — nenhum slot adicional
+   é lançado sem essa guarda permitir explicitamente.
+8. **Codex é smoke real mínimo** (M60/M61) — prova que a CLI Codex invoca e
+   parseia via `executeWithAdapter`, explicitamente **não** um segundo braço
+   completo deste primeiro benchmark comparativo.
+9. **Nenhuma execução adicional ocorre sem billing authorization** — cada
+   lançamento de slot real (Claude ou o smoke Codex) exige autorização de
+   billing explícita antes do spawn.
+10. **Fora de escopo do piloto**: qualquer decisão de produto sobre "qual
+    perfil/agente usar" — o piloto produz evidência; a leitura de valor
+    sobre ela é humana (LAB_CHARTER §2).
 
 O piloto **não começa** com a aprovação deste documento sozinha: como as
-demais tarefas do §5, exige M53–M59 e M64–M67 primeiro em `dev/plan.yaml`
-por decisão humana explícita, e só então execução real.
+demais tarefas do §5, exige M53–M67 primeiro em `dev/plan.yaml` por decisão
+humana explícita, e só então execução real sob billing authorization.
 
 ---
 
 ## 7. Gates
 
-`pnpm typecheck`, `pnpm build` e `pnpm test` verdes nesta revisão (M52).
-Nenhuma alteração de `src/` ou `test/` nesta tarefa — escopo é
-`docs/BACKLOG.md`, `docs/LESSONS.md` e este documento.
+`pnpm typecheck`, `pnpm build` e `pnpm test` verdes em M52A (correção do
+runtime comum) e nesta revisão corrigida (M52B). Nesta tarefa (M52B), nenhuma
+alteração de `src/` ou `test/` — escopo é `docs/BACKLOG.md`,
+`docs/LESSONS.md` e este documento.
 
 ---
 
 ## 8. Parada obrigatória
 
 Esta é a última task do plano operacional atual. **O Marco 2 (M53–M68 acima)
-não inicia sem aprovação humana explícita** a este pacote de revisão. Até lá,
-`dev/plan.yaml` permanece com M52 como última entrada.
+não inicia sem aprovação humana explícita** a este pacote de revisão
+corrigido. Até lá, `dev/plan.yaml` permanece com M52B como última entrada.
