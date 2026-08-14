@@ -1616,3 +1616,71 @@ tasks:
         timeout_seconds: 300
       - argv: [pnpm, test]
         timeout_seconds: 900
+
+  - id: M52C
+    title: Fronteira M67/M68 e pilot pós-M2 corrigida
+    blocked_by: [M52B]
+    objective: >-
+      Corrigir exclusivamente a fronteira documental entre o E2E do M2, a
+      revisão/checklist e a execução posterior do pilot benchmark. NÃO alterar
+      M52B retroativamente nem reescrever commits aceitos. Quando executada,
+      alterar somente documentação necessária, preferencialmente
+      docs/reviews/PRE-M2-REVIEW.md e docs/BACKLOG.md; docs/LESSONS.md somente
+      se uma lesson adicional for realmente útil. Não alterar src/**. Não
+      alterar test/**. Não executar provider. M67 passa a ser prova E2E da
+      infraestrutura experimental (ExperimentSpec → ProviderAdapter →
+      executeRun → evidence → evaluation → qualification → performance →
+      compare), baseada primordialmente em fixtures, fake adapters, ambientes
+      determinísticos e evidência sintética/controlada; smoke real mínimo só
+      quando explicitamente autorizado, billing guard permitir, credential
+      proof passar e for necessário para provar integração real. M67 NÃO
+      executa o piloto completo de 2 arms × 3 tasks × 2 reps = 12 slots e NÃO
+      produz conclusão comparativa final Medium vs High — prova que a
+      infraestrutura capaz de realizar esse experimento funciona. M68 é a
+      última tarefa operacional do M2 antes do pilot real: revisão M2 +
+      pilot checklist (M53–M67 PASS, gates verdes, recover CLEAN, evidence
+      contracts íntegros, billing guard / credential proof / quota probe
+      funcionais, ExperimentSpec congelado, corpus de 3 tasks aprovado,
+      seed/order/counterbalancing definidos, retry policy para INFRA definida,
+      compare aceita apenas QUALIFIED, quota stop >=80%, profiles Medium/High
+      corretos, Codex permanece smoke only, custo máximo/authorization
+      definidos) e PARADA HUMANA OBRIGATÓRIA; nenhum dos 12 slots do pilot
+      completo é lançado automaticamente pela M68. O pilot real (2 arms
+      Claude Sonnet 5 Medium vs High, 3 tasks, 2 reps, 12 slots
+      inference-bearing, sequential, seeded, interleaved/counterbalanced,
+      mesmo TaskSpec/Strategy/EnvironmentProfile controlled, somente
+      QUALIFIED no compare, INFRA usa retry slot e não vira capability FAIL,
+      resultados por task antes do agregado, quota stop >=80%, billing guard
+      pode impedir launch, Codex smoke only, nenhuma execução extra sem
+      billing authorization) só começa após nova aprovação humana explícita
+      posterior a M68. O heading/texto semelhante a "Pilot Benchmark —
+      preservado da proposta original" é semanticamente errado: o piloto
+      pequeno NÃO é a proposta original de M52; foi restaurado pela auditoria
+      humana em substituição à proposta superdimensionada de 8–12 tasks;
+      usar redação como "Pilot Benchmark — desenho aprovado após auditoria
+      humana" ou equivalente. M53–M68 continuam AUSENTES de dev/plan.yaml.
+      Nova parada humana obrigatória após M52C.
+    initial_files:
+      - docs/reviews/PRE-M2-REVIEW.md
+      - docs/BACKLOG.md
+      - docs/LESSONS.md
+    acceptance:
+      - M67 é descrita como prova E2E da infraestrutura/pipeline, baseada em fixtures/fakes e, no máximo, smoke real mínimo explicitamente autorizado.
+      - M67 NÃO executa o pilot completo de 12 slots.
+      - M68 é descrita como revisão M2 + pilot checklist e parada humana obrigatória ANTES do pilot completo.
+      - O pilot de 12 slots só começa após aprovação humana explícita posterior a M68.
+      - Sonnet Medium vs High / 3 tasks / 2 reps / 12 slots permanece inalterado.
+      - Quota stop >=80%, QUALIFIED-only, INFRA retry, counterbalancing e billing authorization permanecem inalterados.
+      - Codex permanece smoke only.
+      - O heading/texto não chama mais o piloto pequeno de "preservado da proposta original"; registra que ele é o desenho aprovado/restaurado pela auditoria humana.
+      - M53–M68 continuam AUSENTES de dev/plan.yaml.
+      - Nova parada humana obrigatória após M52C está registrada.
+      - Nenhuma alteração em src/** ou test/**; nenhum provider real executado.
+      - Gates completos verdes.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, build]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
