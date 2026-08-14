@@ -86,6 +86,7 @@ export type FakeAgentEvent = AgentEvent | UnknownAgentEvent;
 export interface FakeAgentRun {
   readonly record: ExecutionRecord;
   readonly events: FakeAgentEvent[];
+  readonly parsedLines: ParsedProviderLine[];
 }
 
 /**

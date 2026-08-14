@@ -3,14 +3,21 @@
  * cleanup de process group e montagem do `ExecutionRecord` autoritativo vivem
  * aqui — uma vez só — e não em cada adapter.
  *
- * `ExecutionRecord` mistura duas origens deliberadamente separadas na
- * montagem: fatos OBJETIVOS do processo (`exit_code`, `duration_ms`, e o
- * `status` derivado de timeout/exit/último evento) vêm inteiramente deste
- * runtime, que é o único que observa o processo; a leitura de métricas
- * (`tokens`, `changed_files`) vem do último evento `result` que o
- * `parseLine` do adapter devolveu, com a provenance que o próprio adapter
- * declara (`metricsProvenance`, default `identity.name`) — o runtime nunca
- * inventa de onde um número saiu.
+ * `ExecutionRecord` mistura origens deliberadamente separadas na montagem:
+ * fatos OBJETIVOS do processo (`exit_code`, `duration_ms`, e o `status`
+ * derivado de timeout/exit/último evento) vêm inteiramente deste runtime, que
+ * é o único que observa o processo; `metrics.tokens` e `metrics.api_equivalent_usd`
+ * vêm da `ProviderObservation` que o `parseLine` do adapter devolveu junto do
+ * último evento (`ParsedProviderLine.observation`), com a provenance que o
+ * próprio adapter declara (`metricsProvenance`, default `identity.name`);
+ * `metrics.changed_files` vem do último evento `result` em si — o runtime
+ * nunca inventa de onde um número saiu.
+ *
+ * A `ProviderObservation` de cada linha (usage, cost, terminal) não é
+ * descartada: sobrevive no resultado via `parsedLines`, correlacionada por
+ * índice com `events`, para que quem consumir o run tenha acesso auditável a
+ * ela sem que o runtime precise misturá-la aos fatos objetivos do processo.
+ * `terminal` nunca chega a `ExecutionStatus` — permanece só observation.
  *
  * Mesma leitura de stdout, mesma escalada de sinal e mesma confirmação de
  * cleanup que `adapters/fake/index.ts#runFakeAgent` usava antes desta tarefa
@@ -18,7 +25,7 @@
  */
 import type { Readable } from 'node:stream';
 
-import type { ProviderAdapter, ProviderEvent } from '../adapters/contract.js';
+import type { ParsedProviderLine, ProviderAdapter, ProviderEvent } from '../adapters/contract.js';
 import { ExecutionStatus } from '../core/enums.js';
 import { executionEnvelopeSha256, type ExecutionEnvelopeManifest } from '../envelope/index.js';
 import type { ExecutionRecord } from '../schemas/index.js';
@@ -37,6 +44,13 @@ export interface ExecuteWithAdapterOptions extends SpawnProcessOptions {
 export interface AdapterExecutionRun {
   readonly record: ExecutionRecord;
   readonly events: ProviderEvent[];
+  /**
+   * Uma entrada por linha não vazia do stream, na mesma ordem e índice de
+   * `events` (`parsedLines[i].event === events[i]`) — a correlação entre uma
+   * `ProviderObservation` e a linha/evento que a produziu nunca é ambígua,
+   * mesmo quando várias linhas carregam observation.
+   */
+  readonly parsedLines: ParsedProviderLine[];
 }
 
 /**
@@ -85,10 +99,14 @@ export async function executeWithAdapter(
   await escalation.confirmCleanup();
 
   const timedOut = escalation.timedOut();
-  const events = parseProviderLines(adapter, stdout);
-  const result = events.at(-1);
+  const parsedLines = parseProviderLines(adapter, stdout);
+  const events = parsedLines.map((parsedLine) => parsedLine.event);
+  const lastIndex = events.length - 1;
+  const result = events[lastIndex];
   const succeeded = !timedOut && outcome.exitCode === 0 && result?.type === 'result';
   const provenance = adapter.metricsProvenance ?? adapter.identity.name;
+  const observation = result?.type === 'result' ? parsedLines[lastIndex]?.observation : undefined;
+  const cost = observation?.cost;
 
   const record: ExecutionRecord = {
     status: timedOut
@@ -101,17 +119,29 @@ export async function executeWithAdapter(
     execution_envelope_sha256: envelopeSha256,
     metrics: {
       tokens: {
-        value: result?.type === 'result' ? result.tokens : null,
+        value: observation?.usage?.tokens ?? null,
         provenance,
       },
       changed_files: {
         value: result?.type === 'result' ? result.changed_files : null,
         provenance,
       },
+      ...(cost !== undefined && isUsdEquivalentCurrency(cost.currency)
+        ? { api_equivalent_usd: { value: cost.amount, provenance } }
+        : {}),
     },
   };
 
-  return { record, events };
+  return { record, events, parsedLines };
+}
+
+/**
+ * `cost` só alimenta `metrics.api_equivalent_usd` quando já está expresso na
+ * moeda do schema (USD/API-equivalent) — o runtime nunca converte moeda.
+ * Qualquer outra moeda permanece só na observation, sem virar métrica.
+ */
+function isUsdEquivalentCurrency(currency: string): boolean {
+  return currency.trim().toUpperCase() === 'USD';
 }
 
 async function readAll(stream: Readable): Promise<string> {
@@ -123,10 +153,10 @@ async function readAll(stream: Readable): Promise<string> {
 }
 
 /** Interpreta cada linha não vazia de stdout pelo `parseLine` do adapter — nunca por conta própria. */
-function parseProviderLines(adapter: ProviderAdapter, ndjson: string): ProviderEvent[] {
+function parseProviderLines(adapter: ProviderAdapter, ndjson: string): ParsedProviderLine[] {
   return ndjson
     .split('\n')
     .map((line) => line.trim())
     .filter((line) => line.length > 0)
-    .map((line) => adapter.parseLine(line).event);
+    .map((line) => adapter.parseLine(line));
 }
