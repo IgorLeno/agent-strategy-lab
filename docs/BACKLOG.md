@@ -915,3 +915,45 @@ revisão humana depois desta tarefa.**
 - M53–M68 permanecem ausentes de `dev/plan.yaml`; nova parada obrigatória
   registrada. Gates completos verdes.
 - Gates completos verdes.
+
+### M52C — Fronteira M67/M68 e pilot pós-M2 corrigida
+**Depende de:** M52B · **Gate:** `pnpm build`
+
+Corrige exclusivamente a fronteira documental entre a prova E2E do M2, a
+revisão/checklist e o pilot benchmark posterior. M67 passa a provar a
+infraestrutura experimental completa (`ExperimentSpec → ProviderAdapter →
+executeRun → evidence → evaluation → qualification → performance → compare`)
+com fixtures, fake adapters, ambientes determinísticos e evidência
+sintética/controlada. Smoke real mínimo só é permitido quando explicitamente
+autorizado, necessário para provar integração real, liberado pelo billing
+guard e precedido por credential proof; M67 não executa o pilot de 12 slots e
+não produz conclusão comparativa final Medium vs High.
+
+M68 é a última tarefa operacional do M2 antes do pilot real: revisão M2,
+checklist completo e parada humana obrigatória. O checklist exige M53–M67
+`PASS`, gates verdes, `recover CLEAN`, evidence contracts íntegros, billing
+guard/credential proof/quota probe funcionais, `ExperimentSpec` congelado,
+corpus de 3 tasks aprovado, seed/order/counterbalancing definidos, retry policy
+de `INFRA`, compare somente com `QUALIFIED`, quota stop em ≥80%, profiles
+Medium/High corretos, Codex somente smoke e custo máximo/billing authorization
+definidos. M68 não lança nenhum slot do pilot.
+
+O pilot real mantém o desenho aprovado após auditoria humana: Claude Sonnet 5
+Medium vs High, 2 arms × 3 tasks × 2 repetições = 12 slots inference-bearing,
+sequential, seeded e interleaved/counterbalanced, com o mesmo
+`TaskSpec`/`Strategy`/`EnvironmentProfile` controlled. Só `QUALIFIED` entra no
+compare; `INFRA` usa retry slot e não vira capability FAIL; resultados por task
+precedem o agregado; quota stop em ≥80% e billing guard podem interromper o
+launch; Codex permanece smoke only; não há execução extra sem billing
+authorization. Os 12 slots só começam após aprovação humana explícita nova,
+posterior a M68. M53–M68 continuam ausentes de `dev/plan.yaml`.
+**Nova parada obrigatória para revisão humana depois desta tarefa.**
+
+- M67 é prova E2E da infraestrutura/pipeline e não execução do pilot completo.
+- M68 verifica todos os pré-requisitos e termina em parada humana antes do
+  primeiro dos 12 slots.
+- O desenho Medium vs High, as regras de quota, qualificação, retry,
+  counterbalancing, billing e o escopo smoke-only do Codex permanecem
+  inalterados.
+- Nenhuma alteração em `src/`, `test/` ou `dev/plan.yaml`; nenhum provider
+  real executado.

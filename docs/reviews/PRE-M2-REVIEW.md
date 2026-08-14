@@ -1,12 +1,14 @@
 # Revisão PRE-M2 (M52)
 
 Pacote de revisão humana ao final de M41–M51B, corrigido em M52A (gap
-semântico do runtime comum) e M52B (esta revisão, após auditoria humana).
+semântico do runtime comum), M52B (revisão após auditoria humana) e M52C
+(fronteira entre a prova E2E, o checklist e o pilot real).
 **Parada obrigatória**: este documento fecha o plano operacional atual
 (`dev/plan.yaml` termina em M52B). M53–M68, aprovados abaixo como sequência
 final do Marco 2, só entram em `dev/plan.yaml` por uma segunda alteração após
 aprovação humana explícita a este pacote. Nada neste documento autoriza, por
-si, o início do Marco 2.
+si, o início do Marco 2; depois de M68 haverá uma nova parada humana
+obrigatória antes do pilot real de 12 slots.
 
 ---
 
@@ -225,8 +227,8 @@ dependência:
 | M64 | ExperimentSpec freeze | `ExperimentSpec` do piloto (arms, tasks, repetições, seed, counterbalancing) congelada antes de qualquer execução real. |
 | M65 | Experiment runner seeded/counterbalanced | Runner que executa o `ExperimentSpec` congelado — sequential, seeded, interleaved/counterbalanced entre arms. |
 | M66 | Compare | Agregação de `TaskPerformanceRecord` (M46–M48) entre arms do piloto — só `QUALIFIED` entra; resultado por task antes do agregado global. |
-| M67 | E2E | Execução real ponta a ponta do piloto do §6, sob billing authorization explícita. |
-| M68 | Revisão M2 + pilot checklist | Mesmo padrão de M40B/M52B: BACKLOG, LESSONS, ARCHITECTURE conferidos, gates verdes, checklist do piloto fechado, parada para revisão humana antes de qualquer Marco 3. |
+| M67 | E2E da infraestrutura experimental | Prova que `ExperimentSpec → ProviderAdapter → executeRun → evidence → evaluation → qualification → performance → compare` funciona ponta a ponta com fixtures, fake adapters, ambientes determinísticos e evidência sintética/controlada; smoke real mínimo somente quando explicitamente autorizado e necessário. Não executa os 12 slots nem produz a conclusão comparativa Medium vs High. |
+| M68 | Revisão M2 + pilot checklist | Última tarefa operacional antes do pilot real: confere o M2 e todos os pré-requisitos do pilot, fecha gates e impõe parada humana obrigatória; não lança nenhum dos 12 slots. |
 
 Itens que saem da sequência inicial do Marco 2 e, quando úteis, ficam
 registrados como candidatos a **Marco 3 ou follow-up pós-piloto** (não são
@@ -259,7 +261,7 @@ M53 virar packet real:
 
 ---
 
-## 6. Pilot Benchmark — preservado da proposta original
+## 6. Pilot Benchmark — desenho aprovado após auditoria humana
 
 Objetivo do piloto: produzir a **primeira comparação real** entre dois
 perfis do mesmo provider (Claude Sonnet 5 Medium vs Claude Sonnet 5 High)
@@ -300,23 +302,46 @@ Desenho aprovado:
     perfil/agente usar" — o piloto produz evidência; a leitura de valor
     sobre ela é humana (LAB_CHARTER §2).
 
-O piloto **não começa** com a aprovação deste documento sozinha: como as
-demais tarefas do §5, exige M53–M67 primeiro em `dev/plan.yaml` por decisão
-humana explícita, e só então execução real sob billing authorization.
+M67 prova a infraestrutura capaz de realizar este experimento, não realiza o
+experimento: seu E2E é baseado primordialmente em fixtures, fake adapters,
+ambientes determinísticos e evidência sintética/controlada. Um smoke real
+mínimo só pode ocorrer quando for necessário para provar a integração real,
+for explicitamente autorizado, o billing guard permitir e a credential proof
+passar. Mesmo nesse caso, M67 não lança o pilot completo, não consome seus 12
+slots planejados e não produz uma conclusão comparativa final Medium vs High.
+
+M68 é a última tarefa operacional do M2 antes do pilot real. Seu checklist
+exige: M53–M67 `PASS`; gates verdes; `recover CLEAN`; contratos de evidence
+íntegros; billing guard, credential proof e quota probe funcionais;
+`ExperimentSpec` congelado; corpus de 3 tasks aprovado; seed, ordem e
+counterbalancing definidos; retry policy de `INFRA` definida; compare restrito
+a `QUALIFIED`; quota stop em ≥80%; profiles Medium/High corretos; Codex mantido
+somente como smoke; e custo máximo/billing authorization definidos. M68 não
+lança automaticamente nenhum dos 12 slots e termina em **parada humana
+obrigatória**.
+
+O pilot real só começa depois de M68 e de uma nova aprovação humana explícita.
+Essa aprovação posterior autoriza o lançamento sequential, seeded e
+interleaved/counterbalanced dos 12 slots, sempre sujeito ao billing guard,
+quota stop e às demais regras acima; não autoriza execuções adicionais além do
+limite de custo aprovado.
 
 ---
 
 ## 7. Gates
 
 `pnpm typecheck`, `pnpm build` e `pnpm test` verdes em M52A (correção do
-runtime comum) e nesta revisão corrigida (M52B). Nesta tarefa (M52B), nenhuma
-alteração de `src/` ou `test/` — escopo é `docs/BACKLOG.md`,
-`docs/LESSONS.md` e este documento.
+runtime comum) e na revisão corrigida M52B. M52C altera somente a fronteira
+documental descrita acima; não altera `src/`, `test/`, providers nem o desenho
+aprovado do experimento.
 
 ---
 
 ## 8. Parada obrigatória
 
-Esta é a última task do plano operacional atual. **O Marco 2 (M53–M68 acima)
-não inicia sem aprovação humana explícita** a este pacote de revisão
-corrigido. Até lá, `dev/plan.yaml` permanece com M52B como última entrada.
+M52C cria uma nova parada obrigatória. **O Marco 2 (M53–M68 acima) não inicia
+sem aprovação humana explícita** a este pacote corrigido. Até lá,
+`dev/plan.yaml` permanece com M52B como última entrada. Se M53–M68 forem
+posteriormente aprovados e concluídos, M68 encerra com outra parada humana
+obrigatória: o pilot real de 12 slots só começa após aprovação explícita nova,
+posterior a M68.
