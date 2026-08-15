@@ -1575,6 +1575,122 @@ export const InfraFailedAttemptRecord = z
   .strict();
 export type InfraFailedAttemptRecord = z.infer<typeof InfraFailedAttemptRecord>;
 
+/** Conteúdo individual do patch preservado para auditoria byte a byte. */
+export const ProtocolInvalidPatchFile = z
+  .object({
+    path: nonEmpty,
+    /** Código XY do `git status --porcelain=v1`. */
+    git_status: z.string().regex(/^[ MADRCUT?!]{2}$/),
+    content_state: z.enum(['ARCHIVED', 'ABSENT']),
+    /** Caminho relativo ao devDir; ausente somente quando não há conteúdo atual. */
+    archive_path: nonEmpty.nullable(),
+    size_bytes: z.number().int().nonnegative().nullable(),
+    sha256: sha256Hex.nullable(),
+  })
+  .strict()
+  .superRefine((file, ctx) => {
+    const metadata = [file.archive_path, file.size_bytes, file.sha256];
+    const allPresent = metadata.every((value) => value !== null);
+    const allAbsent = metadata.every((value) => value === null);
+    if (file.content_state === 'ARCHIVED' && !allPresent) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${file.path}: conteúdo arquivado incompleto` });
+    }
+    if (file.content_state === 'ABSENT' && !allAbsent) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${file.path}: marcador de ausência contém bytes` });
+    }
+  });
+export type ProtocolInvalidPatchFile = z.infer<typeof ProtocolInvalidPatchFile>;
+
+/**
+ * Attempt cujo worker terminou com SUCCESS/PASS, mas declarou os dois arquivos
+ * de protocol I/O dentro de `changed_files`. Não há veredito de capability nem
+ * de validation oficial: o output de protocolo é que tornou o fechamento
+ * impossível, e os bytes originais ficam preservados antes de qualquer limpeza.
+ */
+export const ProtocolInvalidAttemptRecord = z
+  .object({
+    schema_version: z.literal(DEV_SCHEMA_VERSION),
+    task_id: identifier,
+    attempt: z.number().int().positive(),
+    classification: z.literal('PROTOCOL_OUTPUT_INVALID'),
+    reason_code: z.literal('PROTOCOL_OUTPUT_INVALID'),
+    reason: nonEmpty,
+    source_base_sha: shaHex,
+    head_sha: shaHex,
+    authorized_head_sha: shaHex,
+    profile_id: nonEmpty,
+    execution_policy: ExecutionPolicy,
+    process: ProcessIdentity,
+    launch_id: z.string().uuid(),
+    launch_record: ArchivedEvidenceFile,
+    worker_self_reported_result: z.literal('SUCCESS'),
+    handoff_result: z.literal('PASS'),
+    report_candidate_commit: z.literal(null),
+    state_candidate_commit: z.literal(null),
+    state_accepted_commit: z.literal(null),
+    protocol_invalid_paths: z.array(nonEmpty).length(2),
+    changed_files: z.array(nonEmpty).min(1),
+    actual_patch_matches_normalized_report: z.literal(true),
+    patch_fingerprint: sha256Hex,
+    patch_files: z.array(ProtocolInvalidPatchFile).min(1),
+    change_bundle: PreservedChangeBundleRef,
+    report: ArchivedEvidenceFile,
+    handoff_draft: ArchivedEvidenceFile,
+    capability_verdict: z.literal(null),
+    official_validation_verdict: z.literal(null),
+    attempts_preserved: z.number().int().positive(),
+    archived_at: z.string().datetime(),
+  })
+  .strict()
+  .superRefine((record, ctx) => {
+    if (
+      record.execution_policy.commit_owner !== 'orchestrator' ||
+      record.execution_policy.official_validation_owner !== 'orchestrator'
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'protocol-invalid recovery exige ownership do orquestrador',
+      });
+    }
+    if (
+      record.source_base_sha !== record.head_sha ||
+      record.source_base_sha !== record.authorized_head_sha
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'protocol-invalid recovery exige base, HEAD e authorized head idênticos',
+      });
+    }
+    const expectedProtocolPaths = [
+      `.dev-inbox/${record.task_id}/handoff-draft.json`,
+      `.dev-inbox/${record.task_id}/report.json`,
+    ];
+    if (JSON.stringify(record.protocol_invalid_paths) !== JSON.stringify(expectedProtocolPaths)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'protocol_invalid_paths deve conter somente o par do inbox da task',
+      });
+    }
+    const sortedFiles = [...new Set(record.changed_files)].sort();
+    if (JSON.stringify(record.changed_files) !== JSON.stringify(sortedFiles)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'changed_files deve ser único e ordenado' });
+    }
+    const patchPaths = record.patch_files.map((file) => file.path);
+    if (JSON.stringify(patchPaths) !== JSON.stringify(record.changed_files)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'patch_files deve cobrir changed_files na mesma ordem',
+      });
+    }
+    if (record.attempts_preserved !== record.attempt) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'attempts_preserved deve manter o número histórico do attempt',
+      });
+    }
+  });
+export type ProtocolInvalidAttemptRecord = z.infer<typeof ProtocolInvalidAttemptRecord>;
+
 // ---------------------------------------------------------------------------
 // Parsers com budget — schema válido mas acima do budget também é rejeição.
 // ---------------------------------------------------------------------------

@@ -81,6 +81,9 @@ describe('prompt lean do worker', () => {
     expect(prompt).toMatch(/SUCCESS significa "patch pronto para validação oficial"/i);
     expect(prompt).toMatch(/candidate_commit deve ser null/i);
     expect(prompt).toMatch(/changed_files.*exatamente os\s+arquivos alterados/is);
+    expect(prompt).toMatch(
+      /changed_files lista exclusivamente os arquivos do patch dentro do repositório[\s\S]*NÃO inclua reportPath, handoffDraftPath, \.dev, \.dev-inbox ou qualquer arquivo de protocolo/i,
+    );
     expect(prompt).toMatch(/validations.*somente comandos.*realmente executou/is);
     expect(prompt).toMatch(/HandoffDraft.*PASS.*pronto para validação/is);
     expect(prompt).toMatch(/FAIL.*não conseguiu produzir patch utilizável/is);

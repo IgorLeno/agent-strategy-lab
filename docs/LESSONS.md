@@ -402,3 +402,13 @@ tipo tem os campos certos) e de equivalência da saída antiga (o comportamento
 histórico não regrediu). Shape e equivalência provam que nada quebrou; só o
 teste de consumo prova que o novo campo não está sendo silenciosamente
 descartado.
+
+[2026-08-15] Context: fechamento orchestrator-owned com report e handoff escritos
+corretamente nos slots de protocol I/O.
+Mistake: o prompt permitia interpretar `changed_files` como todos os arquivos
+escritos, incluindo os próprios artefatos do `.dev-inbox`; editar a evidência ou
+registrar FAIL transformaria um erro de protocolo em veredito de capacidade.
+Rule: `changed_files` contém exclusivamente paths candidatos ao commit da task;
+protocol I/O nunca entra no patch. Worker `SUCCESS` com metadata protocol-invalid
+é abandonado com evidência original byte-exact e sem capability verdict — a
+evidência nunca é alterada para fazer o fechamento passar.

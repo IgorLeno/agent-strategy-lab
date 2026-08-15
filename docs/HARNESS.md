@@ -335,8 +335,25 @@ pnpm dev-launch --task M01    # um processo novo para uma tarefa
 pnpm dev-close                # valida e fecha a tarefa RUNNING
 pnpm dev-recover --dry-run    # relata reconciliações sem gravar
 pnpm dev-recover-infra --task M33 --reason '...'   # attempt morto por falha do provider
+pnpm dev-recover-protocol-output --task M56 --reason '...' # SUCCESS/PASS com metadata de protocolo inválida
 pnpm dev-orchestrate --profile claude-build-worker-subscription-v1
 ```
+
+`dev-recover-protocol-output` cobre somente o caso estreito em que um worker
+terminou com report `SUCCESS`, handoff `PASS` e `candidate_commit == null`, mas
+incluiu exatamente os próprios `report.json` e `handoff-draft.json` em
+`changed_files`. Esses arquivos são protocol I/O: nunca fazem parte do patch.
+Qualquer terceiro path proibido, divergência entre os dois arrays, arquivo real
+extra ou ausente, index sujo, processo vivo ou HEAD divergente faz o comando
+recusar sem modificar nada.
+
+Antes de limpar o patch, o recovery publica de forma append-only os bytes e
+hashes do report, handoff, LaunchRecord e de cada arquivo real, além do bundle
+Git e de um `ProtocolInvalidAttemptRecord`. Só depois restaura os paths provados,
+libera o inbox e, por último, devolve a task a `READY`. A classificação
+`PROTOCOL_OUTPUT_INVALID` registra explicitamente que não houve capability
+verdict nem official-validation verdict; uma repetição com a mesma evidência
+converge, e bytes divergentes recusam.
 
 `dev-recover-infra` arquiva o attempt que morreu por **falha terminal do
 provider** e devolve a tarefa a `READY` sem tocar em `attempts` — o attempt
@@ -411,7 +428,8 @@ comando que muda estado).
 
 `.dev/orchestrator.lock` é criado com `wx` (criação exclusiva) por todo
 comando que **muda estado**: `dev-init`, `dev-launch`, `dev-close`,
-`dev-recover` (sem `--dry-run`), `dev-recover-infra` e `dev-orchestrate` —
+`dev-recover` (sem `--dry-run`), `dev-recover-infra`,
+`dev-recover-protocol-output` e `dev-orchestrate` —
 este último segura o lock pelo loop inteiro. `dev-next` e `dev-recover --dry-run` são somente
 leitura e não pegam lock.
 

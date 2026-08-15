@@ -13,6 +13,7 @@ import {
   OrchestratedRevalidationRecord,
   OrchestratedFinalizationRecord,
   PreservedChangeBundleManifest,
+  ProtocolInvalidAttemptRecord,
   RevalidationCheckpoint,
   RevalidationSourceBinding,
   RecoveredFinalizationRecord,
@@ -207,6 +208,40 @@ export function infraFailedAttemptPath(
   attempt: number,
 ): string {
   return path.join(failedAttemptDir(paths, taskId, attempt), 'infra-failed-attempt.json');
+}
+
+export function protocolInvalidDir(
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+): string {
+  return path.join(failedAttemptDir(paths, taskId, attempt), 'protocol-invalid');
+}
+
+export function protocolInvalidAttemptPath(
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+): string {
+  return path.join(protocolInvalidDir(paths, taskId, attempt), 'protocol-invalid-attempt.json');
+}
+
+export function protocolInvalidEvidencePath(
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+  name: 'launch.json',
+): string {
+  return path.join(protocolInvalidDir(paths, taskId, attempt), name);
+}
+
+export function protocolInvalidPatchFilePath(
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+  file: string,
+): string {
+  return path.join(protocolInvalidDir(paths, taskId, attempt), 'files', file);
 }
 
 /**
@@ -496,6 +531,24 @@ export const writeInfraFailedAttempt = (
   writeJsonOnce(
     infraFailedAttemptPath(paths, record.task_id, record.attempt),
     InfraFailedAttemptRecord.parse(record),
+  );
+
+export const readProtocolInvalidAttempt = (
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+): Promise<ProtocolInvalidAttemptRecord | null> =>
+  readOptional(protocolInvalidAttemptPath(paths, taskId, attempt), (input) =>
+    ProtocolInvalidAttemptRecord.parse(input),
+  );
+
+export const writeProtocolInvalidAttempt = (
+  paths: HarnessPaths,
+  record: ProtocolInvalidAttemptRecord,
+): Promise<void> =>
+  writeJsonOnce(
+    protocolInvalidAttemptPath(paths, record.task_id, record.attempt),
+    ProtocolInvalidAttemptRecord.parse(record),
   );
 
 export const readPreservedBundleManifest = (

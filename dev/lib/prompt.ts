@@ -96,7 +96,9 @@ ${io.reportPath}
 
    SUCCESS significa "patch pronto para validação oficial".
    candidate_commit deve ser null. changed_files deve descrever exatamente os
-   arquivos alterados. validations contém somente comandos que realmente executou.
+   arquivos alterados. changed_files lista exclusivamente os arquivos do patch dentro do repositório.
+   NÃO inclua reportPath, handoffDraftPath, .dev, .dev-inbox ou qualquer arquivo de protocolo.
+   validations contém somente comandos que realmente executou.
 
 ${io.handoffDraftPath} (máx. 4 KiB)
 {"schema_version":1,"task_id":"<id do packet>","result":"PASS"|"FAIL",
