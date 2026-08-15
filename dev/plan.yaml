@@ -1684,3 +1684,423 @@ tasks:
         timeout_seconds: 300
       - argv: [pnpm, test]
         timeout_seconds: 900
+
+  # -------------------------------------------------------------------------
+  # Marco 2 — Pipeline experimental inicial
+  # -------------------------------------------------------------------------
+  - id: M53
+    title: Corpus experimental inicial
+    blocked_by: [M52C]
+    objective: >-
+      Criar o primeiro corpus experimental pequeno e versionado para o piloto.
+      O corpus deve conter exatamente 3 tasks adequadas para exercitar o
+      pipeline experimental inicial. Cada task precisa possuir TaskSpec público
+      válido e suficiente para reprodução. O corpus não é a suite definitiva
+      de 8–12 tasks. A suite maior permanece deferida para Marco 3 / pós-piloto.
+      O corpus deve favorecer execução determinística, validação objetiva,
+      baixo custo, escopo pequeno e diferenças de dificuldade/forma suficientes
+      para não medir uma única microclasse de problema. Não usar resultados
+      futuros para escolher as tasks.
+    acceptance:
+      - Exatamente 3 tasks no corpus inicial.
+      - TaskSpecs públicos e versionados.
+      - Nenhum EvaluationPlan privado vazado para o worker.
+      - Corpus reproduzível.
+      - Não virar suite de 8–12 tasks.
+      - Testes determinísticos.
+      - Documentação mínima da escolha das três tasks.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, build]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+
+  - id: M54
+    title: Billing guard do produto
+    blocked_by: [M53]
+    objective: >-
+      Criar no produto AgentLab uma guarda provider-neutral de autorização de
+      execução real. NÃO reutilizar dev/lib/billing.ts como arquitetura
+      pública. A guarda deve responder antes do launch se uma execução
+      inference-bearing real pode ou não começar. Separar autorização, modo de
+      cobrança, quota conhecida/desconhecida, custo/budget e provenance da
+      decisão. Sem autorização suficiente, launch deve ser bloqueado antes do
+      spawn. Não inventar consumo nem custo quando não há fonte autoritativa.
+    acceptance:
+      - Contrato provider-neutral.
+      - Decisão ALLOW/BLOCK auditável.
+      - Nenhuma execução real ocorre quando BLOCK.
+      - Unknown não vira zero.
+      - API-equivalent não vira cobrança real.
+      - Testes somente com fixtures/fakes.
+      - Nenhuma chamada real de provider.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, build]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+
+  - id: M55
+    title: Credential proof provider-neutral
+    blocked_by: [M54]
+    objective: >-
+      Criar contrato de prova de credencial para providers reais antes de
+      execução. O produto deve conseguir distinguir pelo menos assinatura
+      verificada, API verificada, desconhecido/não verificável e não aplicável.
+      A ausência de API key NÃO prova assinatura. Credencial desconhecida deve
+      falhar fechada quando o perfil exigir assinatura. A prova deve ficar
+      separada de billing e de quota.
+    acceptance:
+      - Schema/contrato provider-neutral.
+      - Provenance explícita.
+      - Unknown fail-closed quando assinatura é requisito.
+      - Nenhum segredo persistido.
+      - Fixtures/fakes.
+      - Sem chamada paga.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, build]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+
+  - id: M56
+    title: Claude invocation
+    blocked_by: [M55]
+    objective: >-
+      Implementar buildInvocation real para Claude CLI no ProviderAdapter
+      product-side. Deve produzir argv/env/stdin necessários para execução real
+      sem duplicar spawn, timeout, cleanup ou ExecutionRecord.
+      Responsabilidades do adapter: construir invocation, declarar identity,
+      respeitar EnvironmentProfile e não executar processo por conta própria.
+    acceptance:
+      - buildInvocation Claude determinístico.
+      - Sem spawn dentro do adapter.
+      - Sem duplicação do runtime.
+      - Testes com snapshots/fixtures ou equivalente.
+      - Nenhuma inferência real.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, build]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+
+  - id: M57
+    title: Claude stream parser
+    blocked_by: [M56]
+    objective: >-
+      Implementar parseLine real para stream da Claude CLI. Produzir
+      ParsedProviderLine { event, observation? }. ProviderObservation pode
+      carregar usage, cost e terminal. Terminal é observation e não sobrescreve
+      ExecutionStatus. Custo só é normalizado como api_equivalent_usd quando
+      semanticamente compatível; ausência permanece ausência/null. O parser não
+      decide status operacional do processo.
+    acceptance:
+      - Fixtures reais/sintéticas representativas do stream.
+      - Usage preservado.
+      - Cost preservado.
+      - Terminal preservado.
+      - Malformed input tratado deterministicamente.
+      - Nenhuma chamada real ao provider.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, build]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+
+  - id: M58
+    title: Claude ProviderAdapter
+    blocked_by: [M57]
+    objective: >-
+      Fechar o primeiro ProviderAdapter real completo para Claude: identity,
+      credential/preflight integration necessária ao contrato, buildInvocation,
+      parseLine e registry resolveAdapter. Não mover runtime para o adapter.
+    acceptance:
+      - resolveAdapter identifica Claude.
+      - Fake continua funcionando.
+      - Contrato ProviderAdapter permanece provider-neutral.
+      - Nenhum spawn duplicado.
+      - Full suite verde.
+      - Nenhuma chamada real necessária nos testes.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, build]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+
+  - id: M59
+    title: Claude quota probe
+    blocked_by: [M58]
+    objective: >-
+      Implementar no produto a medição de quota Claude compatível com QuotaUsage
+      M44. A saída persistida deve usar o contrato provider-neutral
+      execution/quota-usage.json ou caminho equivalente já definido pela
+      arquitetura. A medição precisa distinguir OBSERVED e UNAVAILABLE e nunca
+      converter ausência em zero. Preservar janela, before, after, consumed_pp
+      quando comparável, reset/window identity, provenance e motivo quando
+      indisponível.
+    acceptance:
+      - QuotaUsage M44 usado como contrato.
+      - Same-window necessário para delta.
+      - Reset invalida delta.
+      - Unknown/unavailable não vira zero.
+      - Testes com probes fake/fixtures.
+      - Não executar consumo real nos testes.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, build]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+
+  - id: M60
+    title: Codex invocation
+    blocked_by: [M59]
+    objective: >-
+      Implementar buildInvocation real para Codex CLI usando o mesmo contrato
+      criado para Claude. Codex é usado neste Marco 2 somente para provar
+      generalização do adapter. Não transformar Codex em segundo braço do
+      benchmark.
+    acceptance:
+      - Invocation determinística.
+      - Modelo/profile recebidos de configuração explícita.
+      - Sem spawn dentro do adapter.
+      - Sem acoplamento a Claude.
+      - Fixtures/testes.
+      - Nenhuma inferência real.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, build]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+
+  - id: M61
+    title: Codex ProviderAdapter
+    blocked_by: [M60]
+    objective: >-
+      Implementar ProviderAdapter real para Codex: identity,
+      credential/preflight integration necessária, buildInvocation, parseLine e
+      registry. Deve provar que o contrato M51A/M52A generaliza para pelo menos
+      dois providers. Codex continua smoke-only no primeiro piloto.
+    acceptance:
+      - resolveAdapter identifica Codex.
+      - Claude e fake continuam funcionando.
+      - ProviderObservation preservada.
+      - Terminal não controla ExecutionStatus.
+      - Sem duplicação do common runtime.
+      - Nenhum benchmark Codex.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, build]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+
+  - id: M62
+    title: executeRun / integração de adapter
+    blocked_by: [M61]
+    objective: >-
+      Fechar a integração high-level deliberadamente adiada em M51B/M52A:
+      resolveAdapter(profile.cli) → adapter.buildInvocation(...) →
+      executeWithAdapter(...) → evidence. O low-level executeWithAdapter
+      continua recebendo invocation concreta. Não fazer executeWithAdapter
+      chamar buildInvocation diretamente.
+    acceptance:
+      - High-level executeRun ou equivalente.
+      - Registry → invocation → runtime comum ponta a ponta.
+      - ParsedProviderLine/observations preservadas.
+      - Runtime facts separados de provider observations.
+      - Fake/Claude/Codex usam a mesma trajetória estrutural.
+      - Testes sem provider real.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, build]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+
+  - id: M63
+    title: CLI experimental
+    blocked_by: [M62]
+    objective: >-
+      Adicionar interface agentlab para preparar/lançar execução em modo
+      EXPERIMENTAL. A CLI deve usar os contratos do produto, não
+      dev/orchestrate. Ela deve ser fina: CLI → Experiment/Execution contract →
+      executeRun. Não duplicar lógica de runner. Qualquer execução real continua
+      sujeita a billing guard e credential proof.
+    acceptance:
+      - Comando experimental explícito.
+      - Help/erro claros.
+      - Dry/fake path testável.
+      - Billing BLOCK impede spawn.
+      - Nenhuma execução real automática.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, build]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+
+  - id: M64
+    title: ExperimentSpec freeze
+    blocked_by: [M63]
+    objective: >-
+      Criar contrato imutável/versionado do experimento piloto. ExperimentSpec
+      deve congelar ANTES de qualquer execução real: arms; corpus/tasks;
+      repetitions; seed; order/counterbalancing; Strategy; EnvironmentProfile;
+      AgentProfile/model/effort por arm; e budget/billing policy relevante. O
+      spec congelado deve possuir identidade/hash reproduzível. Qualquer
+      alteração posterior cria um NOVO ExperimentSpec, nunca mutação silenciosa
+      do spec já congelado.
+    acceptance:
+      - Schema strict/versionado.
+      - Canonical/hash determinístico.
+      - Imutabilidade semântica.
+      - Arms congelados.
+      - Corpus/tasks congelados.
+      - Repetitions congeladas.
+      - Seed congelada.
+      - Ordem/counterbalancing congelados.
+      - Strategy congelada.
+      - EnvironmentProfile congelado.
+      - AgentProfile/model/effort de cada arm congelados.
+      - Budget/billing policy relevante congelada.
+      - 2 arms Sonnet Medium vs High.
+      - 3 tasks.
+      - 2 reps por task/arm.
+      - 12 slots planejados.
+      - Nenhum slot executado pela tarefa.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, build]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+
+  - id: M65
+    title: Experiment runner seeded/counterbalanced
+    blocked_by: [M64]
+    objective: >-
+      Implementar runner que materializa a ordem de execução a partir do
+      ExperimentSpec congelado. A execução é sequential, seeded,
+      interleaved/counterbalanced e nunca executa todos os slots de um arm antes
+      do outro. A ordem é reproduzível pela seed. INFRA gera retry slot e não
+      capability FAIL. Billing/quota guard são consultados antes de novos
+      launches. Nesta tarefa, provar scheduling com fakes. Não executar os 12
+      slots reais.
+    acceptance:
+      - Mesma seed → mesma ordem.
+      - Outra seed pode alterar ordem de forma válida.
+      - Arms intercalados/counterbalanced.
+      - 12 planned slots derivados corretamente.
+      - INFRA retry separado.
+      - Billing BLOCK interrompe launch.
+      - Fake-only tests.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, build]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+
+  - id: M66
+    title: Compare
+    blocked_by: [M65]
+    objective: >-
+      Comparar TaskPerformanceRecords entre arms do piloto. Somente QUALIFIED
+      entra. Produzir resultado por task antes do agregado. Missing metric
+      permanece null e provenance é preservada. Não fabricar confidence
+      interval, construir Capability Matrix completa ou escolher vencedor de
+      produto automaticamente.
+    acceptance:
+      - QUALIFIED-only.
+      - Per-task comparison.
+      - Aggregate posterior.
+      - N insuficiente explícito.
+      - Missing/null preservado.
+      - Fixtures determinísticas.
+      - Nenhuma inferência real.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, build]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+
+  - id: M67
+    title: E2E da infraestrutura experimental
+    blocked_by: [M66]
+    objective: >-
+      Provar ponta a ponta ExperimentSpec → ProviderAdapter → executeRun →
+      evidence → evaluation → qualification → performance → compare,
+      primordialmente usando fixtures, fake adapters, ambientes determinísticos
+      e evidência sintética/controlada. M67 NÃO executa o pilot completo de 12
+      slots e NÃO produz conclusão final Medium vs High. Smoke real mínimo só
+      pode existir se houver autorização humana EXPLÍCITA separada no momento
+      da execução da tarefa, além de billing guard ALLOW, credential proof PASS,
+      quota/budget compatíveis e necessidade objetiva de provar integração real.
+      Na ausência dessa autorização explícita: FAKE-ONLY.
+    acceptance:
+      - E2E fake ponta a ponta PASS.
+      - Evidence válida.
+      - Evaluation/qualification/performance/compare conectados.
+      - Zero necessidade de 12 slots reais.
+      - Nenhuma conclusão comparativa real.
+      - Real smoke opcional e bloqueado por default.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, build]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+
+  - id: M68
+    title: Revisão M2 + pilot checklist
+    blocked_by: [M67]
+    objective: >-
+      Última tarefa operacional do M2 antes do pilot real. Fazer revisão
+      humana/documental equivalente aos marcos anteriores. O checklist
+      obrigatório cobre M53–M67 PASS, full gates verdes, recover CLEAN,
+      evidence contracts íntegros, billing guard funcional, credential proof
+      funcional, quota probe funcional, ExperimentSpec congelado, corpus de 3
+      tasks aprovado, seed/order/counterbalancing definidos, retry policy para
+      INFRA definida, compare somente QUALIFIED, quota stop >=80%, profiles
+      Sonnet Medium/High corretos, Codex smoke-only, custo/budget máximo definido
+      e billing authorization necessária. Depois de M68: PARADA HUMANA
+      OBRIGATÓRIA. M68 NÃO lança nenhum dos 12 slots. O pilot real só começa
+      após aprovação humana explícita posterior.
+    acceptance:
+      - Review document final.
+      - BACKLOG/LESSONS/ARCHITECTURE coerentes.
+      - Todos os gates verdes.
+      - Checklist explícito.
+      - Nenhum pilot real lançado.
+      - Parada humana registrada.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, build]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
