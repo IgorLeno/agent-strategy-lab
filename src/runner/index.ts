@@ -37,6 +37,13 @@ export {
   type ExecuteWithAdapterOptions,
 } from './execute.js';
 export {
+  BillingGuardBlockedError,
+  decideExecutionAuthorization,
+  type BillingGuardDecision,
+  type BillingGuardReasonCode,
+  type RealExecutionAuthorization,
+} from '../billing/index.js';
+export {
   confirmGroupCleanup,
   listDescendantPids,
   ProcessGroupSurvivorError,

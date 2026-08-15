@@ -13,6 +13,7 @@
  * YAGNI enquanto só existe um adapter (fake) exercitando a forma. Adicionar
  * hoje o que só um segundo adapter real justificaria é abstração prematura.
  */
+import type { ExecutionKind } from '../billing/index.js';
 import type { AdapterIdentity, ExecutionEnvelopeManifest } from '../envelope/index.js';
 import type { AgentEvent } from './events.js';
 
@@ -60,6 +61,8 @@ export interface ParsedProviderLine {
  */
 export interface ProviderAdapter {
   readonly identity: AdapterIdentity;
+  /** Fixture nunca cobra; provider real exige decisão ALLOW antes do spawn. */
+  readonly executionKind: ExecutionKind;
   /**
    * Tag de provenance gravada nas métricas (`tokens`, `changed_files`) que o
    * runtime comum (`executeWithAdapter`, em `runner/execute.ts`) extrai do

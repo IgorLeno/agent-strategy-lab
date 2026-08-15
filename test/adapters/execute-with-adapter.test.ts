@@ -144,6 +144,7 @@ describe('executeWithAdapter — montagem do ExecutionRecord é do runtime comum
   it('produz um ExecutionRecord com identidade e provenance de qualquer ProviderAdapter conforme, reusando só buildInvocation/parseLine', async () => {
     const customAdapter: ProviderAdapter = {
       identity: { name: 'test-custom-adapter', version: '9.9.9' },
+      executionKind: 'FIXTURE',
       metricsProvenance: 'custom_provenance',
       buildInvocation: fakeAdapter.buildInvocation,
       parseLine: fakeAdapter.parseLine,
@@ -170,6 +171,7 @@ describe('executeWithAdapter — montagem do ExecutionRecord é do runtime comum
   it('adapter sem metricsProvenance cai para identity.name — o default é decidido pelo runtime, não pelo adapter', async () => {
     const customAdapter: ProviderAdapter = {
       identity: { name: 'no-provenance-adapter', version: '1.0.0' },
+      executionKind: 'FIXTURE',
       buildInvocation: fakeAdapter.buildInvocation,
       parseLine: fakeAdapter.parseLine,
     };

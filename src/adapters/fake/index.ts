@@ -126,6 +126,7 @@ const FAKE_AGENT_ENTRY = path.join('fixtures', 'fake-agent', 'index.mjs');
  */
 export const fakeAdapter: ProviderAdapter = {
   identity: FAKE_ADAPTER_IDENTITY,
+  executionKind: 'FIXTURE',
   metricsProvenance: FAKE_AGENT_PROVENANCE,
   buildInvocation(options: BuildInvocationOptions): AdapterInvocation {
     return {

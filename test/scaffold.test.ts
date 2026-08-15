@@ -10,6 +10,7 @@ import { LAB_CORE_VERSION } from '../src/core/version.js';
  */
 const AREAS = [
   'adapters',
+  'billing',
   'cli',
   'core',
   'envelope',

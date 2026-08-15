@@ -242,6 +242,7 @@ fronteira.
 | `workspace` | clone descartável, cleanup, change bundle | EXECUTION CONTRACT | M18–M20 |
 | `runner` | spawn por argv, captura, timeout, process group, sobreviventes | EXECUTION CONTRACT | M21–M24B |
 | `adapters` | CLI de provider → interface interna | EXECUTION CONTRACT | M25, M26 |
+| `billing` | autorização provider-neutral anterior ao launch real | EXECUTION CONTRACT | M54 |
 | `strategies` | carga e validação das receitas em `strategies/` | EXPERIMENT PLANE | M05 |
 | `evaluator` | workspace do evaluator, graders, orquestração da avaliação | EXECUTION CONTRACT | M27A–M28 |
 | `scorer` | perfis de score, qualificação | EXECUTION CONTRACT | M29 |

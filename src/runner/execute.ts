@@ -26,6 +26,12 @@
 import type { Readable } from 'node:stream';
 
 import type { ParsedProviderLine, ProviderAdapter, ProviderEvent } from '../adapters/contract.js';
+import {
+  BillingGuardBlockedError,
+  decideExecutionAuthorization,
+  type BillingGuardDecision,
+  type RealExecutionAuthorization,
+} from '../billing/index.js';
 import { ExecutionStatus } from '../core/enums.js';
 import { executionEnvelopeSha256, type ExecutionEnvelopeManifest } from '../envelope/index.js';
 import type { ExecutionRecord } from '../schemas/index.js';
@@ -39,11 +45,14 @@ export interface ExecuteWithAdapterOptions extends SpawnProcessOptions {
   readonly gracePeriodMs: number;
   /** Teto de `confirmCleanup` depois do kill do group. Default: o de `runner/process-group.ts`. */
   readonly cleanupConfirmTimeoutMs?: number;
+  /** Evidência obrigatória para adapter REAL_INFERENCE; fixtures não a consultam. */
+  readonly realExecutionAuthorization?: RealExecutionAuthorization;
 }
 
 export interface AdapterExecutionRun {
   readonly record: ExecutionRecord;
   readonly events: ProviderEvent[];
+  readonly authorization: BillingGuardDecision;
   /**
    * Uma entrada por linha não vazia do stream, na mesma ordem e índice de
    * `events` (`parsedLines[i].event === events[i]`) — a correlação entre uma
@@ -69,6 +78,15 @@ export async function executeWithAdapter(
   adapter: ProviderAdapter,
   options: ExecuteWithAdapterOptions,
 ): Promise<AdapterExecutionRun> {
+  // Última fronteira antes de qualquer processo nascer.
+  const authorization = decideExecutionAuthorization(
+    adapter.executionKind,
+    options.realExecutionAuthorization,
+  );
+  if (authorization.decision === 'BLOCK') {
+    throw new BillingGuardBlockedError(authorization);
+  }
+
   const manifest: ExecutionEnvelopeManifest = { ...options.manifest, adapter: adapter.identity };
   const envelopeSha256 = executionEnvelopeSha256(manifest);
 
@@ -132,7 +150,7 @@ export async function executeWithAdapter(
     },
   };
 
-  return { record, events, parsedLines };
+  return { record, events, parsedLines, authorization };
 }
 
 /**

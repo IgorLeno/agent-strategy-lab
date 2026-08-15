@@ -63,6 +63,7 @@ function manifest(): Omit<ExecutionEnvelopeManifest, 'adapter'> {
 function customAdapterWithCost(currency: string): ProviderAdapter {
   return {
     identity: { name: 'test-observation-adapter', version: '1.0.0' },
+    executionKind: 'FIXTURE',
     metricsProvenance: 'custom_observation_provenance',
     buildInvocation: fakeAdapter.buildInvocation,
     parseLine(raw: string): ParsedProviderLine {
@@ -139,6 +140,7 @@ describe('executeWithAdapter — ProviderObservation preservada', () => {
   it('ausência de usage.tokens na observation vira null + provenance, nunca zero', async () => {
     const adapter: ProviderAdapter = {
       identity: { name: 'test-no-usage-adapter', version: '1.0.0' },
+      executionKind: 'FIXTURE',
       metricsProvenance: 'no_usage_provenance',
       buildInvocation: fakeAdapter.buildInvocation,
       parseLine(raw: string): ParsedProviderLine {
