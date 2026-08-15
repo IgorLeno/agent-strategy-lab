@@ -412,3 +412,19 @@ Rule: `changed_files` contém exclusivamente paths candidatos ao commit da task;
 protocol I/O nunca entra no patch. Worker `SUCCESS` com metadata protocol-invalid
 é abandonado com evidência original byte-exact e sem capability verdict — a
 evidência nunca é alterada para fazer o fechamento passar.
+
+[2026-08-15] Context: adoção oficial dentro do protocolo de autonomia rotineira.
+Mistake: a primeira versão deixava uma recusa de `adoptMaintenance` escapar como
+exceção genérica, embora o contrato de UX proíba devolver stack trace para um
+incidente rotineiro já triado.
+Rule: recusa de uma primitive oficial encerra o incidente em record append-only
+e saída estruturada `HUMAN_REQUIRED`; automação nunca inventa um caminho
+alternativo de adoção nem transforma a recusa em sucesso.
+
+[2026-08-15] Context: review independente da primeira instalação de routine autonomy.
+Mistake: declarar reviewer como read-only no prompt, conferir a árvore apenas
+depois e preencher contadores de task activity com zero constante tratava
+intenção como evidência de isolamento.
+Rule: fronteira de agente é aplicada antes do spawn por sandbox efetivo; estado,
+attempts e launch evidence são medidos antes/depois; qualquer divergência ou
+falha de runtime termina em record append-only e `HUMAN_REQUIRED` estruturado.

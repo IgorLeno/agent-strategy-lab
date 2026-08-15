@@ -34,6 +34,8 @@ import {
   failedAttemptReportPath,
   launchRecordPath,
   readInfraFailedAttempt,
+  readAttemptAbandonment,
+  readProtocolInvalidAttempt,
   readValidationFailedAttempt,
   sourceBindingPath,
   validationFailedAttemptPath,
@@ -799,13 +801,22 @@ export async function readPreviousAttemptDiagnostics(
   while (current >= 1) {
     const validation = await readValidationFailedAttempt(paths, taskId, current);
     const infra = await readInfraFailedAttempt(paths, taskId, current);
-    if (validation !== null && infra !== null) {
+    const protocolInvalid = await readProtocolInvalidAttempt(paths, taskId, current);
+    const abandonment = await readAttemptAbandonment(paths, taskId, current);
+    const recordNames = [
+      validation === null ? null : 'ValidationFailedAttemptRecord',
+      infra === null ? null : 'InfraFailedAttemptRecord',
+      protocolInvalid === null ? null : 'ProtocolInvalidAttemptRecord',
+      abandonment === null ? null : 'AttemptAbandonmentRecord',
+    ].filter((name): name is string => name !== null);
+    if (recordNames.length > 1) {
       throw new InconsistentAttemptEvidenceError(
-        `attempt ${current} de ${taskId} tem ValidationFailedAttemptRecord e InfraFailedAttemptRecord simultâneos`,
+        `attempt ${current} de ${taskId} tem ${recordNames.join(' e ')} simultâneos`,
       );
     }
+    if (abandonment !== null) return null;
     if (validation !== null) return previousAttemptDiagnosticsFrom(validation);
-    if (infra !== null) {
+    if (infra !== null || protocolInvalid !== null) {
       current -= 1;
       continue;
     }

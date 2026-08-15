@@ -395,6 +395,41 @@ stream-json, exatamente um `result`, nenhuma linha inválida). A origem fica
 registrada em `provider_failure_source`: classificação feita depois do fato
 não se passa pela do lançamento.
 
+### Autonomia rotineira bounded
+
+`dev-orchestrate --autonomy routine` envolve somente um preflight bloqueado. O
+modo classifica evidência conhecida como `AUTO_RECOVER`, `AUTO_MAINTENANCE`,
+`TASK_REPAIR` ou `HUMAN_REQUIRED`; sem a opção, o comportamento conservador
+anterior permanece inalterado.
+
+`AUTO_RECOVER` executa apenas uma primitive determinística existente.
+`AUTO_MAINTENANCE` usa um clone descartável fixado no `authorized_head`, uma
+sessão maintainer e uma segunda sessão reviewer, limpa e read-only. O candidate
+precisa ser um único commit filho direto, ter targeted tests e os quatro gates
+oficiais verdes. Depois de `ACCEPT`, publicação é fast-forward normal, adoção é
+exclusivamente por `adoptMaintenance`, recovery é oficial e o retry repete o
+mesmo preflight uma vez. `TASK_REPAIR` continua pertencendo à política de
+capability já existente.
+
+O budget permite no máximo dois candidates (uma correção após `REJECT`), oito
+arquivos de implementação/teste e um retry. A allowlist é `dev/**`,
+`test/dev/**` e docs; `package.json` só aceita script comprovadamente necessário.
+Mudança em `dev/plan.yaml`, `src/**`, billing, profiles/model/effort,
+`schema_version`, evidência runtime/histórica ou qualquer ambiguidade vira
+`HUMAN_REQUIRED`. Maintenance/review não chama `launchTask` e não consome
+attempt de produto.
+Os profiles de maintenance/review são fixos, distintos e subscription-only; o
+reviewer Codex tem o sandbox convertido para `read-only` antes do spawn. Estado,
+attempts e launch evidence do checkout original e do clone são comparados antes
+e depois de cada sessão — zero é resultado medido, não declaração do agente.
+
+Cada incidente recebe eventos imutáveis em
+`.dev/autonomy/incidents/<incident-id>/` e um record terminal append-only em
+`.dev/autonomy/incidents/<incident-id>.json`. O record guarda decisões e
+evidência objetiva, nunca raciocínio interno. Se a automação recusar ou esgotar
+o budget, a saída inclui `status: HUMAN_REQUIRED`, `incident_id`, uma decisão
+específica, o motivo, opções e paths de evidência — nunca apenas o blocker cru.
+
 ### Saída dos comandos
 
 `dev-doctor` e `dev-orchestrate` imprimem por padrão só o que serve para

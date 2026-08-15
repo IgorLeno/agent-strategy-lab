@@ -28,6 +28,12 @@ import { resolveHarnessPaths, type HarnessPaths } from '../lib/paths.js';
 import { loadPlan, type LoadedPlan } from '../lib/plan.js';
 import { loadProfile } from '../lib/profile.js';
 import { InconsistentAttemptEvidenceError } from '../lib/retry-failed.js';
+import {
+  inspectRoutineIncident,
+  resolveRoutinePreflight,
+  type HumanRequiredOutput,
+} from '../lib/routine-autonomy.js';
+import { createRoutineAutonomyRuntime } from '../lib/routine-autonomy-runtime.js';
 import { selectNextTask } from '../lib/select.js';
 import { ensureRuntimeDirs, getTaskState, readState } from '../lib/state.js';
 import { launchTask, prepareNextTask, type LaunchStepResult } from '../lib/steps.js';
@@ -139,6 +145,10 @@ async function executeReadyTask(
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2), [VERBOSE_FLAG, SKIP_PREFLIGHT_FLAG]);
+  const autonomy = args.options.get('autonomy');
+  if (args.flags.has('autonomy') || (autonomy !== undefined && autonomy !== 'routine')) {
+    fail('--autonomy aceita somente routine');
+  }
   const paths = resolveHarnessPaths(args.options.get('repo') ?? process.cwd());
   const loaded = await loadPlan(paths.planFile);
   await ensureRuntimeDirs(paths);
@@ -163,38 +173,65 @@ async function main(): Promise<void> {
   // e nada muda entre o que o pre-flight conferiu e o que o loop lança.
   let exhausted = false;
   let preflight: PreflightResult | null = null;
+  let humanRequired: HumanRequiredOutput | null = null;
 
   await withHarnessLock(paths, 'dev-orchestrate', async () => {
     if (!args.flags.has(SKIP_PREFLIGHT_FLAG)) {
-      preflight = await runOrchestrationPreflight({
+      let currentPreflight = await runOrchestrationPreflight({
         paths,
         loaded,
         requestedProfileId: profileId,
       });
-      if (preflight.status === 'BLOCKED') {
+      if (currentPreflight.status === 'BLOCKED' && autonomy === 'routine') {
+        const incident = await inspectRoutineIncident(paths, currentPreflight);
+        const resolution = await resolveRoutinePreflight({
+          paths,
+          incident,
+          driver: createRoutineAutonomyRuntime({
+            paths,
+            loaded,
+            requestedProfileId: profileId,
+          }),
+        });
+        currentPreflight = resolution.preflight;
+        humanRequired = resolution.human_required;
+        if (resolution.status === 'HUMAN_REQUIRED') {
+          stop = {
+            status: 'HUMAN_REQUIRED',
+            reason: resolution.human_required?.why_automation_stopped ?? 'decisão humana necessária',
+          };
+          preflight = currentPreflight;
+          return;
+        }
+      }
+      preflight = currentPreflight;
+      if (currentPreflight.status === 'BLOCKED') {
         // Bloqueio de pre-flight é problema do repositório, não veredito de
         // tarefa: nenhum provider é lançado, nenhum attempt é consumido e
         // nenhum status de tarefa muda — exceto o archival do primeiro FAIL
         // oficial, que o preflight pode concluir para o repair bounded.
-        stop = { status: 'PREFLIGHT_BLOCKED', reason: preflight.reason ?? 'pre-flight bloqueado' };
-        if (preflight.blocker === AUTOMATIC_REPAIR_EXHAUSTED) {
-          stop = { status: AUTOMATIC_REPAIR_EXHAUSTED, reason: preflight.reason ?? AUTOMATIC_REPAIR_EXHAUSTED };
-        } else if (preflight.blocker === AUTOMATIC_REPAIR_PROFILE_MISMATCH) {
+        stop = { status: 'PREFLIGHT_BLOCKED', reason: currentPreflight.reason ?? 'pre-flight bloqueado' };
+        if (currentPreflight.blocker === AUTOMATIC_REPAIR_EXHAUSTED) {
+          stop = { status: AUTOMATIC_REPAIR_EXHAUSTED, reason: currentPreflight.reason ?? AUTOMATIC_REPAIR_EXHAUSTED };
+        } else if (currentPreflight.blocker === AUTOMATIC_REPAIR_PROFILE_MISMATCH) {
           stop = {
             status: AUTOMATIC_REPAIR_PROFILE_MISMATCH,
-            reason: preflight.reason ?? AUTOMATIC_REPAIR_PROFILE_MISMATCH,
+            reason: currentPreflight.reason ?? AUTOMATIC_REPAIR_PROFILE_MISMATCH,
           };
         } else if (
-          preflight.blocker === 'INCONSISTENT_EVIDENCE' ||
-          preflight.blocker === 'HISTORICAL_GAP' ||
-          preflight.blocker === 'INVALID_EVIDENCE'
+          currentPreflight.blocker === 'INCONSISTENT_EVIDENCE' ||
+          currentPreflight.blocker === 'HISTORICAL_GAP' ||
+          currentPreflight.blocker === 'INVALID_EVIDENCE'
         ) {
-          stop = { status: preflight.blocker, reason: preflight.reason ?? preflight.blocker };
+          stop = {
+            status: currentPreflight.blocker,
+            reason: currentPreflight.reason ?? currentPreflight.blocker,
+          };
         }
         return;
       }
-      if (preflight.status === 'ALL_DONE') {
-        stop = { status: 'ALL_DONE', reason: preflight.reason ?? 'nenhuma tarefa pendente' };
+      if (currentPreflight.status === 'ALL_DONE') {
+        stop = { status: 'ALL_DONE', reason: currentPreflight.reason ?? 'nenhuma tarefa pendente' };
         return;
       }
     }
@@ -351,6 +388,7 @@ async function main(): Promise<void> {
 
   const preflightReport: PreflightResult | null = preflight;
   emit({
+    ...(humanRequired ?? {}),
     ...(preflightReport === null
       ? {}
       : {

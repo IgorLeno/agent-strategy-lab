@@ -9,6 +9,7 @@ import {
   readCompletion,
   readInfraFailedAttempt,
   readLaunchRecord,
+  readProtocolInvalidAttempt,
   readValidationFailedAttempt,
 } from './records.js';
 import type { CompletionRecord, ValidationFailedAttemptRecord } from './schemas.js';
@@ -101,10 +102,12 @@ async function walkValidationFails(
     let validation: ValidationFailedAttemptRecord | null;
     let infra;
     let abandonment;
+    let protocolInvalid;
     try {
       validation = await readValidationFailedAttempt(paths, taskId, current);
       infra = await readInfraFailedAttempt(paths, taskId, current);
       abandonment = await readAttemptAbandonment(paths, taskId, current);
+      protocolInvalid = await readProtocolInvalidAttempt(paths, taskId, current);
     } catch (error) {
       return {
         status: 'invalid',
@@ -112,7 +115,9 @@ async function walkValidationFails(
         reason: `attempt ${current} de ${taskId} tem record ilegível: ${errorMessage(error)}`,
       };
     }
-    const recordCount = [validation, infra, abandonment].filter((record) => record !== null).length;
+    const recordCount = [validation, infra, abandonment, protocolInvalid].filter(
+      (record) => record !== null,
+    ).length;
     if (recordCount > 1) {
       return {
         status: 'inconsistent',
@@ -125,7 +130,7 @@ async function walkValidationFails(
       found.push(validation);
       continue;
     }
-    if (infra !== null) continue;
+    if (infra !== null || protocolInvalid !== null) continue;
     return {
       status: 'gap',
       attempt: current,
@@ -255,19 +260,24 @@ export async function decideAutomaticRepair(
     let currentValidation;
     let currentInfra;
     let currentAbandonment;
+    let currentProtocolInvalid;
     try {
       currentValidation = await readValidationFailedAttempt(paths, taskId, task.attempts);
       currentInfra = await readInfraFailedAttempt(paths, taskId, task.attempts);
       currentAbandonment = await readAttemptAbandonment(paths, taskId, task.attempts);
+      currentProtocolInvalid = await readProtocolInvalidAttempt(paths, taskId, task.attempts);
     } catch (error) {
       return blocked(
         'INVALID_EVIDENCE',
         `attempt ${task.attempts} de ${taskId} tem record ilegível: ${errorMessage(error)}`,
       );
     }
-    const currentRecordCount = [currentValidation, currentInfra, currentAbandonment].filter(
-      (record) => record !== null,
-    ).length;
+    const currentRecordCount = [
+      currentValidation,
+      currentInfra,
+      currentAbandonment,
+      currentProtocolInvalid,
+    ].filter((record) => record !== null).length;
     if (currentRecordCount > 1) {
       return blocked(
         'INCONSISTENT_EVIDENCE',
@@ -276,6 +286,7 @@ export async function decideAutomaticRepair(
     }
     if (currentAbandonment !== null) return { action: 'NOT_APPLICABLE' };
     if (currentInfra !== null) return { action: 'NOT_APPLICABLE' };
+    if (currentProtocolInvalid !== null) return { action: 'NOT_APPLICABLE' };
     if (currentValidation !== null) {
       const history = await walkValidationFails(paths, taskId, task.attempts - 1);
       if (history.status !== 'ok') {

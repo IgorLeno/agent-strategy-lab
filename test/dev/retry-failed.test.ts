@@ -20,10 +20,12 @@ import {
   reportPath,
   sourceBindingPath,
   validationFailedAttemptPath,
+  writeAttemptAbandonment,
   writeCompletion,
   writeInfraFailedAttempt,
   writeLaunchRecord,
   writePacket,
+  writeProtocolInvalidAttempt,
   writeRevalidationSourceBinding,
   writeValidationFailedAttempt,
 } from '../../dev/lib/records.js';
@@ -436,6 +438,105 @@ function infraFailedRecord(taskId: string, attempt: number, baseSha: string) {
     reason_code: 'PROVIDER_TERMINAL_FAILURE' as const,
     reason: `OAuth 401 no attempt ${attempt}`,
     archived_at: NOW,
+  };
+}
+
+function protocolInvalidRecord(taskId: string, attempt: number, baseSha: string) {
+  const sha = hash(`protocol-${taskId}-${attempt}`);
+  const archive = (name: string, sourcePath: string) => ({
+    path: `failed-attempts/${taskId}/attempt-${attempt}/${name}`,
+    source_path: sourcePath,
+    sha256: sha,
+    size_bytes: 1,
+  });
+  return {
+    schema_version: 1 as const,
+    task_id: taskId,
+    attempt,
+    classification: 'PROTOCOL_OUTPUT_INVALID' as const,
+    reason_code: 'PROTOCOL_OUTPUT_INVALID' as const,
+    reason: 'protocol I/O declarado como patch',
+    source_base_sha: baseSha,
+    head_sha: baseSha,
+    authorized_head_sha: baseSha,
+    profile_id: PROFILE,
+    execution_policy: {
+      commit_owner: 'orchestrator' as const,
+      official_validation_owner: 'orchestrator' as const,
+      worker_validation_policy: 'targeted' as const,
+    },
+    process: {
+      pid: 3000 + attempt,
+      pgid: 3000 + attempt,
+      started_at: NOW,
+      proc_start_ticks: attempt,
+      command_sha256: sha,
+    },
+    launch_id: `00000000-0000-4000-8000-10000000000${attempt}`,
+    launch_record: archive('protocol-invalid/launch.json', `logs/${taskId}.launch.json`),
+    worker_self_reported_result: 'SUCCESS' as const,
+    handoff_result: 'PASS' as const,
+    report_candidate_commit: null,
+    state_candidate_commit: null,
+    state_accepted_commit: null,
+    protocol_invalid_paths: [
+      `.dev-inbox/${taskId}/handoff-draft.json`,
+      `.dev-inbox/${taskId}/report.json`,
+    ],
+    changed_files: ['dev/lib/example.ts'],
+    actual_patch_matches_normalized_report: true as const,
+    patch_fingerprint: sha,
+    patch_files: [
+      {
+        path: 'dev/lib/example.ts',
+        git_status: ' M',
+        content_state: 'ARCHIVED' as const,
+        archive_path: `failed-attempts/${taskId}/attempt-${attempt}/protocol-invalid/files/dev/lib/example.ts`,
+        size_bytes: 1,
+        sha256: sha,
+      },
+    ],
+    change_bundle: {
+      manifest_path: `failed-attempts/${taskId}/attempt-${attempt}/changes-manifest.json`,
+      manifest_sha256: sha,
+      patch_path: `failed-attempts/${taskId}/attempt-${attempt}/changes.patch`,
+      patch_sha256: sha,
+      patch_size_bytes: 1,
+    },
+    report: archive('report.json', `../.dev-inbox/${taskId}/report.json`),
+    handoff_draft: archive('handoff-draft.json', `../.dev-inbox/${taskId}/handoff-draft.json`),
+    capability_verdict: null,
+    official_validation_verdict: null,
+    attempts_preserved: attempt,
+    archived_at: NOW,
+  };
+}
+
+function abandonmentRecord(taskId: string, attempt: number, baseSha: string) {
+  return {
+    schema_version: 1 as const,
+    task_id: taskId,
+    attempt,
+    base_sha: baseSha,
+    process: {
+      pid: 4000 + attempt,
+      pgid: 4000 + attempt,
+      started_at: NOW,
+      proc_start_ticks: attempt,
+      command_sha256: hash(`abandon-${taskId}-${attempt}`),
+    },
+    launch_classification: 'FINISHED' as const,
+    exit_code: 0,
+    started_at: NOW,
+    finished_at: NOW,
+    reason: 'boundary manual',
+    previous_diagnostics: null,
+    candidate_commit: null,
+    working_tree_clean: true as const,
+    head_sha: baseSha,
+    report_present: false as const,
+    handoff_present: false as const,
+    abandoned_at: NOW,
   };
 }
 
@@ -1337,6 +1438,46 @@ describe('readPreviousAttemptDiagnostics atravessa INFRA capability-neutral', ()
     expect(await readPreviousAttemptDiagnostics(fixture.paths, TASK, 1)).toBeNull();
   });
 
+  it('M56-like: protocol-invalid attempt 1 apenas => diagnostics null e FIRST_PASS', async () => {
+    const fixture = await lifecycleFixture(1);
+    await writeProtocolInvalidAttempt(
+      fixture.paths,
+      protocolInvalidRecord(TASK, 1, fixture.baseSha),
+    );
+
+    expect(await readPreviousAttemptDiagnostics(fixture.paths, TASK, 1)).toBeNull();
+    const prepared = await prepareNextTask(fixture.paths, fixture.loaded);
+    expect(prepared.packet?.previous_attempt_diagnostics).toBeUndefined();
+  });
+
+  it('validation 1 + protocol-invalid 2 atravessa até os diagnostics do FAIL 1', async () => {
+    const fixture = await lifecycleFixture(2);
+    await writeValidationFailedAttempt(
+      fixture.paths,
+      validationFailedRecord(TASK, 1, fixture.baseSha),
+    );
+    await writeProtocolInvalidAttempt(
+      fixture.paths,
+      protocolInvalidRecord(TASK, 2, fixture.baseSha),
+    );
+
+    expect((await readPreviousAttemptDiagnostics(fixture.paths, TASK, 2))?.attempt).toBe(1);
+  });
+
+  it('attempt abandonment encerra a travessia e não vaza diagnostics anteriores', async () => {
+    const fixture = await lifecycleFixture(2);
+    await writeValidationFailedAttempt(
+      fixture.paths,
+      validationFailedRecord(TASK, 1, fixture.baseSha),
+    );
+    await writeAttemptAbandonment(
+      fixture.paths,
+      abandonmentRecord(TASK, 2, fixture.baseSha),
+    );
+
+    expect(await readPreviousAttemptDiagnostics(fixture.paths, TASK, 2)).toBeNull();
+  });
+
   it('5 — validation attempt 1 + validation attempt 2 => diagnostics do attempt 2', async () => {
     const fixture = await lifecycleFixture(2);
     await writeValidationFailedAttempt(
@@ -1376,6 +1517,22 @@ describe('readPreviousAttemptDiagnostics atravessa INFRA capability-neutral', ()
     );
     await expect(readPreviousAttemptDiagnostics(fixture.paths, TASK, 1)).rejects.toThrow(
       /ValidationFailedAttemptRecord e InfraFailedAttemptRecord/,
+    );
+  });
+
+  it('protocol-invalid e validation no mesmo attempt => FAIL CLOSED', async () => {
+    const fixture = await lifecycleFixture(1);
+    await writeProtocolInvalidAttempt(
+      fixture.paths,
+      protocolInvalidRecord(TASK, 1, fixture.baseSha),
+    );
+    await writeValidationFailedAttempt(
+      fixture.paths,
+      validationFailedRecord(TASK, 1, fixture.baseSha),
+    );
+
+    await expect(readPreviousAttemptDiagnostics(fixture.paths, TASK, 1)).rejects.toThrow(
+      InconsistentAttemptEvidenceError,
     );
   });
 

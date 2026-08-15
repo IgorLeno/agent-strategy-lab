@@ -11,6 +11,7 @@ import {
   writeCompletion,
   writeInfraFailedAttempt,
   writeLaunchRecord,
+  writeProtocolInvalidAttempt,
   writeValidationFailedAttempt,
 } from '../../dev/lib/records.js';
 import {
@@ -172,6 +173,77 @@ function abandoned(attempt: number) {
     report_present: false as const,
     handoff_present: false as const,
     abandoned_at: NOW,
+  };
+}
+
+function protocolInvalid(attempt: number) {
+  const digest = hex64(`protocol-${attempt}`);
+  const archive = (name: string, source: string) => ({
+    path: `failed-attempts/${TASK}/attempt-${attempt}/${name}`,
+    source_path: source,
+    sha256: digest,
+    size_bytes: 1,
+  });
+  return {
+    schema_version: 1 as const,
+    task_id: TASK,
+    attempt,
+    classification: 'PROTOCOL_OUTPUT_INVALID' as const,
+    reason_code: 'PROTOCOL_OUTPUT_INVALID' as const,
+    reason: 'protocol I/O declarado como patch',
+    source_base_sha: baseSha,
+    head_sha: baseSha,
+    authorized_head_sha: baseSha,
+    profile_id: PROFILE,
+    execution_policy: {
+      commit_owner: 'orchestrator' as const,
+      official_validation_owner: 'orchestrator' as const,
+      worker_validation_policy: 'targeted' as const,
+    },
+    process: {
+      pid: 3000 + attempt,
+      pgid: 3000 + attempt,
+      started_at: NOW,
+      proc_start_ticks: attempt,
+      command_sha256: digest,
+    },
+    launch_id: `00000000-0000-4000-8000-10000000000${attempt}`,
+    launch_record: archive('protocol-invalid/launch.json', `logs/${TASK}.launch.json`),
+    worker_self_reported_result: 'SUCCESS' as const,
+    handoff_result: 'PASS' as const,
+    report_candidate_commit: null,
+    state_candidate_commit: null,
+    state_accepted_commit: null,
+    protocol_invalid_paths: [
+      `.dev-inbox/${TASK}/handoff-draft.json`,
+      `.dev-inbox/${TASK}/report.json`,
+    ],
+    changed_files: ['dev/lib/example.ts'],
+    actual_patch_matches_normalized_report: true as const,
+    patch_fingerprint: digest,
+    patch_files: [
+      {
+        path: 'dev/lib/example.ts',
+        git_status: ' M',
+        content_state: 'ARCHIVED' as const,
+        archive_path: `failed-attempts/${TASK}/attempt-${attempt}/protocol-invalid/files/dev/lib/example.ts`,
+        size_bytes: 1,
+        sha256: digest,
+      },
+    ],
+    change_bundle: {
+      manifest_path: `failed-attempts/${TASK}/attempt-${attempt}/changes-manifest.json`,
+      manifest_sha256: digest,
+      patch_path: `failed-attempts/${TASK}/attempt-${attempt}/changes.patch`,
+      patch_sha256: digest,
+      patch_size_bytes: 1,
+    },
+    report: archive('report.json', `../.dev-inbox/${TASK}/report.json`),
+    handoff_draft: archive('handoff-draft.json', `../.dev-inbox/${TASK}/handoff-draft.json`),
+    capability_verdict: null,
+    official_validation_verdict: null,
+    attempts_preserved: attempt,
+    archived_at: NOW,
   };
 }
 
@@ -350,6 +422,39 @@ describe('decideAutomaticRepair — autorização por ValidationFailedAttemptRec
     });
   });
 
+  it('M56-like: somente protocol-invalid é capability-neutral e não autoriza repair', async () => {
+    await writeProtocolInvalidAttempt(paths, protocolInvalid(1));
+    await setTask('READY', 1);
+
+    expect(await decideAutomaticRepair(paths, TASK)).toEqual({ action: 'NOT_APPLICABLE' });
+  });
+
+  it('validation 1 + protocol-invalid 2 mantém o repair do FAIL 1 elegível', async () => {
+    await writeValidationFailedAttempt(paths, validationFailed(1));
+    await writeProtocolInvalidAttempt(paths, protocolInvalid(2));
+    await setTask('READY', 2);
+
+    expect(await decideAutomaticRepair(paths, TASK)).toMatchObject({
+      action: 'REPAIR_ALLOWED',
+      source_attempt: 1,
+      needs_archival: false,
+    });
+  });
+
+  it('validation 1 + protocol-invalid 2 + validation FAIL 3 esgota o repair', async () => {
+    await writeValidationFailedAttempt(paths, validationFailed(1));
+    await writeProtocolInvalidAttempt(paths, protocolInvalid(2));
+    await setTask('FAIL', 3);
+    await writeOfficialFailCompletion();
+    await writeLaunch();
+
+    expect(await decideAutomaticRepair(paths, TASK)).toMatchObject({
+      action: 'REPAIR_EXHAUSTED',
+      source_attempt: 1,
+      validation_fail_count: 2,
+    });
+  });
+
   it('não usa o número operacional do attempt como critério: attempts=2 só com INFRA não autoriza repair', async () => {
     await writeInfraFailedAttempt(paths, infraFailed(1));
     await writeInfraFailedAttempt(paths, infraFailed(2));
@@ -519,6 +624,17 @@ describe('decideAutomaticRepair — fail closed', () => {
     if (decision.action === 'BLOCKED') {
       expect(decision.code).toBe('INCONSISTENT_EVIDENCE');
     }
+  });
+
+  it('Protocol-invalid + Validation no mesmo attempt => BLOCKED', async () => {
+    await writeProtocolInvalidAttempt(paths, protocolInvalid(1));
+    await writeValidationFailedAttempt(paths, validationFailed(1));
+    await setTask('READY', 1);
+
+    expect(await decideAutomaticRepair(paths, TASK)).toMatchObject({
+      action: 'BLOCKED',
+      code: 'INCONSISTENT_EVIDENCE',
+    });
   });
 
   it('Validation + AttemptAbandonment no mesmo attempt => BLOCKED', async () => {
