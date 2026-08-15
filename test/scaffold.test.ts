@@ -13,6 +13,7 @@ const AREAS = [
   'billing',
   'cli',
   'core',
+  'credentials',
   'envelope',
   'evaluator',
   'performance',
