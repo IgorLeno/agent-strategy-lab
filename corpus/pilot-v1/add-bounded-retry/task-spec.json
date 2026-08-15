@@ -1,0 +1,28 @@
+{
+  "id": "add-bounded-retry",
+  "description": "Implementar withBoundedRetry em corpus/pilot-v1/add-bounded-retry/workspace/src/bounded-retry.mjs. A operação e a decisão de retry são injetadas; não use timers nem rede. Execute o grader público com: node --test corpus/pilot-v1/add-bounded-retry/workspace/public-tests.mjs",
+  "visible_criteria": [
+    "operation recebe o número da tentativa, começando em 1, e seu primeiro sucesso é retornado.",
+    "Uma falha só é repetida quando shouldRetry(error) retorna true e ainda há tentativa disponível.",
+    "Ao esgotar maxAttempts, o mesmo erro da última tentativa é lançado.",
+    "maxAttempts deve ser um inteiro maior ou igual a 1; valores inválidos lançam TypeError antes de executar operation.",
+    "O grader público indicado na descrição termina com sucesso."
+  ],
+  "task_class": "feature",
+  "difficulty": "medium",
+  "stack": ["javascript", "node-22", "node-test"],
+  "public_graders": ["node-public-tests"],
+  "budgets": {
+    "duration_ms": { "expected": 120000, "maximum": 300000 },
+    "tokens": { "expected": 6000, "maximum": 16000 },
+    "changed_files": { "expected": 1, "maximum": 4 }
+  },
+  "taxonomy": {
+    "version": 1,
+    "task_class": "feature",
+    "difficulty_declared": "medium",
+    "complexity": "local",
+    "ambiguity": "low",
+    "verification": "deterministic"
+  }
+}

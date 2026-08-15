@@ -1,0 +1,28 @@
+{
+  "id": "add-jsonl-summary-cli",
+  "description": "Completar a CLI em corpus/pilot-v1/add-jsonl-summary-cli/workspace/src/summarize-runs.mjs. Ela recebe exatamente um caminho JSONL, resume outcomes válidos em JSON e reporta entrada inválida sem stack trace. Execute o grader público com: node --test corpus/pilot-v1/add-jsonl-summary-cli/workspace/public-tests.mjs",
+  "visible_criteria": [
+    "A CLI exige exatamente um argumento de caminho e lê o arquivo como UTF-8.",
+    "Linhas vazias são ignoradas; cada outra linha deve ser um objeto JSON cujo outcome seja SUCCESS ou FAILURE.",
+    "Em sucesso, stdout contém uma linha JSON com total, success e failure, e stderr fica vazio.",
+    "Argumentos, leitura, JSON ou outcome inválidos produzem exit code 1, mensagem curta em stderr e nenhum output em stdout.",
+    "O grader público indicado na descrição termina com sucesso."
+  ],
+  "task_class": "feature",
+  "difficulty": "medium",
+  "stack": ["javascript", "node-22", "node-test", "cli"],
+  "public_graders": ["node-public-tests"],
+  "budgets": {
+    "duration_ms": { "expected": 180000, "maximum": 420000 },
+    "tokens": { "expected": 8000, "maximum": 20000 },
+    "changed_files": { "expected": 1, "maximum": 5 }
+  },
+  "taxonomy": {
+    "version": 1,
+    "task_class": "feature",
+    "difficulty_declared": "medium",
+    "complexity": "multi_file",
+    "ambiguity": "low",
+    "verification": "deterministic"
+  }
+}

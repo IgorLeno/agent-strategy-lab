@@ -1,0 +1,28 @@
+{
+  "id": "fix-stable-tag-normalization",
+  "description": "Corrigir corpus/pilot-v1/fix-stable-tag-normalization/workspace/src/normalize-tags.mjs. A função normalizeTags deve normalizar uma lista de strings sem alterar a lista recebida. Execute o grader público com: node --test corpus/pilot-v1/fix-stable-tag-normalization/workspace/public-tests.mjs",
+  "visible_criteria": [
+    "Cada tag é aparada e convertida para minúsculas.",
+    "Tags vazias após a remoção de espaços são descartadas.",
+    "Duplicatas normalizadas são removidas preservando a ordem da primeira ocorrência.",
+    "O array de entrada não é modificado.",
+    "O grader público indicado na descrição termina com sucesso."
+  ],
+  "task_class": "bugfix",
+  "difficulty": "easy",
+  "stack": ["javascript", "node-22", "node-test"],
+  "public_graders": ["node-public-tests"],
+  "budgets": {
+    "duration_ms": { "expected": 60000, "maximum": 180000 },
+    "tokens": { "expected": 4000, "maximum": 10000 },
+    "changed_files": { "expected": 1, "maximum": 3 }
+  },
+  "taxonomy": {
+    "version": 1,
+    "task_class": "bugfix",
+    "difficulty_declared": "easy",
+    "complexity": "local",
+    "ambiguity": "low",
+    "verification": "deterministic"
+  }
+}
