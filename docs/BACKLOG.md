@@ -957,3 +957,277 @@ posterior a M68. M53–M68 continuam ausentes de `dev/plan.yaml`.
   inalterados.
 - Nenhuma alteração em `src/`, `test/` ou `dev/plan.yaml`; nenhum provider
   real executado.
+
+## Marco 2 — Piloto Claude Medium vs High
+
+Sequência final aprovada em `PRE-M2-REVIEW.md` §5–§6: corpus fixo, guardas de
+billing/credencial, os dois primeiros `ProviderAdapter`s reais (Claude,
+Codex smoke-only), `ExperimentSpec` congelado, runner seeded/counterbalanced,
+compare QUALIFIED-only e a prova E2E da infraestrutura — fechando com a
+revisão e o checklist de M68 antes do pilot real de 12 slots.
+
+### M53 — Corpus experimental inicial
+**Depende de:** M52C · **Teste:** `test/corpus/pilot-v1.test.ts`
+
+`corpus/pilot-v1/`: exatamente três tasks (`fix-stable-tag-normalization`,
+`add-bounded-retry`, `add-jsonl-summary-cli`), cada uma com `TaskSpec`
+público válido, workspace deliberadamente não resolvido, grader público
+determinístico (`node --test .../public-tests.mjs`) e um `README.md` que
+documenta o critério de escolha (baixo custo/ambiguidade, sem
+rede/relógio/aleatoriedade, formas de trabalho diferentes) fixado antes de
+qualquer resultado experimental. Não amplia para a suite de 8–12 tasks — essa
+ampliação continua deferida para Marco 3/pós-piloto.
+
+- Exatamente 3 tasks, `TaskSpec` público e versionado cada.
+- Nenhum `EvaluationPlan` ou grader oculto vazado para o worker.
+- Corpus reproduzível sem dependências externas (Node ≥ 22.13.0 só).
+
+### M54 — Billing guard do produto
+**Depende de:** M53 · **Teste:** `test/billing/guard.test.ts`
+
+`decideExecutionAuthorization` (`src/billing/guard.ts`): guarda
+provider-neutral que decide ALLOW/BLOCK antes do launch de uma execução
+`REAL_INFERENCE`, separando autorização, modo de cobrança, quota
+conhecida/desconhecida, custo/budget e a provenance de cada evidência.
+`FIXTURE` é sempre ALLOW; `REAL_INFERENCE` sem evidência é BLOCK; ausência de
+evidência numérica nunca vira zero implícito. Budget só é exigido quando
+`billing_mode === 'API'`. Não reaproveita `dev/lib/billing.ts` como
+arquitetura pública — é uma guarda nova do produto.
+
+- Contrato provider-neutral, decisão auditável (`reasons` + `policy`
+  versionada).
+- Nenhuma execução real ocorre sob decisão BLOCK.
+- API-equivalent nunca alimenta cobrança real; testes só com fixtures/fakes.
+
+### M55 — Credential proof provider-neutral
+**Depende de:** M54 · **Teste:** `test/credentials/proof.test.ts`
+
+`decideCredentialProof` (`src/credentials/proof.ts`): contrato que distingue
+`SUBSCRIPTION_VERIFIED`, `API_VERIFIED`, `UNKNOWN` e `NOT_APPLICABLE` antes de
+execução real, separado de billing e de quota. Ausência de API key nunca
+prova assinatura; `UNKNOWN`/`NOT_APPLICABLE` são fail-closed quando o
+`CredentialRequirement` do perfil exige assinatura ou credencial verificada.
+`CredentialProof` guarda só o status sanitizado e um `verifier_id` opaco —
+nunca saída bruta da CLI, token ou identificador de conta.
+
+- Schema provider-neutral com provenance explícita do método de verificação.
+- Unknown fail-closed quando assinatura é requisito.
+- Nenhum segredo persistido; sem chamada paga nos testes.
+
+### M56 — Claude invocation
+**Depende de:** M55 · **Teste:** `test/adapters/claude-invocation.test.ts`
+
+`buildInvocation` real para a Claude CLI (`src/adapters/claude/invocation.ts`)
+sobre o contrato `ProviderAdapter` (M51A): monta argv/env/stdin
+determinísticos a partir de `AgentProfile`/`EnvironmentProfile` explícitos —
+herdar `process.env` tornaria a saída implícita e não reproduzível. Nenhum
+spawn dentro do adapter; quem executa continua sendo `executeWithAdapter`
+(M51B/M52A).
+
+- `buildInvocation` determinístico e testado por fixture/snapshot.
+- Sem spawn nem duplicação de runtime dentro do adapter.
+- Nenhuma inferência real nos testes.
+
+### M57 — Claude stream parser
+**Depende de:** M56 · **Teste:** `test/adapters/claude-parser.test.ts`
+
+`parseLine` real do stream da Claude CLI (`src/adapters/claude/parser.ts`):
+produz `ParsedProviderLine{event, observation?}`, preservando `usage`, `cost`
+e `terminal` na `ProviderObservation` sem que `terminal` jamais sobrescreva
+`ExecutionStatus`. Custo só normaliza para `api_equivalent_usd` quando já
+semanticamente compatível; ausência permanece ausência. Malformed input é
+tratado deterministicamente, redigindo `session_id`/campos de token.
+
+- Fixtures representativas do stream real (`fixtures/provider-streams/`).
+- Usage, cost e terminal preservados sem ambiguidade de origem.
+- Nenhuma chamada real ao provider.
+
+### M58 — Claude ProviderAdapter
+**Depende de:** M57 · **Teste:** `test/adapters/claude-adapter.test.ts`
+
+Primeiro `ProviderAdapter` real completo (`src/adapters/claude/index.ts`):
+identity + preflight + `buildInvocation` (M56) + `parseLine` (M57),
+registrado em `resolveAdapter` (`src/adapters/registry.ts`). Nenhuma lógica de
+runtime migra para o adapter; o fake continua funcionando pela mesma
+interface.
+
+- `resolveAdapter('claude')` identifica o adapter real; fake inalterado.
+- Contrato `ProviderAdapter` permanece provider-neutral.
+- Full suite verde sem exigir chamada real nos testes.
+
+### M59 — Claude quota probe
+**Depende de:** M58 · **Teste:** `test/adapters/claude-quota.test.ts`
+
+`probeClaudeQuota`/`buildClaudeQuotaUsage`/`writeClaudeQuotaUsage`
+(`src/adapters/claude/quota.ts`): mede consumo de cota via `/usage` e só
+aceita a leitura quando o `result` da CLI prova custo/turnos/tokens de
+inferência zero (`zeroInferenceViolations`) — qualquer violação vira
+`UNAVAILABLE`, nunca uma leitura de 0%. Produz o contrato `QuotaUsage` (M44),
+distinguindo janela igual (delta válido) de janela resetada/ilegível (delta
+`null`), e grava em `execution/quota-usage.json` com `flag: 'wx'` (recusa
+sobrescrever evidência existente).
+
+- Contrato `QuotaUsage` M44 usado sem extensão.
+- Same-window necessário para `consumed_pp`; reset invalida o delta.
+- Unknown/unavailable nunca vira zero; testes só com probes fake/fixtures.
+
+### M60 — Codex invocation
+**Depende de:** M59 · **Teste:** `test/adapters/codex-invocation.test.ts`
+
+`buildInvocation` real para a Codex CLI (`src/adapters/codex/invocation.ts`),
+mesmo contrato do M56, reaproveitando `src/adapters/environment.ts` para o
+ambiente allowlisted compartilhado. Modelo/effort vêm de `AgentProfile`
+explícito; nenhum acoplamento ao adapter Claude. Codex é usado neste Marco 2
+somente para provar generalização do contrato — não é um segundo braço do
+benchmark.
+
+- Invocation determinística, testada por fixture.
+- Sem spawn dentro do adapter; nenhuma inferência real.
+
+### M61 — Codex ProviderAdapter
+**Depende de:** M60 · **Teste:** `test/adapters/codex-adapter.test.ts`
+
+Segundo `ProviderAdapter` real completo (`src/adapters/codex/index.ts`):
+identity + preflight + `buildInvocation` (M60) + `parseLine`
+(`src/adapters/codex/parser.ts`), registrado em `resolveAdapter`. Prova que o
+contrato M51A/M52A generaliza para pelo menos dois providers sem duplicar o
+runtime comum. Codex permanece smoke-only: nenhuma tarefa executa inferência
+Codex real nem produz benchmark.
+
+- `resolveAdapter('codex')` identifica o adapter; Claude e fake continuam
+  funcionando.
+- `ProviderObservation` preservada; `terminal` não controla `ExecutionStatus`.
+- Nenhum benchmark Codex.
+
+### M62 — executeRun / integração de adapter
+**Depende de:** M61 · **Teste:** `test/cli/run-execute.test.ts`
+
+`executeRun` (`src/cli/run-execute.ts`) fecha a integração high-level adiada
+em M51B/M52A: `resolveAdapter(profile.cli) → adapter.buildInvocation(...) →
+executeWithAdapter(...) → evidence`, com fake/Claude/Codex pela mesma
+trajetória estrutural. `executeWithAdapter` continua recebendo a invocation
+já concreta — não chama `buildInvocation` diretamente.
+
+- Registry → invocation → runtime comum ponta a ponta.
+- `ParsedProviderLine`/observations preservadas; fatos de runtime separados
+  de observations de provider.
+- Testes sem provider real (attempt 1 caiu por incidente de protocolo de
+  fechamento, não de capacidade — recuperado; attempt 2 fechou `PASS`).
+
+### M63 — CLI experimental
+**Depende de:** M62 · **Teste:** `test/cli/run.test.ts`
+
+`agentlab run --experimental` (`src/cli/run.ts`): interface fina que lê um
+`ExecutionRequest` de arquivo e delega inteiramente para `prepareRun`/
+`executeRun` — nenhuma lógica de runner nasce na CLI. `--experimental` é
+obrigatório porque o comando pode clonar, rodar o processo de um agente (fake
+ou real) e gravar em `data/`. Billing BLOCK impede spawn antes de qualquer
+clone.
+
+- Comando explícito, help/erro claros.
+- Caminho fake/dry testável sem provider real.
+- BLOCK do billing guard impede spawn; nenhuma execução automática.
+
+### M64 — ExperimentSpec freeze
+**Depende de:** M63 · **Teste:** `test/experiment/freeze.test.ts`, `test/experiment/pilot.test.ts`
+
+`ExperimentSpec` (`src/schemas/experiment-spec.ts`) congela, antes de
+qualquer execução real: arms (só `AgentProfile` varia entre eles), corpus/
+tasks, repetições, seed + esquema de ordenação
+(`seeded_interleaved_counterbalanced`), strategy e environment
+compartilhados, e a `ExperimentBillingPolicy` (billing mode, budget máximo,
+`quota_stop_threshold_pct`). `freezeExperimentSpec` (`src/experiment/index.ts`)
+valida contra o schema `.strict()`, aplica deep-freeze e calcula um hash
+canônico determinístico — qualquer alteração produz um `ExperimentSpec`
+diferente, nunca mutação silenciosa. `buildPilotExperimentSpec`
+(`src/experiment/pilot.ts`) materializa o piloto concreto (2 arms Sonnet 5
+Medium/High, as 3 tasks do M53, 2 repetições, seed fixa, 12 slots
+planejados) só lendo `corpus/` e `strategies/` do repo — nenhum spawn.
+
+- Schema strict/versionado; canonical hash determinístico; imutabilidade
+  semântica (mutação em runtime lança `TypeError`).
+- Arms, corpus, repetições, seed, ordering, strategy, environment e billing
+  policy todos congelados.
+- 2 arms Sonnet Medium vs High, 3 tasks, 2 repetições/task/arm,
+  `planned_slot_count: 12`. Nenhum slot executado pela tarefa.
+
+### M65 — Experiment runner seeded/counterbalanced
+**Depende de:** M64 · **Teste:** `test/experiment/runner.test.ts`
+
+`materializeSlotOrder`/`runExperimentSchedule` (`src/experiment/runner.ts`):
+materializa a ordem concreta de execução a partir do `FrozenExperimentSpec` —
+PRNG determinístico (mulberry32) embaralha blocos task×repetição pela seed
+congelada, e a direção dos arms alterna a cada bloco (counterbalancing), então
+nunca todos os slots de um arm rodam antes dos de outro. `INFRA_ERROR` nunca
+vira capability FAIL: gera um `PlannedSlot{kind:'RETRY'}` enfileirado, até
+`maxRetriesPerSlot` (default 1) tentativas por slot original. A billing/quota
+guard é consultada antes de todo launch, incluindo retries; BLOCK interrompe
+o schedule sem descartar o que já rodou. Só fakes nesta tarefa — não executa
+os 12 slots reais.
+
+- Mesma seed → mesma ordem; seed diferente pode embaralhar de forma diferente
+  (ainda intercalada).
+- Arms intercalados/counterbalanced; 12 planned slots derivados corretamente
+  do spec do M64.
+- `INFRA` gera retry separado, nunca fail de capacidade; billing BLOCK
+  interrompe o launch. Testes fake-only.
+
+### M66 — Compare
+**Depende de:** M65 · **Teste:** `test/reporting/compare.test.ts`
+
+`compareTaskPerformance` (`src/reporting/compare.ts`): compara
+`TaskPerformanceRecord`s (M46) entre arms do piloto. Só observações
+`QUALIFIED` entram no cálculo — `UNSCORABLE`/`MISSCOPED`/`CONTAMINATED`/
+`INVALID_ENVIRONMENT`/`HISTORICAL_ONLY` só incrementam
+`excluded_non_qualified`. Resultado sempre por task primeiro (`per_task`), só
+depois agregado por arm (`aggregate`). `final_pass`/`human_intervention` nulos
+ficam fora do denominador das respectivas taxas — missing nunca vira fail.
+Nunca computa confidence interval, p-value ou Capability Matrix completa;
+`posterior_counts` é só contagem bruta, matéria-prima para inferência futura.
+`reporting/` deixa de ser placeholder (ver `docs/ARCHITECTURE.md` §6.1).
+
+- QUALIFIED-only; per-task antes do agregado.
+- `insufficient_n` explícito abaixo de `DEFAULT_MIN_QUALIFIED_N`.
+- Missing/null preservado; fixtures determinísticas; nenhuma inferência real.
+
+### M67 — E2E da infraestrutura experimental
+**Depende de:** M66 · **Teste:** `test/e2e/experiment-fake-e2e.test.ts`
+
+Prova ponta a ponta, só com fixtures/fake adapter:
+`freezeExperimentSpec` → `runExperimentSchedule` (M65) → `prepareRun`/
+`executeRun` com `FAKE_ADAPTER_IDENTITY` (M62) → `verifyRunIntegrity` →
+`evaluateRun` → `scoreRun` (qualification) → `readTrialHistory`/
+`derivePerformance` (M46) → `compareTaskPerformance` (M66). Spec de teste: 2
+arms fake × 1 task × 2 repetições = 4 slots, bem abaixo dos 12 reais do
+piloto — grader determinístico do teste diferencia os arms sem produzir
+nenhuma conclusão comparativa real (compare só expõe contagem bruta
+`QUALIFIED`, sem winner/confidence interval/Capability Matrix). Segundo
+teste prova que um arm `REAL_INFERENCE` sem `RealExecutionAuthorization`
+explícita é bloqueado pela billing guard (M54) antes de lançar qualquer
+slot — sem autorização humana explícita nesta tarefa, permanece FAKE-ONLY.
+
+- E2E fake ponta a ponta `PASS`; evidence válida (`verifyRunIntegrity` OK).
+- Evaluation/qualification/performance/compare conectados sem gap.
+- Zero necessidade dos 12 slots reais; nenhuma conclusão comparativa real.
+- Real smoke opcional e bloqueado por default (billing guard).
+
+### M68 — Revisão M2 + pilot checklist (parada obrigatória)
+**Depende de:** M67 · **Gate:** `pnpm build`
+
+Fecha o Marco 2: [`docs/reviews/M2-REVIEW.md`](reviews/M2-REVIEW.md) confere
+M53–M67 `PASS`, gates, `recover` reconciliado, e cada item do checklist do
+pilot (evidence contracts, billing guard, credential proof, quota probe,
+`ExperimentSpec` congelado, corpus, seed/ordem/counterbalancing, retry
+`INFRA`, compare QUALIFIED-only, quota stop ≥80%, profiles Medium/High,
+Codex smoke-only, custo/budget máximo, billing authorization). A revisão
+encontrou que o stop de quota em 80% é política congelada no
+`ExperimentSpec` e medida objetivamente pela probe (M59), mas não existe
+ainda uma função que converta automaticamente "consumo ≥ 80%" em `BLOCK` —
+é um passo manual do operador do piloto a cada launch, registrado como risco
+em aberto para a aprovação humana que vem depois deste documento. Nenhum dos
+12 slots do pilot é lançado por esta tarefa.
+
+- Documento de revisão final com checklist explícito por item.
+- `docs/BACKLOG.md`/`docs/LESSONS.md`/`docs/ARCHITECTURE.md` coerentes com
+  M53–M67.
+- Gates verdes; nenhum pilot real lançado; parada humana registrada.

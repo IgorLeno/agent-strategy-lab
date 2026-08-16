@@ -428,3 +428,22 @@ intenção como evidência de isolamento.
 Rule: fronteira de agente é aplicada antes do spawn por sandbox efetivo; estado,
 attempts e launch evidence são medidos antes/depois; qualquer divergência ou
 falha de runtime termina em record append-only e `HUMAN_REQUIRED` estruturado.
+
+[2026-08-16] Contexto: revisão M68 (`docs/reviews/M2-REVIEW.md`) — checklist
+do pilot benchmark, item "quota stop ≥80%".
+Mistake: `ExperimentBillingPolicy.quota_stop_threshold_pct` (M64) é validado,
+congelado no `ExperimentSpec` do piloto e coberto por teste — o que fazia
+parecer que o stop de quota em 80% já era uma regra em vigor. Mas
+`decideExecutionAuthorization` (M54) só consome `quota.availability` como
+`Evidence` já decidida pelo chamador, e trata `QUOTA_UNKNOWN` como ALLOW por
+design (mesma lógica de "ausência não é prova negativa" do resto do kernel).
+Nenhum código do produto lê `QuotaUsage.windows` da probe (M59) e converte
+"consumido ≥ threshold" em `INSUFFICIENT`. Sem essa ponte, o valor de 80%
+seria só um número congelado no schema, nunca aplicado.
+Rule: um threshold declarado num contrato imutável (schema `.strict()`,
+freeze, teste de shape) prova que o VALOR está congelado, nunca que ele é
+ENFORÇADO em runtime. Toda vez que um contrato de política introduz um
+threshold numérico, a revisão precisa localizar explicitamente o consumidor
+que lê a medição observada e decide com base nele — se esse consumidor não
+existe, o threshold é dado inerte, e isso precisa virar risco registrado
+antes de qualquer aprovação humana que dependa dele.
