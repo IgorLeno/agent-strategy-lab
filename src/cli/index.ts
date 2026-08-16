@@ -10,7 +10,11 @@
  */
 import { runDoctor, type DoctorReport } from './doctor.js';
 import { runInit } from './init.js';
+import { runExperimental } from './run.js';
 import { runTaskCreate } from './task-create.js';
+
+const USAGE =
+  'Uso: agentlab doctor | agentlab init --repo <caminho> [--force] | agentlab task create --input <caminho> [--force] | agentlab run --experimental --input <caminho>';
 
 export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<number> {
   const [command, ...rest] = argv;
@@ -34,9 +38,11 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
     return 1;
   }
 
-  process.stderr.write(
-    `comando desconhecido: ${command ?? '(nenhum)'}\nUso: agentlab doctor | agentlab init --repo <caminho> [--force] | agentlab task create --input <caminho> [--force]\n`,
-  );
+  if (command === 'run') {
+    return runExperimentalCommand(rest);
+  }
+
+  process.stderr.write(`comando desconhecido: ${command ?? '(nenhum)'}\n${USAGE}\n`);
   return 1;
 }
 
@@ -55,6 +61,43 @@ async function runTaskCreateCommand(args: readonly string[]): Promise<number> {
     return 0;
   } catch (error) {
     process.stderr.write(`task create: ${error instanceof Error ? error.message : String(error)}\n`);
+    return 1;
+  }
+}
+
+const RUN_USAGE =
+  'Uso: agentlab run --experimental --input <caminho>\n' +
+  'run: comando EXPERIMENTAL — prepara um clone descartável e pode rodar o processo de um agente\n' +
+  '(fake ou real, conforme trial.agent.cli no arquivo de entrada). Execução real permanece bloqueada\n' +
+  'pela billing guard do produto sem evidência de autorização válida em "real_execution_authorization".\n';
+
+/**
+ * `agentlab run --experimental`: exige a flag `--experimental` explícita
+ * porque este comando pode, de fato, rodar o processo de um agente — nada
+ * disso é implícito em "run". Fora essa checagem e a formatação de
+ * resultado/erro, toda a lógica pertence a `runExperimental` (`run.ts`),
+ * que por sua vez só encaminha para `prepareRun`/`executeRun`.
+ */
+async function runExperimentalCommand(args: readonly string[]): Promise<number> {
+  if (!args.includes('--experimental')) {
+    process.stderr.write(`run: --experimental é obrigatório para confirmar um comando experimental\n${RUN_USAGE}`);
+    return 1;
+  }
+
+  const input = readFlagValue(args, '--input');
+  if (input === undefined) {
+    process.stderr.write(`run: --input <caminho> é obrigatório\n${RUN_USAGE}`);
+    return 1;
+  }
+
+  try {
+    const result = await runExperimental({ input });
+    process.stdout.write(`run: run_id=${result.runId}\n`);
+    process.stdout.write(`run: run_dir=${result.runDir}\n`);
+    process.stdout.write(`run: status=${result.executed.record.status}\n`);
+    return result.executed.record.status === 'COMPLETED' ? 0 : 1;
+  } catch (error) {
+    process.stderr.write(`run: ${error instanceof Error ? error.message : String(error)}\n`);
     return 1;
   }
 }
