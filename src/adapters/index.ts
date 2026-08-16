@@ -24,6 +24,22 @@ export { buildClaudeInvocation, CLAUDE_ADAPTER_IDENTITY } from './claude/invocat
 export { parseClaudeLine } from './claude/parser.js';
 export { claudeAdapter } from './claude/index.js';
 export {
+  buildClaudeQuotaInvocation,
+  buildClaudeQuotaUsage,
+  parseClaudeQuotaText,
+  probeClaudeQuota,
+  writeClaudeQuotaUsage,
+  CLAUDE_QUOTA_FILE_NAME,
+  CLAUDE_QUOTA_MAX_BUDGET_USD,
+  CLAUDE_QUOTA_PROMPT,
+  CLAUDE_QUOTA_PROVENANCE,
+  type ClaudeQuotaCommandRunner,
+  type ClaudeQuotaProbeOutcome,
+  type ClaudeQuotaReading,
+  type ClaudeQuotaWindowReading,
+  type ProbeClaudeQuotaOptions,
+} from './claude/quota.js';
+export {
   FAKE_ADAPTER_IDENTITY,
   fakeAdapter,
   runFakeAgent,
