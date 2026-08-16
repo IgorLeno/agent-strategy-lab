@@ -5,10 +5,11 @@
  * registrado, em vez de deixar quem chama descobrir via `undefined`.
  */
 import { claudeAdapter } from './claude/index.js';
+import { codexAdapter } from './codex/index.js';
 import { fakeAdapter } from './fake/index.js';
 import type { ProviderAdapter } from './contract.js';
 
-const ADAPTERS: readonly ProviderAdapter[] = [claudeAdapter, fakeAdapter];
+const ADAPTERS: readonly ProviderAdapter[] = [claudeAdapter, codexAdapter, fakeAdapter];
 
 const REGISTRY = new Map<string, ProviderAdapter>(
   ADAPTERS.map((adapter) => [adapter.identity.name, adapter]),
