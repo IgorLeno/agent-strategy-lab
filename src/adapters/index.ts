@@ -12,6 +12,7 @@
 export { AgentEvent, parseAgentEvents } from './events.js';
 export type {
   AdapterInvocation,
+  AdapterPreflightOptions,
   BuildInvocationOptions,
   ParsedProviderLine,
   ProviderAdapter,
@@ -21,6 +22,7 @@ export type {
 } from './contract.js';
 export { buildClaudeInvocation, CLAUDE_ADAPTER_IDENTITY } from './claude/invocation.js';
 export { parseClaudeLine } from './claude/parser.js';
+export { claudeAdapter } from './claude/index.js';
 export {
   FAKE_ADAPTER_IDENTITY,
   fakeAdapter,

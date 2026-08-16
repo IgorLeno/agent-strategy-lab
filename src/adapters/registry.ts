@@ -4,10 +4,11 @@
  * adapter — cli desconhecida falha explicitamente, nomeando o que está
  * registrado, em vez de deixar quem chama descobrir via `undefined`.
  */
+import { claudeAdapter } from './claude/index.js';
 import { fakeAdapter } from './fake/index.js';
 import type { ProviderAdapter } from './contract.js';
 
-const ADAPTERS: readonly ProviderAdapter[] = [fakeAdapter];
+const ADAPTERS: readonly ProviderAdapter[] = [claudeAdapter, fakeAdapter];
 
 const REGISTRY = new Map<string, ProviderAdapter>(
   ADAPTERS.map((adapter) => [adapter.identity.name, adapter]),

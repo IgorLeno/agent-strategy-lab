@@ -9,11 +9,12 @@
  * `executeWithAdapter`, spawn/timeout/cleanup/montagem de `ExecutionRecord` —
  * vive em `runner/execute.ts` (M51B), parametrizado só por este contrato.
  *
- * `preflight` (checar CLI instalada/autenticada) continua fase posterior —
- * YAGNI enquanto só existe um adapter (fake) exercitando a forma. Adicionar
- * hoje o que só um segundo adapter real justificaria é abstração prematura.
+ * O `preflight` opcional é deliberadamente puro: recebe somente a prova de
+ * credencial já coletada e devolve a decisão provider-neutral. Descoberta de
+ * binário, chamadas à CLI e spawn continuam fora do adapter.
  */
 import type { ExecutionKind } from '../billing/index.js';
+import type { CredentialProofDecision } from '../credentials/index.js';
 import type { AdapterIdentity, ExecutionEnvelopeManifest } from '../envelope/index.js';
 import type { AgentEvent } from './events.js';
 
@@ -61,6 +62,11 @@ export interface ParsedProviderLine {
   readonly observation?: ProviderObservation;
 }
 
+/** Entrada provider-neutral do preflight; coleta/probe de credencial pertence ao chamador. */
+export interface AdapterPreflightOptions {
+  readonly credentialProof?: unknown;
+}
+
 /**
  * Forma mínima de um adapter de provider. Não inclui execução — só o que é
  * específico de cada provider: identidade, como montar a invocation, e como
@@ -76,6 +82,8 @@ export interface ProviderAdapter {
    * último evento `result`. Default, quando ausente: `identity.name`.
    */
   readonly metricsProvenance?: string;
+  /** Valida a prova já coletada sem executar CLI, consultar ambiente ou iniciar processo. */
+  preflight?(options: AdapterPreflightOptions): CredentialProofDecision;
   buildInvocation(options: BuildInvocationOptions): AdapterInvocation;
   parseLine(raw: string): ParsedProviderLine;
 }
