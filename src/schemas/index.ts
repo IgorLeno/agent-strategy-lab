@@ -17,6 +17,12 @@ export {
   InstructionFileFingerprint,
 } from './profiles.js';
 export { StrategyDef } from './strategy.js';
+export {
+  ExperimentArm,
+  ExperimentBillingPolicy,
+  ExperimentOrdering,
+  ExperimentSpec,
+} from './experiment-spec.js';
 export { ExecutionRequest, Trial, TrialStatus } from './trial.js';
 export {
   EvaluationRecord,

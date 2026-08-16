@@ -245,6 +245,7 @@ fronteira.
 | `billing` | autorização provider-neutral anterior ao launch real | EXECUTION CONTRACT | M54 |
 | `credentials` | prova sanitizada e provider-neutral da fonte da credencial | EXECUTION CONTRACT | M55 |
 | `strategies` | carga e validação das receitas em `strategies/` | EXPERIMENT PLANE | M05 |
+| `experiment` | congelamento/hash de `ExperimentSpec` (arms, corpus, repetitions, seed, ordering, strategy, environment, billing policy) | EXPERIMENT PLANE | M64 |
 | `evaluator` | workspace do evaluator, graders, orquestração da avaliação | EXECUTION CONTRACT | M27A–M28 |
 | `scorer` | perfis de score, qualificação | EXECUTION CONTRACT | M29 |
 | `reporting` | relatório de terminal e `--json` | EXTENSIONS | M38 |
