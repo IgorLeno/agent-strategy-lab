@@ -248,7 +248,7 @@ fronteira.
 | `experiment` | congelamento/hash de `ExperimentSpec` (arms, corpus, repetitions, seed, ordering, strategy, environment, billing policy) | EXPERIMENT PLANE | M64 |
 | `evaluator` | workspace do evaluator, graders, orquestração da avaliação | EXECUTION CONTRACT | M27A–M28 |
 | `scorer` | perfis de score, qualificação | EXECUTION CONTRACT | M29 |
-| `reporting` | relatório de terminal e `--json` | EXTENSIONS | M38 |
+| `reporting` | relatório de terminal e `--json`; compare entre arms do piloto | EXTENSIONS | M38, M66 |
 | `performance` | fatos de attempt e records de performance derivados, sem I/O | EXTENSIONS | M45–M48 |
 | `project` | `.agentlab/project.yaml`, resolução do data dir | CONTROL PLANE | M11, M33 |
 | `cli` | comandos `agentlab` | CONTROL PLANE | M32–M38 |
@@ -283,13 +283,14 @@ migração — estão registrados em [ADR-0001](adr/ADR-0001-stack.md); esta se�
 só aponta que a implementação já vive no lado `node:sqlite` daquele ADR, e não
 no lado nomeado na Seção 7.
 
-**`reporting/` é placeholder.** `src/reporting/index.ts` (M38) ainda não
-implementa nada — `export {}`. O relatório de um run, hoje, vive inteiramente
-em `src/cli/report.ts` (formatação texto/`--json` a partir da evidência
-selada). `reporting/` existe como área reservada para quando o compare entre
-estratégias (fora do Marco 1, ver Seção 2.4) precisar de lógica de
-apresentação compartilhada entre múltiplos runs — é ali que ela nasce, não em
-`cli/`.
+**`reporting/` era placeholder até M66.** O relatório de um run (M38) segue
+vivendo inteiramente em `src/cli/report.ts` (formatação texto/`--json` a
+partir da evidência selada) — `reporting/` nunca implementou isso. A área foi
+reservada para quando o compare entre estratégias (ver Seção 2.4) precisasse
+de lógica de apresentação compartilhada entre múltiplos runs, e é exatamente
+onde ela nasceu: `src/reporting/compare.ts` (M66) compara
+`TaskPerformanceRecord`s QUALIFIED entre arms, por task antes do agregado,
+sem fabricar confidence interval, Capability Matrix ou vencedor automático.
 
 ---
 

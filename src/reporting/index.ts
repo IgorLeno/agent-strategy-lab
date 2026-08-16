@@ -6,6 +6,18 @@
  * qualificação. Métrica ausente é exibida como null com a origem registrada,
  * nunca como zero, que se confundiria com medição real.
  *
- * Preenchido por M38.
+ * O relatório de um run (M38) vive em `src/cli/report.ts`. Esta área abriga,
+ * a partir de M66, a comparação entre arms de um experimento — ver
+ * `compare.ts`.
  */
-export {};
+export {
+  DEFAULT_MIN_QUALIFIED_N,
+  compareTaskPerformance,
+  type ArmAggregateResult,
+  type ArmPosteriorCounts,
+  type ArmTaskComparisonResult,
+  type CompareOptions,
+  type CompareResult,
+  type TaskComparisonResult,
+  type TaskPerformanceObservation,
+} from './compare.js';
