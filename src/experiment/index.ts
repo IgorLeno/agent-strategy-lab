@@ -19,6 +19,14 @@ import { canonicalSha256 } from '../envelope/index.js';
 import { ExperimentSpec } from '../schemas/index.js';
 
 export { ExperimentArm, ExperimentBillingPolicy, ExperimentOrdering, ExperimentSpec } from '../schemas/index.js';
+export {
+  materializeSlotOrder,
+  runExperimentSchedule,
+  type PlannedSlot,
+  type RunExperimentScheduleOptions,
+  type RunExperimentScheduleResult,
+  type SlotLaunchRecord,
+} from './runner.js';
 
 export interface FrozenExperimentSpec {
   readonly spec: ExperimentSpec;
