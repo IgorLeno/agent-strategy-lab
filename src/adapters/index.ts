@@ -20,6 +20,7 @@ export type {
   UnknownProviderEvent,
 } from './contract.js';
 export { buildClaudeInvocation, CLAUDE_ADAPTER_IDENTITY } from './claude/invocation.js';
+export { parseClaudeLine } from './claude/parser.js';
 export {
   FAKE_ADAPTER_IDENTITY,
   fakeAdapter,
