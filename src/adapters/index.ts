@@ -23,6 +23,7 @@ export type {
 export { buildClaudeInvocation, CLAUDE_ADAPTER_IDENTITY } from './claude/invocation.js';
 export { parseClaudeLine } from './claude/parser.js';
 export { claudeAdapter } from './claude/index.js';
+export { buildCodexInvocation, CODEX_ADAPTER_IDENTITY } from './codex/invocation.js';
 export {
   buildClaudeQuotaInvocation,
   buildClaudeQuotaUsage,

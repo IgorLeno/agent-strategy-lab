@@ -1,0 +1,48 @@
+{
+  "agent_profile": {
+    "id": "codex-sol-medium",
+    "cli": "codex-fixture",
+    "cli_version": "0.146.0",
+    "model": "gpt-5.6-sol",
+    "flags": [
+      "--ignore-user-config",
+      "--sandbox",
+      "workspace-write",
+      "--ephemeral",
+      "--ignore-rules",
+      "--config",
+      "model_reasoning_effort=\"medium\""
+    ]
+  },
+  "source_env": {
+    "PATH": "/fixture/bin",
+    "LANG": "pt_BR.UTF-8",
+    "CODEX_HOME": "/fixture/codex-auth",
+    "OPENAI_API_KEY": "não deve atravessar"
+  },
+  "expected": {
+    "argv": [
+      "codex-fixture",
+      "exec",
+      "--json",
+      "--strict-config",
+      "--model",
+      "gpt-5.6-sol",
+      "--ignore-user-config",
+      "--sandbox",
+      "workspace-write",
+      "--ephemeral",
+      "--ignore-rules",
+      "--config",
+      "model_reasoning_effort=\"medium\"",
+      "-"
+    ],
+    "env": {
+      "PATH": "/fixture/bin",
+      "LANG": "pt_BR.UTF-8",
+      "CODEX_HOME": "/fixture/codex-auth",
+      "HOME": "/isolated/home"
+    },
+    "stdin": "Implemente o packet sem executar nenhuma inferência real.\n"
+  }
+}
