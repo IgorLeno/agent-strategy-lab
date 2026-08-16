@@ -23,8 +23,11 @@ const HUMAN_CONTROLLED_HARNESS_FILES = new Set([
   'dev/lib/maintenance.ts',
   'dev/lib/profile.ts',
   'dev/lib/records.ts',
+  'dev/lib/routine-autonomy.ts',
+  'dev/lib/routine-autonomy-runtime.ts',
   'dev/lib/schemas.ts',
   'dev/lib/state.ts',
+  'dev/cli/dev-orchestrate.ts',
 ]);
 
 export type IncidentClassification =
@@ -32,6 +35,71 @@ export type IncidentClassification =
   | 'AUTO_MAINTENANCE'
   | 'TASK_REPAIR'
   | 'HUMAN_REQUIRED';
+
+export type RoutineRecipeId =
+  | 'deterministic-recover'
+  | 'protocol-invalid-history-integration'
+  | 'protocol-output-recovery'
+  | 'provider-infra-retry'
+  | 'official-validation-repair';
+
+export interface RoutineRecipe {
+  readonly id: RoutineRecipeId;
+  readonly incident_phase: 'PRE_FLIGHT' | 'POST_LAUNCH';
+  readonly classification: Exclude<IncidentClassification, 'HUMAN_REQUIRED'>;
+  readonly action: string;
+  readonly boundary: string;
+  readonly targeted_tests: readonly string[];
+  readonly retry_budget: 1;
+}
+
+export const ROUTINE_RECIPES: readonly RoutineRecipe[] = [
+  {
+    id: 'deterministic-recover',
+    incident_phase: 'PRE_FLIGHT',
+    classification: 'AUTO_RECOVER',
+    action: 'APPLY_DETERMINISTIC_RECOVERY',
+    boundary: 'RECOVERY_ATTENTION derivada pela primitive oficial sem plan/state/base divergence',
+    targeted_tests: ['test/dev/routine-autonomy.test.ts', 'test/dev/dev-recover.test.ts'],
+    retry_budget: 1,
+  },
+  {
+    id: 'protocol-invalid-history-integration',
+    incident_phase: 'PRE_FLIGHT',
+    classification: 'AUTO_MAINTENANCE',
+    action: 'INTEGRATE_PROTOCOL_INVALID_HISTORY',
+    boundary: 'HISTORICAL_GAP com exatamente um ProtocolInvalidAttemptRecord',
+    targeted_tests: ['test/dev/automatic-repair-policy.test.ts', 'test/dev/retry-failed.test.ts'],
+    retry_budget: 1,
+  },
+  {
+    id: 'protocol-output-recovery',
+    incident_phase: 'POST_LAUNCH',
+    classification: 'AUTO_RECOVER',
+    action: 'RECOVER_PROTOCOL_OUTPUT',
+    boundary: 'primitive dev-recover-protocol-output aceita integralmente o contrato estreito',
+    targeted_tests: ['test/dev/protocol-output-recovery.test.ts', 'test/dev/routine-autonomy.test.ts'],
+    retry_budget: 1,
+  },
+  {
+    id: 'provider-infra-retry',
+    incident_phase: 'POST_LAUNCH',
+    classification: 'AUTO_RECOVER',
+    action: 'RECOVER_PROVIDER_INFRA',
+    boundary: 'primitive dev-recover-infra prova INFRA_ERROR capability-neutral e recuperável',
+    targeted_tests: ['test/dev/infra-recover.test.ts', 'test/dev/routine-autonomy.test.ts'],
+    retry_budget: 1,
+  },
+  {
+    id: 'official-validation-repair',
+    incident_phase: 'POST_LAUNCH',
+    classification: 'TASK_REPAIR',
+    action: 'USE_EXISTING_TASK_REPAIR_POLICY',
+    boundary: 'somente FAIL de validation oficial reconhecido pela automatic-repair policy',
+    targeted_tests: ['test/dev/automatic-repair-policy.test.ts', 'test/dev/automatic-repair-e2e.test.ts'],
+    retry_budget: 1,
+  },
+];
 
 export type LifecycleRecordName =
   | 'ValidationFailedAttemptRecord'
@@ -49,10 +117,58 @@ export interface RoutineIncidentContext {
   readonly evidence_paths?: readonly string[];
 }
 
+export interface RoutinePostLaunchIncident {
+  readonly phase: 'POST_LAUNCH';
+  readonly authorized_head_before: string;
+  readonly task_id: string;
+  readonly attempt: number;
+  readonly profile_id: string;
+  readonly launch: string;
+  readonly close: string | null;
+  readonly outcome: string;
+  readonly reason: string;
+  readonly task_status: string;
+  readonly task_phase: string | null;
+  readonly commit_owner: 'worker' | 'orchestrator' | null;
+  readonly capability_verdict: boolean;
+  readonly official_validation_failure: boolean;
+  readonly evidence_paths: readonly string[];
+}
+
 export interface RoutineTriage {
   readonly classification: IncidentClassification;
   readonly action: string;
   readonly reason: string;
+  readonly recipe_id: RoutineRecipeId | null;
+}
+
+function knownRecipe(id: RoutineRecipeId): RoutineRecipe {
+  const recipe = ROUTINE_RECIPES.find((candidate) => candidate.id === id);
+  if (!recipe) throw new Error(`RoutineRecipe ausente: ${id}`);
+  return recipe;
+}
+
+function triageFromRecipe(id: RoutineRecipeId, reason: string): RoutineTriage {
+  const recipe = knownRecipe(id);
+  return {
+    classification: recipe.classification,
+    action: recipe.action,
+    reason,
+    recipe_id: recipe.id,
+  };
+}
+
+function humanTriage(reason: string): RoutineTriage {
+  return { classification: 'HUMAN_REQUIRED', action: 'NONE', reason, recipe_id: null };
+}
+
+function existingTaskRepairTriage(reason: string): RoutineTriage {
+  return {
+    classification: 'TASK_REPAIR',
+    action: 'USE_EXISTING_TASK_REPAIR_POLICY',
+    reason,
+    recipe_id: null,
+  };
 }
 
 export interface RoutineCandidate {
@@ -103,6 +219,17 @@ export interface RoutineAutonomyDriver {
   retryPreflight(actionId: string, incident: RoutineIncidentContext): Promise<PreflightResult>;
 }
 
+export interface RoutinePostLaunchDriver {
+  recoverProtocolOutput(
+    actionId: string,
+    incident: RoutinePostLaunchIncident,
+  ): Promise<{ readonly action: string }>;
+  recoverInfra(
+    actionId: string,
+    incident: RoutinePostLaunchIncident,
+  ): Promise<{ readonly action: string }>;
+}
+
 export interface HumanRequiredOutput {
   readonly status: 'HUMAN_REQUIRED';
   readonly incident_id: string;
@@ -130,6 +257,9 @@ export interface RoutineIncidentRecord {
   readonly retry_result: string | null;
   readonly human_required: boolean;
   readonly human_reason: string | null;
+  readonly phase?: 'PRE_FLIGHT' | 'POST_LAUNCH';
+  readonly outcome?: string;
+  readonly recipe_id?: RoutineRecipeId | null;
 }
 
 export type RoutineResolution = {
@@ -148,6 +278,24 @@ export interface ResolveRoutinePreflightInput {
   readonly now?: () => string;
 }
 
+export interface ResolveRoutinePostLaunchInput<T> {
+  readonly paths: HarnessPaths;
+  readonly incident: RoutinePostLaunchIncident;
+  readonly driver: RoutinePostLaunchDriver;
+  readonly retrySameTask: (
+    actionId: string,
+    incident: RoutinePostLaunchIncident,
+  ) => Promise<{ readonly incident: RoutinePostLaunchIncident; readonly value: T }>;
+  readonly now?: () => string;
+}
+
+export type RoutinePostLaunchResolution<T> = {
+  readonly status: 'RETRIED' | 'HUMAN_REQUIRED';
+  readonly retry: T | null;
+  readonly record: RoutineIncidentRecord;
+  readonly human_required: HumanRequiredOutput | null;
+};
+
 function blockerOf(context: RoutineIncidentContext): string {
   return context.preflight.blocker ?? 'UNKNOWN_BLOCKER';
 }
@@ -155,32 +303,16 @@ function blockerOf(context: RoutineIncidentContext): string {
 export function classifyRoutineIncident(context: RoutineIncidentContext): RoutineTriage {
   const blocker = blockerOf(context);
   if (context.evidence_error) {
-    return {
-      classification: 'HUMAN_REQUIRED',
-      action: 'NONE',
-      reason: `evidência não pôde ser verificada: ${context.evidence_error}`,
-    };
+    return humanTriage(`evidência não pôde ser verificada: ${context.evidence_error}`);
   }
   if (blocker === 'INCONSISTENT_EVIDENCE' || blocker === 'INVALID_EVIDENCE') {
-    return {
-      classification: 'HUMAN_REQUIRED',
-      action: 'NONE',
-      reason: context.preflight.reason ?? blocker,
-    };
+    return humanTriage(context.preflight.reason ?? blocker);
   }
   if (context.lifecycle_records.length > 1) {
-    return {
-      classification: 'HUMAN_REQUIRED',
-      action: 'NONE',
-      reason: 'lifecycle records incompatíveis simultâneos; normalização automática recusada',
-    };
+    return humanTriage('lifecycle records incompatíveis simultâneos; normalização automática recusada');
   }
   if (blocker === 'AUTOMATIC_REPAIR_PROFILE_MISMATCH') {
-    return {
-      classification: 'TASK_REPAIR',
-      action: 'USE_EXISTING_TASK_REPAIR_POLICY',
-      reason: context.preflight.reason ?? blocker,
-    };
+    return existingTaskRepairTriage(context.preflight.reason ?? blocker);
   }
   if (blocker === 'RECOVERY_ATTENTION') {
     const recovery = context.preflight.recover;
@@ -191,11 +323,10 @@ export function classifyRoutineIncident(context: RoutineIncidentContext): Routin
       !recovery.state_was_missing &&
       recovery.head_matches_authorized
     ) {
-      return {
-        classification: 'AUTO_RECOVER',
-        action: 'APPLY_DETERMINISTIC_RECOVERY',
-        reason: 'reconciliation pendente já derivada pela primitive de recovery',
-      };
+      return triageFromRecipe(
+        'deterministic-recover',
+        'reconciliation pendente já derivada pela primitive de recovery',
+      );
     }
   }
   if (
@@ -203,17 +334,49 @@ export function classifyRoutineIncident(context: RoutineIncidentContext): Routin
     context.lifecycle_records.length === 1 &&
     context.lifecycle_records[0] === 'ProtocolInvalidAttemptRecord'
   ) {
-    return {
-      classification: 'AUTO_MAINTENANCE',
-      action: 'INTEGRATE_PROTOCOL_INVALID_HISTORY',
-      reason: 'record capability-neutral existe e o history walker conhecido não o reconhece',
-    };
+    return triageFromRecipe(
+      'protocol-invalid-history-integration',
+      'record capability-neutral existe e o history walker conhecido não o reconhece',
+    );
   }
-  return {
-    classification: 'HUMAN_REQUIRED',
-    action: 'NONE',
-    reason: context.preflight.reason ?? blocker,
-  };
+  return humanTriage(context.preflight.reason ?? blocker);
+}
+
+export function classifyRoutinePostLaunchIncident(
+  incident: RoutinePostLaunchIncident,
+): RoutineTriage {
+  if (incident.capability_verdict && incident.outcome !== 'FAIL') {
+    return humanTriage('incidente operacional contém capability verdict incompatível');
+  }
+  if (incident.outcome === 'FAIL' && incident.official_validation_failure) {
+    return triageFromRecipe('official-validation-repair', incident.reason);
+  }
+  if (
+    incident.outcome === 'PENDING' &&
+    incident.launch === 'FINISHED' &&
+    incident.close === 'PENDING' &&
+    incident.task_status === 'RUNNING' &&
+    incident.task_phase === 'FINALIZING' &&
+    incident.commit_owner === 'orchestrator' &&
+    !incident.capability_verdict
+  ) {
+    return triageFromRecipe(
+      'protocol-output-recovery',
+      'fechamento orchestrator-owned pendente; primitive oficial decidirá o contrato estreito',
+    );
+  }
+  if (
+    incident.outcome === 'INFRA_ERROR' &&
+    incident.launch === 'INFRA_ERROR' &&
+    incident.close === null &&
+    !incident.capability_verdict
+  ) {
+    return triageFromRecipe(
+      'provider-infra-retry',
+      'launcher classificou INFRA_ERROR sem capability verdict; primitive oficial decidirá recoverability',
+    );
+  }
+  return humanTriage(incident.reason);
 }
 
 function isGreen(result: ValidationResult): boolean {
@@ -306,6 +469,16 @@ export function routineIncidentId(context: RoutineIncidentContext): string {
     context.attempt ?? 0,
     context.authorized_head_before.slice(0, 12),
     safeSegment(blockerOf(context)),
+  ].join('-');
+}
+
+export function routinePostLaunchIncidentId(context: RoutinePostLaunchIncident): string {
+  return [
+    context.task_id,
+    context.attempt,
+    context.authorized_head_before.slice(0, 12),
+    'post-launch',
+    safeSegment(context.outcome),
   ].join('-');
 }
 
@@ -403,6 +576,9 @@ function baseRecord(
   return {
     incident_id: incidentId,
     detected_at: (input.now ?? (() => new Date().toISOString()))(),
+    phase: 'PRE_FLIGHT',
+    outcome: blockerOf(input.incident),
+    recipe_id: triage.recipe_id,
     task_id: input.incident.task_id,
     attempt: input.incident.attempt,
     blocker: blockerOf(input.incident),
@@ -786,6 +962,201 @@ export async function resolveRoutinePreflight(
     lastReview?.decision ?? null,
     null,
   );
+}
+
+function postLaunchBaseRecord(
+  input: ResolveRoutinePostLaunchInput<unknown>,
+  triage: RoutineTriage,
+  incidentId: string,
+): Omit<
+  RoutineIncidentRecord,
+  | 'maintenance_commit'
+  | 'review_decision'
+  | 'authorized_head_after'
+  | 'retry_result'
+  | 'human_required'
+  | 'human_reason'
+> {
+  return {
+    incident_id: incidentId,
+    detected_at: (input.now ?? (() => new Date().toISOString()))(),
+    phase: 'POST_LAUNCH',
+    outcome: input.incident.outcome,
+    recipe_id: triage.recipe_id,
+    task_id: input.incident.task_id,
+    attempt: input.incident.attempt,
+    blocker: input.incident.outcome,
+    classification: triage.classification,
+    authorized_head_before: input.incident.authorized_head_before,
+    triage_reason: triage.reason,
+    action: triage.action,
+    maintainer_profile: null,
+    reviewer_profile: null,
+  };
+}
+
+async function finishPostLaunchHuman<T>(
+  input: ResolveRoutinePostLaunchInput<T>,
+  base: ReturnType<typeof postLaunchBaseRecord>,
+  reason: string,
+  retryResult: string | null,
+): Promise<RoutinePostLaunchResolution<T>> {
+  const record: RoutineIncidentRecord = {
+    ...base,
+    maintenance_commit: null,
+    review_decision: null,
+    authorized_head_after: null,
+    retry_result: retryResult,
+    human_required: true,
+    human_reason: reason,
+  };
+  await writeTerminalRecord(input.paths, record);
+  const evidence = [
+    path.relative(input.paths.repoRoot, path.join(incidentRoot(input.paths), base.incident_id)),
+    ...input.incident.evidence_paths,
+  ];
+  return {
+    status: 'HUMAN_REQUIRED',
+    retry: null,
+    record,
+    human_required: humanOutput(base.incident_id, reason, evidence),
+  };
+}
+
+async function finishPostLaunchRetried<T>(
+  input: ResolveRoutinePostLaunchInput<T>,
+  base: ReturnType<typeof postLaunchBaseRecord>,
+  retryResult: string,
+  retry: T,
+): Promise<RoutinePostLaunchResolution<T>> {
+  const record: RoutineIncidentRecord = {
+    ...base,
+    maintenance_commit: null,
+    review_decision: null,
+    authorized_head_after: input.incident.authorized_head_before,
+    retry_result: retryResult,
+    human_required: false,
+    human_reason: null,
+  };
+  await writeTerminalRecord(input.paths, record);
+  return { status: 'RETRIED', retry, record, human_required: null };
+}
+
+export async function resolveRoutinePostLaunch<T>(
+  input: ResolveRoutinePostLaunchInput<T>,
+): Promise<RoutinePostLaunchResolution<T>> {
+  const incidentId = routinePostLaunchIncidentId(input.incident);
+  const previous = await readTerminalRecord(input.paths, incidentId);
+  if (previous) {
+    const reason = previous.human_reason ?? 'incidente pós-launch já processado; replay automático recusado';
+    return {
+      status: 'HUMAN_REQUIRED',
+      retry: null,
+      record: previous,
+      human_required: humanOutput(incidentId, reason, input.incident.evidence_paths),
+    };
+  }
+
+  const triage = classifyRoutinePostLaunchIncident(input.incident);
+  const base = postLaunchBaseRecord(input, triage, incidentId);
+  await writeRoutineIncidentEvent(input.paths, incidentId, 'detected', {
+    incident_id: incidentId,
+    phase: 'POST_LAUNCH',
+    outcome: input.incident.outcome,
+    recipe_id: triage.recipe_id,
+    classification: triage.classification,
+    task_id: input.incident.task_id,
+    attempt: input.incident.attempt,
+    profile_id: input.incident.profile_id,
+    triage_reason: triage.reason,
+  });
+
+  if (triage.classification === 'HUMAN_REQUIRED' || triage.classification === 'TASK_REPAIR') {
+    return finishPostLaunchHuman(input, base, triage.reason, null);
+  }
+
+  const retryStarted = await readRoutineIncidentEvent<{ readonly action_id: string }>(
+    input.paths,
+    incidentId,
+    'retry-started',
+  );
+  if (retryStarted !== null) {
+    return finishPostLaunchHuman(
+      input,
+      base,
+      'restart encontrou retry já iniciado sem resultado terminal; replay de provider recusado',
+      null,
+    );
+  }
+
+  const actionId = `${incidentId}:recover`;
+  const savedRecovery = await readRoutineIncidentEvent<{ readonly action: string }>(
+    input.paths,
+    incidentId,
+    'recover-completed',
+  );
+  if (savedRecovery === null) {
+    try {
+      const recovery =
+        triage.recipe_id === 'protocol-output-recovery'
+          ? await input.driver.recoverProtocolOutput(actionId, input.incident)
+          : await input.driver.recoverInfra(actionId, input.incident);
+      await writeRoutineIncidentEvent(input.paths, incidentId, 'recover-completed', recovery);
+    } catch (error) {
+      return finishPostLaunchHuman(
+        input,
+        base,
+        automationFailure(`recipe ${triage.recipe_id ?? 'desconhecida'}`, error),
+        null,
+      );
+    }
+  }
+
+  const retryActionId = `${incidentId}:retry`;
+  await writeRoutineIncidentEvent(input.paths, incidentId, 'retry-started', {
+    action_id: retryActionId,
+    task_id: input.incident.task_id,
+    profile_id: input.incident.profile_id,
+  });
+  let retry;
+  try {
+    retry = await input.retrySameTask(retryActionId, input.incident);
+  } catch (error) {
+    return finishPostLaunchHuman(
+      input,
+      base,
+      automationFailure('retry operacional da mesma task/profile', error),
+      null,
+    );
+  }
+  await writeRoutineIncidentEvent(input.paths, incidentId, 'retry-completed', {
+    task_id: retry.incident.task_id,
+    attempt: retry.incident.attempt,
+    profile_id: retry.incident.profile_id,
+    outcome: retry.incident.outcome,
+  });
+
+  if (
+    retry.incident.task_id !== input.incident.task_id ||
+    retry.incident.profile_id !== input.incident.profile_id ||
+    retry.incident.attempt !== input.incident.attempt + 1
+  ) {
+    return finishPostLaunchHuman(
+      input,
+      base,
+      'retry operacional não voltou à mesma task/profile no attempt imediatamente seguinte',
+      retry.incident.outcome,
+    );
+  }
+  if (retry.incident.outcome !== 'PASS' && retry.incident.outcome !== 'FAIL') {
+    return finishPostLaunchHuman(
+      input,
+      base,
+      `budget da recipe esgotado: ${retry.incident.outcome} reapareceu no único retry`,
+      retry.incident.outcome,
+    );
+  }
+  return finishPostLaunchRetried(input, base, retry.incident.outcome, retry.value);
 }
 
 export async function inspectRoutineIncident(

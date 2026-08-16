@@ -24,13 +24,38 @@ import { resolveHarnessPaths } from '../../dev/lib/paths.js';
 import { headSha } from '../../dev/lib/git.js';
 import { loadPlan } from '../../dev/lib/plan.js';
 import { loadProfile } from '../../dev/lib/profile.js';
-import { buildInitialState, ensureRuntimeDirs, writeState } from '../../dev/lib/state.js';
+import {
+  readInfraFailedAttempt,
+  readProtocolInvalidAttempt,
+} from '../../dev/lib/records.js';
+import { buildInitialState, ensureRuntimeDirs, readState, writeState } from '../../dev/lib/state.js';
 import type { PreflightBlocker, PreflightResult } from '../../dev/lib/orchestrate-preflight.js';
-import { makeSandboxRepo, runDevCli } from './helpers.js';
+import { commitAll, makeSandboxRepo, runDevCli } from './helpers.js';
 
 const BASE = '4'.repeat(40);
 const CANDIDATE = '5'.repeat(40);
 const NOW = '2026-08-15T20:00:00.000Z';
+const REPAIR_PLAN = `
+schema_version: 1
+tasks:
+  - id: T1
+    title: primeira tarefa
+    objective: criar src/t1.txt
+    initial_files: [README.md]
+    acceptance: ['arquivo criado']
+    validation:
+      - argv: ['grep', '-qx', 'repaired', 'src/t1.txt']
+        timeout_seconds: 30
+  - id: T2
+    title: segunda tarefa
+    blocked_by: [T1]
+    include_previous_handoff: true
+    objective: criar src/t2.txt
+    acceptance: ['arquivo criado']
+    validation:
+      - argv: ['true']
+        timeout_seconds: 30
+`;
 const roots: string[] = [];
 
 afterEach(async () => {
@@ -187,18 +212,90 @@ async function exists(file: string): Promise<boolean> {
   }
 }
 
+async function initializedSandbox(plan?: string) {
+  const sandbox = plan === undefined ? await makeSandboxRepo() : await makeSandboxRepo(plan);
+  roots.push(sandbox.root);
+  const paths = resolveHarnessPaths(sandbox.root);
+  const loaded = await loadPlan(paths.planFile);
+  await ensureRuntimeDirs(paths);
+  await writeState(
+    paths,
+    buildInitialState(loaded.plan, loaded.planSha256, { baselineSha: await headSha(sandbox.root) }),
+  );
+  return { sandbox, paths, loaded };
+}
+
+async function installFakeOrchestratorProfile(
+  sandbox: Awaited<ReturnType<typeof makeSandboxRepo>>,
+  paths: ReturnType<typeof resolveHarnessPaths>,
+  loaded: Awaited<ReturnType<typeof loadPlan>>,
+): Promise<string> {
+  const profileId = 'fake-orchestrator-routine-v1';
+  await writeFile(
+    path.join(sandbox.root, 'dev', 'profiles', `${profileId}.yaml`),
+    [
+      `id: ${profileId}`,
+      'agent: fake',
+      'commit_owner: orchestrator',
+      'official_validation_owner: orchestrator',
+      'worker_validation_policy: targeted',
+      'argv: [node, fixtures/fake-worker.mjs]',
+      'prompt_delivery: argv',
+      'timeout_seconds: 60',
+      'forbidden_flags: []',
+      'env_allowlist: [PATH, HOME, AGENTLAB_FAKE_MODE]',
+    ].join('\n'),
+    'utf8',
+  );
+  const baseline = await commitAll(sandbox.root, 'fake orchestrator routine profile');
+  await writeState(paths, buildInitialState(loaded.plan, loaded.planSha256, { baselineSha: baseline }));
+  return profileId;
+}
+
 describe('routine autonomy classification', () => {
+  it('expõe somente as cinco recipes aprovadas com phase, action, boundary, tests e budget', async () => {
+    const module = await import('../../dev/lib/routine-autonomy.js') as unknown as {
+      ROUTINE_RECIPES: ReadonlyArray<{
+        id: string;
+        incident_phase: string;
+        classification: string;
+        action: string;
+        boundary: string;
+        targeted_tests: readonly string[];
+        retry_budget: number;
+      }>;
+    };
+
+    expect(module.ROUTINE_RECIPES.map((recipe) => recipe.id)).toEqual([
+      'deterministic-recover',
+      'protocol-invalid-history-integration',
+      'protocol-output-recovery',
+      'provider-infra-retry',
+      'official-validation-repair',
+    ]);
+    expect(module.ROUTINE_RECIPES).toSatisfy((recipes: typeof module.ROUTINE_RECIPES) =>
+      recipes.every(
+        (recipe) =>
+          ['PRE_FLIGHT', 'POST_LAUNCH'].includes(recipe.incident_phase) &&
+          recipe.boundary.length > 0 &&
+          recipe.targeted_tests.length > 0 &&
+          recipe.retry_budget === 1,
+      ),
+    );
+  });
+
   it('blocker determinístico de recovery é AUTO_RECOVER e não chega ao humano', () => {
     const preflight = blockedPreflight('RECOVERY_ATTENTION');
     expect(
       classifyRoutineIncident(context({ preflight, lifecycle_records: [] })),
-    ).toMatchObject({ classification: 'AUTO_RECOVER' });
+    ).toMatchObject({ classification: 'AUTO_RECOVER', recipe_id: 'deterministic-recover' });
   });
 
   it('gap mecânico com somente ProtocolInvalidAttemptRecord é AUTO_MAINTENANCE', () => {
     expect(classifyRoutineIncident(context())).toMatchObject({
       classification: 'AUTO_MAINTENANCE',
       action: 'INTEGRATE_PROTOCOL_INVALID_HISTORY',
+      recipe_id: 'protocol-invalid-history-integration',
     });
   });
 
@@ -207,7 +304,7 @@ describe('routine autonomy classification', () => {
       classifyRoutineIncident(
         context({ preflight: blockedPreflight('AUTOMATIC_REPAIR_PROFILE_MISMATCH') }),
       ),
-    ).toMatchObject({ classification: 'TASK_REPAIR' });
+    ).toMatchObject({ classification: 'TASK_REPAIR', recipe_id: null });
   });
 
   it('evidência inconsistente nunca é normalizada automaticamente', () => {
@@ -219,6 +316,17 @@ describe('routine autonomy classification', () => {
     expect(
       classifyRoutineIncident(context({ preflight: blockedPreflight('INCONSISTENT_EVIDENCE') })),
     ).toMatchObject({ classification: 'HUMAN_REQUIRED' });
+  });
+
+  it('erro textual aparentemente simples sem recipe permanece HUMAN_REQUIRED', () => {
+    expect(
+      classifyRoutineIncident(
+        context({
+          preflight: blockedPreflight('MAINTENANCE_BLOCKED', 'ajuste simples de uma linha'),
+          lifecycle_records: [],
+        }),
+      ),
+    ).toMatchObject({ classification: 'HUMAN_REQUIRED', recipe_id: null });
   });
 });
 
@@ -232,6 +340,9 @@ describe('routine maintenance boundaries', () => {
     ['schema policy', candidate({ changed_files: ['dev/lib/schemas.ts'] })],
     ['official adoption policy', candidate({ changed_files: ['dev/lib/maintenance.ts'] })],
     ['runtime state policy', candidate({ changed_files: ['dev/lib/state.ts'] })],
+    ['autonomy recipe policy', candidate({ changed_files: ['dev/lib/routine-autonomy.ts'] })],
+    ['autonomy runtime policy', candidate({ changed_files: ['dev/lib/routine-autonomy-runtime.ts'] })],
+    ['autonomy orchestration policy', candidate({ changed_files: ['dev/cli/dev-orchestrate.ts'] })],
     ['historical evidence', candidate({ changed_files: ['.dev/failed-attempts/M56/record.json'] })],
     ['historical handoff', candidate({ changed_files: ['docs/M56-handoff.md'] })],
     ['schema version', candidate({ diff: '+ schema_version: 2\n' })],
@@ -454,6 +565,293 @@ describe('routine autonomy state machine', () => {
   });
 });
 
+type PostIncident = {
+  readonly phase: 'POST_LAUNCH';
+  readonly authorized_head_before: string;
+  readonly task_id: string;
+  readonly attempt: number;
+  readonly profile_id: string;
+  readonly launch: string;
+  readonly close: string | null;
+  readonly outcome: string;
+  readonly reason: string;
+  readonly task_status: string;
+  readonly task_phase: string | null;
+  readonly commit_owner: 'worker' | 'orchestrator' | null;
+  readonly capability_verdict: boolean;
+  readonly official_validation_failure: boolean;
+  readonly evidence_paths: readonly string[];
+};
+
+function postIncident(overrides: Partial<PostIncident> = {}): PostIncident {
+  return {
+    phase: 'POST_LAUNCH',
+    authorized_head_before: BASE,
+    task_id: 'M56',
+    attempt: 1,
+    profile_id: 'fake-worker-v1',
+    launch: 'FINISHED',
+    close: 'PENDING',
+    outcome: 'PENDING',
+    reason: 'close operacional pendente',
+    task_status: 'RUNNING',
+    task_phase: 'FINALIZING',
+    commit_owner: 'orchestrator',
+    capability_verdict: false,
+    official_validation_failure: false,
+    evidence_paths: [],
+    ...overrides,
+  };
+}
+
+async function postAutonomyModule() {
+  return await import('../../dev/lib/routine-autonomy.js') as unknown as {
+    classifyRoutinePostLaunchIncident(incident: PostIncident): {
+      classification: string;
+      action: string;
+      recipe_id: string | null;
+    };
+    routinePostLaunchIncidentId(incident: PostIncident): string;
+    resolveRoutinePostLaunch<T>(input: {
+      paths: ReturnType<typeof resolveHarnessPaths>;
+      incident: PostIncident;
+      driver: {
+        recoverProtocolOutput(actionId: string, incident: PostIncident): Promise<{ action: string }>;
+        recoverInfra(actionId: string, incident: PostIncident): Promise<{ action: string }>;
+      };
+      retrySameTask(actionId: string, incident: PostIncident): Promise<{
+        incident: PostIncident;
+        value: T;
+      }>;
+      now?: () => string;
+    }): Promise<{
+      status: 'RETRIED' | 'HUMAN_REQUIRED';
+      retry: T | null;
+      record: { phase?: string; outcome?: string; recipe_id?: string | null };
+      human_required: { why_automation_stopped: string } | null;
+    }>;
+  };
+}
+
+describe('post-launch known incident autonomy', () => {
+  it('reconhece somente facts estruturados da recipe de protocol output', async () => {
+    const module = await postAutonomyModule();
+    expect(module.classifyRoutinePostLaunchIncident(postIncident())).toMatchObject({
+      classification: 'AUTO_RECOVER',
+      action: 'RECOVER_PROTOCOL_OUTPUT',
+      recipe_id: 'protocol-output-recovery',
+    });
+    expect(
+      module.classifyRoutinePostLaunchIncident(
+        postIncident({ reason: 'parece simples', commit_owner: 'worker' }),
+      ),
+    ).toMatchObject({ classification: 'HUMAN_REQUIRED', recipe_id: null });
+  });
+
+  it('protocol output usa primitive oficial e volta à mesma task sem maintainer', async () => {
+    const module = await postAutonomyModule();
+    const { paths } = await fixture();
+    const calls: string[] = [];
+    const result = await module.resolveRoutinePostLaunch({
+      paths,
+      incident: postIncident(),
+      driver: {
+        async recoverProtocolOutput(actionId) {
+          calls.push(`protocol:${actionId}`);
+          return { action: 'dev-recover-protocol-output' };
+        },
+        async recoverInfra(actionId) {
+          calls.push(`infra:${actionId}`);
+          return { action: 'dev-recover-infra' };
+        },
+      },
+      async retrySameTask(actionId) {
+        calls.push(`retry:${actionId}`);
+        return {
+          incident: postIncident({ attempt: 2, close: 'PASS', outcome: 'PASS', task_status: 'PASS', task_phase: null }),
+          value: 'same-task-retry',
+        };
+      },
+      now: () => NOW,
+    });
+
+    expect(result.status).toBe('RETRIED');
+    expect(result.retry).toBe('same-task-retry');
+    expect(calls.filter((call) => call.startsWith('protocol:'))).toHaveLength(1);
+    expect(calls.filter((call) => call.startsWith('infra:'))).toHaveLength(0);
+    expect(calls.filter((call) => call.startsWith('retry:'))).toHaveLength(1);
+    expect(result.record).toMatchObject({
+      phase: 'POST_LAUNCH',
+      outcome: 'PENDING',
+      recipe_id: 'protocol-output-recovery',
+    });
+  });
+
+  it('recusa da primitive protocol vira HUMAN_REQUIRED sem retry', async () => {
+    const module = await postAutonomyModule();
+    const { paths } = await fixture();
+    let retries = 0;
+    const result = await module.resolveRoutinePostLaunch({
+      paths,
+      incident: postIncident(),
+      driver: {
+        async recoverProtocolOutput() {
+          throw new Error('contrato estreito recusado');
+        },
+        async recoverInfra() {
+          throw new Error('não deveria executar');
+        },
+      },
+      async retrySameTask() {
+        retries += 1;
+        throw new Error('não deveria executar');
+      },
+    });
+
+    expect(result.status).toBe('HUMAN_REQUIRED');
+    expect(result.human_required?.why_automation_stopped).toMatch(/contrato estreito recusado/);
+    expect(retries).toBe(0);
+  });
+
+  it('INFRA_ERROR recuperável usa a primitive oficial e repete uma vez o mesmo slot/profile', async () => {
+    const module = await postAutonomyModule();
+    const { paths } = await fixture();
+    const calls: string[] = [];
+    const initial = postIncident({
+      launch: 'INFRA_ERROR',
+      close: null,
+      outcome: 'INFRA_ERROR',
+      task_status: 'INFRA_ERROR',
+      task_phase: null,
+      commit_owner: 'worker',
+    });
+    const result = await module.resolveRoutinePostLaunch({
+      paths,
+      incident: initial,
+      driver: {
+        async recoverProtocolOutput() {
+          throw new Error('não deveria executar');
+        },
+        async recoverInfra(actionId) {
+          calls.push(`infra:${actionId}`);
+          return { action: 'dev-recover-infra' };
+        },
+      },
+      async retrySameTask(actionId) {
+        calls.push(`retry:${actionId}`);
+        return {
+          incident: {
+            ...initial,
+            attempt: 2,
+            launch: 'FINISHED',
+            close: 'PASS',
+            outcome: 'PASS',
+            task_status: 'PASS',
+          },
+          value: 'infra-retry-pass',
+        };
+      },
+    });
+
+    expect(result.status).toBe('RETRIED');
+    expect(result.retry).toBe('infra-retry-pass');
+    expect(calls.filter((call) => call.startsWith('infra:'))).toHaveLength(1);
+    expect(calls.filter((call) => call.startsWith('retry:'))).toHaveLength(1);
+  });
+
+  it('INFRA_ERROR capability-neutral recebe um retry e o segundo mesmo infra exige humano', async () => {
+    const module = await postAutonomyModule();
+    const { paths } = await fixture();
+    const calls: string[] = [];
+    const initial = postIncident({
+      launch: 'INFRA_ERROR',
+      close: null,
+      outcome: 'INFRA_ERROR',
+      task_status: 'INFRA_ERROR',
+      task_phase: null,
+      commit_owner: 'worker',
+    });
+    const result = await module.resolveRoutinePostLaunch({
+      paths,
+      incident: initial,
+      driver: {
+        async recoverProtocolOutput() {
+          throw new Error('não deveria executar');
+        },
+        async recoverInfra(actionId) {
+          calls.push(`infra:${actionId}`);
+          return { action: 'dev-recover-infra' };
+        },
+      },
+      async retrySameTask(actionId) {
+        calls.push(`retry:${actionId}`);
+        return { incident: { ...initial, attempt: 2 }, value: 'second-infra' };
+      },
+    });
+
+    expect(result.status).toBe('HUMAN_REQUIRED');
+    expect(result.human_required?.why_automation_stopped).toMatch(/retry|reapareceu|budget/i);
+    expect(calls.filter((call) => call.startsWith('infra:'))).toHaveLength(1);
+    expect(calls.filter((call) => call.startsWith('retry:'))).toHaveLength(1);
+  });
+
+  it('retry-started persistido impede replay cego e segundo provider', async () => {
+    const module = await postAutonomyModule();
+    const { paths } = await fixture();
+    const incident = postIncident({
+      launch: 'INFRA_ERROR',
+      close: null,
+      outcome: 'INFRA_ERROR',
+      task_status: 'INFRA_ERROR',
+      task_phase: null,
+      commit_owner: 'worker',
+    });
+    const incidentId = module.routinePostLaunchIncidentId(incident);
+    await writeRoutineIncidentEvent(paths, incidentId, 'retry-started', { action_id: `${incidentId}:retry` });
+    let retries = 0;
+
+    const result = await module.resolveRoutinePostLaunch({
+      paths,
+      incident,
+      driver: {
+        async recoverProtocolOutput() {
+          throw new Error('não deveria executar');
+        },
+        async recoverInfra() {
+          throw new Error('não deve repetir recovery após retry-started');
+        },
+      },
+      async retrySameTask() {
+        retries += 1;
+        throw new Error('provider duplicado');
+      },
+    });
+
+    expect(result.status).toBe('HUMAN_REQUIRED');
+    expect(result.human_required?.why_automation_stopped).toMatch(/restart|replay|retry/i);
+    expect(retries).toBe(0);
+  });
+
+  it('FAIL oficial continua classificado para automatic-repair existente', async () => {
+    const module = await postAutonomyModule();
+    expect(
+      module.classifyRoutinePostLaunchIncident(
+        postIncident({
+          close: 'FAIL',
+          outcome: 'FAIL',
+          task_status: 'FAIL',
+          task_phase: null,
+          official_validation_failure: true,
+        }),
+      ),
+    ).toMatchObject({
+      classification: 'TASK_REPAIR',
+      action: 'USE_EXISTING_TASK_REPAIR_POLICY',
+      recipe_id: 'official-validation-repair',
+    });
+  });
+});
+
 class FakeRuntimePort implements RoutineRuntimePort {
   readonly calls: string[] = [];
   readonly agents: RoutineRuntimeAgentInput[] = [];
@@ -533,6 +931,53 @@ class FakeRuntimePort implements RoutineRuntimePort {
 }
 
 describe('routine autonomy runtime', () => {
+  it('runtime pós-launch delega protocol e infra somente às primitives oficiais', async () => {
+    const module = await import('../../dev/lib/routine-autonomy-runtime.js') as unknown as {
+      createRoutinePostLaunchRuntime(input: {
+        paths: ReturnType<typeof resolveHarnessPaths>;
+        port: {
+          recoverProtocolOutput(input: Record<string, unknown>): Promise<unknown>;
+          recoverInfraAttempt(input: Record<string, unknown>): Promise<unknown>;
+        };
+      }): {
+        recoverProtocolOutput(actionId: string, incident: PostIncident): Promise<{ action: string }>;
+        recoverInfra(actionId: string, incident: PostIncident): Promise<{ action: string }>;
+      };
+    };
+    const { paths } = await fixture();
+    const calls: Array<{ kind: string; input: Record<string, unknown> }> = [];
+    const runtime = module.createRoutinePostLaunchRuntime({
+      paths,
+      port: {
+        async recoverProtocolOutput(input) {
+          calls.push({ kind: 'protocol', input });
+          return {};
+        },
+        async recoverInfraAttempt(input) {
+          calls.push({ kind: 'infra', input });
+          return {};
+        },
+      },
+    });
+    const protocol = postIncident();
+    const infra = postIncident({
+      launch: 'INFRA_ERROR',
+      close: null,
+      outcome: 'INFRA_ERROR',
+      task_status: 'INFRA_ERROR',
+      task_phase: null,
+      commit_owner: 'worker',
+    });
+
+    await runtime.recoverProtocolOutput('protocol-action', protocol);
+    await runtime.recoverInfra('infra-action', infra);
+
+    expect(calls.map((call) => call.kind)).toEqual(['protocol', 'infra']);
+    expect(calls[0]?.input).toMatchObject({ paths, taskId: 'M56' });
+    expect(calls[1]?.input).toMatchObject({ paths, taskId: 'M56' });
+    expect(calls.some((call) => JSON.stringify(call).includes('maintainer'))).toBe(false);
+  });
+
   it('usa clones e profiles separados; reviewer não edita e adoption é oficial', async () => {
     const { paths } = await fixture();
     const port = new FakeRuntimePort();
@@ -687,6 +1132,126 @@ describe('routine autonomy runtime', () => {
 });
 
 describe('dev-orchestrate --autonomy routine', () => {
+  it('intercepta protocol-invalid pós-launch, usa recovery oficial e repete a mesma task', async () => {
+    const { sandbox, paths, loaded } = await initializedSandbox();
+    const profileId = await installFakeOrchestratorProfile(sandbox, paths, loaded);
+    const result = await runDevCli(
+      'dev-orchestrate.ts',
+      [
+        '--repo',
+        sandbox.root,
+        '--profile',
+        profileId,
+        '--max-iterations',
+        '1',
+        '--autonomy',
+        'routine',
+      ],
+      { AGENTLAB_DEV_DIR: sandbox.devDir, AGENTLAB_FAKE_MODE: 'protocol-invalid-then-success' },
+    );
+
+    expect(result.exitCode, result.stderr).toBe(9);
+    const output = JSON.parse(result.stdout) as {
+      stopped_by: string;
+      iteration_count: number;
+      iterations: Array<{ task_id: string; result: string }>;
+    };
+    expect(output.stopped_by, JSON.stringify(output)).toBe('LIMIT_REACHED');
+    expect(output.iteration_count).toBe(2);
+    expect(output.iterations.map((iteration) => iteration.task_id)).toEqual(['T1', 'T1']);
+    expect((await readState(paths)).tasks[0]).toMatchObject({ status: 'PASS', attempts: 2 });
+    expect(await readProtocolInvalidAttempt(paths, 'T1', 1)).not.toBeNull();
+  }, 60_000);
+
+  it('primitive protocol que recusa escala sem maintainer nem retry', async () => {
+    const { sandbox, paths, loaded } = await initializedSandbox();
+    const profileId = await installFakeOrchestratorProfile(sandbox, paths, loaded);
+    const result = await runDevCli(
+      'dev-orchestrate.ts',
+      ['--repo', sandbox.root, '--profile', profileId, '--max-iterations', '1', '--autonomy', 'routine'],
+      { AGENTLAB_DEV_DIR: sandbox.devDir, AGENTLAB_FAKE_MODE: 'no-commit' },
+    );
+
+    expect(result.exitCode).toBe(9);
+    const output = JSON.parse(result.stdout) as Record<string, unknown>;
+    expect(output['stopped_by']).toBe('HUMAN_REQUIRED');
+    expect(output['iteration_count']).toBe(1);
+    expect(output['why_automation_stopped']).toMatch(/protocol-output-recovery|patch normalizado|recus/i);
+    expect((await readState(paths)).tasks[0]).toMatchObject({ status: 'RUNNING', attempts: 1 });
+    expect(await readProtocolInvalidAttempt(paths, 'T1', 1)).toBeNull();
+  }, 60_000);
+
+  it('INFRA_ERROR de launcher sem prova de provider é recusado sem retry genérico', async () => {
+    const { sandbox, paths } = await initializedSandbox();
+    const result = await runDevCli(
+      'dev-orchestrate.ts',
+      [
+        '--repo',
+        sandbox.root,
+        '--profile',
+        'fake-worker-v1',
+        '--max-iterations',
+        '1',
+        '--autonomy',
+        'routine',
+      ],
+      { AGENTLAB_DEV_DIR: sandbox.devDir, AGENTLAB_FAKE_MODE: 'infra-error' },
+    );
+
+    expect(result.exitCode, result.stderr).toBe(9);
+    const output = JSON.parse(result.stdout) as Record<string, unknown>;
+    expect(output['stopped_by']).toBe('HUMAN_REQUIRED');
+    expect(output['iteration_count']).toBe(1);
+    expect(output['why_automation_stopped']).toMatch(/LaunchRecord|provider|stream-json/);
+    expect((await readState(paths)).tasks[0]).toMatchObject({ attempts: 1 });
+    expect(await readInfraFailedAttempt(paths, 'T1', 1)).toBeNull();
+  }, 60_000);
+
+  it('FAIL oficial com autonomy continua na automatic-repair policy existente', async () => {
+    const { sandbox, paths, loaded } = await initializedSandbox(REPAIR_PLAN);
+    const profileId = await installFakeOrchestratorProfile(sandbox, paths, loaded);
+    const result = await runDevCli(
+      'dev-orchestrate.ts',
+      [
+        '--repo',
+        sandbox.root,
+        '--profile',
+        profileId,
+        '--max-iterations',
+        '1',
+        '--autonomy',
+        'routine',
+        '--verbose',
+      ],
+      { AGENTLAB_DEV_DIR: sandbox.devDir, AGENTLAB_FAKE_MODE: 'official-fail-then-repair' },
+    );
+
+    expect(result.exitCode, result.stderr).toBe(9);
+    const output = JSON.parse(result.stdout) as {
+      stopped_by: string;
+      iterations: Array<{ automatic_repair?: boolean }>;
+    };
+    expect(output.stopped_by, JSON.stringify(output)).toBe('LIMIT_REACHED');
+    expect(output.iterations).toHaveLength(2);
+    expect(output.iterations[1]?.automatic_repair).toBe(true);
+    expect((await readState(paths)).tasks[0]?.status).toBe('PASS');
+  }, 60_000);
+
+  it('sem --autonomy routine o PENDING pós-launch mantém o comportamento legado', async () => {
+    const { sandbox, paths, loaded } = await initializedSandbox();
+    const profileId = await installFakeOrchestratorProfile(sandbox, paths, loaded);
+    const result = await runDevCli(
+      'dev-orchestrate.ts',
+      ['--repo', sandbox.root, '--profile', profileId, '--max-iterations', '1'],
+      { AGENTLAB_DEV_DIR: sandbox.devDir, AGENTLAB_FAKE_MODE: 'protocol-invalid-then-success' },
+    );
+
+    expect(result.exitCode).toBe(9);
+    expect(JSON.parse(result.stdout)).toMatchObject({ stopped_by: 'PENDING', iteration_count: 1 });
+    expect((await readState(paths)).tasks[0]).toMatchObject({ status: 'RUNNING', attempts: 1 });
+    expect(await readProtocolInvalidAttempt(paths, 'T1', 1)).toBeNull();
+  }, 60_000);
+
   it('blocker fora da allowlist emite HUMAN_REQUIRED estruturado sem lançar provider', async () => {
     const sandbox = await makeSandboxRepo();
     roots.push(sandbox.root);

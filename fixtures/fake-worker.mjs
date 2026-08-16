@@ -11,13 +11,15 @@
  *   official-fail         SUCCESS + patch que falha a validation oficial (grep repaired)
  *   official-fail-then-repair  FIRST_PASS falha a validation; REPAIR escreve 'repaired'
  *   official-fail-then-worker-failure  FIRST_PASS falha a validation; REPAIR reporta FAILURE
+ *   protocol-invalid-then-success  primeiro close tem metadata inválida; retry passa
+ *   infra-error  encerra com exit de launcher não recuperável
  *   dirty      commita e ainda deixa arquivo não rastreado na árvore
  *   out-of-scope  commita alterando dev/plan.yaml
  *   timeout    ignora SIGTERM e nunca termina
  *   leak       deixa um descendente vivo depois de sair
  */
 import { execFileSync, spawn } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 if (process.argv.slice(2).some((argument) => argument === '--help' || argument === '-h')) {
@@ -34,6 +36,20 @@ const draftPath = process.env.AGENTLAB_HANDOFF_DRAFT_PATH;
 if (!repoRoot || !packetPath || !reportPath || !draftPath) {
   console.error('fake-worker: ambiente incompleto');
   process.exit(2);
+}
+
+const taskId = process.env.AGENTLAB_TASK_ID;
+const devDir = path.dirname(path.dirname(packetPath));
+
+function hasArchivedAttempt(relativeRecord) {
+  if (!taskId) return false;
+  const taskRoot = path.join(devDir, 'failed-attempts', taskId);
+  if (!existsSync(taskRoot)) return false;
+  return readdirSync(taskRoot).some((attempt) => existsSync(path.join(taskRoot, attempt, relativeRecord)));
+}
+
+if (mode === 'infra-error') {
+  process.exit(125);
 }
 
 if (mode === 'timeout') {
@@ -61,12 +77,16 @@ function main() {
   let changedFiles = [];
   let candidateCommit = null;
   const repairAttempt = packet.previous_attempt_diagnostics != null;
+  const protocolInvalidFirst =
+    mode === 'protocol-invalid-then-success' &&
+    !hasArchivedAttempt(path.join('protocol-invalid', 'protocol-invalid-attempt.json'));
   const skipGit =
     mode === 'no-commit' ||
     mode === 'orchestrator-success' ||
     mode === 'official-fail' ||
     mode === 'official-fail-then-repair' ||
-    mode === 'official-fail-then-worker-failure';
+    mode === 'official-fail-then-worker-failure' ||
+    mode === 'protocol-invalid-then-success';
 
   if (mode === 'out-of-scope') {
     const planFile = path.join(repoRoot, 'dev', 'plan.yaml');
@@ -107,6 +127,13 @@ function main() {
     timed_out: false,
     duration_ms: 1,
   }));
+  const reportedChangedFiles = protocolInvalidFirst
+    ? [
+        ...changedFiles,
+        `.dev-inbox/${packet.task_id}/report.json`,
+        `.dev-inbox/${packet.task_id}/handoff-draft.json`,
+      ]
+    : changedFiles;
 
   writeFileSync(
     reportPath,
@@ -117,7 +144,7 @@ function main() {
         self_reported_result: failed ? 'FAILURE' : 'SUCCESS',
         summary: `fake-worker modo ${mode}`,
         candidate_commit: candidateCommit,
-        changed_files: changedFiles,
+        changed_files: reportedChangedFiles,
         validations,
         decisions: [],
         lessons: [],
@@ -135,7 +162,7 @@ function main() {
         schema_version: 1,
         task_id: packet.task_id,
         result: failed ? 'FAIL' : 'PASS',
-        changed_files: changedFiles,
+        changed_files: reportedChangedFiles,
         validations,
         decisions: [],
         lessons: [],

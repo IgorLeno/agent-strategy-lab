@@ -15,6 +15,7 @@ import { adoptMaintenance, adoptionValidationCommands } from './maintenance.js';
 import { runOrchestrationPreflight } from './orchestrate-preflight.js';
 import type { HarnessPaths } from './paths.js';
 import type { LoadedPlan } from './plan.js';
+import { recoverInfraAttempt } from './infra-recover.js';
 import {
   assertNoForbiddenFlags,
   buildEnvironment,
@@ -22,10 +23,12 @@ import {
   type LauncherProfile,
 } from './profile.js';
 import { recover } from './recover.js';
+import { recoverProtocolOutput } from './protocol-output-recovery.js';
 import type {
   RoutineAutonomyDriver,
   RoutineCandidate,
   RoutineIncidentContext,
+  RoutinePostLaunchDriver,
   RoutineReview,
 } from './routine-autonomy.js';
 import type { ValidationResult } from './schemas.js';
@@ -96,6 +99,43 @@ export interface RoutineAutonomyRuntimeOptions {
   readonly maintainerProfile?: string;
   readonly reviewerProfile?: string;
   readonly port?: RoutineRuntimePort;
+}
+
+export interface RoutinePostLaunchRuntimePort {
+  recoverProtocolOutput: typeof recoverProtocolOutput;
+  recoverInfraAttempt: typeof recoverInfraAttempt;
+}
+
+export interface RoutinePostLaunchRuntimeOptions {
+  readonly paths: HarnessPaths;
+  readonly port?: RoutinePostLaunchRuntimePort;
+}
+
+export function createRoutinePostLaunchRuntime(
+  options: RoutinePostLaunchRuntimeOptions,
+): RoutinePostLaunchDriver {
+  const port: RoutinePostLaunchRuntimePort = options.port ?? {
+    recoverProtocolOutput,
+    recoverInfraAttempt,
+  };
+  return {
+    async recoverProtocolOutput(_actionId, incident) {
+      await port.recoverProtocolOutput({
+        paths: options.paths,
+        taskId: incident.task_id,
+        reason: `routine recipe protocol-output-recovery: ${incident.reason}`,
+      });
+      return { action: 'dev-recover-protocol-output' };
+    },
+    async recoverInfra(_actionId, incident) {
+      await port.recoverInfraAttempt({
+        paths: options.paths,
+        taskId: incident.task_id,
+        reason: `routine recipe provider-infra-retry: ${incident.reason}`,
+      });
+      return { action: 'dev-recover-infra' };
+    },
+  };
 }
 
 function targetedCommands(incident: RoutineIncidentContext): readonly (readonly string[])[] {
