@@ -19,6 +19,7 @@ export type {
   ProviderObservation,
   UnknownProviderEvent,
 } from './contract.js';
+export { buildClaudeInvocation, CLAUDE_ADAPTER_IDENTITY } from './claude/invocation.js';
 export {
   FAKE_ADAPTER_IDENTITY,
   fakeAdapter,

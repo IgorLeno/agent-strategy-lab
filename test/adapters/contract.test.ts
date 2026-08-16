@@ -68,7 +68,11 @@ describe('fakeAdapter — forma ProviderAdapter', () => {
   });
 
   it('buildInvocation monta argv apontando para o fake agent, com o prompt compilado como stdin', () => {
-    const invocation = fakeAdapter.buildInvocation({ manifest: manifest(), cwd: REPO_ROOT });
+    const invocation = fakeAdapter.buildInvocation({
+      manifest: manifest(),
+      cwd: REPO_ROOT,
+      sourceEnv: {},
+    });
 
     expect(invocation.argv[0]).toBe(process.execPath);
     expect(invocation.argv[1]).toBe(

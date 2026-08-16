@@ -31,6 +31,13 @@ export type ProviderEvent = AgentEvent | UnknownProviderEvent;
 export interface BuildInvocationOptions {
   readonly manifest: Omit<ExecutionEnvelopeManifest, 'adapter'>;
   readonly cwd: string;
+  /**
+   * Ambiente de origem explícito. O adapter copia somente nomes autorizados
+   * pelo `EnvironmentProfile`; nunca consulta `process.env` implicitamente.
+   */
+  readonly sourceEnv: Readonly<Record<string, string | undefined>>;
+  /** HOME isolado exigido quando o `EnvironmentProfile` declara `home: sanitized`. */
+  readonly sanitizedHome?: string;
 }
 
 /** Executável e argumentos já separados — nunca uma linha de comando para alguém partir depois. */
