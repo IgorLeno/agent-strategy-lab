@@ -31,8 +31,6 @@ import { runAgentlabCli } from '../cli/helpers.js';
 
 const execFileAsync = promisify(execFile);
 
-const REPO_ROOT = path.resolve(import.meta.dirname, '../..');
-const FAKE_AGENT_ENTRY = path.join(REPO_ROOT, 'fixtures', 'fake-agent', 'index.mjs');
 
 const GIT_ENV = {
   ...process.env,
@@ -157,7 +155,7 @@ describe('slice E2E — caminho feliz', () => {
       task: taskSpec,
       agent: {
         id: 'fake-agent-profile',
-        cli: 'fake-agent',
+        cli: 'fake',
         cli_version: '1.0.0',
         model: 'fake-model',
         flags: [],
@@ -197,10 +195,7 @@ describe('slice E2E — caminho feliz', () => {
     await writeFile(path.join(prepared.clone.clonePath, 'README.md'), 'base\nlinha do agente\n', 'utf8');
 
     // 6. executa: captura eventos, stream sanitizado e change bundle; sela execution/.
-    const executed = await executeRun({
-      prepared,
-      argv: [process.execPath, FAKE_AGENT_ENTRY, 'success'],
-    });
+    const executed = await executeRun({ prepared });
     expect(executed.record.status).toBe(ExecutionStatus.COMPLETED);
 
     // 7. layout de evidência de execution/.

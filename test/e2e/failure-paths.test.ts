@@ -24,15 +24,13 @@ import { executeRun } from '../../src/cli/run-execute.js';
 import { prepareRun } from '../../src/cli/run-prepare.js';
 import { scoreRun } from '../../src/cli/score.js';
 import { runTaskCreate } from '../../src/cli/task-create.js';
-import { FAKE_ADAPTER_IDENTITY } from '../../src/adapters/index.js';
+import { FAKE_ADAPTER_IDENTITY, FAKE_AGENT_VARIANT_ENV } from '../../src/adapters/index.js';
 import type { GraderSpec } from '../../src/evaluator/index.js';
 import { ProcessGroupSurvivorError } from '../../src/runner/index.js';
 import { EvaluationPlan, TaskSpec, type EnvironmentProfile, type Trial } from '../../src/schemas/index.js';
 
 const execFileAsync = promisify(execFile);
 
-const REPO_ROOT = path.resolve(import.meta.dirname, '../..');
-const FAKE_AGENT_ENTRY = path.join(REPO_ROOT, 'fixtures', 'fake-agent', 'index.mjs');
 
 const GIT_ENV = {
   ...process.env,
@@ -173,7 +171,7 @@ async function setupScenario(): Promise<Scenario> {
     task: taskSpec,
     agent: {
       id: 'fake-agent-profile',
-      cli: 'fake-agent',
+      cli: 'fake',
       cli_version: '1.0.0',
       model: 'fake-model',
       flags: [],
@@ -207,7 +205,7 @@ describe('slice E2E — caminhos de falha', () => {
 
     const executed = await executeRun({
       prepared,
-      argv: [process.execPath, FAKE_AGENT_ENTRY, 'timeout'],
+      env: { ...process.env, [FAKE_AGENT_VARIANT_ENV]: 'timeout' },
     });
 
     expect(executed.record.status).toBe(ExecutionStatus.TIMED_OUT);
@@ -257,7 +255,7 @@ describe('slice E2E — caminhos de falha', () => {
 
     const executed = await executeRun({
       prepared,
-      argv: [process.execPath, FAKE_AGENT_ENTRY, 'failure'],
+      env: { ...process.env, [FAKE_AGENT_VARIANT_ENV]: 'failure' },
     });
 
     // Outcome relatado é `failure`, mas a execução em si terminou por completo.
@@ -307,7 +305,7 @@ describe('slice E2E — caminhos de falha', () => {
     try {
       await executeRun({
         prepared,
-        argv: [process.execPath, FAKE_AGENT_ENTRY, 'child-process-leak'],
+        env: { ...process.env, [FAKE_AGENT_VARIANT_ENV]: 'child-process-leak' },
         // Bem menor que os 5s de vida do descendente escapado (ver
         // fixtures/fake-agent): a confirmação vence com ele ainda vivo, e é
         // exatamente isso que este cenário verifica — não um cleanup lento.

@@ -18,15 +18,14 @@ import { evaluateRun } from '../../src/cli/evaluate.js';
 import { executeRun } from '../../src/cli/run-execute.js';
 import { prepareRun } from '../../src/cli/run-prepare.js';
 import { runTaskCreate } from '../../src/cli/task-create.js';
-import { FAKE_ADAPTER_IDENTITY } from '../../src/adapters/index.js';
+import { FAKE_ADAPTER_IDENTITY, fakeAdapter } from '../../src/adapters/index.js';
+import type { ProviderAdapter } from '../../src/adapters/contract.js';
 import type { GraderSpec } from '../../src/evaluator/index.js';
 import { verifyRunIntegrity } from '../../src/storage/index.js';
 import { EvaluationPlan, TaskSpec, type EnvironmentProfile, type Trial } from '../../src/schemas/index.js';
 
 const execFileAsync = promisify(execFile);
 
-const REPO_ROOT = path.resolve(import.meta.dirname, '../..');
-const FAKE_AGENT_ENTRY = path.join(REPO_ROOT, 'fixtures', 'fake-agent', 'index.mjs');
 
 const GIT_ENV = {
   ...process.env,
@@ -130,7 +129,7 @@ function trialFor(taskSpec: TaskSpec): Trial {
     task: taskSpec,
     agent: {
       id: 'fake-agent-profile',
-      cli: 'fake-agent',
+      cli: 'fake',
       cli_version: '1.0.0',
       model: 'fake-model',
       flags: [],
@@ -179,7 +178,7 @@ describe('slice E2E — hardening do Marco 1', () => {
     });
 
     await writeFile(path.join(prepared.clone.clonePath, 'README.md'), 'base\nlinha do agente\n', 'utf8');
-    await executeRun({ prepared, argv: [process.execPath, FAKE_AGENT_ENTRY, 'success'] });
+    await executeRun({ prepared });
 
     // A seção acabou de selar: a reverificação a partir do disco confirma
     // integridade antes de qualquer adulteração.
@@ -238,7 +237,17 @@ describe('slice E2E — hardening do Marco 1', () => {
       ].join(';\n'),
     );
 
-    const executed = await executeRun({ prepared, argv: contaminatedAgent });
+    // Adapter de teste, não o fake registrado: só `buildInvocation` diverge
+    // (a invocation contaminada acima), `parseLine` continua o do fake
+    // adapter — mesma trajetória `buildInvocation → executeWithAdapter` que
+    // qualquer `ProviderAdapter` de produção segue via `executeRun`.
+    const contaminatedAdapter: ProviderAdapter = {
+      identity: FAKE_ADAPTER_IDENTITY,
+      executionKind: 'FIXTURE',
+      buildInvocation: () => ({ argv: contaminatedAgent }),
+      parseLine: fakeAdapter.parseLine,
+    };
+    const executed = await executeRun({ prepared, adapter: contaminatedAdapter });
     expect(executed.record.exit_code).toBe(0);
 
     const evaluated = await evaluateRun({
@@ -309,8 +318,8 @@ describe('slice E2E — hardening do Marco 1', () => {
     await writeFile(path.join(preparedA.clone.clonePath, 'README.md'), 'base\nlinha do agente\n', 'utf8');
     await writeFile(path.join(preparedB.clone.clonePath, 'README.md'), 'base\nlinha do agente\n', 'utf8');
 
-    const executedA = await executeRun({ prepared: preparedA, argv: [process.execPath, FAKE_AGENT_ENTRY, 'success'] });
-    const executedB = await executeRun({ prepared: preparedB, argv: [process.execPath, FAKE_AGENT_ENTRY, 'success'] });
+    const executedA = await executeRun({ prepared: preparedA });
+    const executedB = await executeRun({ prepared: preparedB });
 
     // Sela em runs diferentes, mas ambos carregam o mesmo digest de execução.
     expect(executedA.record.execution_envelope_sha256).toBe(preparedA.executionEnvelopeSha256);

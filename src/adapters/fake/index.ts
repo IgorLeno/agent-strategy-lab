@@ -42,6 +42,7 @@
  * segunda implementação de spawn/timeout/cleanup/montagem de record.
  */
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import type { ExecutionRecord } from '../../schemas/index.js';
 import { executeWithAdapter, type ExecuteWithAdapterOptions } from '../../runner/index.js';
@@ -115,8 +116,33 @@ function safeJsonParse(text: string): unknown {
   }
 }
 
-/** Caminho do fake agent relativo à raiz do repo — o que `buildInvocation` do fake adapter aponta. */
-const FAKE_AGENT_ENTRY = path.join('fixtures', 'fake-agent', 'index.mjs');
+/**
+ * Caminho absoluto do fake agent, resolvido a partir da localização deste
+ * módulo — não de `options.cwd`. `cwd` é o clone descartável do repo-alvo
+ * (`workspace/`), onde `fixtures/fake-agent/` nunca existe; o fixture mora
+ * neste repo (agent-strategy-lab), então o caminho não pode depender de onde
+ * o processo do run vai rodar.
+ */
+const FAKE_AGENT_ENTRY = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '..',
+  '..',
+  '..',
+  'fixtures',
+  'fake-agent',
+  'index.mjs',
+);
+
+/**
+ * Nome da variável de ambiente que escolhe a variante do fake agent
+ * (`success`, `failure`, `timeout`, `malformed-stream`, `child-process-leak`
+ * — ver `fixtures/fake-agent/index.mjs`). Só existe para quem chama
+ * `executeRun`/`executeWithAdapter` com o adapter fake escolher o cenário sem
+ * precisar de um `argv` próprio; `sourceEnv` já é o mecanismo provider-neutral
+ * de `BuildInvocationOptions` para o adapter ler o ambiente de origem.
+ * Default (variável ausente): `success`.
+ */
+export const FAKE_AGENT_VARIANT_ENV = 'FAKE_AGENT_VARIANT';
 
 /**
  * Forma `ProviderAdapter` do fake adapter: identidade, `buildInvocation` e o parser de linha —
@@ -129,8 +155,13 @@ export const fakeAdapter: ProviderAdapter = {
   executionKind: 'FIXTURE',
   metricsProvenance: FAKE_AGENT_PROVENANCE,
   buildInvocation(options: BuildInvocationOptions): AdapterInvocation {
+    const variant = options.sourceEnv[FAKE_AGENT_VARIANT_ENV];
     return {
-      argv: [process.execPath, path.join(options.cwd, FAKE_AGENT_ENTRY)],
+      argv: [
+        process.execPath,
+        FAKE_AGENT_ENTRY,
+        ...(variant === undefined ? [] : [variant]),
+      ],
       stdin: options.manifest.compiled_prompt,
     };
   },

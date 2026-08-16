@@ -13,9 +13,6 @@ import type { Trial } from '../../src/schemas/index.js';
 
 const execFileAsync = promisify(execFile);
 
-const REPO_ROOT = path.resolve(import.meta.dirname, '../..');
-const FAKE_AGENT_ENTRY = path.join(REPO_ROOT, 'fixtures', 'fake-agent', 'index.mjs');
-
 const GIT_ENV = {
   ...process.env,
   GIT_CONFIG_GLOBAL: os.devNull,
@@ -77,7 +74,7 @@ function trial(): Trial {
     },
     agent: {
       id: 'fake-agent-profile',
-      cli: 'fake-agent',
+      cli: 'fake',
       cli_version: '1.0.0',
       model: 'fake-model',
       flags: [],
@@ -133,10 +130,7 @@ describe('executeRun — indexação e descarte do clone', () => {
     const source = await sourceRepo();
     const prepared = await preparedFakeRun(source, labRoot);
 
-    const executed = await executeRun({
-      prepared,
-      argv: [process.execPath, FAKE_AGENT_ENTRY, 'success'],
-    });
+    const executed = await executeRun({ prepared });
 
     const dbPath = path.join(prepared.dataDir, RUN_INDEX_FILE_NAME);
     const index = RunIndex.open(dbPath);
@@ -173,10 +167,7 @@ describe('executeRun — indexação e descarte do clone', () => {
 
     expect(await pathExists(clonePath)).toBe(true);
 
-    await executeRun({
-      prepared,
-      argv: [process.execPath, FAKE_AGENT_ENTRY, 'success'],
-    });
+    await executeRun({ prepared });
 
     expect(await pathExists(clonePath)).toBe(false);
   });
@@ -202,10 +193,7 @@ describe('executeRun — indexação e descarte do clone', () => {
     raw.close();
 
     await expect(
-      executeRun({
-        prepared,
-        argv: [process.execPath, FAKE_AGENT_ENTRY, 'success'],
-      }),
+      executeRun({ prepared }),
     ).rejects.toThrow(RunIndexSchemaVersionError);
 
     expect(await pathExists(clonePath)).toBe(false);

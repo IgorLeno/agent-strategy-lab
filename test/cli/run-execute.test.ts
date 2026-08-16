@@ -17,14 +17,12 @@ import {
   executeRun,
 } from '../../src/cli/run-execute.js';
 import { prepareRun } from '../../src/cli/run-prepare.js';
-import { FAKE_ADAPTER_IDENTITY } from '../../src/adapters/index.js';
+import { FAKE_ADAPTER_IDENTITY, FAKE_AGENT_VARIANT_ENV } from '../../src/adapters/index.js';
 import { disposeClone } from '../../src/workspace/index.js';
 import type { Trial } from '../../src/schemas/index.js';
 
 const execFileAsync = promisify(execFile);
 
-const REPO_ROOT = path.resolve(import.meta.dirname, '../..');
-const FAKE_AGENT_ENTRY = path.join(REPO_ROOT, 'fixtures', 'fake-agent', 'index.mjs');
 
 const GIT_ENV = {
   ...process.env,
@@ -87,7 +85,7 @@ function trial(): Trial {
     },
     agent: {
       id: 'fake-agent-profile',
-      cli: 'fake-agent',
+      cli: 'fake',
       cli_version: '1.0.0',
       model: 'fake-model',
       flags: [],
@@ -134,10 +132,7 @@ describe('executeRun', () => {
     const prepared = await preparedFakeRun(source);
 
     try {
-      const executed = await executeRun({
-        prepared,
-        argv: [process.execPath, FAKE_AGENT_ENTRY, 'success'],
-      });
+      const executed = await executeRun({ prepared });
 
       expect(executed.record.status).toBe(ExecutionStatus.COMPLETED);
       expect(executed.record.exit_code).toBe(0);
@@ -182,10 +177,7 @@ describe('executeRun', () => {
     const prepared = await preparedFakeRun(source);
 
     try {
-      const executed = await executeRun({
-        prepared,
-        argv: [process.execPath, FAKE_AGENT_ENTRY, 'success'],
-      });
+      const executed = await executeRun({ prepared });
 
       const recalculated = executionEnvelopeSha256(prepared.envelopeManifest);
       expect(executed.record.execution_envelope_sha256).toBe(recalculated);
@@ -201,7 +193,7 @@ describe('executeRun', () => {
     try {
       await executeRun({
         prepared,
-        argv: [process.execPath, FAKE_AGENT_ENTRY, 'malformed-stream'],
+        env: { ...process.env, [FAKE_AGENT_VARIANT_ENV]: 'malformed-stream' },
       });
 
       const eventsContent = await readFile(
@@ -228,10 +220,7 @@ describe('executeRun', () => {
     const prepared = await preparedFakeRun(source);
 
     try {
-      const executed = await executeRun({
-        prepared,
-        argv: [process.execPath, FAKE_AGENT_ENTRY, 'success'],
-      });
+      const executed = await executeRun({ prepared });
 
       expect(executed.changeBundle.manifest.base_sha).toBe(source.baseSha);
       expect(executed.changeBundle.patchPath).toBe(
@@ -252,7 +241,7 @@ describe('executeRun', () => {
     try {
       const executed = await executeRun({
         prepared,
-        argv: [process.execPath, FAKE_AGENT_ENTRY, 'timeout'],
+        env: { ...process.env, [FAKE_AGENT_VARIANT_ENV]: 'timeout' },
         gracePeriodMs: 50,
       });
 

@@ -44,6 +44,7 @@ export {
 } from './claude/quota.js';
 export {
   FAKE_ADAPTER_IDENTITY,
+  FAKE_AGENT_VARIANT_ENV,
   fakeAdapter,
   runFakeAgent,
   type FakeAgentEvent,

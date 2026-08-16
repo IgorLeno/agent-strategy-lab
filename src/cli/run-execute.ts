@@ -12,9 +12,12 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
+import type { ParsedProviderLine, ProviderAdapter, ProviderEvent } from '../adapters/contract.js';
+import { resolveAdapter } from '../adapters/index.js';
+import type { RealExecutionAuthorization } from '../billing/index.js';
 import type { JsonValue } from '../core/index.js';
-import { runFakeAgent, type FakeAgentEvent } from '../adapters/index.js';
 import type { ExecutionEnvelopeManifest } from '../envelope/index.js';
+import { executeWithAdapter } from '../runner/index.js';
 import type { ExecutionRecord } from '../schemas/index.js';
 import {
   finalizeExecution,
@@ -35,46 +38,89 @@ export const PROMPT_DIR_NAME = 'prompt';
 export const PROMPT_FILE_NAME = 'prompt.txt';
 export const CHANGES_DIR_NAME = 'changes';
 
+/**
+ * Prazo padrão entre o SIGTERM do timeout e o SIGKILL da escalada, preservado
+ * aqui desde que `executeRun` delegava em `runFakeAgent` (M25/M26): nenhuma
+ * CLI de produção resolveu um valor próprio ainda, então o default continua
+ * o de um run rápido em vez do de 10s de `runner/capture.ts`.
+ */
+const DEFAULT_GRACE_PERIOD_MS = 200;
+
 export interface ExecuteRunOptions {
   readonly prepared: PreparedRun;
-  /** argv do adapter — ex. `[process.execPath, fakeAgentEntry, variant]`. */
-  readonly argv: readonly string[];
+  /**
+   * Override do `ProviderAdapter` resolvido por `trial.agent.cli`. Produção
+   * nunca passa isto — existe para testes que precisam de uma invocation que
+   * nenhum adapter registrado produziria (ex.: stream contaminado de
+   * propósito). Fora isso, `executeRun` sempre resolve pelo registry.
+   */
+  readonly adapter?: ProviderAdapter;
   readonly env?: NodeJS.ProcessEnv;
+  /** HOME isolado repassado ao `buildInvocation` do adapter quando o `EnvironmentProfile` exige. */
+  readonly sanitizedHome?: string;
   readonly gracePeriodMs?: number;
   readonly cleanupConfirmTimeoutMs?: number;
+  /** Evidência obrigatória para adapter REAL_INFERENCE; fixtures não a consultam. */
+  readonly realExecutionAuthorization?: RealExecutionAuthorization;
   readonly now?: Date;
 }
 
 export interface ExecutedRun {
   readonly record: ExecutionRecord;
+  /**
+   * Uma entrada por linha do stream, correlacionada por índice com os eventos
+   * gravados em `events.jsonl` — a `ProviderObservation` de cada linha (usage,
+   * cost, terminal) sobrevive aqui em vez de ser descartada depois que
+   * `record.metrics` já extraiu dela o que é fato de execução.
+   */
+  readonly parsedLines: readonly ParsedProviderLine[];
   readonly changeBundle: ChangeBundle;
   readonly sealed: SealedSection;
 }
 
 /**
- * Roda o fake agent no clone já preparado, grava todo artifact de
- * `execution/` e sela a seção por último — falha em qualquer etapa anterior
- * propaga sem selar, então uma execução incompleta nunca aparenta selada.
+ * Resolve o `ProviderAdapter` do `trial.agent.cli`, monta a invocation dele e
+ * roda através do runtime comum (`executeWithAdapter`) no clone já preparado
+ * — grava todo artifact de `execution/` e sela a seção por último — falha em
+ * qualquer etapa anterior propaga sem selar, então uma execução incompleta
+ * nunca aparenta selada.
+ *
+ * `resolveAdapter → adapter.buildInvocation → executeWithAdapter` é a mesma
+ * trajetória para fake, claude e codex: nenhum deles ganha um caminho
+ * especial aqui.
  */
 export async function executeRun(options: ExecuteRunOptions): Promise<ExecutedRun> {
   const { prepared } = options;
   const { adapter: _adapter, ...manifestWithoutAdapter } = prepared.envelopeManifest;
   const now = options.now ?? new Date();
+  const adapter = options.adapter ?? resolveAdapter(prepared.executionRequest.trial.agent.cli);
+  const sourceEnv = options.env ?? process.env;
+  const invocation = adapter.buildInvocation({
+    manifest: manifestWithoutAdapter,
+    cwd: prepared.clone.clonePath,
+    sourceEnv,
+    ...(options.sanitizedHome === undefined ? {} : { sanitizedHome: options.sanitizedHome }),
+  });
 
   let record: ExecutionRecord;
+  let parsedLines: readonly ParsedProviderLine[];
   let changeBundle: ChangeBundle;
   try {
-    const agentRun = await runFakeAgent({
-      argv: options.argv,
+    const agentRun = await executeWithAdapter(adapter, {
+      argv: invocation.argv,
       cwd: prepared.clone.clonePath,
-      ...(options.env === undefined ? {} : { env: options.env }),
+      ...(invocation.env === undefined ? {} : { env: invocation.env }),
       manifest: manifestWithoutAdapter,
-      ...(options.gracePeriodMs === undefined ? {} : { gracePeriodMs: options.gracePeriodMs }),
+      gracePeriodMs: options.gracePeriodMs ?? DEFAULT_GRACE_PERIOD_MS,
       ...(options.cleanupConfirmTimeoutMs === undefined
         ? {}
         : { cleanupConfirmTimeoutMs: options.cleanupConfirmTimeoutMs }),
+      ...(options.realExecutionAuthorization === undefined
+        ? {}
+        : { realExecutionAuthorization: options.realExecutionAuthorization }),
     });
     record = agentRun.record;
+    parsedLines = agentRun.parsedLines;
 
     await writePrompt(prepared.executionDir, manifestWithoutAdapter);
     await writeEventStreams(prepared.executionDir, agentRun.events);
@@ -97,7 +143,7 @@ export async function executeRun(options: ExecuteRunOptions): Promise<ExecutedRu
 
   await indexExecutedRun(prepared, record, now);
 
-  return { record, changeBundle, sealed };
+  return { record, parsedLines, changeBundle, sealed };
 }
 
 /**
@@ -165,7 +211,7 @@ async function writePrompt(
  */
 async function writeEventStreams(
   executionDir: string,
-  events: readonly FakeAgentEvent[],
+  events: readonly ProviderEvent[],
 ): Promise<void> {
   const eventsContent = events.map((event) => `${JSON.stringify(event)}\n`).join('');
   const sanitizedContent = events

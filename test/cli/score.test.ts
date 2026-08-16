@@ -18,8 +18,6 @@ import type { GraderSpec } from '../../src/evaluator/index.js';
 
 const execFileAsync = promisify(execFile);
 
-const REPO_ROOT = path.resolve(import.meta.dirname, '../..');
-const FAKE_AGENT_ENTRY = path.join(REPO_ROOT, 'fixtures', 'fake-agent', 'index.mjs');
 
 const GIT_ENV = {
   ...process.env,
@@ -82,7 +80,7 @@ function trial(): Trial {
     },
     agent: {
       id: 'fake-agent-profile',
-      cli: 'fake-agent',
+      cli: 'fake',
       cli_version: '1.0.0',
       model: 'fake-model',
       flags: [],
@@ -154,10 +152,7 @@ async function executedRun(labRoot: string, source: SourceRepo): Promise<Prepare
     'utf8',
   );
 
-  await executeRun({
-    prepared,
-    argv: [process.execPath, FAKE_AGENT_ENTRY, 'success'],
-  });
+  await executeRun({ prepared });
 
   return prepared;
 }
