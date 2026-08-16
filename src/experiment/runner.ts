@@ -18,13 +18,16 @@
  * `INFRA_ERROR` nunca vira capability FAIL silenciosamente: o runner enfileira
  * um retry slot separado (`kind: 'RETRY'`) em vez de registrar o slot original
  * como resultado de capability. A billing/quota guard (`billing/guard.ts`) é
- * consultada antes de CADA launch, incluindo retries — uma decisão `BLOCK`
- * interrompe o launch imediatamente, sem descartar o que já rodou nem os
- * slots que ainda restam.
+ * consultada antes de CADA launch, incluindo retries. Quando `observeQuota`
+ * está presente, a política congelada do spec deriva `quota.availability`
+ * antes dessa guarda — uma decisão `BLOCK` interrompe o launch imediatamente,
+ * sem descartar o que já rodou nem os slots que ainda restam.
  */
 import { ExecutionStatus } from '../core/enums.js';
 import type { BillingGuardDecision } from '../billing/index.js';
+import type { QuotaUsage } from '../schemas/index.js';
 import type { FrozenExperimentSpec } from './index.js';
+import { decideExperimentSlotAuthorization } from './quota-availability.js';
 
 export interface PlannedSlot {
   /** Determinístico: `${task_id}:${arm_id}:${repetition_index}`, com sufixo `:retry:N` para retries. */
@@ -119,6 +122,17 @@ export interface RunExperimentScheduleOptions {
   readonly executeSlot: (slot: PlannedSlot) => Promise<ExecutionStatus> | ExecutionStatus;
   /** Consultada antes de CADA launch, incluindo retries. Nunca pulada. */
   readonly authorizeSlot: (slot: PlannedSlot) => BillingGuardDecision;
+  /**
+   * Snapshot de `QuotaUsage` imediatamente antes de cada launch, inclusive
+   * retries. Quando presente, a política congelada em
+   * `frozen.spec.billing_policy` deriva `quota.availability` e a guarda é
+   * reconsultada com essa evidência — `INSUFFICIENT` bloqueia antes de
+   * `executeSlot`. Omitir preserva o comportamento anterior: quota
+   * desconhecida permanece `null` e não vira BLOCK por omissão.
+   */
+  readonly observeQuota?: (
+    slot: PlannedSlot,
+  ) => QuotaUsage | null | Promise<QuotaUsage | null>;
   /** Tentativas de retry por slot original antes de desistir. Default 1: uma tentativa extra por INFRA_ERROR. */
   readonly maxRetriesPerSlot?: number;
 }
@@ -137,11 +151,13 @@ export interface RunExperimentScheduleResult {
  * Conduz o launch sequencial dos slots materializados de `options.frozen`.
  *
  * Antes de cada launch — incluindo o de um retry — `authorizeSlot` é
- * consultada; uma decisão `BLOCK` interrompe o launch imediatamente e devolve
- * os slots restantes sem lançá-los. `INFRA_ERROR` nunca vira capability FAIL:
- * gera um retry slot (`kind: 'RETRY'`, `retry_of` apontando pro slot
- * original) enfileirado para launch, até `maxRetriesPerSlot` tentativas por
- * slot original.
+ * consultada. Quando `observeQuota` está presente, a política de quota do
+ * spec deriva `quota.availability` e a guarda é reconsultada com essa
+ * evidência antes de qualquer `executeSlot`. Uma decisão `BLOCK` interrompe
+ * o launch imediatamente e devolve os slots restantes sem lançá-los.
+ * `INFRA_ERROR` nunca vira capability FAIL: gera um retry slot
+ * (`kind: 'RETRY'`, `retry_of` apontando pro slot original) enfileirado para
+ * launch, até `maxRetriesPerSlot` tentativas por slot original.
  */
 export async function runExperimentSchedule(
   options: RunExperimentScheduleOptions,
@@ -154,7 +170,7 @@ export async function runExperimentSchedule(
 
   while (queue.length > 0) {
     const slot = queue.shift() as PlannedSlot;
-    const decision = options.authorizeSlot(slot);
+    const decision = await authorizeLaunch(options, slot);
     if (decision.decision === 'BLOCK') {
       return {
         launches,
@@ -183,4 +199,29 @@ export async function runExperimentSchedule(
   }
 
   return { launches, stoppedByBillingGuard: false, remainingSlots: [] };
+}
+
+/**
+ * Autorização do slot +, quando há observação de quota, derivação da política
+ * experimental antes do spawn. FIXTURE não é reescrito; REAL_INFERENCE com
+ * evidência tem `quota.availability` substituída pela derivação.
+ */
+async function authorizeLaunch(
+  options: RunExperimentScheduleOptions,
+  slot: PlannedSlot,
+): Promise<BillingGuardDecision> {
+  const decision = options.authorizeSlot(slot);
+  if (options.observeQuota === undefined) return decision;
+  if (decision.decision === 'BLOCK') return decision;
+  if (decision.execution_kind !== 'REAL_INFERENCE' || decision.evidence === null) {
+    return decision;
+  }
+
+  const usage = await options.observeQuota(slot);
+  return decideExperimentSlotAuthorization(
+    decision.execution_kind,
+    decision.evidence,
+    usage,
+    options.frozen.spec.billing_policy,
+  );
 }

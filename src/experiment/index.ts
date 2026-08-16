@@ -13,12 +13,20 @@
  *
  * Este módulo nunca executa slot nenhum: materializar a ordem concreta de
  * execução a partir de um `FrozenExperimentSpec` é responsabilidade do
- * runner (M65).
+ * runner (M65). A derivação `QuotaUsage` → `quota.availability` a partir da
+ * política congelada vive em `quota-availability.ts` e é aplicada pelo
+ * runner antes de cada launch quando `observeQuota` está presente.
  */
 import { canonicalSha256 } from '../envelope/index.js';
 import { ExperimentSpec } from '../schemas/index.js';
 
 export { ExperimentArm, ExperimentBillingPolicy, ExperimentOrdering, ExperimentSpec } from '../schemas/index.js';
+export {
+  decideExperimentSlotAuthorization,
+  deriveQuotaAvailability,
+  withDerivedExperimentQuota,
+  type DerivedQuotaAvailability,
+} from './quota-availability.js';
 export {
   materializeSlotOrder,
   runExperimentSchedule,

@@ -447,3 +447,13 @@ threshold numérico, a revisão precisa localizar explicitamente o consumidor
 que lê a medição observada e decide com base nele — se esse consumidor não
 existe, o threshold é dado inerte, e isso precisa virar risco registrado
 antes de qualquer aprovação humana que dependa dele.
+
+[2026-08-16] Contexto: enforcement do quota stop após M68.
+Mistake: deixar a derivação só como helper opcional do chamador reabriria a
+lacuna operacional — o runner já consultava a guarda antes de cada launch,
+mas a guarda não lê `QuotaUsage`.
+Rule: medição (`QuotaUsage`), derivação (`deriveQuotaAvailability`) e
+decisão (`decideExecutionAuthorization`) permanecem camadas separadas.
+O runner aplica a derivação da política congelada antes de cada launch e
+de cada retry quando há observação; `UNAVAILABLE`/ausência continuam `null`
+e não viram BLOCK por omissão.
