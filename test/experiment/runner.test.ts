@@ -8,8 +8,19 @@ import {
   type FrozenExperimentSpec,
   type PlannedSlot,
 } from '../../src/experiment/index.js';
-import { decideExecutionAuthorization, type BillingGuardDecision } from '../../src/billing/index.js';
-import type { AgentProfile, EnvironmentProfile, TaskSpec } from '../../src/schemas/index.js';
+import {
+  decideExecutionAuthorization,
+  type BillingGuardDecision,
+  type RealExecutionAuthorization,
+} from '../../src/billing/index.js';
+import {
+  QuotaObservationStatus,
+  QuotaReasonCode,
+  type AgentProfile,
+  type EnvironmentProfile,
+  type QuotaUsage,
+  type TaskSpec,
+} from '../../src/schemas/index.js';
 
 const budgets = {
   duration_ms: { expected: 120_000, maximum: 300_000 },
@@ -216,5 +227,83 @@ describe('runExperimentSchedule', () => {
     expect(result.remainingSlots.map((slot) => slot.slot_id)).toEqual(
       order.slice(3).map((slot) => slot.slot_id),
     );
+  });
+
+  it('observeQuota ausente preserva o comportamento anterior (scheduler genérico sem quota-stop)', async () => {
+    const frozen = buildFrozen('seed-a');
+
+    const result = await runExperimentSchedule({
+      frozen,
+      executeSlot: () => ExecutionStatus.COMPLETED,
+      authorizeSlot: () => FIXTURE_ALLOW,
+    });
+
+    expect(result.stoppedByBillingGuard).toBe(false);
+    expect(result.launches).toHaveLength(12);
+  });
+
+  it('quota INSUFFICIENT derivada de observeQuota bloqueia antes de executeSlot, inclusive em retry', async () => {
+    const frozen = buildFrozen('seed-a');
+    const realInferenceEvidence: RealExecutionAuthorization = {
+      authorization: { value: 'AUTHORIZED', provenance: 'fake_auth_probe' },
+      billing_mode: { value: 'SUBSCRIPTION', provenance: 'fake_profile' },
+      quota: {
+        availability: { value: 'SUFFICIENT', provenance: 'stale_probe' },
+        remaining: { value: 50, provenance: 'stale_probe' },
+        unit: 'percent',
+      },
+      cost: {
+        api_equivalent_usd: { value: null, provenance: 'n/a' },
+        projected_incremental_charge_usd: { value: null, provenance: 'n/a' },
+        actual_incremental_charge_usd: { value: null, provenance: 'n/a' },
+        actual_incremental_charge_authoritative: false,
+      },
+      budget: {
+        maximum_incremental_charge_usd: { value: null, provenance: 'n/a' },
+      },
+    };
+    const allowDecision = decideExecutionAuthorization('REAL_INFERENCE', realInferenceEvidence);
+    expect(allowDecision.decision).toBe('ALLOW');
+
+    const insufficientUsage: QuotaUsage = {
+      provider: 'anthropic',
+      observation: {
+        status: QuotaObservationStatus.OBSERVED,
+        reason_code: QuotaReasonCode.OK,
+        provenance: 'live_probe',
+      },
+      windows: [
+        {
+          window_id: 'five_hour',
+          before_used_pct: 70,
+          after_used_pct: 92,
+          consumed_pp: 22,
+          same_window: true,
+          reason_code: QuotaReasonCode.OK,
+          provenance: 'live_probe',
+        },
+      ],
+    };
+
+    const executed: string[] = [];
+    const observedSlots: string[] = [];
+    const result = await runExperimentSchedule({
+      frozen,
+      executeSlot: (slot) => {
+        executed.push(slot.slot_id);
+        return ExecutionStatus.COMPLETED;
+      },
+      authorizeSlot: () => allowDecision,
+      observeQuota: (slot) => {
+        observedSlots.push(slot.slot_id);
+        return insufficientUsage;
+      },
+    });
+
+    expect(result.stoppedByBillingGuard).toBe(true);
+    expect(result.blockedDecision?.decision).toBe('BLOCK');
+    expect(result.blockedDecision?.reasons).toContain('QUOTA_INSUFFICIENT');
+    expect(executed).toHaveLength(0);
+    expect(observedSlots.length).toBeGreaterThan(0);
   });
 });

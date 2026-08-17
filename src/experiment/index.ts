@@ -27,6 +27,10 @@ export {
   type RunExperimentScheduleResult,
   type SlotLaunchRecord,
 } from './runner.js';
+export {
+  deriveQuotaAvailability,
+  type DerivedQuotaAvailability,
+} from './quota-availability.js';
 
 export interface FrozenExperimentSpec {
   readonly spec: ExperimentSpec;

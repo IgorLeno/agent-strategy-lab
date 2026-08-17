@@ -21,10 +21,19 @@
  * consultada antes de CADA launch, incluindo retries — uma decisão `BLOCK`
  * interrompe o launch imediatamente, sem descartar o que já rodou nem os
  * slots que ainda restam.
+ *
+ * Quando `options.observeQuota` está presente (M69), a política de quota
+ * congelada em `frozen.spec.billing_policy` é derivada contra o `QuotaUsage`
+ * observado (`experiment/quota-availability.ts`) e a guarda é reconsultada
+ * com essa evidência antes de CADA launch, incluindo retries — `BLOCK`
+ * ocorre antes de `executeSlot`. `observeQuota` permanece opcional: sem ele,
+ * o scheduler genérico se comporta exatamente como antes desta tarefa.
  */
 import { ExecutionStatus } from '../core/enums.js';
-import type { BillingGuardDecision } from '../billing/index.js';
+import { decideExecutionAuthorization, type BillingGuardDecision } from '../billing/index.js';
+import type { QuotaUsage } from '../schemas/index.js';
 import type { FrozenExperimentSpec } from './index.js';
+import { deriveQuotaAvailability } from './quota-availability.js';
 
 export interface PlannedSlot {
   /** Determinístico: `${task_id}:${arm_id}:${repetition_index}`, com sufixo `:retry:N` para retries. */
@@ -119,6 +128,16 @@ export interface RunExperimentScheduleOptions {
   readonly executeSlot: (slot: PlannedSlot) => Promise<ExecutionStatus> | ExecutionStatus;
   /** Consultada antes de CADA launch, incluindo retries. Nunca pulada. */
   readonly authorizeSlot: (slot: PlannedSlot) => BillingGuardDecision;
+  /**
+   * Observa `QuotaUsage` imediatamente antes de cada launch, incluindo
+   * retries. Opcional: o scheduler genérico não exige quota-stop. Quando
+   * presente e `authorizeSlot` devolveu `ALLOW` para uma execução
+   * `REAL_INFERENCE` com evidência, a quota observada é derivada contra
+   * `frozen.spec.billing_policy` (`quota-availability.ts`) e a guarda é
+   * reconsultada com essa evidência — `INSUFFICIENT` vira `BLOCK` antes de
+   * `executeSlot`. `null`/`UNAVAILABLE` nunca bloqueia por omissão.
+   */
+  readonly observeQuota?: (slot: PlannedSlot) => QuotaUsage | null | Promise<QuotaUsage | null>;
   /** Tentativas de retry por slot original antes de desistir. Default 1: uma tentativa extra por INFRA_ERROR. */
   readonly maxRetriesPerSlot?: number;
 }
@@ -154,7 +173,7 @@ export async function runExperimentSchedule(
 
   while (queue.length > 0) {
     const slot = queue.shift() as PlannedSlot;
-    const decision = options.authorizeSlot(slot);
+    const decision = await authorizeLaunch(options, slot);
     if (decision.decision === 'BLOCK') {
       return {
         launches,
@@ -183,4 +202,34 @@ export async function runExperimentSchedule(
   }
 
   return { launches, stoppedByBillingGuard: false, remainingSlots: [] };
+}
+
+/**
+ * `authorizeSlot(slot)` seguida, quando `options.observeQuota` existe, da
+ * derivação de quota-stop antes de `executeSlot`. `FIXTURE`, `BLOCK` já
+ * decidido, ou ausência de evidência (`AUTHORIZATION_UNKNOWN` sem evidence)
+ * passam adiante sem reconsulta — não há evidência de billing para
+ * substituir a quota.
+ */
+async function authorizeLaunch(
+  options: RunExperimentScheduleOptions,
+  slot: PlannedSlot,
+): Promise<BillingGuardDecision> {
+  const decision = options.authorizeSlot(slot);
+  if (options.observeQuota === undefined) return decision;
+  if (decision.decision === 'BLOCK') return decision;
+  if (decision.execution_kind !== 'REAL_INFERENCE' || decision.evidence === null) {
+    return decision;
+  }
+
+  const usage = await options.observeQuota(slot);
+  const derived = deriveQuotaAvailability(usage, options.frozen.spec.billing_policy);
+  return decideExecutionAuthorization(decision.execution_kind, {
+    ...decision.evidence,
+    quota: {
+      availability: derived.availability,
+      remaining: derived.remaining,
+      unit: derived.unit,
+    },
+  });
 }
