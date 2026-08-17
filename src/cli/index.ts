@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /**
- * CLI `agentlab`: doctor, init, task create, run, evaluate, score e report.
+ * CLI `agentlab`: doctor, init, task create, run, evaluate, score, report
+ * e experiment --pilot.
  *
  * Fronteira: a CLI só orquestra as outras áreas. Regra de negócio que nasce
  * aqui fica inacessível para teste que não passe por processo — e teste de
@@ -9,12 +10,13 @@
  * Preenchido por M32–M38.
  */
 import { runDoctor, type DoctorReport } from './doctor.js';
+import { runPilotCli } from './experiment.js';
 import { runInit } from './init.js';
 import { runExperimental } from './run.js';
 import { runTaskCreate } from './task-create.js';
 
 const USAGE =
-  'Uso: agentlab doctor | agentlab init --repo <caminho> [--force] | agentlab task create --input <caminho> [--force] | agentlab run --experimental --input <caminho>';
+  'Uso: agentlab doctor | agentlab init --repo <caminho> [--force] | agentlab task create --input <caminho> [--force] | agentlab run --experimental --input <caminho> | agentlab experiment --pilot --dry-run';
 
 export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<number> {
   const [command, ...rest] = argv;
@@ -40,6 +42,10 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
 
   if (command === 'run') {
     return runExperimentalCommand(rest);
+  }
+
+  if (command === 'experiment') {
+    return runPilotCli({ args: rest });
   }
 
   process.stderr.write(`comando desconhecido: ${command ?? '(nenhum)'}\n${USAGE}\n`);

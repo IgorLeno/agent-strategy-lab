@@ -245,13 +245,13 @@ fronteira.
 | `billing` | autorização provider-neutral anterior ao launch real | EXECUTION CONTRACT | M54 |
 | `credentials` | prova sanitizada e provider-neutral da fonte da credencial | EXECUTION CONTRACT | M55 |
 | `strategies` | carga e validação das receitas em `strategies/` | EXPERIMENT PLANE | M05 |
-| `experiment` | congelamento/hash de `ExperimentSpec`; derivação `QuotaUsage` → `quota.availability` pela billing policy antes de cada launch | EXPERIMENT PLANE | M64, M65 |
+| `experiment` | congelamento/hash de `ExperimentSpec`; derivação `QuotaUsage` → `quota.availability` pela billing policy; caminho oficial do piloto (`runOfficialPilot`) injeta a Claude quota probe como `observeQuota` obrigatória; o scheduler genérico continua aceitando `observeQuota` ausente | EXPERIMENT PLANE | M64, M65 |
 | `evaluator` | workspace do evaluator, graders, orquestração da avaliação | EXECUTION CONTRACT | M27A–M28 |
 | `scorer` | perfis de score, qualificação | EXECUTION CONTRACT | M29 |
 | `reporting` | relatório de terminal e `--json`; compare entre arms do piloto | EXTENSIONS | M38, M66 |
 | `performance` | fatos de attempt e records de performance derivados, sem I/O | EXTENSIONS | M45–M48 |
 | `project` | `.agentlab/project.yaml`, resolução do data dir | CONTROL PLANE | M11, M33 |
-| `cli` | comandos `agentlab` | CONTROL PLANE | M32–M38 |
+| `cli` | comandos `agentlab`, inclusive `experiment --pilot --dry-run` (inspeção sem provider; não autoriza o piloto) | CONTROL PLANE | M32–M38 |
 
 - **STABLE KERNEL** — vocabulário e contratos que todo o resto importa; zero
   I/O ou serialização canônica, muda raramente e qualquer mudança é
@@ -291,6 +291,15 @@ de lógica de apresentação compartilhada entre múltiplos runs, e é exatament
 onde ela nasceu: `src/reporting/compare.ts` (M66) compara
 `TaskPerformanceRecord`s QUALIFIED entre arms, por task antes do agregado,
 sem fabricar confidence interval, Capability Matrix ou vencedor automático.
+
+**Quota stop do piloto vs scheduler genérico.** `runExperimentSchedule`
+(`src/experiment/runner.ts`) continua aceitando `observeQuota` ausente —
+fixtures e o E2E fake não têm quota de provider. O caminho oficial do
+piloto Claude (`runOfficialPilot` em `src/experiment/pilot-launch.ts`)
+injeta a probe existente (`probeClaudeQuota`) como observer obrigatória
+antes de cada launch e retry; `>= quota_stop_threshold_pct` (80%) vira
+`INSUFFICIENT` e bloqueia antes de `executeSlot`. Isso não autoriza o
+piloto real nem altera o `ExperimentSpec` congelado.
 
 ---
 

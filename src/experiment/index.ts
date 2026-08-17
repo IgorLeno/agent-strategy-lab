@@ -15,7 +15,9 @@
  * execução a partir de um `FrozenExperimentSpec` é responsabilidade do
  * runner (M65). A derivação `QuotaUsage` → `quota.availability` a partir da
  * política congelada vive em `quota-availability.ts` e é aplicada pelo
- * runner antes de cada launch quando `observeQuota` está presente.
+ * runner antes de cada launch quando `observeQuota` está presente. O caminho
+ * oficial do piloto (`pilot-launch.ts`) torna essa observação obrigatória e
+ * liga a Claude quota probe; o scheduler genérico continua aceitando ausência.
  */
 import { canonicalSha256 } from '../envelope/index.js';
 import { ExperimentSpec } from '../schemas/index.js';
@@ -35,6 +37,28 @@ export {
   type RunExperimentScheduleResult,
   type SlotLaunchRecord,
 } from './runner.js';
+export {
+  PILOT_ARM_HIGH_ID,
+  PILOT_ARM_MEDIUM_ID,
+  PILOT_REPETITIONS_PER_ARM_TASK,
+  PILOT_SEED,
+  PILOT_TASK_IDS,
+  buildPilotExperimentSpec,
+} from './pilot.js';
+export {
+  bindClaudePilotExecutor,
+  bindOfficialPilotDependencies,
+  createClaudePilotQuotaObserver,
+  inspectOfficialPilot,
+  quotaUsageFromClaudePreLaunchProbe,
+  runOfficialPilot,
+  OFFICIAL_PILOT_QUOTA_OBSERVER,
+  type OfficialPilotBindings,
+  type OfficialPilotInspection,
+  type OfficialPilotQuotaObservation,
+  type RunOfficialPilotOptions,
+  type RunOfficialPilotResult,
+} from './pilot-launch.js';
 
 export interface FrozenExperimentSpec {
   readonly spec: ExperimentSpec;

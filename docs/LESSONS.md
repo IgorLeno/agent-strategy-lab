@@ -457,3 +457,13 @@ decisão (`decideExecutionAuthorization`) permanecem camadas separadas.
 O runner aplica a derivação da política congelada antes de cada launch e
 de cada retry quando há observação; `UNAVAILABLE`/ausência continuam `null`
 e não viram BLOCK por omissão.
+
+[2026-08-16] Contexto: integração da Claude quota probe no caminho oficial
+do piloto, depois da derivação de M68/`389a96d`.
+Mistake: deixar o piloto real depender de o operador lembrar de passar
+`observeQuota` no scheduler genérico reabriria a lacuna operacional no
+único caminho que executa Claude Medium vs High.
+Rule: `runExperimentSchedule` pode omitir `observeQuota` (fixtures). O
+caminho oficial do piloto (`runOfficialPilot`) trata a Claude quota probe
+como dependência obrigatória e observa de novo antes de cada launch e
+retry. A existência desse caminho não autoriza `REAL_INFERENCE`.

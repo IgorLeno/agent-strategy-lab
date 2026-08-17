@@ -99,6 +99,30 @@ operacional explícito do procedimento de lançamento do pilot real, e como
 candidato de follow-up (ver §5) para fechar a lacuna automaticamente antes
 ou durante os 12 slots reais.
 
+### 3.1 Follow-up posterior a M68 — a lacuna operacional foi fechada
+
+O texto do §3 e o veredito ⚠️ do item 13 descrevem o estado **na revisão
+M68**. Não reescrever isso como se o enforcement já existisse naquela
+data.
+
+Depois de M68, duas entregas fecharam a ponte sem redesenhar o
+BillingGuard:
+
+1. `deriveQuotaAvailability` / `decideExperimentSlotAuthorization`
+   (`src/experiment/quota-availability.ts`, commit `389a96d`) — consumidor
+   runtime do threshold de 80%: `QuotaUsage` observado vira
+   `INSUFFICIENT` quando a utilização relevante é `>= 80%`.
+2. `runOfficialPilot` (`src/experiment/pilot-launch.ts`) — o caminho
+   oficial do piloto injeta `probeClaudeQuota` como `observeQuota`
+   obrigatória imediatamente antes de cada launch e de cada retry.
+   `INSUFFICIENT` bloqueia antes de `executeSlot`. O scheduler genérico
+   `runExperimentSchedule` **continua** permitindo `observeQuota` ausente
+   (fixtures). `UNAVAILABLE`/medição incomparável permanecem quota
+   desconhecida (`null`), não `SUFFICIENT` fabricado e não BLOCK global.
+
+Nenhuma dessas entregas autoriza o piloto real de 12 slots. Dry-run:
+`agentlab experiment --pilot --dry-run`.
+
 ---
 
 ## 4. Gates
@@ -116,12 +140,10 @@ orquestrador.
 
 ## 5. Riscos e decisões em aberto antes do pilot real
 
-1. **Quota stop ≥80% depende de um passo manual** (§3) — a aprovação humana
-   que autoriza os 12 slots precisa decidir explicitamente: (a) aceitar o
-   procedimento manual documentado acima como suficiente para o piloto de
-   escopo pequeno, ou (b) exigir uma função de enforcement automático
-   (`QuotaUsage` → `quota.availability`) como pré-requisito antes do
-   primeiro slot real. Nenhuma das duas é decidida por este documento.
+1. **Quota stop ≥80% depende de um passo manual** (§3) — achado da revisão
+   M68. Fechado posteriormente: ver §3.1. A existência do caminho oficial
+   com observer automática **não** constitui autorização para executar o
+   piloto.
 2. **Custo real de rodar adapters reais** — billing guard e credential proof
    bloqueiam por default; a autorização explícita por slot continua sendo
    responsabilidade de quem lançar os 12 slots, item por item.
@@ -156,8 +178,9 @@ Nenhum provider real foi invocado.
 O pilot real (Claude Sonnet 5 Medium vs High, 2 arms × 3 tasks ×
 2 repetições, sequential/seeded/interleaved-counterbalanced, conforme
 `PRE-M2-REVIEW.md` §6) só pode começar após uma aprovação humana explícita
-**posterior a este documento**, que resolva no mínimo o risco do §5.1
-(quota stop manual vs. automático) antes do primeiro slot real. Essa
-aprovação autoriza exclusivamente o lançamento dentro do desenho já
-aprovado — não autoriza ampliar o corpus, os arms, as repetições ou o
-custo/quota máximo além do que está congelado em `buildPilotExperimentSpec`.
+**posterior a este documento**. O risco do §5.1 (quota stop manual) foi
+fechado depois desta revisão — ver §3.1 — e isso ainda **não** autoriza o
+lançamento. Essa aprovação autoriza exclusivamente o lançamento dentro do
+desenho já aprovado — não autoriza ampliar o corpus, os arms, as
+repetições ou o custo/quota máximo além do que está congelado em
+`buildPilotExperimentSpec`.
