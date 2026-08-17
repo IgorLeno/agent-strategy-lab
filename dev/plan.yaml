@@ -2104,3 +2104,107 @@ tasks:
         timeout_seconds: 300
       - argv: [pnpm, test]
         timeout_seconds: 900
+
+  # -------------------------------------------------------------------------
+  # Pós-M68 — Pre-pilot: quota-stop automático + launcher oficial Claude
+  # -------------------------------------------------------------------------
+  - id: M69
+    title: Automatic quota-stop enforcement
+    blocked_by: [M68]
+    objective: >-
+      Formalizar a integração de ExperimentBillingPolicy.quota_stop_threshold_pct
+      com QuotaUsage observado no experiment plane, mantendo medição, derivação
+      e BillingGuard separados. A implementação futura deve criar uma derivação
+      QuotaUsage + ExperimentBillingPolicy → quota availability: abaixo do
+      threshold => SUFFICIENT; igual ou acima => INSUFFICIENT;
+      UNAVAILABLE, missing ou incomparável => null, nunca zero. Não somar
+      janelas incompatíveis nem window_id diferentes. Usar o snapshot relevante
+      da própria janela; não usar consumed_pp para o threshold. Consultar essa
+      derivação antes de cada launch e retry quando observeQuota existir.
+      Preservar observeQuota opcional no scheduler genérico. Não alterar o
+      BillingGuard provider-neutral. Não executar provider real. Não lançar os
+      12 slots do piloto. A branch backup/prepilot-quota contém uma
+      implementação histórica apenas como referência: as tarefas formais devem
+      ser executadas normalmente pelo harness; não tratar aqueles commits como
+      já aceitos nem cherry-pická-los.
+    initial_files:
+      - src/experiment/runner.ts
+      - src/billing/guard.ts
+      - src/schemas/quota-usage.ts
+      - src/schemas/experiment-spec.ts
+      - docs/reviews/M2-REVIEW.md
+    acceptance:
+      - Derivação QuotaUsage + ExperimentBillingPolicy produz SUFFICIENT abaixo do threshold.
+      - Igual ao threshold => INSUFFICIENT; acima do threshold => INSUFFICIENT.
+      - UNAVAILABLE, missing ou incomparável => null, nunca zero.
+      - Janelas incompatíveis / window_id diferentes não são somadas.
+      - Threshold usa snapshot da própria janela, não consumed_pp.
+      - observeQuota é consultada antes de cada launch e retry quando presente.
+      - BLOCK ocorre antes de executeSlot.
+      - Retry reobserva quota.
+      - observeQuota permanece opcional no scheduler genérico.
+      - BillingGuard provider-neutral inalterado.
+      - Fixtures existentes continuam válidas.
+      - Nenhum provider real executado.
+      - backup/prepilot-quota é referência histórica; commits dali não são aceitos; a tarefa corre pelo harness.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/experiment, test/billing, test/adapters/claude-quota.test.ts]
+        timeout_seconds: 300
+      - argv: [pnpm, build]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+      - argv: [git, diff, --check]
+        timeout_seconds: 60
+
+  - id: M70
+    title: Official Claude pilot launcher
+    blocked_by: [M69]
+    objective: >-
+      Formalizar o caminho oficial do piloto Claude Sonnet 5 Medium vs High.
+      Manter runExperimentSchedule genérico. Criar um caminho oficial de pilot
+      launch que injeta obrigatoriamente a Claude quota probe como observeQuota,
+      observa quota antes de todo launch e retry, e conecta authorizeSlot →
+      quota probe → derivação → BillingGuard → executeSlot. Impedir spawn
+      quando quota >= 80%. Manter autorização humana explícita e separada.
+      Fornecer dry-run/preflight que não chama provider nem autoriza inferência.
+      O caminho real deve exigir confirmação explícita e evidência humana.
+      Preservar integralmente o fingerprint do ExperimentSpec: 2 arms Medium vs
+      High, 3 tasks, 2 repetitions por arm/task, 12 slots, seed/order existentes
+      e threshold 80%. Nenhum provider real deve ser executado durante M70.
+      Não lançar os 12 slots reais. A branch backup/prepilot-quota contém uma
+      implementação histórica apenas como referência: as tarefas formais devem
+      ser executadas normalmente pelo harness; não tratar aqueles commits como
+      já aceitos nem cherry-pická-los.
+    initial_files:
+      - src/experiment/runner.ts
+      - src/experiment/pilot.ts
+      - src/experiment/index.ts
+      - src/adapters/claude/quota.ts
+      - src/cli/index.ts
+    acceptance:
+      - Observer Claude obrigatória no caminho oficial (observeQuota injetada).
+      - Abaixo de 80 permite o executor.
+      - Igual a 80 e acima de 80 bloqueiam antes do executor.
+      - Segunda execução recebe nova probe.
+      - Retry recebe nova probe.
+      - Ausência de autorização humana bloqueia.
+      - Dry-run/preflight com authorizes_real_inference=false; não chama provider nem autoriza inferência.
+      - Caminho real exige confirmação explícita e evidência humana.
+      - Scheduler genérico continua permitindo observeQuota ausente.
+      - Fingerprint do ExperimentSpec permanece inalterado (2 arms Medium vs High, 3 tasks, 2 reps, 12 slots, seed/order existentes, threshold 80%).
+      - Nenhum provider real nos testes.
+      - backup/prepilot-quota é referência histórica; commits dali não são aceitos; a tarefa corre pelo harness.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/experiment, test/cli, test/billing, test/e2e/experiment-fake-e2e.test.ts]
+        timeout_seconds: 300
+      - argv: [pnpm, build]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+      - argv: [git, diff, --check]
+        timeout_seconds: 60
