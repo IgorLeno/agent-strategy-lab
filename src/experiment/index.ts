@@ -13,7 +13,9 @@
  *
  * Este módulo nunca executa slot nenhum: materializar a ordem concreta de
  * execução a partir de um `FrozenExperimentSpec` é responsabilidade do
- * runner (M65).
+ * runner (M65). O caminho oficial do piloto real (`pilot-launch.ts`, M70)
+ * liga a Claude quota probe obrigatória sobre o mesmo runner genérico —
+ * `runExperimentSchedule` continua aceitando `observeQuota` ausente.
  */
 import { canonicalSha256 } from '../envelope/index.js';
 import { ExperimentSpec } from '../schemas/index.js';
@@ -31,6 +33,28 @@ export {
   deriveQuotaAvailability,
   type DerivedQuotaAvailability,
 } from './quota-availability.js';
+export {
+  PILOT_ARM_HIGH_ID,
+  PILOT_ARM_MEDIUM_ID,
+  PILOT_REPETITIONS_PER_ARM_TASK,
+  PILOT_SEED,
+  PILOT_TASK_IDS,
+  buildPilotExperimentSpec,
+} from './pilot.js';
+export {
+  bindClaudePilotExecutor,
+  bindOfficialPilotDependencies,
+  createClaudePilotQuotaObserver,
+  inspectOfficialPilot,
+  quotaUsageFromClaudePreLaunchProbe,
+  runOfficialPilot,
+  OFFICIAL_PILOT_QUOTA_OBSERVER,
+  type OfficialPilotBindings,
+  type OfficialPilotInspection,
+  type OfficialPilotQuotaObservation,
+  type RunOfficialPilotOptions,
+  type RunOfficialPilotResult,
+} from './pilot-launch.js';
 
 export interface FrozenExperimentSpec {
   readonly spec: ExperimentSpec;
