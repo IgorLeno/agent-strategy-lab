@@ -2208,3 +2208,1192 @@ tasks:
         timeout_seconds: 900
       - argv: [git, diff, --check]
         timeout_seconds: 60
+
+  # -------------------------------------------------------------------------
+  # Marco 3 — Adaptive universal project orchestration (M71–M86)
+  #
+  # O Agent Strategy Lab é o CONTROL PLANE; Claude Code e Codex são WORKERS que
+  # recebem work packets delimitados. Workers não possuem lifecycle global,
+  # DAG, estado autoritativo, routing, escalation, commit oficial, validation
+  # oficial, alteração de plano, autorização humana nem billing/quota policy.
+  # O estado autoritativo vive em disco, fora da memória conversacional dos
+  # modelos.
+  #
+  # Unidade de trabalho: ATOMIC VALIDATABLE CHANGE (AVC) — objetivo único,
+  # contexto delimitado, blast radius delimitado, fronteiras de
+  # responsabilidade claras, verificável isoladamente, PASS/FAIL objetivo.
+  # NÃO existe teto universal de duração: uma task coerente e independentemente
+  # verificável pode ter budget maior, e uma task curta que atravessa
+  # responsibilidades demais ainda precisa ser decomposta. Duração é UM sinal,
+  # nunca a regra.
+  #
+  # Três conceitos de tempo são INDEPENDENTES, têm números potencialmente
+  # diferentes e cada um responde a UM bound próprio: estimated task duration é
+  # sinal de planejamento e não tem teto arquitetural; worker runtime budget é o
+  # limite do processo do worker e é validado contra launcher e profile;
+  # validation command timeout é o limite INDIVIDUAL de cada comando e é
+  # validado contra o contrato ValidationCommand. É proibido derivar o runtime
+  # do worker de min(bound do worker, bound de validação): os limites não se
+  # cruzam, e um budget de worker maior que o teto de um comando de validação
+  # não é inconsistência. O execution budget é adaptativo (task + profile +
+  # custo de validação + evidência histórica); recomendação fora do bound
+  # apropriado produz resultado explícito nomeando o bound violado, nunca
+  # bypass silencioso.
+  #
+  # Contratos e lógica pura ficam em src/ (buildável); wiring de lifecycle fica
+  # em dev/, que já pode importar src/. src/ NÃO pode importar dev/:
+  # tsconfig.build.json compila somente src/ com rootDir src.
+  #
+  # Reuso obrigatório em vez de abstração nova: derivações de profile de
+  # dev/lib/doctor.ts, roles/reviewer/overlay read-only de
+  # dev/lib/routine-autonomy*.ts, timeoutSecondsOverride de dev/lib/launch.ts,
+  # TaskPacket de dev/lib/schemas.ts, TaskBudgets/TaskTaxonomy de
+  # src/schemas/task-spec.ts, readTrialHistory/derivePerformance de
+  # src/performance/, guards de billing/quota e o lifecycle do dev-orchestrate.
+  #
+  # Nada aqui remove ou altera o benchmark pilot-v1: ExperimentSpec congelado,
+  # fingerprint, runExperimentSchedule genérico, profiles e evidência histórica
+  # permanecem intactos e disponíveis como ferramenta de calibração.
+  # -------------------------------------------------------------------------
+  - id: M71
+    title: Project Intake + Execution Authorization Contract
+    blocked_by: [M70]
+    objective: >-
+      Criar em src/intake/ o contrato formal de entrada de um pedido de
+      implementação sobre um repositório EXTERNO. O ProjectIntakeRequest deve
+      representar no mínimo: repo alvo, base revision, user request, objetivos,
+      constraints, exclusões e o requested_scope / execution_intent — o registro
+      de que o usuário pediu explicitamente a implementação daquele escopo, para
+      que gates humanos posteriores sejam proporcionais em vez de redundantes.
+      requested_scope NÃO é autorização geral: ele não autoriza, por si só,
+      cobrança não autorizada, troca de billing mode, uso de credenciais, ação
+      destrutiva, efeito colateral externo, produção ou deployment, expansão de
+      escopo, alteração security-sensitive não implicada pelo pedido, nem
+      execução de provider real que exija gate próprio. O contrato deve tornar
+      essa separação explícita para impedir a inferência futura "o usuário pediu
+      X, logo qualquer ação necessária está autorizada". Para que essa separação
+      não vire burocracia por spawn, esta task define também a
+      ExecutionAuthorizationScope provider-neutral, com três partes distintas:
+      requested_scope (o que o usuário pediu), autonomous execution boundary
+      (as ações que o harness pode realizar sem novo gate humano — por exemplo
+      workspaces descartáveis locais, workers de assinatura já configurados,
+      validation determinística, bounded repair, capability escalation dentro da
+      ladder aprovada e cross-provider entre profiles de assinatura previamente
+      permitidos) e human-gated capabilities (o que continua exigindo
+      intervenção — billing de API não previamente autorizado, mudança de
+      billing mode, ação destrutiva, deployment/produção, efeito colateral
+      externo relevante, scope expansion, nova fronteira de credenciais, decisão
+      de arquitetura ou produto não resolvida, ação crítica ou
+      security-sensitive, profile/provider fora da execution policy, evidência
+      insuficiente e escalation segura esgotada). A autorização é de ESCOPO, no
+      nível do projeto/run: um spawn individual dentro do boundary não é um novo
+      gate. Reusar contratos existentes onde eles já servirem, em vez de criar
+      estrutura paralela. Contrato
+      strict e versionado, com identidade canônica determinística reusando
+      canonicalSha256 de src/envelope; não criar hasher novo. O intake é estado
+      do control plane, persistido e auditável, nunca memória conversacional de
+      worker. Somente contrato nesta task: nenhuma inspeção, planning, routing
+      ou execução, e nenhum provider. risk, envelope adaptativo e context
+      requirements pertencem ao contrato de planning task (M73), não aqui.
+    initial_files:
+      - src/intake/index.ts
+      - src/schemas/index.ts
+      - src/envelope/index.ts
+      - test/intake/intake-request.test.ts
+    acceptance:
+      - ProjectIntakeRequest strict e versionado.
+      - Repo alvo e base revision representados; base revision exige SHA de 40 hex.
+      - user_request, objectives, constraints e exclusions presentes.
+      - requested_scope / execution_intent registrado explicitamente, para gates proporcionais posteriores.
+      - Contrato separa requested_scope de autorização; billing, credenciais, ação destrutiva, efeito externo, deploy, scope expansion, mudança security-sensitive e provider real continuam com gates próprios.
+      - Teste prova que requested_scope sozinho não autoriza nenhuma dessas categorias.
+      - ExecutionAuthorizationScope strict e versionada, provider-neutral, definida em src.
+      - As três partes - requested_scope, autonomous execution boundary e human-gated capabilities - são distinguíveis no contrato.
+      - Autorização é de escopo no nível do projeto/run; o contrato não exige gate por spawn individual.
+      - Ação dentro do boundary é representável como permitida sem novo gate; ação fora do boundary é representável como HUMAN_REQUIRED.
+      - Nenhuma estrutura paralela criada onde um contrato existente já serve.
+      - Identidade canônica determinística via canonicalSha256 existente; nenhum hasher novo.
+      - Reordenar chaves não muda a identidade.
+      - Intake é estado persistido do control plane, não memória de worker.
+      - Nenhuma inspeção, planning, routing ou execução nesta task.
+      - TaskSpec e TaskTaxonomy inalterados.
+      - Nenhum provider real.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/intake]
+        timeout_seconds: 300
+      - argv: [pnpm, build]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+      - argv: [git, diff, --check]
+        timeout_seconds: 60
+  - id: M72
+    title: Repository Inspector + Context/Environment Facts
+    blocked_by: [M71]
+    objective: >-
+      Implementar inspeção READ-ONLY do repositório alvo em src/inspection/,
+      produzindo um ProjectInspection com os fatos que o control plane precisa
+      para planejar, montar contexto proporcional e depois derivar environment
+      readiness: stack, package/build system, principais diretórios, testes,
+      comandos de validação candidatos, git state, estado de dependências,
+      ferramentas e serviços locais requeridos, arquitetura observável,
+      permissões de filesystem, feedback/observabilidade disponível, arquivos
+      relevantes e riscos observados. Instruções do projeto (AGENTS.md,
+      CLAUDE.md, README, docs de arquitetura, configs, scripts) entram como
+      MAPA — caminho, escopo e relevância aparente, mais source anchors por
+      área — e NUNCA como conteúdo concatenado para prompt: montar contexto é
+      responsabilidade posterior do harness. Reusar gitOrThrow, cloneGitEnv e
+      isInside de src/workspace/clone.ts; não escrever helper de git, spawner
+      ou hasher novo. Fato ausente é null com motivo e provenance; unknown
+      nunca vira valor inventado, zero, nem READY. O inspector não modifica o
+      repo alvo, não cria branch, não executa os comandos de validação
+      descobertos e não chama provider.
+    initial_files:
+      - src/inspection/index.ts
+      - src/workspace/clone.ts
+      - src/intake/index.ts
+      - test/inspection/inspect-repository.test.ts
+      - fixtures/external-project
+    acceptance:
+      - ProjectInspection strict e versionado.
+      - Stack, build system, diretórios, testes e comandos de validação candidatos derivados de fatos do disco.
+      - Estado de dependências, ferramentas e serviços requeridos representados como fatos.
+      - Permissões de filesystem e feedback disponível representados.
+      - Git state derivado via gitOrThrow existente; nenhum helper de git novo.
+      - Instruções do projeto entram como mapa com caminho, escopo e relevância.
+      - Nenhum conteúdo de documentação é concatenado nem preparado como prompt.
+      - Source anchors por área disponíveis para montagem posterior de contexto proporcional.
+      - Fato indisponível vira null com motivo e provenance; nunca zero, nunca inventado, nunca READY.
+      - Zero escrita no repo alvo, provada por teste.
+      - Comandos de validação descobertos não são executados nesta task.
+      - Contenção de caminho verificada com isInside existente.
+      - Nenhum provider real.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/inspection]
+        timeout_seconds: 300
+      - argv: [pnpm, build]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+      - argv: [git, diff, --check]
+        timeout_seconds: 60
+  - id: M73
+    title: Planning Task Schema / Adaptive Task Envelope
+    blocked_by: [M71]
+    objective: >-
+      Criar em src/planner/ o contrato formal das tasks produzidas pelo planner
+      — PlannedTask e seu envelope ADAPTATIVO. Deve compor contratos existentes
+      em vez de duplicá-los: TaskTaxonomy v1 entra verbatim como bloco
+      aninhado, e TaskBudgets já oferece expected/maximum POR TASK para
+      duration_ms, tokens e changed_files, que é exatamente o envelope
+      adaptativo necessário — não criar contrato de budget paralelo. A dimensão
+      risk (low/medium/high/critical) é nova e vive somente aqui: TaskSpec,
+      TaskTaxonomy e os schemas de performance permanecem inalterados para
+      manter evidência histórica recomputável. PlannedTask deve expressar:
+      objetivo único, blocked_by, taxonomy, risk, acceptance, validation,
+      arquivos iniciais/prováveis, context scope e context requirements com
+      source anchors, environment requirements, custo/budget esperado de
+      validação e o resource envelope de runtime. O contrato precisa manter
+      SEPARADOS três conceitos de tempo distintos: estimated task duration
+      (estimativa do envelope), worker runtime budget (limite do processo do
+      worker, derivado depois em M78) e validation command timeout (limite por
+      comando de validação). Não colapsar os três num único número. Duração
+      esperada e máxima são valores ESPECÍFICOS DA TASK; é proibido introduzir
+      teto universal de duração no contrato. O comando de validação declarado em src/ espelha o
+      par {argv, timeout_seconds} do harness — duplicação mínima imposta pela
+      fronteira de build, com compatibilidade provada em M83. Somente contrato
+      nesta task.
+    initial_files:
+      - src/planner/task.ts
+      - src/planner/index.ts
+      - src/schemas/task-spec.ts
+      - test/planner/planned-task.test.ts
+    acceptance:
+      - PlannedTask strict e versionado.
+      - TaskTaxonomy v1 composta verbatim, sem cópia de enums.
+      - TaskBudgets reusado como envelope adaptativo por task; nenhum contrato de budget paralelo.
+      - risk com low/medium/high/critical presente apenas no contrato novo.
+      - TaskSpec, TaskTaxonomy e schemas de performance inalterados.
+      - Objetivo único por task exigido pelo contrato.
+      - context scope, context requirements e source anchors representados.
+      - environment requirements representados de forma comparável aos fatos de inspection.
+      - Custo/budget esperado de validação representado.
+      - Duração esperada e máxima são específicas da task.
+      - Estimated task duration, worker runtime budget e validation command timeout permanecem conceitos separados no contrato.
+      - Cada conceito de tempo responde a um bound próprio; o contrato não cruza limites entre eles.
+      - Nenhum teto universal de duração existe no contrato, provado por teste.
+      - acceptance e validation obrigatórios e não vazios.
+      - Nenhum provider real.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/planner]
+        timeout_seconds: 300
+      - argv: [pnpm, build]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+      - argv: [git, diff, --check]
+        timeout_seconds: 60
+  - id: M74
+    title: AVC Task Decomposition Engine
+    blocked_by: [M73]
+    objective: >-
+      Implementar lógica PURA de decomposição em src/planner/decomposition.ts,
+      sem I/O e sem provider, baseada em ATOMIC VALIDATABLE CHANGE. Uma task
+      deve ser dividida quando deixou de ser uma mudança coerente e validável —
+      não porque o relógio passou de N minutos. Sinais avaliados: objetivo
+      único, contexto delimitado, blast radius delimitado, fronteiras de
+      responsabilidade, complexity, ambiguity, risk, verification,
+      dependências, superfície esperada de changed-files, custo de validação,
+      pressão esperada de contexto/tokens, isolamento de retry, fronteira de
+      rollback/recovery e possibilidade de determinar PASS/FAIL objetivamente.
+      É PROIBIDO implementar qualquer regra da forma "duração acima de N
+      obrigatoriamente decompõe": duração é um sinal entre outros. Uma task
+      coerente, bem delimitada e verificável isoladamente PODE ter budget de
+      execução maior. Uma task curta pode exigir decomposição por atravessar
+      responsabilidades demais, misturar outcomes, ter ambiguidade alta, não ser
+      validável isoladamente ou exigir contexto excessivo. Também não
+      substituir budget adequado por fragmentação artificial. O veredito nomeia
+      os sinais que o dispararam, com provenance. Over-fragmentation e
+      MERGE_RECOMMENDED são do validador de plano (M75).
+    initial_files:
+      - src/planner/decomposition.ts
+      - src/planner/task.ts
+      - test/planner/decomposition.test.ts
+    acceptance:
+      - Função pura, sem I/O, sem spawn, sem provider.
+      - Veredito determinístico - mesma entrada produz mesma saída.
+      - Nenhuma regra de duração absoluta obrigando decomposição, provado por teste.
+      - Task longa mas coerente e verificável isoladamente NÃO é decomposta só por duração.
+      - Task curta com responsabilidades demais ou blast radius amplo É decomposta.
+      - Ambiguidade alta, impossibilidade de validação isolada e contexto excessivo disparam decomposição.
+      - Isolamento de retry e fronteira de rollback considerados.
+      - DECOMPOSITION_REQUIRED nomeia os sinais disparados, com provenance.
+      - Fragmentação artificial não é recomendada em lugar de budget adequado.
+      - Sinal ausente não é tratado como sinal favorável.
+      - Nenhum provider real.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/planner]
+        timeout_seconds: 300
+      - argv: [pnpm, build]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+      - argv: [git, diff, --check]
+        timeout_seconds: 60
+  - id: M75
+    title: Plan Policy Validator
+    blocked_by: [M74]
+    objective: >-
+      Implementar em src/planner/validate.ts a validação determinística do
+      PLANO COMPLETO mais a policy de workflow proporcional, reusando a engine
+      de M74 para o veredito por task. Detectar: objetivos múltiplos, ciclos de
+      dependência, dependências inválidas ou inexistentes, acceptance ausente,
+      validation insuficiente, tasks que deveriam ser divididas e
+      over-fragmentation. Emitir os quatro vereditos DECOMPOSITION_REQUIRED,
+      MERGE_RECOMMENDED, DIRECT_ALLOWED e REVIEWED_REQUIRED. DIRECT_ALLOWED só
+      é permitido com critérios OBJETIVOS: trabalho estreito, risco baixo,
+      ambiguidade baixa, escopo conhecido, contexto delimitado, sem escolha
+      arquitetural aberta, sem comportamento security-sensitive, sem efeito
+      colateral externo relevante, sem mudança ampla de comportamento, com
+      validation conhecida e source of truth suficiente. Qualquer critério não
+      satisfeito ou desconhecido resulta em REVIEWED_REQUIRED — fail safe.
+      DIRECT_ALLOWED NUNCA significa ausência de validation determinística NEM
+      ausência de fatos: ele exige um MINIMAL FACTUAL PREFLIGHT — repo e base
+      revision confirmados, git/working state relevante conhecido, fatos mínimos
+      de environment readiness obtidos ou revalidados, validation disponível
+      identificada, instruções e source anchors necessários descobertos, e
+      nenhum fato consumido pelo router ausente ou inválido. Esses fatos podem
+      vir de um ProjectInspection válido/cacheado OU de coleta mínima read-only.
+      DIRECT pula exploração ampla, planning worker, plan draft completo e review
+      redundante — não pula os fatos. O verdict precisa declarar quais fatos
+      mínimos são exigidos e se a fonte cacheada é aceitável. Esta task também
+      implementa a DIRECT TASK NORMALIZATION: a etapa determinística do control
+      plane que transforma ProjectIntakeRequest mais requested_scope mais fatos
+      do minimal factual preflight mais validation e contexto conhecidos em um
+      DirectTaskCandidate e, daí, numa work unit compatível com PlannedTask, que
+      é então avaliada por M74 e pelo restante desta policy. Ela preenche
+      SOMENTE fatos derivados diretamente do request, dos fatos do repo, de
+      source anchors conhecidos, de validation observada e de policy
+      determinística; é PROIBIDO inventar arquitetura, acceptance sem base,
+      dependências complexas, tratar risco desconhecido como baixo, criar source
+      anchors inexistentes, presumir validation não observada ou aceitar
+      fronteiras de task ambíguas. Ela NÃO é um segundo planner e não faz
+      raciocínio semântico de planejamento. Se não for possível construir a work
+      unit com confiança suficiente, o resultado obrigatório é
+      REVIEWED_REQUIRED, que encaminha para inspection completa, planning
+      worker, untrusted draft e validação determinística.
+      Detecção de ciclo é implementada em src/ porque findDependencyCycle do
+      harness não é exportado e src não pode importar dev; a semântica deve
+      casar com a do harness. Plano inválido é FAIL CLOSED: não executável nem
+      projetável. Não corrigir o plano automaticamente, não classificar
+      execução (M76) e não rotear (M78).
+    initial_files:
+      - src/planner/validate.ts
+      - src/planner/decomposition.ts
+      - src/planner/task.ts
+      - test/planner/validate-plan.test.ts
+    acceptance:
+      - Validação pura e determinística do plano inteiro.
+      - Ciclo de dependência recusa o plano com o caminho do ciclo no motivo.
+      - Dependência inexistente e autodependência recusadas.
+      - acceptance ausente ou validation insuficiente recusadas.
+      - DECOMPOSITION_REQUIRED derivado da engine de M74, sem lógica duplicada.
+      - MERGE_RECOMMENDED nomeia as tasks candidatas a combinação.
+      - DIRECT_ALLOWED exige todos os critérios objetivos satisfeitos.
+      - Critério não satisfeito ou desconhecido produz REVIEWED_REQUIRED - fail safe.
+      - DIRECT_ALLOWED nunca dispensa validation determinística, provado por teste.
+      - DIRECT_ALLOWED declara o minimal factual preflight exigido e aceita fatos de inspection cacheada válida ou de coleta mínima read-only.
+      - Fato mínimo ausente ou inválido impede DIRECT_ALLOWED, provado por teste.
+      - Direct Task Normalization determinística produz work unit compatível com PlannedTask a partir de intake, requested_scope e fatos do preflight.
+      - Normalization preenche somente fatos derivados de request, repo, source anchors conhecidos, validation observada e policy determinística.
+      - Normalization não inventa arquitetura, acceptance sem base, dependências, risco, anchors, validation nem fronteiras ambíguas, provado por teste.
+      - Normalization não executa raciocínio semântico de planejamento e não é um segundo planner.
+      - Confiança insuficiente na normalization produz REVIEWED_REQUIRED e encaminha para o caminho completo com planning worker.
+      - M74 e o restante da policy sempre recebem work unit estruturada, nunca request bruto.
+      - Plano inválido não é executável nem projetável - fail closed.
+      - Nenhuma correção automática do plano.
+      - Nenhum provider real.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/planner]
+        timeout_seconds: 300
+      - argv: [pnpm, build]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+      - argv: [git, diff, --check]
+        timeout_seconds: 60
+  - id: M76
+    title: Execution Assessment
+    blocked_by: [M72, M73]
+    objective: >-
+      Implementar em src/planner/assess.ts a avaliação DETERMINÍSTICA e
+      rule-based de execução de uma task, derivando de PlannedTask mais fatos
+      do ProjectInspection: difficulty, risk, context pressure, ENVIRONMENT
+      READINESS, verification strength, review requirement e confidence, todos
+      com rationale e provenance. Environment readiness compara os environment
+      requirements da task com os fatos observados: repositório acessível, base
+      revision válida, git state conhecido, estado de dependências, comando de
+      build conhecido, testes conhecidos, validation disponível, ferramentas e
+      serviços locais requeridos, instruções descobríveis, constraints de
+      ambiente e permissões de filesystem adequadas. UNKNOWN NÃO é READY, e
+      fato ausente nunca vira default otimista — reduz confiança, jamais
+      aumenta. Ambiente inadequado é classificado como problema de ambiente e
+      nunca justifica elevar reasoning effort ou modelo. Os fatos de readiness
+      podem vir de um ProjectInspection completo OU do minimal factual preflight
+      do caminho DIRECT; a origem entra na provenance, e fato mínimo ausente ou
+      inválido reduz confiança e impede tratar readiness como conhecida. Review
+      requirement é derivado de risco, verification strength e evidência
+      disponível, e precisa expressar DUAS dimensões separadas: a exigência de
+      review independente (fresh context, sempre que aplicável) e a exigência de
+      DIVERSIDADE de profile/model/provider, que é PROPORCIONAL ao risco — em
+      risco baixo/médio o mesmo profile pode revisar desde que invocação e
+      contexto sejam independentes; em risco alto a diversidade é preferida; em
+      risco crítico ou security-sensitive a policy pode exigi-la. Diversidade
+      não é condição universal de independência. O resultado combina depois com
+      o verdict de plano de M75 pelo critério MAIS
+      RESTRITIVO. Nenhuma leitura de histórico nesta task (é M82), nenhum
+      modelo, nenhum provider, nenhuma escolha de profile e nenhum budget de
+      runtime (é M78).
+    initial_files:
+      - src/planner/assess.ts
+      - src/planner/task.ts
+      - src/inspection/index.ts
+      - test/planner/assess.test.ts
+    acceptance:
+      - Avaliação pura, determinística e rule-based.
+      - difficulty, risk, context pressure, verification strength, review requirement e confidence derivados com rationale e provenance.
+      - EnvironmentReadiness derivada comparando requirements da task com fatos observados.
+      - Todos os fatos de readiness listados no objective representados.
+      - UNKNOWN não é READY, provado por teste.
+      - Fato ausente reduz confiança e nunca vira default otimista.
+      - Ambiente inadequado classificado como problema de ambiente, sem elevar effort ou modelo.
+      - Origem dos fatos de readiness registrada na provenance - inspection completa ou minimal factual preflight.
+      - Review requirement derivado de risco, verification strength e evidência.
+      - Review requirement separa exigência de review independente da exigência de diversidade de profile/model/provider.
+      - Diversidade é proporcional ao risco e não é condição universal de independência, provado por teste.
+      - Nenhuma leitura de histórico de performance nesta task.
+      - Nenhuma escolha de profile e nenhum budget de runtime nesta task.
+      - PlannedTask de entrada não é mutado.
+      - Nenhum provider real.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/planner]
+        timeout_seconds: 300
+      - argv: [pnpm, build]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+      - argv: [git, diff, --check]
+        timeout_seconds: 60
+  - id: M77
+    title: Profile Capability Registry
+    blocked_by: [M70]
+    objective: >-
+      Criar em src/routing/capability.ts a visão estruturada das capacidades
+      dos profiles existentes, CONSUMINDO as derivações que já existem em vez
+      de reimplementá-las: experimentFactsOf, claudeReasoningEffort,
+      codexReasoningEffort e os campos já presentes no DoctorReport
+      (model, reasoning_effort e sua fonte, billing_mode, credential_source,
+      environment_mode, instruction_environment, commit_owner,
+      official_validation_owner, worker_validation_policy, sandbox,
+      session_persistence). É PROIBIDO re-parsear argv para model ou effort
+      nesta task, e é proibido derivar capacidade da prosa do campo notes. O
+      contrato acrescenta o que falta para o control plane IMPOR políticas:
+      session isolation, permission/mutation capability, operabilidade
+      read-only e por qual mecanismo determinístico, ownership de commit e de
+      validação oficial, e compatibilidade de role (planner, implementer,
+      reviewer). Registrar explicitamente que o overlay read-only existente
+      converte apenas sandbox Codex workspace-write em read-only e recusa
+      qualquer outro caso, de modo que a capacidade read-only de um profile
+      Claude fica declarada como indisponível até que M84 forneça o mecanismo
+      estrutural correspondente. Valor não determinável vira null com motivo,
+      nunca chute. src NÃO pode importar dev: a derivação recebe os facts como
+      entrada e o teste os alimenta carregando os profiles reais de
+      dev/profiles. Nenhuma escolha de profile, nenhum profile novo, nenhum
+      profile existente alterado.
+    initial_files:
+      - src/routing/capability.ts
+      - src/routing/index.ts
+      - dev/lib/doctor.ts
+      - dev/lib/profile.ts
+      - test/routing/capability-registry.test.ts
+    acceptance:
+      - ProfileCapability strict e versionado.
+      - model e reasoning effort consumidos das derivações existentes; nenhum re-parse de argv nesta task.
+      - Prosa de notes nunca usada como fonte de capacidade.
+      - session isolation, mutation capability, ownership de commit e de validação oficial representados.
+      - Operabilidade read-only representada junto do mecanismo determinístico que a garante.
+      - Compatibilidade de role planner, implementer e reviewer representada.
+      - Facts suficientes para uma policy de diversidade avaliar semelhança e diferença entre profiles (provider, model, effort, environment) expostos pelo registry.
+      - Registry não impõe diversidade; apenas fornece os facts para a policy decidir.
+      - Capacidade read-only de profile Claude declarada indisponível enquanto não houver mecanismo estrutural.
+      - Valor não determinável vira null com motivo, nunca chute.
+      - Registry indexa capabilities e rejeita id duplicado.
+      - Teste deriva capability de todos os profiles reais de dev/profiles.
+      - Nenhum import de dev dentro de src.
+      - Nenhum profile existente alterado e nenhum profile novo criado.
+      - Nenhuma decisão de routing nesta task.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/routing, test/dev/doctor.test.ts]
+        timeout_seconds: 300
+      - argv: [pnpm, build]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+      - argv: [git, diff, --check]
+        timeout_seconds: 60
+  - id: M78
+    title: Initial Profile Router + Initial Execution Budget
+    blocked_by: [M76, M77]
+    objective: >-
+      Implementar em src/routing/router.ts o router DETERMINÍSTICO inicial e o
+      budget de execução inicial: execution assessment mais fatos do projeto
+      mais capability registry produzem profile inicial E envelope de runtime,
+      com rationale e provenance. Considerar task_class, difficulty,
+      complexity, ambiguity, risk, stack, verification strength, context
+      pressure, environment readiness, review requirement e compatibilidade de
+      role. Objetivo é UTILIDADE, não só qualidade: escolher o MENOR recurso com
+      probabilidade suficientemente alta de resolver corretamente aquela classe
+      de trabalho. O starting profile NÃO precisa ser o menor degrau — pode
+      começar em degrau intermediário quando a classificação justificar. O
+      budget inicial é o WORKER RUNTIME BUDGET, grandeza distinta da estimated
+      task duration do envelope e do validation command timeout; derivado de
+      envelope da task, capability do profile escolhido, custo esperado de
+      validação, stack e ambiente. Ele é validado contra o SEU bound e somente
+      contra ele: launcher e profile runtime. O teto por comando de validação
+      pertence ao contrato ValidationCommand e é validado separadamente; é
+      PROIBIDO derivar o runtime do worker de min(bound do worker, bound de
+      validação), e um worker runtime budget maior que o teto de um comando de
+      validação não é inconsistência. Se a recomendação ficar fora do bound de
+      runtime, o resultado é EXPLÍCITO — BUDGET_UNSUPPORTED com o bound violado
+      identificado (por exemplo WORKER_RUNTIME_BOUND) e, quando os contratos
+      permitirem de forma simples, budget solicitado, bound suportado, origem do
+      bound, profile e provenance. Isso pode
+      levar a outro profile adequado, reconfiguração, replan ou HUMAN_REQUIRED —
+      nunca a bypass silencioso dos limites estruturais. O router sempre recebe
+      uma work unit já estruturada, vinda do planner completo ou da Direct Task
+      Normalization, nunca um request bruto. É PROIBIDO
+      introduzir teto universal de duração, e é proibido tratar budget como
+      substituto de decomposição. Herdar a política existente: profile de
+      cobrança por API nunca é escolhido implicitamente. Profile indisponível ou
+      incompatível com o role é descartado com motivo, sem substituição
+      silenciosa. Nenhuma leitura de histórico nesta task (é M82). Nenhuma
+      execução, nenhum spawn, nenhum provider.
+    initial_files:
+      - src/routing/router.ts
+      - src/routing/capability.ts
+      - src/planner/assess.ts
+      - test/routing/router.test.ts
+    acceptance:
+      - Decisão pura e determinística - mesma entrada produz mesmo profile e mesmo budget.
+      - RoutingDecision carrega profile, budget inicial, rationale, provenance, candidatos considerados e rejeições com motivo.
+      - Sinais de context pressure, environment readiness, verification strength e review requirement influenciam a decisão.
+      - Task fácil e local escolhe o degrau mais econômico adequado.
+      - Task difícil ou de risco alto pode iniciar em degrau intermediário, com rationale.
+      - Budget inicial derivado de envelope, capability, custo de validação, stack e ambiente.
+      - Worker runtime budget, estimated task duration e validation command timeout permanecem separados.
+      - Worker runtime budget validado somente contra launcher e profile runtime.
+      - Validation command timeout validado somente contra o contrato ValidationCommand.
+      - Nenhum min entre bound de worker e bound de validação, provado por teste.
+      - Worker runtime budget maior que o teto de um comando de validação não é tratado como inconsistência.
+      - Budget fora do bound de runtime produz BUDGET_UNSUPPORTED identificando o bound violado.
+      - BUDGET_UNSUPPORTED pode levar a outro profile, reconfiguração, replan ou HUMAN_REQUIRED.
+      - Nenhum bypass silencioso dos limites estruturais existentes, provado por teste.
+      - Router sempre recebe work unit estruturada, do planner completo ou da Direct Task Normalization.
+      - Nenhum teto universal de duração introduzido, provado por teste.
+      - Budget maior nunca é usado como substituto de decomposição.
+      - Fatos do minimal factual preflight bastam para o router decidir no caminho DIRECT; fato ausente ou inválido impede a decisão em vez de virar default.
+      - Profile de billing API nunca escolhido implicitamente.
+      - Profile indisponível ou incompatível com o role descartado com motivo.
+      - Nenhuma consulta a histórico de performance nesta task.
+      - Nenhum spawn e nenhum provider real.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/routing]
+        timeout_seconds: 300
+      - argv: [pnpm, build]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+      - argv: [git, diff, --check]
+        timeout_seconds: 60
+  - id: M79
+    title: Failure Diagnosis + Escalation Policy
+    blocked_by: [M78]
+    objective: >-
+      Criar em src/routing/diagnosis.ts o conceito formal de FAILURE DIAGNOSIS
+      e, a partir dele, a escalation policy. O fluxo é: first pass, falha
+      capability-bearing, BOUNDED REPAIR no mesmo profile, falha novamente,
+      FAILURE DIAGNOSIS, e só então a decisão apropriada. O diagnóstico
+      classifica ao menos INFRA, ENVIRONMENT_NOT_READY, TASK_DEFINITION_TOO_BROAD,
+      CONTEXT_PRESSURE, VALIDATION_OR_TOOLING_GAP, CAPABILITY e
+      UNKNOWN_INSUFFICIENT_EVIDENCE, com razão e provenance. Somente CAPABILITY
+      autoriza a escalation ladder. ENVIRONMENT_NOT_READY vai para remediação de
+      ambiente; TASK_DEFINITION_TOO_BROAD e CONTEXT_PRESSURE vão para
+      replan/decomposição ou re-escopo de contexto; VALIDATION_OR_TOOLING_GAP é
+      problema do harness/tooling e pode exigir humano; UNKNOWN é FAIL CLOSED
+      para HUMAN_REQUIRED ou diagnóstico adicional, nunca assumido como
+      capability para manter momentum. Reusar a SEMÂNTICA já existente na
+      routine autonomy — classificação, rationale, boundary, retry budget
+      bounded, decision needed, why automation stopped, options e referências de
+      evidência — em vez de criar vocabulário paralelo. Mas src/ NÃO pode
+      importar dev/: esta task define contratos PROVIDER-NEUTRAIS em
+      src/routing/ (FailureDiagnosis, EscalationDecision e uma decisão de
+      intervenção humana equivalente), e o adapter dessas decisões puras para o
+      HumanRequiredOutput real do harness pertence a M84, no plano dev/. Não
+      duplicar conceitos além do necessário e não criar dependência src para
+      dev. A ladder é CONFIGURÁVEL, resolvida contra o
+      capability registry e a policy; a ordem default precisa ser justificada
+      por capacidade crescente, sem hard-code de família de modelo. Preservar
+      integralmente o bounded repair existente: repair é UM, no MESMO profile, e
+      NÃO é escalation. Escalation exige autorização PRÓPRIA — uma por degrau,
+      com decisão, evidência e provenance registradas — mas autorização própria
+      NÃO significa necessariamente nova autorização HUMANA: quando o degrau
+      pretendido já está dentro da ladder aprovada pela ExecutionAuthorizationScope
+      do projeto, a autorização é DERIVADA da policy, com provenance
+      project_execution_policy, e o harness prossegue automaticamente. Degrau
+      fora da ladder autorizada, profile ou provider fora da execution policy e
+      billing de API não previamente autorizado produzem HUMAN_REQUIRED. Nada
+      disso reutiliza cegamente a autorização de
+      repair. INFRA_ERROR permanece capability-neutral: não consome degrau, não
+      cria autorização, não eleva effort nem modelo. Ladder esgotada resulta em
+      HUMAN_REQUIRED explícito, nunca em loop. Decisão PURA nesta task: sem I/O,
+      sem spawn, sem provider. Degraus cross-provider ficam em M80.
+    initial_files:
+      - src/routing/diagnosis.ts
+      - src/routing/escalation.ts
+      - src/routing/capability.ts
+      - src/performance/attempt-facts.ts
+      - dev/lib/routine-autonomy.ts
+      - test/routing/diagnosis.test.ts
+      - test/routing/escalation.test.ts
+    acceptance:
+      - FailureDiagnosis é contrato formal com razão e provenance.
+      - As sete classes de diagnóstico do objective existem e são distinguíveis.
+      - Somente CAPABILITY autoriza escalation, provado por teste.
+      - ENVIRONMENT_NOT_READY não eleva effort nem modelo.
+      - TASK_DEFINITION_TOO_BROAD e CONTEXT_PRESSURE encaminham para replan ou re-escopo, não para escalation.
+      - VALIDATION_OR_TOOLING_GAP encaminha para harness/tooling e pode exigir humano.
+      - UNKNOWN é fail closed para HUMAN_REQUIRED ou diagnóstico adicional, nunca assumido como capability.
+      - Semântica de classificação e de intervenção humana reusada da routine autonomy, sem vocabulário paralelo.
+      - Contratos são provider-neutrais e vivem em src/routing; nenhum import de dev dentro de src, provado por typecheck e build.
+      - Adapter para o HumanRequiredOutput real do harness fica fora desta task, em M84.
+      - Diagnosis ocorre entre repair esgotado e escalation.
+      - EscalationLadder configurável, resolvida contra o capability registry, com ordem default justificada.
+      - Nenhum hard-code de família de modelo ou de ordem provider a provider.
+      - Repair permanece bounded a um e no mesmo profile.
+      - Escalation exige autorização própria, uma por degrau, com decisão, evidência e provenance.
+      - Autorização de escalation pode ser derivada da ExecutionAuthorizationScope, com provenance project_execution_policy, sem novo gate humano.
+      - Degrau dentro da ladder autorizada prossegue automaticamente, provado por teste.
+      - Degrau fora da ladder, profile ou provider fora da execution policy e billing de API não autorizado produzem HUMAN_REQUIRED.
+      - Escalation nunca reusa cegamente a autorização de repair.
+      - INFRA_ERROR não consome degrau nem eleva effort ou modelo.
+      - Sequência de INFRA_ERROR não produz escalation de capacidade.
+      - Ladder esgotada produz HUMAN_REQUIRED explícito, sem loop.
+      - AttemptRole existente reusado, sem enum paralelo.
+      - Nenhum degrau cross-provider nesta task.
+      - Nenhum provider real.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/routing]
+        timeout_seconds: 300
+      - argv: [pnpm, build]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+      - argv: [git, diff, --check]
+        timeout_seconds: 60
+  - id: M80
+    title: Cross-provider Escalation
+    blocked_by: [M79]
+    objective: >-
+      Estender a ladder de M79 para permitir degraus em OUTRO provider —
+      Claude e Codex/OpenAI — conforme os profiles configurados, sem hard-code
+      de direção nem de família. O degrau cross-provider só pode ser proposto a
+      partir de uma decisão diagnosticada como CAPABILITY; qualquer outro
+      diagnóstico nunca troca de provider. Provider availability, credencial
+      ausente, quota insuficiente e billing bloqueado NÃO são capability
+      failures: descartam o degrau com motivo, preservam a neutralidade de
+      capacidade e jamais contam como FAIL do agente. Os guards existentes de
+      billing e quota são consultados ANTES de propor degrau de outro provider e
+      permanecem provider-neutral e inalterados. Profile de cobrança por API
+      continua nunca sendo escolhido implicitamente. A troca de provider é
+      decisão do Agent Strategy Lab, nunca do worker, e quando o par de profiles
+      já está dentro da ladder e da ExecutionAuthorizationScope aprovadas ela
+      ocorre AUTOMATICAMENTE, com autorização derivada da policy e provenance
+      registrada — sem novo gate humano só por ser outro provider. Provider ou
+      profile fora da execution policy autorizada produz HUMAN_REQUIRED. Se todos os degraus
+      restantes estiverem indisponíveis, o resultado é HUMAN_REQUIRED com o
+      motivo de cada degrau descartado. Decisão pura: nenhum spawn, nenhum
+      provider real.
+    initial_files:
+      - src/routing/escalation.ts
+      - src/routing/diagnosis.ts
+      - src/routing/capability.ts
+      - src/billing/guard.ts
+      - test/routing/escalation-cross-provider.test.ts
+    acceptance:
+      - Ladder aceita degraus de provider diferente, definidos por configuração.
+      - Degrau cross-provider só é proposto a partir de diagnóstico CAPABILITY.
+      - Provider failure separado de capability failure, provado por teste.
+      - Credencial ausente, quota insuficiente ou billing BLOCK descartam o degrau com motivo.
+      - Degrau descartado por indisponibilidade não conta como capability FAIL.
+      - Guards de billing e quota consultados antes de propor degrau de outro provider.
+      - BillingGuard provider-neutral inalterado.
+      - Profile de billing API nunca escolhido implicitamente.
+      - Troca de provider é decisão do harness, nunca do worker.
+      - Cross-provider entre profiles dentro da ladder e da execution policy autorizadas ocorre automaticamente, com autorização derivada e provenance.
+      - Provider ou profile fora da execution policy autorizada produz HUMAN_REQUIRED, provado por teste.
+      - Todos os degraus indisponíveis produz HUMAN_REQUIRED com motivo por degrau.
+      - INFRA_ERROR continua capability-neutral no caminho cross-provider.
+      - Nenhum spawn e nenhum provider real.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/routing, test/billing]
+        timeout_seconds: 300
+      - argv: [pnpm, build]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+      - argv: [git, diff, --check]
+        timeout_seconds: 60
+  - id: M81
+    title: Performance History Query
+    blocked_by: [M77]
+    objective: >-
+      Criar camada READ-ONLY em src/performance/query.ts que consulta os
+      performance records históricos por características de task e identidade de
+      profile, reusando readTrialHistory e derivePerformance em vez de
+      recalcular métricas. Suportar as agregações que o routing adaptativo
+      precisa: attempts, first-pass, final-pass, repair rate, escalation rate,
+      distribuição de duração, tokens, consumo de quota, custo equivalente de
+      API quando disponível, intervenção humana, qualification e sinais de
+      context pressure. A IDENTIDADE DE SÉRIE precisa impedir que resultados
+      incomparáveis sejam fundidos. Criar uma ComparableRunIdentity derivada,
+      construída SOMENTE a partir de evidência autoritativa que já existe: fato
+      disponível vira valor mais provenance; fato indisponível vira UNKNOWN mais
+      provenance. NÃO fingir que dimensões como transporte, role ou
+      contexto/readiness já são campos do RunPerformanceRecord, e não inventar
+      valores. A identidade de profile usa profile_id mais um fingerprint
+      canônico determinístico derivado do profile autoritativo — não inventar um
+      campo de versão textual que o LauncherProfile não possui — de modo que, se
+      o mesmo YAML mudar no futuro, runs antigos e novos não se misturem em
+      silêncio só porque o id continuou igual. Quando uma dimensão NECESSÁRIA
+      para comparabilidade estiver UNKNOWN, as séries não são fundidas
+      automaticamente. Duas execuções não são a mesma série apenas por
+      compartilharem o nome do modelo. Esta task é ESTRITAMENTE READ-ONLY: ela
+      não escreve performance records, execution records, metadata novo,
+      migrations, backfills nem evidência adicional, e não tem side effect.
+      Read-only, porém, NÃO impede DEFINIR schema: esta task é a dona do
+      contrato puro e provider-neutral dos ComparableRunFacts e da
+      ComparableRunIdentity — campos, versão e requisitos de provenance — em
+      src/, sem I/O. Esse contrato é COMPARTILHADO: o writer do evidence
+      recording path do lifecycle (M84, em dev/, que pode importar src) o
+      consome para persistir os facts dos runs NOVOS, e esta camada o consome
+      para ler. É proibido criar schema paralelo em dev/. Enquanto os facts não
+      existirem num run, a dimensão correspondente permanece UNKNOWN com
+      provenance. Evidência histórica é IMUTÁVEL: nenhuma
+      escrita, nenhuma migração, nenhum recompute destrutivo; provenance
+      preservada e resultado recomputável. Tamanho de amostra sempre explícito;
+      métrica ausente permanece null com motivo, nunca zero; amostra
+      insuficiente é reportada como insuficiente em vez de virar taxa. Esta task
+      apenas consulta: nenhuma decisão de routing nem de budget (é M82).
+    initial_files:
+      - src/performance/query.ts
+      - src/performance/history.ts
+      - src/performance/derive-performance.ts
+      - src/routing/capability.ts
+      - test/performance/query.test.ts
+    acceptance:
+      - Camada estritamente read-only, sem nenhuma escrita em data/.
+      - readTrialHistory e derivePerformance reusados, sem recálculo paralelo de métricas.
+      - Agregações de attempts, first-pass, final-pass, repair, escalation, duração, tokens, quota, custo, intervenção humana, qualification e context pressure disponíveis.
+      - ComparableRunIdentity construída somente de evidência autoritativa existente.
+      - Fato disponível vira valor com provenance; fato indisponível vira UNKNOWN com provenance.
+      - Nenhuma dimensão inexistente é fingida como campo já presente e nenhum valor é inventado.
+      - Identidade de profile usa profile_id mais fingerprint canônico determinístico; nenhum campo de versão inventado.
+      - Mudança do mesmo profile YAML separa as séries em vez de misturá-las pelo id igual.
+      - Dimensão necessária em UNKNOWN impede fusão automática de séries, provado por teste.
+      - Séries incomparáveis não são fundidas; nome de modelo igual não basta, provado por teste.
+      - Nenhuma acceptance desta task exige escrita de qualquer tipo.
+      - Nenhum performance record, execution record, metadata, migration, backfill ou evidência é escrito aqui, e nenhum side effect ocorre.
+      - ComparableRunFacts e ComparableRunIdentity definidos como contrato puro, versionado e provider-neutral em src, sem I/O.
+      - Contrato inclui campos, versão e requisitos de provenance, e é consumível tanto pelo reader quanto pelo writer.
+      - Nenhum schema paralelo de comparable facts existe em dev.
+      - Registro dos facts comparáveis de runs novos pertence ao evidence recording path de M84.
+      - Fact comparável ainda não registrado permanece UNKNOWN com provenance, sem bloquear a consulta.
+      - Tamanho de amostra explícito em toda agregação.
+      - Amostra insuficiente reportada como insuficiente, não convertida em taxa.
+      - Métrica ausente permanece null com motivo, nunca zero.
+      - Distribuição de duração disponível para recomendação futura de budget.
+      - Provenance preservada e resultado recomputável.
+      - Nenhum record histórico alterado, provado por teste.
+      - Nenhuma decisão de routing nem de budget nesta task.
+      - Nenhum provider real.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/performance]
+        timeout_seconds: 300
+      - argv: [pnpm, build]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+      - argv: [git, diff, --check]
+        timeout_seconds: 60
+  - id: M82
+    title: History-informed Router + Budget Recommendation
+    blocked_by: [M78, M81]
+    objective: >-
+      Usar a consulta de M81 para melhorar o router de M78 sem substituí-lo, em
+      src/routing/history-router.ts. Quando houver evidência suficiente na
+      MESMA série comparável, características da task mais performance histórica
+      produzem o profile inicial recomendado E uma recomendação de execution
+      budget derivada da distribuição de duração observada; quando não houver, o
+      resultado é fallback DETERMINÍSTICO para M78. O limiar mínimo de amostra é
+      configurável e explícito: amostra minúscula não decide, ausência de
+      evidência nunca vira certeza, e nenhuma precisão é inventada — sem
+      intervalo de confiança fabricado nem fórmula pseudoestatística sem dados.
+      A recomendação otimiza UTILIDADE: probabilidade de first-pass, sucesso
+      final, taxa de repair e de escalation, duração, tokens, quota, custo,
+      intervenção humana, qualification, context pressure e compatibilidade de
+      ambiente. Empate ou evidência ambígua cai no fallback determinístico. A
+      decisão registra rationale e provenance dizendo se veio de histórico ou de
+      fallback, quais agregações a sustentam, qual a série usada e qual o
+      tamanho da amostra. Nenhuma escrita em evidência histórica, nenhum spawn,
+      nenhum provider real.
+    initial_files:
+      - src/routing/history-router.ts
+      - src/routing/router.ts
+      - src/performance/query.ts
+      - test/routing/history-router.test.ts
+    acceptance:
+      - Evidência suficiente na mesma série produz profile inicial informado por histórico.
+      - Evidência suficiente produz recomendação de execution budget derivada da duração observada.
+      - Evidência insuficiente cai em fallback determinístico para o router de M78.
+      - Limiar mínimo de amostra configurável e explícito na decisão.
+      - Amostra minúscula não decide.
+      - Ausência de evidência nunca vira certeza e nenhuma precisão é inventada.
+      - Empate ou evidência ambígua resolve por fallback determinístico.
+      - Otimização considera first-pass, sucesso final, repair, escalation, duração, tokens, quota, custo, intervenção humana, qualification e context pressure.
+      - rationale e provenance indicam origem, agregações, série e tamanho de amostra.
+      - Router de M78 continua funcionando isolado e com comportamento inalterado.
+      - Recomendação de budget nunca substitui decomposição necessária.
+      - Recomendação de worker runtime budget validada apenas contra o bound de runtime de M78; fora dele produz BUDGET_UNSUPPORTED nomeando o bound, sem cruzar com o teto de validation command.
+      - Nenhuma escrita em evidência histórica.
+      - Nenhum spawn e nenhum provider real.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/routing, test/performance]
+        timeout_seconds: 300
+      - argv: [pnpm, build]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+      - argv: [git, diff, --check]
+        timeout_seconds: 60
+  - id: M83
+    title: Project Plan Generator + Untrusted Planning Worker
+    blocked_by: [M75, M76, M77]
+    objective: >-
+      Compor intake, inspection, task schema, decomposition, plan policy e
+      execution assessment em um ImplementationPlan autorizado, em
+      src/planner/generate.ts, E construir de fato o caminho do PLANNING
+      WORKER — não deixá-lo como trabalho futuro. O planning worker é um worker
+      READ-ONLY subordinado ao control plane: recebe um PlannerPacket bounded
+      com user intent, ProjectInspection resumida, source anchors, constraints e
+      o planning contract, e devolve um UNTRUSTED PLAN DRAFT. O PlannerPacket
+      segue a filosofia do TaskPacket existente — fatos derivados e
+      delimitados, nunca transcript nem documentação concatenada. O draft NÃO
+      vira plano automaticamente; o pipeline determinístico é: normalização de
+      schema, análise AVC/decomposição, plan policy validation, dependency
+      validation, risk/readiness validation e só então ImplementationPlan
+      autorizado. O worker não pode alterar plan policy, acceptance contract,
+      routing policy, safety boundaries nem estado autorizado, e draft inválido
+      é recusado em vez de corrigido em silêncio. A invocação do planner é feita
+      por uma PORTA PROVIDER-AGNOSTIC (PlanningWorkerPort) definida aqui, com
+      contrato de resultado de invocação e um planner fake/injetado para os
+      testes. Como esta task vive em src/, ela NÃO conecta Claude nem Codex: o
+      wiring real da porta para o launcher, permissions, credential, billing,
+      quota e processo fresco pertence a M84, no plano dev/. O que M83 prova é
+      que a porta é PROVIDER-READY — contrato suficiente para um adapter real,
+      role read-only exigido pelo próprio contrato e resultado sempre tratado
+      como untrusted —, não que o caminho real já esteja conectado. Fechar com a
+      projeção determinística ImplementationPlan para PlanFile do harness,
+      provando que a saída é aceita pelo parser existente, com argv sem shell e
+      timeout dentro do teto do contrato. A projeção não escreve o
+      dev/plan.yaml deste repositório.
+    initial_files:
+      - src/planner/generate.ts
+      - src/planner/draft.ts
+      - src/planner/validate.ts
+      - src/planner/assess.ts
+      - src/inspection/index.ts
+      - src/routing/capability.ts
+      - test/planner/generate-plan.test.ts
+      - test/planner/planning-worker-draft.test.ts
+    acceptance:
+      - ImplementationPlan strict, versionado e determinístico em estrutura.
+      - Intake, inspection, schema, decomposition, plan policy e assessment compostos sem lógica duplicada.
+      - PlannerPacket bounded, com fatos derivados e source anchors, sem transcript nem documentação concatenada.
+      - Planning worker é read-only e sua saída é tratada como untrusted draft.
+      - Pipeline normalização, AVC, plan policy, dependencies, risk/readiness executado nessa ordem.
+      - Draft inválido recusado, nunca corrigido em silêncio.
+      - Worker não pode alterar plan policy, acceptance, routing policy, safety boundaries ou estado autorizado, provado por teste.
+      - PlanningWorkerPort é provider-agnostic e vive em src; testes usam planner fake injetado.
+      - Porta é provider-ready - contrato suficiente para adapter real, role read-only exigido pelo contrato.
+      - Nenhum adapter para Claude ou Codex é implementado nesta task; wiring real pertence a M84.
+      - Nenhum import de dev dentro de src, provado por typecheck e build.
+      - DECOMPOSITION_REQUIRED ou plano inválido impedem a geração - fail closed.
+      - Projeção ImplementationPlan para PlanFile determinística e aceita pelo parser existente.
+      - argv projetado sem metacaractere de shell e timeout dentro do teto do contrato.
+      - dev/plan.yaml deste repositório não é escrito pela projeção.
+      - Nenhum provider real chamado nesta task.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/planner, test/dev/plan.test.ts]
+        timeout_seconds: 300
+      - argv: [pnpm, build]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+      - argv: [git, diff, --check]
+        timeout_seconds: 60
+  - id: M84
+    title: Universal Project Orchestration Lifecycle
+    blocked_by: [M80, M82, M83]
+    objective: >-
+      Implementar em dev/ o lifecycle universal que torna o lab control plane
+      de implementações reais, reusando o orquestrador existente, sem executor
+      paralelo. ÚNICA task com provider wiring:
+      adapter da PlanningWorkerPort de M83 para Claude/Codex (launcher,
+      permissions, credential/billing/quota, processo fresco) e adapter das
+      decisões de M79 para o HumanRequiredOutput real do harness. Dois
+      caminhos: DIRECT (minimal factual preflight, route, budget adaptativo,
+      implementer fresco, validation determinística, review só se a policy
+      exigir, PASS) e REVIEWED (intake, inspect read-only, mapa de contexto,
+      fatos de ambiente, planning worker read-only via porta adaptada,
+      untrusted draft, normalização e validação determinística, assessment,
+      gate humano proporcional, route, budget adaptativo, implementer fresco,
+      validation oficial, fresh reviewer conforme policy, PASS). DIRECT nunca
+      opera sobre fato ausente/inválido — preflight vem de inspection
+      válida/cacheada ou coleta mínima read-only — e pula exploração ampla,
+      planning worker e review redundante. Conecta a Direct Task Normalization
+      de M75; confiança insuficiente vira REVIEWED_REQUIRED sem inventar a
+      task. Verdict de M75 e review requirement de M76 combinam
+      pelo critério mais restritivo; environment readiness é aplicado antes de
+      culpar capacidade. Roles são ESTRUTURAIS: generaliza o overlay read-only
+      (hoje só Codex) com mecanismo Claude via settings versionado e profiles
+      de role dedicados para planner/reviewer read-only e implementer com
+      mutation só no workspace autorizado. Invocação fresca por work unit com
+      packets bounded; estado autoritativo em disco, independente das sessões.
+      Worker runtime budget promove o timeoutSecondsOverride existente a valor
+      derivado por policy, validado só contra o bound de runtime do
+      launcher/profile; validation command timeout é checado separadamente
+      contra o contrato ValidationCommand, sem cruzar ou usar min entre os
+      bounds; fora do bound produz BUDGET_UNSUPPORTED nomeando o bound
+      violado, levando a outro profile, reconfiguração, replan ou
+      HUMAN_REQUIRED, nunca bypass ou degradação silenciosa. O lifecycle é
+      também o writer dos ComparableRunFacts (contrato de M81), escrita
+      aditiva com provenance, sem alterar runs antigos — M81 só lê depois.
+      Após repair esgotado, consulta a failure diagnosis de M79: só CAPABILITY
+      escala; environment, task definition, context e tooling seguem caminhos
+      próprios, incluindo replan. Reviewer: contexto fresco é
+      universal (nova invocação, read-only, workspace apropriado, packet
+      bounded, contrato de acceptance conhecido, decisão independente, nunca
+      confia no self-report, JSON único e inequívoco, read-only provado depois
+      do fato); diversidade de profile/model/provider é policy-based e
+      proporcional ao risco — baixo/médio pode reusar o mesmo profile com
+      invocação/contexto independentes, crítico ou security-sensitive pode
+      exigi-la por policy. Human gates são proporcionais: não existe aprovação humana
+      universal entre plano e execução porque requested_scope registra o
+      pedido do usuário — mas requested_scope NÃO é autorização geral e não
+      cobre billing não autorizado, troca de billing mode, credenciais, ação
+      destrutiva, efeito externo, deploy nem mudança security-sensitive não
+      implicada. A autorização é de ESCOPO via ExecutionAuthorizationScope de
+      M71, e NÃO por spawn: worker novo, bounded repair, effort dentro da
+      ladder autorizada e troca Claude/Codex dentro da execution policy não
+      exigem novo gate; cada launch ainda verifica escopo, elegibilidade,
+      billing, quota, credenciais, risco e execution policy — ALLOW automático
+      dentro do boundary, HUMAN_REQUIRED fora dele, obrigatório em scope
+      expansion, ação destrutiva, efeito externo relevante, billing não
+      autorizado, credenciais, risco crítico, decisão de arquitetura/produto
+      não resolvida, decisão security-sensitive, escalation esgotada e
+      evidência insuficiente. Resolver os HarnessPaths do repositório ALVO por
+      override aditivo de plan file e runtime dir, mantendo o default de
+      resolveHarnessPaths idêntico (sem regredir M01 a M70). Reusar
+      selectNextTask, launch, close, recover, state, evidence, automatic
+      repair e os guards; nada de lifecycle, attempts, evidência ou recovery
+      reimplementados. O caminho de provider real existe ao fim desta task,
+      desligado por default, habilitado só por ExecutionAuthorizationScope no
+      nível do projeto/run (autorização de escopo, não gate por spawn), sempre
+      com billing guard e credential proof antes de cada launch, com
+      dry-run/preflight que não chama provider; nenhum provider real é
+      executado nesta task. Fail-safe de escopo: se uma responsabilidade
+      revelar que não pode ser validada coerentemente na mesma state machine,
+      o resultado é DECOMPOSITION_REQUIRED ou ajuste de plano explícito, nunca
+      PASS parcial nem M87 silencioso.
+    initial_files:
+      - dev/lib/project-orchestrate.ts
+      - dev/lib/project-roles.ts
+      - dev/cli/dev-project-orchestrate.ts
+      - dev/lib/paths.ts
+      - dev/lib/launch.ts
+      - dev/lib/automatic-repair.ts
+      - dev/lib/routine-autonomy-runtime.ts
+      - dev/profiles/claude-reviewer-readonly.settings.json
+      - src/planner/generate.ts
+      - src/routing/diagnosis.ts
+      - test/dev/project-orchestrate.test.ts
+    acceptance:
+      - Lifecycle com DIRECT e REVIEWED paths implementados e distinguíveis.
+      - DIRECT executa minimal factual preflight (repo, base revision, git state, readiness mínima, validation, instruções, source anchors), aceita inspection válida/cacheada ou coleta mínima read-only, nunca opera sobre fato ausente/inválido, e pula exploração ampla, planning worker e review redundante; Direct Task Normalization de M75 conectada no path, e confiança insuficiente vira REVIEWED_REQUIRED e planning worker, sem inventar a task - tudo provado por teste.
+      - Evidence recording path é o writer dos ComparableRunFacts, consumindo o contrato de M81, com escrita aditiva e provenance, sem schema paralelo em dev e sem alterar runs históricos, provado por teste.
+      - Adapter real da PlanningWorkerPort de M83 para Claude/Codex e adapter das decisões de M79 para HumanRequiredOutput implementados aqui, e somente aqui.
+      - Verdict de plano e review requirement combinados pelo critério mais restritivo; environment readiness aplicado antes de culpar capacidade.
+      - Roles planner, implementer e reviewer com restrição estrutural, não por prompt; overlay read-only generalizado via settings Claude; planner e reviewer não mutam o repo alvo, provado por teste.
+      - Invocação fresca por work unit com packets bounded, sem conversa compartilhada; estado autoritativo em disco, independente das sessões dos modelos.
+      - Worker runtime budget via timeoutSecondsOverride validado só contra o bound do launcher/profile; validation command timeout checado só contra ValidationCommand; sem cruzamento nem min entre os bounds; fora do bound produz BUDGET_UNSUPPORTED nomeando o bound, levando a outro profile, replan ou HUMAN_REQUIRED, nunca degradação ou bypass silencioso, provado por teste; os três conceitos de tempo permanecem separados e nenhum teto universal de duração é aplicado.
+      - Failure diagnosis consultada após repair esgotado; só CAPABILITY escala; environment, task definition, context e tooling seguem caminhos próprios, incluindo replan.
+      - Reviewer sempre com nova invocação, contexto fresco, read-only provado, packet bounded e decisão JSON única; nunca decide a partir do self-report do implementer.
+      - Diversidade de profile/model/provider é policy-based e proporcional ao risco - baixo/médio reusa o mesmo profile com invocação independente, provado por teste; crítico ou security-sensitive pode exigir diversidade; maintainer diferente de reviewer da routine autonomy permanece inalterado; review de modelo não substitui gates determinísticos.
+      - Nenhuma aprovação humana universal entre plano e execução; requested_scope não é autorização geral - billing, credenciais, ação destrutiva, efeito externo, deploy e mudança security-sensitive continuam com gate próprio, provado por teste.
+      - ExecutionAuthorizationScope de M71 é autorização de escopo, não por spawn - worker novo, bounded repair, effort dentro da ladder autorizada e troca Claude/Codex dentro da policy não exigem novo gate, provado por teste; cada launch verifica escopo, billing, quota, credenciais, risco e execution policy, com ALLOW automático dentro do boundary e HUMAN_REQUIRED fora, gate obrigatório nas condições do objective.
+      - Override de plan file e runtime dir aditivo; default de resolveHarnessPaths idêntico; suíte de M01 a M70 verde, sem regressão.
+      - selectNextTask, launch, close, recover, state, evidence, automatic repair e guards reusados, sem executor paralelo; workers não possuem lifecycle, DAG, estado autoritativo, routing, escalation, commit ou validation oficial, alteração de plano nem billing policy.
+      - Caminho de provider real existe, desligado por default, habilitado só por ExecutionAuthorizationScope no nível do projeto/run, com billing guard e credential proof antes de cada launch; dry-run/preflight não chama provider.
+      - Fail-safe de escopo - responsabilidade não validável na mesma state machine para com DECOMPOSITION_REQUIRED ou ajuste de plano explícito, sem esconder expansão, aumentar timeout arbitrariamente ou entregar PASS parcial; nenhuma criação de M87.
+      - Nenhum provider real executado e nenhum projeto real conduzido nesta task.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/dev]
+        timeout_seconds: 900
+      - argv: [pnpm, build]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+      - argv: [git, diff, --check]
+        timeout_seconds: 60
+  - id: M85
+    title: External Project Fake E2E
+    blocked_by: [M84]
+    objective: >-
+      Criar fixture de projeto EXTERNO sintético e provar o fluxo completo sem
+      nenhum provider real, reusando os fake CLIs e o worker falso já
+      existentes em fixtures/ em vez de criar novo duplo. Cobrir ao menos oito
+      cenários. Um, DIRECT - task pequena e de baixo risco passa por minimal
+      factual preflight e vai para route, worker, validation e PASS, sem
+      inspection ampla, planning worker ou review redundantes, e sem perder
+      validation determinística; provar também que a Direct Task Normalization
+      produz a work unit estruturada e que fato mínimo ausente impede DIRECT em
+      vez de virar default. Dois, REVIEWED - com um request ambíguo ou material
+      em que a normalization NÃO alcança confiança suficiente e o fluxo cai para
+      REVIEWED_REQUIRED, a task passa por inspection, planning worker draft,
+      plan validation determinística, implementer, validation e fresh reviewer
+      até PASS. Três,
+      CAPABILITY - implementer FAIL, bounded repair FAIL, failure diagnosis
+      CAPABILITY, escalation, PASS. Quatro, INFRA - INFRA_ERROR não produz
+      escalation de capacidade. Cinco, ENVIRONMENT - ambiente não pronto não
+      produz escalation de modelo. Seis, TASK/CONTEXT - task ampla demais ou
+      pressão de contexto encaminha para replan/decomposição, sem blind
+      escalation. Sete, CROSS_PROVIDER - após repair esgotado e diagnosis
+      CAPABILITY, com o profile/provider atual não resolvendo e os facts de
+      billing/credential/quota permitindo, o HARNESS consulta a escalation
+      policy, escolhe o próximo provider/profile elegível e lança worker novo até
+      PASS; provar que o worker nunca escolhe provider, que a decisão fica
+      registrada pelo control plane, que a troca não herda conversa, que a
+      transição aparece na evidência e que nenhuma cobrança ou provider real
+      ocorre. Oito, HUMAN_GATE - simular ao menos um caso de scope expansion,
+      ação destrutiva, risco crítico, decisão de arquitetura/produto não
+      resolvida ou ação security-sensitive e provar que a policy leva a
+      HUMAN_REQUIRED, que há ZERO spawn de worker ou provider depois do gate,
+      que state e evidência são preservados e que decision needed e options
+      ficam expostos ao operador — o harness precisa provar que sabe PARAR, não
+      apenas executar. Sem criar cenário adicional, os oito existentes devem
+      provar ainda três integrações. Primeira, WRITE para READ: um run fake
+      executado pelo lifecycle grava ComparableRunFacts pelo evidence recording
+      path, M81 lê essa evidência, deriva a ComparableRunIdentity e o fact novo
+      aparece como valor mais provenance, NÃO como UNKNOWN; e uma fixture
+      histórica sem esses facts produz UNKNOWN mais provenance em M81, sem
+      migration e sem escrita. Segunda, AUTONOMIA dentro do escopo: com a
+      execution policy autorizada, a sequência task 1 PASS, task 2 FAIL, repair,
+      FAIL, diagnosis CAPABILITY, escalation permitida, worker novo, PASS e
+      próxima task roda SEM gate humano intermediário, porque tudo permaneceu
+      dentro do boundary. Terceira, PARADA na fronteira: a tentativa de
+      atravessar boundary não autorizada produz HUMAN_REQUIRED e zero spawn
+      posterior. Essas provas podem ser integradas aos cenários CAPABILITY,
+      CROSS_PROVIDER e HUMAN_GATE já existentes. Provar também que o estado do harness é durável e que cada
+      worker recebe contexto FRESCO, sem herdar conversa. O repositório alvo é
+      criado e descartado pelo teste; o repositório do lab não é modificado e o
+      dev/plan.yaml deste repo não é tocado pelo fluxo. Nenhuma inferência real,
+      nenhum custo, nenhuma credencial de provider exercitada.
+    initial_files:
+      - test/e2e/project-orchestration-e2e.test.ts
+      - fixtures/external-project
+      - fixtures/fake-clis
+      - dev/lib/project-orchestrate.ts
+      - dev/profiles/fake-worker-v1.yaml
+    acceptance:
+      - Fixture de projeto externo sintética criada e descartada pelo teste.
+      - Cenário DIRECT - minimal factual preflight, normalization bem-sucedida, route, worker, validation determinística, PASS.
+      - Cenário DIRECT - fato mínimo ausente impede DIRECT em vez de virar default.
+      - Cenário REVIEWED - normalization insuficiente produz REVIEWED_REQUIRED e aciona o caminho com planning worker.
+      - Nenhum cenário permite que a normalization invente a task quando há ambiguidade.
+      - Cenário REVIEWED - draft de planning worker, validação determinística, implementer e fresh reviewer até PASS.
+      - Cenário CAPABILITY - FAIL, repair FAIL, diagnosis CAPABILITY, escalation, PASS.
+      - Cenário INFRA - INFRA_ERROR sem escalation de capacidade.
+      - Cenário ENVIRONMENT - ambiente não pronto sem escalation de modelo.
+      - Cenário TASK/CONTEXT - replan ou decomposição sem blind escalation.
+      - Cenário CROSS_PROVIDER - diagnosis CAPABILITY leva o harness a trocar de provider e alcançar PASS.
+      - Cenário CROSS_PROVIDER - worker nunca escolhe provider e a decisão fica registrada pelo control plane.
+      - Cenário CROSS_PROVIDER - troca de provider não herda conversa e a transição aparece na evidência.
+      - Cenário HUMAN_GATE - policy leva a HUMAN_REQUIRED com decision needed e options expostos.
+      - Cenário HUMAN_GATE - zero spawn de worker ou provider após o gate, provado por teste.
+      - Cenário HUMAN_GATE - state e evidência preservados no ponto de parada.
+      - Integração write para read - run fake grava ComparableRunFacts e M81 os lê como valor mais provenance, não UNKNOWN.
+      - Fixture histórica sem os facts novos produz UNKNOWN mais provenance em M81, sem migration e sem escrita.
+      - Autonomia dentro do escopo - PASS, FAIL, repair, FAIL, CAPABILITY, escalation, PASS e próxima task sem gate humano intermediário.
+      - Parada na fronteira - tentativa de atravessar boundary não autorizada produz HUMAN_REQUIRED e zero spawn posterior.
+      - Exatamente oito cenários; nenhuma prova nova exigiu cenário redundante.
+      - Estado do harness durável entre fases, provado por teste.
+      - Cada worker recebe contexto fresco, sem herdar conversa.
+      - Fake CLIs e worker falso existentes reusados, sem novo duplo de provider.
+      - Records de evidência produzidos e válidos ao fim de cada cenário.
+      - Repositório do lab não modificado e dev/plan.yaml deste repo não tocado.
+      - Nenhum provider real, nenhuma inferência e nenhuma credencial exercitada.
+      - Suíte completa verde.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, exec, vitest, run, test/e2e]
+        timeout_seconds: 900
+      - argv: [pnpm, build]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+      - argv: [git, diff, --check]
+        timeout_seconds: 60
+  - id: M86
+    title: Human Review + First Real Project Checklist
+    blocked_by: [M85]
+    objective: >-
+      Última task operacional do Marco 3. Fazer a revisão humana/documental
+      equivalente às revisões anteriores e produzir o checklist obrigatório
+      ANTES de usar o harness em um projeto real. O checklist confirma:
+      ownership do control plane pelo Agent Strategy Lab com Claude Code e
+      Codex como workers; AVC como unidade de trabalho, sem teto universal de
+      duração; execution budgets adaptativos; context management com instruções
+      do projeto como mapa; environment readiness; policy Direct/Reviewed;
+      role-specific workers com restrição estrutural; failure diagnosis antes de
+      escalation; escalation seletiva somente para capability; independent fresh
+      review; history-informed routing com fallback determinístico; safety,
+      validation, recovery, evidence, billing/quota e human gates proporcionais.
+      Confirmar também que o benchmark pilot-v1 permanece intacto e disponível —
+      ExperimentSpec congelado, fingerprint, runExperimentSchedule genérico,
+      profiles e evidência histórica. Atualizar BACKLOG, LESSONS e ARCHITECTURE
+      para coerência com o Marco 3. NÃO executar automaticamente nenhum projeto
+      real nesta task e não conduzir implementação em repositório do usuário. Ao
+      final, PARADA HUMANA OBRIGATÓRIA registrada: o primeiro projeto real só
+      começa após aprovação humana explícita posterior.
+    initial_files:
+      - docs/reviews/M3-REVIEW.md
+      - docs/BACKLOG.md
+      - docs/LESSONS.md
+      - docs/ARCHITECTURE.md
+    acceptance:
+      - Documento de revisão do Marco 3 criado.
+      - Checklist confirma control plane no lab e Claude/Codex como workers.
+      - Checklist confirma AVC sem teto universal de duração.
+      - Checklist confirma separação entre estimated task duration, worker runtime budget e validation command timeout.
+      - Checklist confirma que cada timeout é validado apenas contra o próprio bound, sem cruzamento.
+      - Checklist confirma execution budgets adaptativos com BUDGET_UNSUPPORTED nomeando o bound violado.
+      - Checklist confirma context management com instruções como mapa.
+      - Checklist confirma environment readiness.
+      - Checklist confirma policy Direct/Reviewed com minimal factual preflight e Direct Task Normalization no caminho Direct.
+      - Checklist confirma que M81 é read-only e que os facts comparáveis são gravados pelo evidence recording path.
+      - Checklist confirma contrato ComparableRunFacts puro em src, compartilhado entre writer M84 e reader M81.
+      - Checklist confirma execution authorization de escopo, não por spawn.
+      - Checklist confirma que worker spawn, bounded repair, escalation CAPABILITY na ladder autorizada e cross-provider dentro da policy não exigem novo gate humano.
+      - Checklist confirma que billing, profile ou provider fora do boundary produz HUMAN_REQUIRED.
+      - Checklist confirma evidence e provenance por escalation.
+      - Checklist confirma requested_scope separado dos gates de autorização.
+      - Checklist confirma role-specific workers com restrição estrutural.
+      - Checklist confirma failure diagnosis antes de escalation e escalation seletiva.
+      - Checklist confirma independent fresh review com diversidade policy-based.
+      - Checklist confirma history-informed routing com fallback determinístico e identidade comparável sem dados inventados.
+      - Checklist confirma safety, validation, recovery, evidence, billing/quota e human gates proporcionais.
+      - M71 a M85 PASS confirmados.
+      - Gates completos verdes e recover CLEAN confirmados.
+      - pilot-v1, ExperimentSpec congelado e fingerprint confirmados intactos.
+      - runExperimentSchedule genérico, profiles existentes e evidência histórica confirmados inalterados.
+      - BACKLOG, LESSONS e ARCHITECTURE coerentes com o Marco 3.
+      - Nenhum projeto real executado nesta task.
+      - HUMAN STOP explícito registrado antes do primeiro projeto real.
+    validation:
+      - argv: [pnpm, typecheck]
+        timeout_seconds: 300
+      - argv: [pnpm, build]
+        timeout_seconds: 300
+      - argv: [pnpm, test]
+        timeout_seconds: 900
+      - argv: [git, diff, --check]
+        timeout_seconds: 60
