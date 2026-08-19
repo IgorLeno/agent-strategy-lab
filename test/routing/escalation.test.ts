@@ -229,7 +229,7 @@ describe('decideEscalation', () => {
     });
   });
 
-  it('exige humano para profile/provider fora da policy e não permite cross-provider', () => {
+  it('exige humano para profile fora da policy', () => {
     expect(
       decideEscalation(
         input({ execution_policy: policy({ allowed_profile_ids: ['profile-low', 'profile-high'] }) }),
@@ -239,21 +239,6 @@ describe('decideEscalation', () => {
       reason_code: 'PROFILE_OR_PROVIDER_OUTSIDE_POLICY',
     });
 
-    const profiles = [capability('profile-low'), capability('profile-mid', { agent: 'claude' })];
-    const crossProvider = input(
-      {
-        ladder: ladder(['profile-low', 'profile-mid']),
-        execution_policy: policy({
-          allowed_profile_ids: ['profile-low', 'profile-mid'],
-          allowed_providers: ['codex', 'claude'],
-        }),
-      },
-      profiles,
-    );
-    expect(decideEscalation(crossProvider)).toMatchObject({
-      outcome: 'HUMAN_REQUIRED',
-      reason_code: 'PROFILE_OR_PROVIDER_OUTSIDE_POLICY',
-    });
   });
 
   it('exige humano para billing de API não autorizado', () => {

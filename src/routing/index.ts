@@ -52,7 +52,9 @@ export {
 /** Ladder e autorização pura de escalation (M79). */
 export {
   DEFAULT_ESCALATION_ORDER_RATIONALE,
+  DiscardedEscalationStep,
   EscalationAuthorization,
+  EscalationDiscardReason,
   EscalationDecision,
   EscalationExecutionPolicy,
   EscalationLadder,
@@ -61,6 +63,7 @@ export {
   RepairSequenceEvidence,
   decideEscalation,
   resolveEscalationLadder,
+  type EscalationCandidatePreflight,
   type EscalationDecisionInput,
   type ResolvedEscalationLadder,
 } from './escalation.js';

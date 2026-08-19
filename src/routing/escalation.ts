@@ -1,6 +1,10 @@
 import { z } from 'zod';
 
 import {
+  decideExecutionAuthorization,
+  type RealExecutionAuthorization,
+} from '../billing/index.js';
+import {
   ExecutionAuthorizationScope,
   authorizeExecutionAction,
   type HumanGatedCapability,
@@ -117,11 +121,64 @@ export const EscalationAuthorization = z
     step_index: z.number().int().positive(),
     from_profile_id: profileId,
     to_profile_id: profileId,
+    from_provider: z.enum(['claude', 'codex', 'fake']),
+    to_provider: z.enum(['claude', 'codex', 'fake']),
+    cross_provider: z.boolean(),
+    decision_owner: z.literal('agent_strategy_lab_harness'),
+    scope_capabilities: z
+      .array(
+        z.enum([
+          'CAPABILITY_ESCALATION_WITHIN_LADDER',
+          'CROSS_PROVIDER_WITHIN_ALLOWED_SUBSCRIPTION_PROFILES',
+        ]),
+      )
+      .min(1),
     evidence_paths: z.array(nonEmpty).min(1),
+    preflight_provenance: z.array(nonEmpty),
     provenance: z.literal('project_execution_policy'),
   })
   .strict();
 export type EscalationAuthorization = z.infer<typeof EscalationAuthorization>;
+
+const AvailabilityEvidence = z
+  .object({
+    value: z.boolean().nullable(),
+    provenance: nonEmpty,
+  })
+  .strict();
+
+/** Facts operacionais coletados pelo harness; este decisor permanece sem I/O. */
+export interface EscalationCandidatePreflight {
+  readonly profile_id: string;
+  readonly provider_availability: z.infer<typeof AvailabilityEvidence>;
+  readonly credential_availability: z.infer<typeof AvailabilityEvidence>;
+  readonly real_execution_authorization: RealExecutionAuthorization;
+}
+
+export const EscalationDiscardReason = z.enum([
+  'PREFLIGHT_EVIDENCE_MISSING',
+  'PROVIDER_UNAVAILABLE',
+  'PROVIDER_AVAILABILITY_UNKNOWN',
+  'CREDENTIAL_MISSING',
+  'CREDENTIAL_AVAILABILITY_UNKNOWN',
+  'QUOTA_INSUFFICIENT',
+  'BILLING_GUARD_BLOCKED',
+  'API_BILLING_REQUIRES_EXPLICIT_SELECTION',
+]);
+export type EscalationDiscardReason = z.infer<typeof EscalationDiscardReason>;
+
+export const DiscardedEscalationStep = z
+  .object({
+    step_index: z.number().int().positive(),
+    profile_id: profileId,
+    provider: z.enum(['claude', 'codex', 'fake']),
+    reason_codes: z.array(EscalationDiscardReason).min(1),
+    reasons: z.array(nonEmpty).min(1),
+    capability_failure: z.literal(false),
+    evaluation_outcome: z.literal('NOT_EVALUATED'),
+  })
+  .strict();
+export type DiscardedEscalationStep = z.infer<typeof DiscardedEscalationStep>;
 
 export const HumanEscalationReason = z.enum([
   'INVALID_REPAIR_SEQUENCE',
@@ -143,6 +200,7 @@ const Escalate = z
     to_profile: ProfileCapability,
     attempt_role: z.literal(AttemptRole.ESCALATION),
     authorization: EscalationAuthorization,
+    discarded_steps: z.array(DiscardedEscalationStep),
     rationale: nonEmpty,
     human_required: z.null(),
   })
@@ -155,6 +213,7 @@ const NoEscalation = z
     attempt_role: z.null(),
     authorization: z.null(),
     intervention: FailureInterventionDecision,
+    discarded_steps: z.array(DiscardedEscalationStep),
     human_required: z.null(),
   })
   .strict();
@@ -166,6 +225,7 @@ const EscalationHumanRequired = z
     reason_code: HumanEscalationReason.nullable(),
     attempt_role: z.null(),
     authorization: z.null(),
+    discarded_steps: z.array(DiscardedEscalationStep),
     human_required: HumanInterventionDecision,
   })
   .strict();
@@ -185,6 +245,7 @@ export interface EscalationDecisionInput {
   readonly execution_policy: EscalationExecutionPolicy;
   readonly prior_authorizations?: readonly EscalationAuthorization[];
   readonly requested_profile_id?: string;
+  readonly candidate_preflights?: readonly EscalationCandidatePreflight[];
 }
 
 export type ResolvedEscalationLadder =
@@ -207,7 +268,7 @@ export function resolveEscalationLadder(
   };
 }
 
-function unique(values: readonly string[]): string[] {
+function unique<Value extends string>(values: readonly Value[]): Value[] {
   return [...new Set(values)];
 }
 
@@ -218,6 +279,7 @@ function human(
   decisionNeeded: string,
   options: readonly string[],
   extraEvidence: readonly string[],
+  discardedSteps: readonly DiscardedEscalationStep[] = [],
 ): EscalationDecision {
   return {
     outcome: 'HUMAN_REQUIRED',
@@ -225,6 +287,7 @@ function human(
     reason_code: reasonCode,
     attempt_role: null,
     authorization: null,
+    discarded_steps: [...discardedSteps],
     human_required: {
       status: 'HUMAN_REQUIRED',
       classification: diagnosis.classification,
@@ -259,6 +322,7 @@ function humanForReason(
   policy: EscalationExecutionPolicy,
   reason: HumanEscalationReason,
   detail: string,
+  discardedSteps: readonly DiscardedEscalationStep[] = [],
 ): EscalationDecision {
   return human(
     diagnosis,
@@ -267,6 +331,7 @@ function humanForReason(
     `Decidir sobre ${gatedCapabilityFor(reason)} antes de continuar.`,
     ['autorizar explicitamente a mudança de boundary', 'replanear sem escalation'],
     policy.evidence_paths,
+    discardedSteps,
   );
 }
 
@@ -276,6 +341,10 @@ function currentProfileFromHistory(
   steps: ResolvedEscalationLadder & { readonly ok: true },
 ): { readonly ok: true; readonly profile_id: string } | { readonly ok: false; readonly reason: string } {
   let current = initialProfileId;
+  let currentStepIndex = steps.steps.findIndex((step) => step.profile_id === initialProfileId);
+  if (currentStepIndex < 0) {
+    return { ok: false, reason: 'profile inicial não pertence à ladder' };
+  }
   for (const authorization of prior) {
     const parsed = EscalationAuthorization.safeParse(authorization);
     if (!parsed.success) return { ok: false, reason: 'authorization anterior inválida' };
@@ -283,13 +352,103 @@ function currentProfileFromHistory(
     if (
       parsed.data.from_profile_id !== current ||
       expected?.profile_id !== parsed.data.to_profile_id ||
-      steps.steps[parsed.data.step_index - 1]?.profile_id !== parsed.data.from_profile_id
+      parsed.data.step_index <= currentStepIndex
     ) {
       return { ok: false, reason: 'authorization anterior não forma cadeia contígua na ladder' };
     }
     current = parsed.data.to_profile_id;
+    currentStepIndex = parsed.data.step_index;
   }
   return { ok: true, profile_id: current };
+}
+
+function discardedStep(
+  stepIndex: number,
+  profile: ProfileCapability,
+  reasonCodes: readonly EscalationDiscardReason[],
+  reasons: readonly string[],
+): DiscardedEscalationStep {
+  return {
+    step_index: stepIndex,
+    profile_id: profile.profile_id,
+    provider: profile.agent,
+    reason_codes: unique(reasonCodes),
+    reasons: unique(reasons),
+    capability_failure: false,
+    evaluation_outcome: 'NOT_EVALUATED',
+  };
+}
+
+function preflightProvenance(preflight: EscalationCandidatePreflight): string[] {
+  const evidence = preflight.real_execution_authorization;
+  return unique([
+    preflight.provider_availability.provenance,
+    preflight.credential_availability.provenance,
+    evidence.authorization.provenance,
+    evidence.billing_mode.provenance,
+    evidence.quota.availability.provenance,
+    evidence.quota.remaining.provenance,
+  ]);
+}
+
+function unavailableStep(
+  stepIndex: number,
+  profile: ProfileCapability,
+  preflight: EscalationCandidatePreflight | undefined,
+): { readonly discarded: DiscardedEscalationStep | null; readonly provenance: readonly string[] } {
+  if (preflight === undefined) {
+    return {
+      discarded: discardedStep(
+        stepIndex,
+        profile,
+        ['PREFLIGHT_EVIDENCE_MISSING'],
+        ['preflight de provider, credencial, quota e billing não foi fornecido pelo harness'],
+      ),
+      provenance: [],
+    };
+  }
+
+  const provider = AvailabilityEvidence.parse(preflight.provider_availability);
+  const credential = AvailabilityEvidence.parse(preflight.credential_availability);
+  const provenance = preflightProvenance(preflight);
+  const reasonCodes: EscalationDiscardReason[] = [];
+  const reasons: string[] = [];
+
+  if (provider.value === false) {
+    reasonCodes.push('PROVIDER_UNAVAILABLE');
+    reasons.push(`provider indisponível: ${provider.provenance}`);
+  } else if (provider.value === null) {
+    reasonCodes.push('PROVIDER_AVAILABILITY_UNKNOWN');
+    reasons.push(`disponibilidade do provider desconhecida: ${provider.provenance}`);
+  }
+  if (credential.value === false) {
+    reasonCodes.push('CREDENTIAL_MISSING');
+    reasons.push(`credencial ausente: ${credential.provenance}`);
+  } else if (credential.value === null) {
+    reasonCodes.push('CREDENTIAL_AVAILABILITY_UNKNOWN');
+    reasons.push(`disponibilidade da credencial desconhecida: ${credential.provenance}`);
+  }
+
+  const billingDecision = decideExecutionAuthorization(
+    'REAL_INFERENCE',
+    preflight.real_execution_authorization,
+  );
+  if (billingDecision.reasons.includes('QUOTA_INSUFFICIENT')) {
+    reasonCodes.push('QUOTA_INSUFFICIENT');
+    reasons.push('quota insuficiente segundo a billing/quota guard');
+  }
+  if (billingDecision.decision === 'BLOCK') {
+    reasonCodes.push('BILLING_GUARD_BLOCKED');
+    reasons.push(`billing guard bloqueou o degrau: ${billingDecision.reasons.join(', ')}`);
+  }
+
+  return {
+    discarded:
+      reasonCodes.length === 0
+        ? null
+        : discardedStep(stepIndex, profile, reasonCodes, reasons),
+    provenance,
+  };
 }
 
 /**
@@ -318,6 +477,7 @@ export function decideEscalation(input: EscalationDecisionInput): EscalationDeci
       reason_code: null,
       attempt_role: null,
       authorization: null,
+      discarded_steps: [],
       human_required: intervention.human_required,
     };
   }
@@ -328,6 +488,7 @@ export function decideEscalation(input: EscalationDecisionInput): EscalationDeci
       attempt_role: null,
       authorization: null,
       intervention,
+      discarded_steps: [],
       human_required: null,
     };
   }
@@ -359,8 +520,7 @@ export function decideEscalation(input: EscalationDecisionInput): EscalationDeci
       `profile atual ${history.profile_id} não pertence à ladder autorizada`,
     );
   }
-  const next = resolved.steps[currentIndex + 1];
-  if (!next) {
+  if (resolved.steps[currentIndex + 1] === undefined) {
     return humanForReason(
       diagnosis,
       policy,
@@ -368,40 +528,29 @@ export function decideEscalation(input: EscalationDecisionInput): EscalationDeci
       'ladder autorizada foi esgotada; novo loop de escalation foi recusado',
     );
   }
-  if (input.requested_profile_id !== undefined && input.requested_profile_id !== next.profile_id) {
+  const requestedStepIndex =
+    input.requested_profile_id === undefined
+      ? null
+      : resolved.steps.findIndex((step) => step.profile_id === input.requested_profile_id);
+  if (requestedStepIndex !== null && requestedStepIndex <= currentIndex) {
     return humanForReason(
       diagnosis,
       policy,
       'STEP_OUTSIDE_AUTHORIZED_LADDER',
-      `profile solicitado ${input.requested_profile_id} não é o próximo degrau autorizado`,
+      `profile solicitado ${input.requested_profile_id} não é um degrau posterior autorizado`,
     );
   }
 
   const current = resolved.steps[currentIndex]!.profile;
   if (
-    current.agent !== next.profile.agent ||
     !policy.allowed_profile_ids.includes(current.profile_id) ||
-    !policy.allowed_profile_ids.includes(next.profile_id) ||
-    !policy.allowed_providers.includes(current.agent) ||
-    !policy.allowed_providers.includes(next.profile.agent)
+    !policy.allowed_providers.includes(current.agent)
   ) {
     return humanForReason(
       diagnosis,
       policy,
       'PROFILE_OR_PROVIDER_OUTSIDE_POLICY',
-      'próximo profile/provider está fora da execution policy ou exigiria cross-provider',
-    );
-  }
-  if (!policy.authorized_billing_modes.includes(next.profile.billing_mode)) {
-    const reason =
-      next.profile.billing_mode === 'api'
-        ? 'UNAUTHORIZED_API_BILLING'
-        : 'PROFILE_OR_PROVIDER_OUTSIDE_POLICY';
-    return humanForReason(
-      diagnosis,
-      policy,
-      reason,
-      `billing_mode=${next.profile.billing_mode} não foi autorizado pela execution policy`,
+      'profile/provider atual está fora da execution policy',
     );
   }
   if (
@@ -418,6 +567,115 @@ export function decideEscalation(input: EscalationDecisionInput): EscalationDeci
     );
   }
 
+  const preflights = new Map(
+    (input.candidate_preflights ?? []).map((preflight) => [preflight.profile_id, preflight]),
+  );
+  const discardedSteps: DiscardedEscalationStep[] = [];
+  let next: (typeof resolved.steps)[number] | undefined;
+  let selectedPreflightProvenance: readonly string[] = [];
+
+  for (let stepIndex = currentIndex + 1; stepIndex < resolved.steps.length; stepIndex += 1) {
+    const candidate = resolved.steps[stepIndex];
+    if (!candidate) continue;
+
+    if (
+      !policy.allowed_profile_ids.includes(candidate.profile_id) ||
+      !policy.allowed_providers.includes(candidate.profile.agent)
+    ) {
+      return humanForReason(
+        diagnosis,
+        policy,
+        'PROFILE_OR_PROVIDER_OUTSIDE_POLICY',
+        `profile/provider ${candidate.profile_id}/${candidate.profile.agent} está fora da execution policy`,
+        discardedSteps,
+      );
+    }
+    if (!policy.authorized_billing_modes.includes(candidate.profile.billing_mode)) {
+      const reason =
+        candidate.profile.billing_mode === 'api'
+          ? 'UNAUTHORIZED_API_BILLING'
+          : 'PROFILE_OR_PROVIDER_OUTSIDE_POLICY';
+      return humanForReason(
+        diagnosis,
+        policy,
+        reason,
+        `billing_mode=${candidate.profile.billing_mode} não foi autorizado pela execution policy`,
+        discardedSteps,
+      );
+    }
+
+    if (
+      candidate.profile.billing_mode === 'api' &&
+      input.requested_profile_id !== candidate.profile_id
+    ) {
+      discardedSteps.push(
+        discardedStep(
+          stepIndex,
+          candidate.profile,
+          ['API_BILLING_REQUIRES_EXPLICIT_SELECTION'],
+          ['profile billing_mode=api nunca é escolhido implicitamente'],
+        ),
+      );
+      continue;
+    }
+
+    const crossProvider = current.agent !== candidate.profile.agent;
+    if (
+      crossProvider &&
+      authorizeExecutionAction(policy.authorization_scope, {
+        kind: 'autonomous',
+        capability: 'CROSS_PROVIDER_WITHIN_ALLOWED_SUBSCRIPTION_PROFILES',
+      }) !== 'ALLOWED'
+    ) {
+      return humanForReason(
+        diagnosis,
+        policy,
+        'ESCALATION_NOT_AUTHORIZED',
+        'ExecutionAuthorizationScope não autoriza troca cross-provider entre profiles configurados',
+        discardedSteps,
+      );
+    }
+
+    const candidatePreflight = preflights.get(candidate.profile_id);
+    if (crossProvider || candidatePreflight !== undefined) {
+      const preflight = unavailableStep(stepIndex, candidate.profile, candidatePreflight);
+      if (preflight.discarded !== null) {
+        discardedSteps.push(preflight.discarded);
+        continue;
+      }
+      selectedPreflightProvenance = preflight.provenance;
+    }
+
+    if (requestedStepIndex !== null && stepIndex < requestedStepIndex) {
+      return humanForReason(
+        diagnosis,
+        policy,
+        'STEP_OUTSIDE_AUTHORIZED_LADDER',
+        `profile solicitado ${input.requested_profile_id} pularia o degrau disponível ${candidate.profile_id}`,
+        discardedSteps,
+      );
+    }
+    if (requestedStepIndex !== null && stepIndex > requestedStepIndex) break;
+
+    next = candidate;
+    break;
+  }
+
+  if (next === undefined) {
+    const discardSummary = discardedSteps
+      .map((step) => `${step.profile_id}: ${step.reason_codes.join(', ')}`)
+      .join('; ');
+    return humanForReason(
+      diagnosis,
+      policy,
+      'SAFE_ESCALATION_EXHAUSTED',
+      discardSummary.length > 0
+        ? `todos os degraus restantes foram descartados sem capability FAIL: ${discardSummary}`
+        : 'nenhum próximo degrau autorizado permaneceu disponível',
+      discardedSteps,
+    );
+  }
+
   const evidencePaths = unique([
     ...diagnosis.evidence_paths,
     ...sequence.data.initial.evidence_paths,
@@ -428,10 +686,22 @@ export function decideEscalation(input: EscalationDecisionInput): EscalationDeci
     decision: 'ALLOWED',
     capability: 'CAPABILITY_ESCALATION_WITHIN_LADDER',
     attempt_role: AttemptRole.ESCALATION,
-    step_index: currentIndex + 1,
+    step_index: resolved.steps.indexOf(next),
     from_profile_id: current.profile_id,
     to_profile_id: next.profile_id,
+    from_provider: current.agent,
+    to_provider: next.profile.agent,
+    cross_provider: current.agent !== next.profile.agent,
+    decision_owner: 'agent_strategy_lab_harness',
+    scope_capabilities:
+      current.agent === next.profile.agent
+        ? ['CAPABILITY_ESCALATION_WITHIN_LADDER']
+        : [
+            'CAPABILITY_ESCALATION_WITHIN_LADDER',
+            'CROSS_PROVIDER_WITHIN_ALLOWED_SUBSCRIPTION_PROFILES',
+          ],
     evidence_paths: evidencePaths,
+    preflight_provenance: [...selectedPreflightProvenance],
     provenance: 'project_execution_policy',
   };
   return {
@@ -441,6 +711,7 @@ export function decideEscalation(input: EscalationDecisionInput): EscalationDeci
     to_profile: next.profile,
     attempt_role: AttemptRole.ESCALATION,
     authorization,
+    discarded_steps: discardedSteps,
     rationale: `${next.rationale}; ${input.ladder.ordering_rationale}`,
     human_required: null,
   };
