@@ -253,6 +253,7 @@ fronteira.
 | `project` | `.agentlab/project.yaml`, resolução do data dir | CONTROL PLANE | M11, M33 |
 | `cli` | comandos `agentlab` | CONTROL PLANE | M32–M38 |
 | `intake` | `ProjectIntakeRequest` e `ExecutionAuthorizationScope`: pedido formal sobre repo externo e separação entre escopo pedido e ações autorizadas sem novo gate | CONTROL PLANE | M71 |
+| `routing` | `ProfileCapability`/`CapabilityRegistry`: visão estruturada das capacidades de profile (session isolation, mutation/read-only, ownership, compatibilidade de role) para o control plane impor política, sem decidir routing | CONTROL PLANE | M77 |
 
 - **STABLE KERNEL** — vocabulário e contratos que todo o resto importa; zero
   I/O ou serialização canônica, muda raramente e qualquer mudança é

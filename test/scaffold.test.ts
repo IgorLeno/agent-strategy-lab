@@ -23,6 +23,7 @@ const AREAS = [
   'planner',
   'project',
   'reporting',
+  'routing',
   'runner',
   'schemas',
   'scorer',
