@@ -140,9 +140,11 @@ tarefas/ciclos primários, não impede o único repair bounded da mesma tarefa:
 primário acabou, a próxima tarefa não entra; se o repair falhou, o fluxo para
 na hora.
 
-`dev-orchestrate` também para em `LIMIT_REACHED` (exit 9) quando esgota
-`--max-iterations` com tarefa ainda pendente — sair com 0 e `ALL_DONE` ali
-esconderia trabalho que ninguém fez.
+`dev-orchestrate` também para em `LIMIT_REACHED` quando esgota
+`--max-iterations` com tarefa ainda pendente. Essa é uma parada normal pelo
+budget solicitado e retorna exit 0; `stopped_by` e `reason` continuam expondo
+o trabalho restante e distinguindo o caso de `ALL_DONE`. Portanto, exit 0
+significa sucesso da invocação, não necessariamente conclusão integral do plano.
 
 ### Falha terminal do provider ≠ guarda operacional
 
@@ -468,7 +470,7 @@ evidência e billing são gravados iguais nos dois modos.
 
 Exit codes: `dev-doctor` 3 = algum check FAIL · `dev-next` 4 = fluxo
 parado/ocupado · `dev-close` 5 = FAIL, 6 = guarda pendente · `dev-launch` 7 = TIMED_OUT, 8 = INFRA_ERROR ·
-`dev-orchestrate` 9 = fluxo parado · **10 = harness ocupado** (qualquer
+`dev-orchestrate` 9 = término bloqueante/anormal (`LIMIT_REACHED` usa 0) · **10 = harness ocupado** (qualquer
 comando que muda estado).
 
 ## Exclusão mútua

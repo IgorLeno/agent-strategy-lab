@@ -23,6 +23,35 @@ let sandbox: Sandbox;
 let paths: HarnessPaths;
 let loaded: LoadedPlan;
 
+const FOUR_TASK_PLAN = `
+schema_version: 1
+tasks:
+  - id: T1
+    title: primeira tarefa
+    objective: criar src/t1.txt
+    initial_files: [README.md]
+    acceptance: ['arquivo criado']
+    validation: [{ argv: ['true'], timeout_seconds: 30 }]
+  - id: T2
+    title: segunda tarefa
+    blocked_by: [T1]
+    objective: criar src/t2.txt
+    acceptance: ['arquivo criado']
+    validation: [{ argv: ['true'], timeout_seconds: 30 }]
+  - id: T3
+    title: terceira tarefa
+    blocked_by: [T2]
+    objective: criar src/t3.txt
+    acceptance: ['arquivo criado']
+    validation: [{ argv: ['true'], timeout_seconds: 30 }]
+  - id: T4
+    title: quarta tarefa
+    blocked_by: [T3]
+    objective: criar src/t4.txt
+    acceptance: ['arquivo criado']
+    validation: [{ argv: ['true'], timeout_seconds: 30 }]
+`;
+
 beforeEach(async () => {
   sandbox = await makeSandboxRepo();
   paths = resolveHarnessPaths(sandbox.root);
@@ -76,7 +105,7 @@ describe('protocolo de sessões descartáveis — duas tarefas em sequência', (
       ['--repo', sandbox.root, '--profile', 'fake-orchestrator-v2', '--max-iterations', '1'],
       { AGENTLAB_DEV_DIR: sandbox.devDir, AGENTLAB_FAKE_MODE: 'orchestrator-success' },
     );
-    expect(result.exitCode, result.stderr).toBe(9);
+    expect(result.exitCode, result.stderr).toBe(0);
     expect(JSON.parse(result.stdout).iterations[0].result).toBe('PASS');
     expect((await readCompletion(paths, 'T1'))?.commit_origin).toBe('orchestrator');
     expect((await readLaunchRecord(paths, 'T1'))?.execution_policy.commit_owner).toBe(
@@ -168,12 +197,11 @@ describe('protocolo de sessões descartáveis — duas tarefas em sequência', (
 });
 
 describe('protocolo — limite de iterações', () => {
-  it('para em LIMIT_REACHED com exit 9 quando ainda há tarefa pendente', async () => {
+  it('para em LIMIT_REACHED com exit 0 quando ainda há tarefa pendente', async () => {
     const result = await orchestrate('success', ['--max-iterations', '1']);
 
-    // Sucesso com trabalho não feito seria a pior saída possível: exit 0 e
-    // ALL_DONE esconderiam a T2 intocada.
-    expect(result.exitCode).toBe(9);
+    // Exit 0 descreve a invocação; LIMIT_REACHED continua expondo a T2 intocada.
+    expect(result.exitCode).toBe(0);
     const summary = JSON.parse(result.stdout) as {
       stopped_by: string;
       iterations: { task_id: string }[];
@@ -183,6 +211,53 @@ describe('protocolo — limite de iterações', () => {
 
     const state = await readState(paths);
     expect(state.tasks.map((task) => task.status)).toEqual(['PASS', 'READY']);
+  }, 60_000);
+
+  it('três tasks concluídas e a quarta READY retornam LIMIT_REACHED com exit 0', async () => {
+    const fixture = await makeSandboxRepo(FOUR_TASK_PLAN);
+    try {
+      const fixturePaths = resolveHarnessPaths(fixture.root);
+      const fixturePlan = await loadPlan(fixturePaths.planFile);
+      await ensureRuntimeDirs(fixturePaths);
+      await writeState(
+        fixturePaths,
+        buildInitialState(fixturePlan.plan, fixturePlan.planSha256, {
+          baselineSha: await headSha(fixture.root),
+        }),
+      );
+
+      const result = await runDevCli(
+        'dev-orchestrate.ts',
+        ['--repo', fixture.root, '--profile', 'fake-worker-v1', '--max-iterations', '3'],
+        { AGENTLAB_DEV_DIR: fixture.devDir, AGENTLAB_FAKE_MODE: 'success' },
+      );
+
+      expect(result.exitCode, result.stderr).toBe(0);
+      const summary = JSON.parse(result.stdout) as {
+        stopped_by: string;
+        reason: string;
+        iteration_count: number;
+        iterations: { task_id: string; result: string }[];
+      };
+      expect(summary).toMatchObject({
+        stopped_by: 'LIMIT_REACHED',
+        iteration_count: 3,
+      });
+      expect(summary.reason).toMatch(/T4.*pronta/i);
+      expect(summary.iterations).toMatchObject([
+        { task_id: 'T1', result: 'PASS' },
+        { task_id: 'T2', result: 'PASS' },
+        { task_id: 'T3', result: 'PASS' },
+      ]);
+      expect((await readState(fixturePaths)).tasks.map((task) => task.status)).toEqual([
+        'PASS',
+        'PASS',
+        'PASS',
+        'READY',
+      ]);
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
   }, 60_000);
 
   it('limite suficiente para o plano inteiro continua ALL_DONE com exit 0', async () => {

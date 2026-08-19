@@ -1190,7 +1190,7 @@ describe('dev-orchestrate --autonomy routine', () => {
       { AGENTLAB_DEV_DIR: sandbox.devDir, AGENTLAB_FAKE_MODE: 'protocol-invalid-then-success' },
     );
 
-    expect(result.exitCode, result.stderr).toBe(9);
+    expect(result.exitCode, result.stderr).toBe(0);
     const output = JSON.parse(result.stdout) as {
       stopped_by: string;
       iteration_count: number;
@@ -1266,7 +1266,7 @@ describe('dev-orchestrate --autonomy routine', () => {
       { AGENTLAB_DEV_DIR: sandbox.devDir, AGENTLAB_FAKE_MODE: 'official-fail-then-repair' },
     );
 
-    expect(result.exitCode, result.stderr).toBe(9);
+    expect(result.exitCode, result.stderr).toBe(0);
     const output = JSON.parse(result.stdout) as {
       stopped_by: string;
       iterations: Array<{ automatic_repair?: boolean }>;

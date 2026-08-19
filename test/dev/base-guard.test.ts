@@ -162,7 +162,7 @@ describe('base divergente para o fluxo', () => {
 
   it('dev-launch recusa packet cuja base não é mais o HEAD', async () => {
     const before = await orchestrate('success', ['--max-iterations', '1']);
-    expect(before.exitCode).toBe(9);
+    expect(before.exitCode).toBe(0);
 
     // Packet da T2 persistido com a base de agora; o commit externo seguinte
     // é exatamente o cenário de "trabalho entrou entre duas sessões".

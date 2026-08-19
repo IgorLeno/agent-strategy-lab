@@ -161,7 +161,7 @@ async function seedArchivedValidationFail(attempt: number, profile = PROFILE): P
 describe('dev-orchestrate — reparo automático bounded da validation oficial', () => {
   it('1 — FIRST_PASS FAIL + REPAIR PASS => tarefa aceita, mesmo profile', async () => {
     const result = await orchestrate('official-fail-then-repair', ['--max-iterations', '1']);
-    expect(result.exitCode, result.stderr).toBe(9);
+    expect(result.exitCode, result.stderr).toBe(0);
 
     const summary = JSON.parse(result.stdout) as {
       stopped_by: string;
@@ -222,6 +222,7 @@ describe('dev-orchestrate — reparo automático bounded da validation oficial',
 
   it('3/20 — --max-iterations 1 com FAIL+REPAIR PASS não lança a próxima tarefa', async () => {
     const result = await orchestrate('official-fail-then-repair', ['--max-iterations', '1']);
+    expect(result.exitCode, result.stderr).toBe(0);
     const summary = JSON.parse(result.stdout) as {
       stopped_by: string;
       iterations: { task_id: string }[];
@@ -359,7 +360,7 @@ describe('dev-orchestrate — reparo automático bounded da validation oficial',
     expect(await readValidationFailedAttempt(paths, 'T1', 1)).toBeNull();
 
     const result = await orchestrate('official-fail-then-repair', ['--max-iterations', '1']);
-    expect(result.exitCode, result.stderr).toBe(9);
+    expect(result.exitCode, result.stderr).toBe(0);
     const summary = JSON.parse(result.stdout) as {
       stopped_by: string;
       iteration_count: number;
@@ -560,6 +561,7 @@ describe('dev-orchestrate — reparo automático bounded da validation oficial',
     });
 
     const result = await orchestrate('official-fail-then-repair', ['--max-iterations', '1']);
+    expect(result.exitCode, result.stderr).toBe(0);
     const output = JSON.parse(result.stdout) as {
       stopped_by: string;
       iteration_count: number;

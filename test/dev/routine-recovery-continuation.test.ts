@@ -186,7 +186,7 @@ describe('dev-orchestrate — continuação após RECOVERED capability-neutral',
     const fixture = await setup();
     const result = await orchestrate(fixture, 'incomplete-output-then-success', 1);
 
-    expect(result.exitCode, result.stderr).toBe(9);
+    expect(result.exitCode, result.stderr).toBe(0);
     const output = JSON.parse(result.stdout) as OrchestrationOutput;
     expect(output.stopped_by, JSON.stringify(output)).toBe('LIMIT_REACHED');
     expect(output.iteration_count).toBe(2);
@@ -242,7 +242,7 @@ describe('dev-orchestrate — continuação após RECOVERED capability-neutral',
     const fixture = await setup(REPAIR_PLAN);
     const result = await orchestrate(fixture, 'repair-incomplete-then-success', 1, true);
 
-    expect(result.exitCode, result.stderr).toBe(9);
+    expect(result.exitCode, result.stderr).toBe(0);
     const output = JSON.parse(result.stdout) as OrchestrationOutput;
     expect(output.stopped_by, JSON.stringify(output)).toBe('LIMIT_REACHED');
     expect(output.iterations).toMatchObject([

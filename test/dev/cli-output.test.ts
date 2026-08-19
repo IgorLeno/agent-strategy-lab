@@ -592,7 +592,7 @@ describe('dev-orchestrate: saída padrão orientada ao resultado', () => {
 
   it('a escolha entre padrão e --verbose não muda nada gravado', async () => {
     const compact = await orchestrate('fake-worker-v1', ['--max-iterations', '1'], 'success');
-    expect(compact.exitCode).toBe(9);
+    expect(compact.exitCode).toBe(0);
     const compactRecord = await readLaunchRecord(paths, 'T1');
 
     // Segundo sandbox: mesmo cenário, mesma tarefa, só o modo de saída muda.
@@ -611,7 +611,7 @@ describe('dev-orchestrate: saída padrão orientada ao resultado', () => {
       ['--repo', other.root, '--profile', 'fake-worker-v1', '--max-iterations', '1', '--verbose'],
       { AGENTLAB_DEV_DIR: other.devDir, AGENTLAB_FAKE_MODE: 'success' },
     );
-    expect(verbose.exitCode).toBe(9);
+    expect(verbose.exitCode).toBe(0);
     const verboseRecord = await readLaunchRecord(otherPaths, 'T1');
 
     // Tudo que não é identidade do processo, instante do run ou caminho do

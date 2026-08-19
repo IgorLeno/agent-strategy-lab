@@ -472,3 +472,9 @@ FIRST_PASS, embora o repair source continuasse autorizado.
 Rule: retry operacional dentro de repair carrega o `repairSourceAttempt`
 autorizado e reancora o packet diretamente nessa evidência; ausência ou
 divergência do source falha fechado, e nunca fabrica nova capability escalation.
+
+[2026-08-19] Contexto: atualização cirúrgica de expectativas repetidas de exit code.
+Mistake: aplicar uma substituição sem contexto suficiente alcançou um teste
+vizinho de `HUMAN_REQUIRED` em vez do segundo caso de `LIMIT_REACHED`.
+Rule: patch em asserções repetidas inclui o nome do teste e o `stopped_by`
+esperado no contexto; estado bloqueante nunca muda por substituição posicional.

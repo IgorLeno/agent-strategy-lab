@@ -24,6 +24,7 @@ import {
   summarizePreflight,
   type IterationInput,
 } from '../lib/orchestrate-report.js';
+import { exitCodeForOrchestrationStop } from '../lib/orchestration-termination.js';
 import { resolveHarnessPaths, type HarnessPaths } from '../lib/paths.js';
 import { loadPlan, type LoadedPlan } from '../lib/plan.js';
 import { loadProfile } from '../lib/profile.js';
@@ -71,8 +72,8 @@ const SKIP_PREFLIGHT_FLAG = 'skip-preflight';
  * Antes do loop roda o PRE-FLIGHT (maintenance -> recover dry-run ->
  * automatic-repair reconcile -> readiness), dentro do MESMO lock.
  *
- * Exit codes: 0 fluxo terminou sem pendência | 9 fluxo parado (inclui
- * LIMIT_REACHED, PREFLIGHT_BLOCKED e AUTOMATIC_REPAIR_EXHAUSTED) | 10 harness ocupado.
+ * Exit codes: 0 invocação concluída normalmente (ALL_DONE ou LIMIT_REACHED) |
+ * 9 término bloqueante/anormal | 10 harness ocupado.
  */
 function recordOf(launch: LaunchStepResult) {
   return launch.outcome?.record ?? null;
@@ -727,7 +728,6 @@ async function main(): Promise<void> {
     }
   });
 
-  const halted = stop.status !== 'ALL_DONE';
   const verbose = isVerbose(args);
   const estimates = iterations
     .map((iteration) => iteration.record?.billing?.provider_estimated_api_equivalent_usd ?? null)
@@ -761,7 +761,7 @@ async function main(): Promise<void> {
     ...(verbose ? { total_provider_estimated_api_equivalent_usd: total } : {}),
     billing_note: ESTIMATED_COST_LABEL,
   });
-  process.exit(halted ? 9 : 0);
+  process.exit(exitCodeForOrchestrationStop(stop));
 }
 
 await runMain(main);
