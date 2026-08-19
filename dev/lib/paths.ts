@@ -32,18 +32,42 @@ export interface HarnessPaths {
 }
 
 /**
+ * Override ADITIVO usado quando o harness opera sobre um repositório ALVO que
+ * não é o seu próprio: o plano do projeto e o runtime do orquestrador vivem
+ * fora do layout default. Omitir os dois campos reproduz exatamente o
+ * comportamento histórico — nenhum caminho muda de lugar por causa deste tipo.
+ */
+export interface HarnessPathsOverride {
+  /** Caminho absoluto do plan file do repositório alvo. */
+  readonly planFile?: string;
+  /** Runtime do orquestrador para este alvo; o inbox continua derivado dele. */
+  readonly devDir?: string;
+}
+
+/**
  * `AGENTLAB_DEV_DIR` existe para testes e para inspeção manual; o default é
  * sempre `<repo>/.dev`, que está no .gitignore. O inbox é derivado dele
  * (`<devDir>-inbox`), então redirecionar o runtime redireciona os dois juntos.
+ *
+ * `override` tem precedência sobre a variável de ambiente porque é uma decisão
+ * explícita do control plane sobre QUAL repositório está sendo conduzido, não
+ * uma preferência de ambiente do operador.
  */
-export function resolveHarnessPaths(repoRoot: string = process.cwd()): HarnessPaths {
+export function resolveHarnessPaths(
+  repoRoot: string = process.cwd(),
+  override: HarnessPathsOverride = {},
+): HarnessPaths {
   const root = path.resolve(repoRoot);
-  const devDir = process.env['AGENTLAB_DEV_DIR']
-    ? path.resolve(process.env['AGENTLAB_DEV_DIR'])
-    : path.join(root, '.dev');
+  const devDir = override.devDir
+    ? path.resolve(override.devDir)
+    : process.env['AGENTLAB_DEV_DIR']
+      ? path.resolve(process.env['AGENTLAB_DEV_DIR'])
+      : path.join(root, '.dev');
   return {
     repoRoot: root,
-    planFile: path.join(root, 'dev', 'plan.yaml'),
+    planFile: override.planFile
+      ? path.resolve(override.planFile)
+      : path.join(root, 'dev', 'plan.yaml'),
     devDir,
     inboxDir: `${devDir}-inbox`,
     stateFile: path.join(devDir, 'state.json'),
