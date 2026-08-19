@@ -77,3 +77,38 @@ export {
   assessExecution,
 } from './assess.js';
 export type { ExecutionAssessmentContext } from './assess.js';
+
+/** Contrato provider-agnostic do planning worker e draft sempre nao confiavel. */
+export {
+  CONTROL_PLANE_PLANNING_POLICY,
+  MAX_PLANNER_PACKET_BYTES,
+  MAX_PLANNER_TASKS,
+  PLANNING_PIPELINE,
+  PlannerPacket,
+  PlanningPolicy,
+  PlanningWorkerInvocation,
+  PlanningWorkerInvocationResult,
+  UntrustedPlanDraft,
+  buildPlannerPacket,
+  normalizeUntrustedPlanDraft,
+} from './draft.js';
+export type {
+  BuildPlannerPacketInput,
+  DraftIssue,
+  DraftNormalizationResult,
+  PlanningWorkerPort,
+} from './draft.js';
+
+/** Composicao autorizada do plano e projecao pura para o PlanFile do harness. */
+export {
+  ImplementationPlan,
+  PLAN_FILE_VALIDATION_TIMEOUT_CEILING_SECONDS,
+  PlanGenerationStage,
+  ProjectedPlanFile,
+  generateImplementationPlan,
+  projectImplementationPlan,
+} from './generate.js';
+export type {
+  GenerateImplementationPlanInput,
+  PlanGenerationResult,
+} from './generate.js';
