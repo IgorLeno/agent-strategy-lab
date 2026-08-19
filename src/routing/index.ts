@@ -37,6 +37,21 @@ export {
   type InitialRoutingInput,
 } from './router.js';
 
+/** Camada histórica read-only sobre M78 (M82). */
+export {
+  HISTORY_UTILITY_AGGREGATIONS,
+  HistoryInformedRoutingResult,
+  HistoryRoutingEvidence,
+  HistoryRoutingRecommendation,
+  HistoryRoutingSource,
+  HistoryWorkerRuntimeBudget,
+  routeHistoryInformedProfile,
+  routeInitialProfileWithHistory,
+  type HistoryRoutingInput,
+  type HistorySeriesConsideration,
+  type HistoryUtility,
+} from './history-router.js';
+
 /** Failure diagnosis e intervenção provider-neutral (M79). */
 export {
   BoundedRepairBudget,

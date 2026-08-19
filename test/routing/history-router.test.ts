@@ -1,0 +1,543 @@
+import { describe, expect, it } from 'vitest';
+
+import { ProjectInspection } from '../../src/inspection/index.js';
+import { assessExecution, type PlannedTask } from '../../src/planner/index.js';
+import type {
+  EvidenceAggregation,
+  NumericDistribution,
+  PerformanceHistoryQueryResult,
+  PerformanceSeries,
+} from '../../src/performance/index.js';
+import {
+  CapabilityRegistry,
+  capabilityOf,
+  routeInitialProfile,
+  routeInitialProfileWithHistory,
+  type HistoryRoutingInput,
+  type InitialRoutingInput,
+  type ProfileCapability,
+  type RoutingCandidate,
+  type StructuredWorkUnit,
+} from '../../src/routing/index.js';
+
+const HEAD_SHA = 'a'.repeat(40);
+const FINGERPRINT_A = '1'.repeat(64);
+const FINGERPRINT_B = '2'.repeat(64);
+const SERIES_A = 'a'.repeat(64);
+const SERIES_B = 'b'.repeat(64);
+
+function task(overrides: Partial<PlannedTask> = {}): PlannedTask {
+  return {
+    schema_version: 1,
+    task_id: 'M82-fixture',
+    objective: 'Implementar uma mudança local',
+    blocked_by: [],
+    taxonomy: {
+      version: 1,
+      task_class: 'feature',
+      difficulty_declared: 'easy',
+      complexity: 'local',
+      ambiguity: 'low',
+      verification: 'deterministic',
+    },
+    risk: 'low',
+    acceptance: ['mudança validada'],
+    validation: [{ argv: ['pnpm', 'typecheck'], timeout_seconds: 1 }],
+    initial_files: ['src/routing/history-router.ts'],
+    probable_files: ['test/routing/history-router.test.ts'],
+    context_scope: { areas: ['routing'] },
+    context_requirements: [{ description: 'router', source_anchor: 'src/routing/router.ts' }],
+    environment_requirements: [{ kind: 'tool', name: 'node', reason: 'typecheck' }],
+    estimated_duration: { expected: 500_000, maximum: 1_500_000 },
+    validation_budget: { expected: 60_000, maximum: 300_000 },
+    resource_envelope: {
+      duration_ms: { expected: 600_000, maximum: 1_800_000 },
+      tokens: { expected: 10_000, maximum: 50_000 },
+      changed_files: { expected: 2, maximum: 5 },
+    },
+    ...overrides,
+  };
+}
+
+function inspection(): ProjectInspection {
+  return {
+    schema_version: 1,
+    repo_root: '/repo',
+    inspected_at: '2026-08-19T00:00:00.000Z',
+    git: {
+      known: true,
+      value: { head_sha: HEAD_SHA, branch: 'main', dirty: false, remotes: [] },
+      provenance: 'git',
+    },
+    stack: {
+      known: true,
+      value: { primary_ecosystem: 'node', ecosystems_detected: ['node'] },
+      provenance: 'fs:package.json',
+    },
+    package_manager: { known: true, value: 'pnpm', provenance: 'fs:pnpm-lock.yaml' },
+    build_system: { known: true, value: 'typescript', provenance: 'fs:tsconfig.json' },
+    directories: [],
+    tests: { known: true, value: { framework: 'vitest', test_directories: ['test'] }, provenance: 'fs' },
+    validation_command_candidates: [
+      { name: 'typecheck', command: 'pnpm typecheck', source: 'package.json:scripts' },
+    ],
+    dependencies_state: {
+      known: true,
+      value: { lockfile_path: 'pnpm-lock.yaml', installed: true },
+      provenance: 'fs',
+    },
+    required_tools: [],
+    required_services: [],
+    filesystem_permissions: {
+      known: true,
+      value: { readable: true, writable: true },
+      provenance: 'fs',
+    },
+    feedback_sources: [],
+    project_instructions: [{ path: 'AGENTS.md', scope: 'root', relevance: 'general' }],
+    source_anchors: [{ area: 'routing', path: 'src/routing' }],
+    relevant_files: [],
+    risks: [],
+  };
+}
+
+function workUnit(plannedTask: PlannedTask = task()): StructuredWorkUnit {
+  const facts = inspection();
+  return {
+    source: 'planner',
+    task: plannedTask,
+    assessment: assessExecution(plannedTask, {
+      inspection: facts,
+      expectedBaseRevisionSha: HEAD_SHA,
+      factsSource: 'full_inspection',
+    }),
+    project_facts: facts,
+  };
+}
+
+function capability(profileId: string): ProfileCapability {
+  return capabilityOf({
+    profile_id: profileId,
+    agent: 'codex',
+    model: 'gpt-5.6-luna',
+    reasoning_effort: 'medium',
+    reasoning_effort_source: 'codex_config_override',
+    billing_mode: 'subscription_only',
+    credential_source: 'chatgpt_subscription',
+    environment_mode: 'real-world',
+    instruction_environment: 'sanitized_user_home',
+    commit_owner: 'orchestrator',
+    official_validation_owner: 'orchestrator',
+    worker_validation_policy: 'targeted',
+    sandbox: 'workspace-write',
+    session_persistence: 'ephemeral',
+  });
+}
+
+function candidate(profileId: string, maximumMs = 5_000_000): RoutingCandidate {
+  return {
+    profile_id: profileId,
+    availability: { value: true, provenance: 'doctor.ok' },
+    runtime_bounds: [
+      {
+        kind: 'WORKER_RUNTIME_BOUND',
+        source: 'launcher',
+        maximum_ms: maximumMs,
+        provenance: 'LauncherProfile.timeout_seconds',
+      },
+    ],
+  };
+}
+
+function metric<T>(value: T, sampleSize = 3): EvidenceAggregation<T> {
+  return {
+    value,
+    sample_size: sampleSize,
+    population_size: sampleSize,
+    status: 'AVAILABLE',
+    reason: null,
+    provenance: ['fixture'],
+  };
+}
+
+function distribution(p90: number, sampleSize = 3): NumericDistribution {
+  const values = Array.from({ length: sampleSize }, (_, index) =>
+    index === sampleSize - 1 ? p90 : Math.max(0, p90 - (sampleSize - index) * 100),
+  );
+  return {
+    values,
+    total: values.reduce((total, value) => total + value, 0),
+    mean: values.reduce((total, value) => total + value, 0) / values.length,
+    min: values[0]!,
+    p50: values[Math.ceil(values.length / 2) - 1]!,
+    p90,
+    max: p90,
+  };
+}
+
+interface SeriesUtilityOverrides {
+  readonly firstPass?: number;
+  readonly finalPass?: number;
+  readonly repair?: number;
+  readonly escalation?: number;
+  readonly durationP90?: number;
+  readonly tokensP90?: number;
+  readonly quotaP90?: number;
+  readonly costP90?: number;
+  readonly intervention?: number;
+  readonly qualification?: number;
+  readonly sampleSize?: number;
+  readonly costUnavailable?: boolean;
+  readonly difficulty?: string;
+  readonly contextPressure?: 'low' | 'medium' | 'high';
+}
+
+function series(
+  profileId: string,
+  fingerprint: string,
+  seriesKey: string,
+  overrides: SeriesUtilityOverrides = {},
+): PerformanceSeries {
+  const sampleSize = overrides.sampleSize ?? 3;
+  const cost = overrides.costUnavailable
+    ? {
+        value: null,
+        sample_size: 0,
+        population_size: sampleSize,
+        status: 'UNAVAILABLE' as const,
+        reason: 'métrica não registrada',
+        provenance: ['fixture_missing'],
+      }
+    : metric(distribution(overrides.costP90 ?? 1, sampleSize), sampleSize);
+  return {
+    identity: {
+      schema_version: 1,
+      task: {
+        task_class: { value: 'feature', provenance: 'fixture' },
+        difficulty: { value: overrides.difficulty ?? 'easy', provenance: 'fixture' },
+        stack: { value: ['node'], provenance: 'fixture' },
+      },
+      profile: {
+        profile_id: { value: profileId, provenance: 'fixture' },
+        profile_fingerprint_sha256: { value: fingerprint, provenance: 'fixture' },
+      },
+      execution: {
+        provider: { value: 'openai', provenance: 'fixture' },
+        agent_cli: { value: 'codex', provenance: 'fixture' },
+        model: { value: 'gpt-5.6-luna', provenance: 'fixture' },
+        reasoning_effort: { value: 'medium', provenance: 'fixture' },
+        transport: { value: 'jsonl', provenance: 'fixture' },
+        worker_role: { value: 'implementer', provenance: 'fixture' },
+        strategy_name: { value: 'baseline', provenance: 'fixture' },
+        strategy_version: { value: 1, provenance: 'fixture' },
+        environment_profile_id: { value: 'env-real', provenance: 'fixture' },
+        environment_mode: { value: 'real-world', provenance: 'fixture' },
+      },
+      context: {
+        context_pressure: { value: overrides.contextPressure ?? 'low', provenance: 'fixture' },
+        environment_readiness: { value: 'READY', provenance: 'fixture' },
+      },
+      comparable: true,
+      blocking_unknown_dimensions: [],
+      series_key: seriesKey,
+    },
+    automatic_merge_eligible: true,
+    trial_ids: Array.from({ length: sampleSize }, (_, index) => `trial-${profileId}-${index}`),
+    run_ids: Array.from({ length: sampleSize }, (_, index) => `run-${profileId}-${index}`),
+    aggregations: {
+      trials: metric(sampleSize, sampleSize),
+      attempts: {
+        operational: metric(sampleSize, sampleSize),
+        with_inference: metric(sampleSize, sampleSize),
+        without_inference: metric(0, sampleSize),
+        inference_unknown: metric(0, sampleSize),
+        infra_error: metric(0, sampleSize),
+      },
+      first_operational_pass_rate: metric(overrides.firstPass ?? 1, sampleSize),
+      first_inference_bearing_pass_rate: metric(overrides.firstPass ?? 1, sampleSize),
+      final_pass_rate: metric(overrides.finalPass ?? 1, sampleSize),
+      repair_rate: metric(overrides.repair ?? 0, sampleSize),
+      escalation_rate: metric(overrides.escalation ?? 0, sampleSize),
+      duration_ms: metric(distribution(overrides.durationP90 ?? 1_000, sampleSize), sampleSize),
+      tokens: {
+        total: metric(distribution(overrides.tokensP90 ?? 1_000, sampleSize), sampleSize),
+        input: metric(distribution(500, sampleSize), sampleSize),
+        cached_input: metric(distribution(100, sampleSize), sampleSize),
+        fresh_input: metric(distribution(400, sampleSize), sampleSize),
+        output: metric(distribution(300, sampleSize), sampleSize),
+        reasoning: metric(distribution(200, sampleSize), sampleSize),
+      },
+      quota: metric(
+        [
+          {
+            provider: 'openai',
+            window_id: 'weekly',
+            consumed_pp: metric(distribution(overrides.quotaP90 ?? 1, sampleSize), sampleSize),
+          },
+        ],
+        sampleSize,
+      ),
+      api_equivalent_usd: cost,
+      human_intervention_rate: metric(overrides.intervention ?? 0, sampleSize),
+      qualification: {
+        counts: metric({ QUALIFIED: sampleSize }, sampleSize),
+        qualified_rate: metric(overrides.qualification ?? 1, sampleSize),
+      },
+      context_pressure: metric(
+        { [overrides.contextPressure ?? 'low']: sampleSize },
+        sampleSize,
+      ),
+    },
+  };
+}
+
+function history(seriesValues: readonly PerformanceSeries[], minimumSampleSize = 3): PerformanceHistoryQueryResult {
+  return {
+    schema_version: 1,
+    minimum_sample_size: minimumSampleSize,
+    series: seriesValues,
+    excluded_runs: [],
+    excluded_trials: [],
+    comparable_facts_issues: [],
+  };
+}
+
+function input(
+  seriesValues: readonly PerformanceSeries[],
+  options: {
+    readonly plannedTask?: PlannedTask;
+    readonly candidates?: readonly RoutingCandidate[];
+    readonly capabilities?: readonly ProfileCapability[];
+    readonly minimumSampleSize?: number;
+  } = {},
+): HistoryRoutingInput {
+  const capabilities = options.capabilities ?? [capability('profile-a')];
+  const candidates = options.candidates ?? capabilities.map((entry) => candidate(entry.profile_id));
+  return {
+    work_unit: workUnit(options.plannedTask),
+    role: 'implementer',
+    capability_registry: new CapabilityRegistry(capabilities),
+    candidates,
+    history: history(seriesValues),
+    minimum_sample_size: options.minimumSampleSize ?? 3,
+    profile_fingerprints_sha256: {
+      'profile-a': FINGERPRINT_A,
+      'profile-b': FINGERPRINT_B,
+    },
+  };
+}
+
+function m78Input(value: HistoryRoutingInput): InitialRoutingInput {
+  return {
+    work_unit: value.work_unit,
+    role: value.role,
+    capability_registry: value.capability_registry,
+    candidates: value.candidates,
+  };
+}
+
+describe('routeInitialProfileWithHistory', () => {
+  it('produz profile e budget p90 a partir de uma única série suficiente', () => {
+    const value = input([
+      series('profile-a', FINGERPRINT_A, SERIES_A, { durationP90: 4_000_000 }),
+    ]);
+    const result = routeInitialProfileWithHistory(value);
+
+    expect(result.source).toBe('HISTORY');
+    expect(result.fallback).toBeNull();
+    expect(result.recommendation).toMatchObject({
+      outcome: 'ROUTED',
+      profile: { profile_id: 'profile-a' },
+      worker_runtime_budget: {
+        milliseconds: 4_000_000,
+        statistic: 'observed_duration_ms_p90',
+        sample_size: 3,
+      },
+    });
+    expect(result.evidence).toMatchObject({
+      decision_minimum_sample_size: 3,
+      selected_series_key: SERIES_A,
+      selected_series_sample_size: 3,
+    });
+    expect(result.evidence.aggregations_considered).toEqual(
+      expect.arrayContaining([
+        'first_operational_pass_rate',
+        'final_pass_rate',
+        'repair_rate',
+        'escalation_rate',
+        'duration_ms.p90',
+        'tokens.total.p90',
+        'quota.consumed_pp.p90_total',
+        'api_equivalent_usd.p90',
+        'human_intervention_rate',
+        'qualification.qualified_rate',
+        'context_pressure.compatibility',
+        'environment_readiness.compatibility',
+      ]),
+    );
+    expect(result.rationale.join(' ')).toContain('não substitui decomposição');
+  });
+
+  it('seleciona somente a série que domina em toda a utilidade observada', () => {
+    const capabilities = [capability('profile-a'), capability('profile-b')];
+    const result = routeInitialProfileWithHistory(
+      input(
+        [
+          series('profile-b', FINGERPRINT_B, SERIES_B, {
+            firstPass: 0.5,
+            finalPass: 0.75,
+            repair: 0.4,
+            escalation: 0.2,
+            durationP90: 2_000,
+            tokensP90: 2_000,
+            quotaP90: 2,
+            costP90: 2,
+            intervention: 0.25,
+            qualification: 0.75,
+          }),
+          series('profile-a', FINGERPRINT_A, SERIES_A),
+        ],
+        { capabilities },
+      ),
+    );
+
+    expect(result.source).toBe('HISTORY');
+    expect(result.recommendation?.profile.profile_id).toBe('profile-a');
+  });
+
+  it('amostra minúscula e métrica ausente caem no M78 sem fabricar certeza', () => {
+    for (const historical of [
+      series('profile-a', FINGERPRINT_A, SERIES_A, { sampleSize: 1 }),
+      series('profile-a', FINGERPRINT_A, SERIES_A, { costUnavailable: true }),
+    ]) {
+      const value = input([historical]);
+      const result = routeInitialProfileWithHistory(value);
+      expect(result.source).toBe('M78_FALLBACK');
+      expect(result.recommendation).toBeNull();
+      expect(result.fallback).toEqual(routeInitialProfile(m78Input(value)));
+      expect(result.evidence.series_considered[0]).toMatchObject({
+        status: 'INSUFFICIENT_EVIDENCE',
+        utility: null,
+      });
+    }
+  });
+
+  it('profile elegível sem série também torna a comparação insuficiente', () => {
+    const capabilities = [capability('profile-a'), capability('profile-b')];
+    const value = input([series('profile-a', FINGERPRINT_A, SERIES_A)], { capabilities });
+    const result = routeInitialProfileWithHistory(value);
+
+    expect(result.source).toBe('M78_FALLBACK');
+    expect(result.evidence.series_considered).toContainEqual(
+      expect.objectContaining({
+        profile_id: 'profile-b',
+        series_key: null,
+        status: 'INSUFFICIENT_EVIDENCE',
+        utility: null,
+      }),
+    );
+  });
+
+  it('não ignora uma segunda série comparável com amostra insuficiente do mesmo profile', () => {
+    const result = routeInitialProfileWithHistory(
+      input([
+        series('profile-a', FINGERPRINT_A, SERIES_A),
+        series('profile-a', FINGERPRINT_A, SERIES_B, { sampleSize: 1 }),
+      ]),
+    );
+
+    expect(result.source).toBe('M78_FALLBACK');
+    expect(result.rationale.join(' ')).toContain('série comparável incompleta');
+  });
+
+  it('empate e trade-off permanecem ambíguos e o fallback não depende da ordem histórica', () => {
+    const capabilities = [capability('profile-a'), capability('profile-b')];
+    const first = input(
+      [
+        series('profile-a', FINGERPRINT_A, SERIES_A),
+        series('profile-b', FINGERPRINT_B, SERIES_B),
+      ],
+      { capabilities },
+    );
+    const second = input([...first.history.series].reverse(), { capabilities });
+
+    const left = routeInitialProfileWithHistory(first);
+    const right = routeInitialProfileWithHistory(second);
+    expect(left).toEqual(right);
+    expect(left.source).toBe('M78_FALLBACK');
+    expect(left.evidence.series_considered.every((entry) => entry.status === 'AMBIGUOUS')).toBe(true);
+  });
+
+  it('budget acima de validation timeout continua válido quando cabe no runtime bound', () => {
+    const result = routeInitialProfileWithHistory(
+      input([series('profile-a', FINGERPRINT_A, SERIES_A, { durationP90: 4_000_000 })]),
+    );
+    expect(result.recommendation?.outcome).toBe('ROUTED');
+    expect(result.recommendation?.worker_runtime_budget.milliseconds).toBeGreaterThan(1_000);
+    expect(result.recommendation?.worker_runtime_budget.provenance.join(' ')).not.toContain(
+      'timeout_seconds',
+    );
+  });
+
+  it('budget fora do runtime bound produz BUDGET_UNSUPPORTED nomeando somente o bound', () => {
+    const result = routeInitialProfileWithHistory(
+      input(
+        [series('profile-a', FINGERPRINT_A, SERIES_A, { durationP90: 4_000_000 })],
+        { candidates: [candidate('profile-a', 3_000_000)] },
+      ),
+    );
+    expect(result.source).toBe('HISTORY');
+    expect(result.recommendation).toMatchObject({
+      outcome: 'BUDGET_UNSUPPORTED',
+      violations: [
+        {
+          requested_budget_ms: 4_000_000,
+          violated_bound: {
+            kind: 'WORKER_RUNTIME_BOUND',
+            source: 'launcher',
+            maximum_ms: 3_000_000,
+          },
+        },
+      ],
+    });
+  });
+
+  it('histórico não contorna capacidade/decomposição exigida pelo M78', () => {
+    const broadTask = task({
+      taxonomy: {
+        ...task().taxonomy,
+        difficulty_declared: 'hard',
+        complexity: 'cross_cutting',
+        ambiguity: 'high',
+        verification: 'subjective',
+      },
+      risk: 'critical',
+      context_scope: { areas: ['a', 'b', 'c', 'd'] },
+    });
+    const incompatibleHistory = series('profile-a', FINGERPRINT_A, SERIES_A, {
+      difficulty: 'hard',
+      contextPressure: 'high',
+    });
+    const value = input([incompatibleHistory], { plannedTask: broadTask });
+    const result = routeInitialProfileWithHistory(value);
+
+    expect(result.source).toBe('M78_FALLBACK');
+    expect(result.fallback?.outcome).toBe('HUMAN_REQUIRED');
+    expect(result.evidence.series_considered[0]?.reason).toContain('M78 recusou');
+  });
+
+  it('fingerprint ausente ou divergente nunca vira comparabilidade presumida', () => {
+    const value = input([series('profile-a', FINGERPRINT_A, SERIES_A)]);
+    const withoutFingerprint: HistoryRoutingInput = {
+      ...value,
+      profile_fingerprints_sha256: {},
+    };
+    const result = routeInitialProfileWithHistory(withoutFingerprint);
+    expect(result.source).toBe('M78_FALLBACK');
+    expect(result.evidence.series_considered[0]).toMatchObject({
+      status: 'INCOMPATIBLE',
+      utility: null,
+    });
+    expect(result.evidence.series_considered[0]?.reason).toContain('não foi fornecido');
+  });
+});
