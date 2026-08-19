@@ -463,3 +463,12 @@ resolver isso mutando profile ids históricos nem o settings compartilhado
 com a policy `full`. Reset path-scoped que remove arquivos ADDED também
 precisa podar diretórios pais que ficaram vazios: git fica limpo, mas
 `readdir` ainda vê `src/intake` e o scaffold test falha na adoção.
+
+[2026-08-19] Context: retry operacional capability-neutral ocorrido durante
+um REPAIR bounded.
+Mistake: derivar a lineage apenas do último lifecycle record fazia um
+AttemptAbandonmentRecord interromper a busca e o retry seguinte virar
+FIRST_PASS, embora o repair source continuasse autorizado.
+Rule: retry operacional dentro de repair carrega o `repairSourceAttempt`
+autorizado e reancora o packet diretamente nessa evidência; ausência ou
+divergência do source falha fechado, e nunca fabrica nova capability escalation.

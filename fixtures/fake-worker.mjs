@@ -12,6 +12,9 @@
  *   official-fail-then-repair  FIRST_PASS falha a validation; REPAIR escreve 'repaired'
  *   official-fail-then-worker-failure  FIRST_PASS falha a validation; REPAIR reporta FAILURE
  *   protocol-invalid-then-success  primeiro close tem metadata inválida; retry passa
+ *   incomplete-output-then-success  primeiro close omite report/handoff; retry passa
+ *   incomplete-output-always  todos os closes omitem report/handoff
+ *   repair-incomplete-then-success  FIRST_PASS falha; REPAIR omite artifacts uma vez
  *   infra-error  encerra com exit de launcher não recuperável
  *   dirty      commita e ainda deixa arquivo não rastreado na árvore
  *   out-of-scope  commita alterando dev/plan.yaml
@@ -48,6 +51,13 @@ function hasArchivedAttempt(relativeRecord) {
   return readdirSync(taskRoot).some((attempt) => existsSync(path.join(taskRoot, attempt, relativeRecord)));
 }
 
+function hasAbandonedAttempt() {
+  if (!taskId) return false;
+  const taskRoot = path.join(devDir, 'attempts', taskId);
+  if (!existsSync(taskRoot)) return false;
+  return readdirSync(taskRoot).some((entry) => /^\d+-abandoned\.json$/.test(entry));
+}
+
 if (mode === 'infra-error') {
   process.exit(125);
 }
@@ -80,13 +90,21 @@ function main() {
   const protocolInvalidFirst =
     mode === 'protocol-invalid-then-success' &&
     !hasArchivedAttempt(path.join('protocol-invalid', 'protocol-invalid-attempt.json'));
+  const incompleteWorkerOutput =
+    taskId === 'T1' &&
+    (mode === 'incomplete-output-always' ||
+      (mode === 'incomplete-output-then-success' && !hasAbandonedAttempt()) ||
+      (mode === 'repair-incomplete-then-success' && repairAttempt && !hasAbandonedAttempt()));
   const skipGit =
     mode === 'no-commit' ||
     mode === 'orchestrator-success' ||
     mode === 'official-fail' ||
     mode === 'official-fail-then-repair' ||
     mode === 'official-fail-then-worker-failure' ||
-    mode === 'protocol-invalid-then-success';
+    mode === 'protocol-invalid-then-success' ||
+    mode === 'incomplete-output-then-success' ||
+    mode === 'incomplete-output-always' ||
+    mode === 'repair-incomplete-then-success';
 
   if (mode === 'out-of-scope') {
     const planFile = path.join(repoRoot, 'dev', 'plan.yaml');
@@ -98,9 +116,11 @@ function main() {
     const contents =
       mode === 'official-fail'
         ? 'broken\n'
-        : mode === 'official-fail-then-repair' || mode === 'official-fail-then-worker-failure'
+        : mode === 'official-fail-then-repair' ||
+            mode === 'official-fail-then-worker-failure' ||
+            mode === 'repair-incomplete-then-success'
           ? repairAttempt
-            ? mode === 'official-fail-then-repair'
+            ? mode === 'official-fail-then-repair' || mode === 'repair-incomplete-then-success'
               ? 'repaired\n'
               : 'broken\n'
             : 'broken\n'
@@ -117,6 +137,10 @@ function main() {
 
   if (mode === 'dirty') {
     writeFileSync(path.join(repoRoot, 'src', 'nao-commitado.txt'), 'sujeira\n');
+  }
+
+  if (incompleteWorkerOutput) {
+    process.exit(0);
   }
 
   const failed =

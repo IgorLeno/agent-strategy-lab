@@ -27,9 +27,14 @@ import {
 import { resolveHarnessPaths, type HarnessPaths } from '../lib/paths.js';
 import { loadPlan, type LoadedPlan } from '../lib/plan.js';
 import { loadProfile } from '../lib/profile.js';
-import { InconsistentAttemptEvidenceError } from '../lib/retry-failed.js';
+import { writePacket } from '../lib/records.js';
+import {
+  InconsistentAttemptEvidenceError,
+  readPreviousAttemptDiagnostics,
+} from '../lib/retry-failed.js';
 import {
   inspectRoutineIncident,
+  ROUTINE_RECIPES,
   resolveRoutinePostLaunch,
   resolveRoutinePreflight,
   type HumanRequiredOutput,
@@ -103,7 +108,8 @@ async function executeReadyTask(
     }
     throw error;
   }
-  const { selection, packet, baseViolation } = prepared;
+  const { selection, baseViolation } = prepared;
+  let { packet } = prepared;
   if (baseViolation) {
     return { empty: true, stop: { status: 'BASE_DIVERGED', reason: baseViolation } };
   }
@@ -118,6 +124,38 @@ async function executeReadyTask(
         reason: `retry operacional esperava ${expectedTaskId}, mas selecionou ${packet.task_id}`,
       },
     };
+  }
+
+  if (repair !== null) {
+    let diagnostics;
+    try {
+      diagnostics = await readPreviousAttemptDiagnostics(
+        paths,
+        packet.task_id,
+        repair.repairSourceAttempt,
+      );
+    } catch (error) {
+      if (error instanceof InconsistentAttemptEvidenceError) {
+        return {
+          empty: true,
+          stop: { status: 'INCONSISTENT_EVIDENCE', reason: error.message },
+        };
+      }
+      throw error;
+    }
+    if (diagnostics === null || diagnostics.attempt !== repair.repairSourceAttempt) {
+      return {
+        empty: true,
+        stop: {
+          status: 'INCONSISTENT_EVIDENCE',
+          reason:
+            `repair automático de ${packet.task_id} perdeu diagnostics do source attempt ` +
+            repair.repairSourceAttempt,
+        },
+      };
+    }
+    packet = { ...packet, previous_attempt_diagnostics: diagnostics };
+    await writePacket(paths, packet);
   }
 
   const launch = await launchTask(
@@ -191,10 +229,68 @@ async function postLaunchIncidentOf(
   };
 }
 
-interface RoutinePostLaunchHandling {
-  readonly execution: ExecutionResult | null;
-  readonly retried: boolean;
-  readonly human_required: HumanRequiredOutput | null;
+type RoutinePostLaunchHandling =
+  | {
+      readonly status: 'RETRIED';
+      readonly execution: ExecutionResult;
+      readonly human_required: null;
+    }
+  | {
+      readonly status: 'RECOVERED';
+      readonly execution: null;
+      readonly human_required: null;
+      readonly incident: RoutinePostLaunchIncident;
+      readonly incident_id: string;
+      readonly operational_retry_budget: number;
+    }
+  | {
+      readonly status: 'HUMAN_REQUIRED';
+      readonly execution: null;
+      readonly human_required: HumanRequiredOutput;
+    };
+
+type RoutinePostLaunchSettlement =
+  | {
+      readonly status: 'EXECUTED';
+      readonly execution: ExecutionResult;
+      readonly executions: readonly ExecutionResult[];
+      readonly human_required: null;
+    }
+  | {
+      readonly status: 'HUMAN_REQUIRED';
+      readonly execution: null;
+      readonly executions: readonly ExecutionResult[];
+      readonly human_required: HumanRequiredOutput;
+    };
+
+function assertNever(value: never): never {
+  throw new Error(`estado pós-launch não tratado: ${JSON.stringify(value)}`);
+}
+
+function needsRoutinePostLaunch(execution: ExecutionResult): boolean {
+  return (
+    execution.closeKind !== 'PASS' &&
+    execution.closeKind !== 'FAIL' &&
+    execution.stop !== null
+  );
+}
+
+function operationalRetryHumanRequired(
+  incidentId: string,
+  reason: string,
+  evidencePaths: readonly string[],
+): HumanRequiredOutput {
+  return {
+    status: 'HUMAN_REQUIRED',
+    incident_id: incidentId,
+    decision_needed: 'Revisar o incidente operacional persistente antes de um novo provider launch.',
+    why_automation_stopped: reason,
+    options: [
+      'corrigir o protocolo/tooling e rerodar',
+      'inspecionar manualmente a evidência preservada',
+    ],
+    evidence_paths: [...evidencePaths],
+  };
 }
 
 async function handleRoutinePostLaunch(
@@ -204,15 +300,14 @@ async function handleRoutinePostLaunch(
   profileId: string,
   timeoutOverride: string | undefined,
   repair: { automaticRepair: boolean; repairSourceAttempt: number } | null,
+  operationalRetryAllowed = true,
 ): Promise<RoutinePostLaunchHandling> {
-  if (execution.closeKind === 'PASS' || execution.closeKind === 'FAIL' || execution.stop === null) {
-    return { execution, retried: false, human_required: null };
-  }
   const incident = await postLaunchIncidentOf(paths, execution, profileId);
-  const resolution = await resolveRoutinePostLaunch<ReadyTaskExecution>({
+  const resolution = await resolveRoutinePostLaunch<ExecutionResult>({
     paths,
     incident,
     driver: createRoutinePostLaunchRuntime({ paths }),
+    operationalRetryAllowed,
     retrySameTask: async (_actionId, original) => {
       const retry = await executeReadyTask(
         paths,
@@ -223,22 +318,9 @@ async function handleRoutinePostLaunch(
         original.task_id,
       );
       if ('empty' in retry) {
-        const state = await readState(paths);
-        const task = getTaskState(state, original.task_id);
-        return {
-          incident: {
-            ...original,
-            attempt: task.attempts,
-            launch: retry.stop.status,
-            close: null,
-            outcome: retry.stop.status,
-            reason: retry.stop.reason,
-            task_status: task.status,
-            task_phase: task.phase,
-            commit_owner: null,
-          },
-          value: retry,
-        };
+        throw new Error(
+          `retry operacional da mesma task não produziu execução: ${retry.stop.status}: ${retry.stop.reason}`,
+        );
       }
       return {
         incident: await postLaunchIncidentOf(paths, retry, original.profile_id),
@@ -246,14 +328,123 @@ async function handleRoutinePostLaunch(
       };
     },
   });
-  if (resolution.status === 'HUMAN_REQUIRED') {
-    return { execution: null, retried: false, human_required: resolution.human_required };
+  switch (resolution.status) {
+    case 'RETRIED':
+      return { status: 'RETRIED', execution: resolution.retry, human_required: null };
+    case 'RECOVERED': {
+      const recipe = ROUTINE_RECIPES.find(
+        (candidate) =>
+          candidate.id === resolution.record.recipe_id &&
+          candidate.incident_phase === 'POST_LAUNCH',
+      );
+      return {
+        status: 'RECOVERED',
+        execution: null,
+        human_required: null,
+        incident,
+        incident_id: resolution.record.incident_id,
+        operational_retry_budget: recipe?.retry_budget ?? 0,
+      };
+    }
+    case 'HUMAN_REQUIRED':
+      return {
+        status: 'HUMAN_REQUIRED',
+        execution: null,
+        human_required: resolution.human_required,
+      };
+    default:
+      return assertNever(resolution);
   }
-  const retry = resolution.retry;
-  if (retry === null || 'empty' in retry) {
-    throw new Error('resolver pós-launch declarou RETRIED sem ExecutionResult');
+}
+
+async function settleRoutinePostLaunch(
+  paths: HarnessPaths,
+  loaded: LoadedPlan,
+  initial: ExecutionResult,
+  profileId: string,
+  timeoutOverride: string | undefined,
+  repair: { automaticRepair: boolean; repairSourceAttempt: number } | null,
+): Promise<RoutinePostLaunchSettlement> {
+  const executions: ExecutionResult[] = [initial];
+  let execution = initial;
+  let operationalRetriesRemaining: number | null = null;
+  let recoveredIncidentId = '';
+  let recoveredEvidencePaths: readonly string[] = [];
+
+  while (needsRoutinePostLaunch(execution)) {
+    const handled = await handleRoutinePostLaunch(
+      paths,
+      loaded,
+      execution,
+      profileId,
+      timeoutOverride,
+      repair,
+      operationalRetriesRemaining !== 0,
+    );
+    switch (handled.status) {
+      case 'RETRIED':
+        executions.push(handled.execution);
+        return {
+          status: 'EXECUTED',
+          execution: handled.execution,
+          executions,
+          human_required: null,
+        };
+      case 'HUMAN_REQUIRED':
+        return {
+          status: 'HUMAN_REQUIRED',
+          execution: null,
+          executions,
+          human_required: handled.human_required,
+        };
+      case 'RECOVERED': {
+        operationalRetriesRemaining ??= handled.operational_retry_budget;
+        recoveredIncidentId = handled.incident_id;
+        recoveredEvidencePaths = handled.incident.evidence_paths;
+        if (operationalRetriesRemaining < 1) {
+          return {
+            status: 'HUMAN_REQUIRED',
+            execution: null,
+            executions,
+            human_required: operationalRetryHumanRequired(
+              recoveredIncidentId,
+              'budget operacional da recipe esgotado; incidente persistente de protocol/tooling ' +
+                'foi recuperado sem novo retry',
+              recoveredEvidencePaths,
+            ),
+          };
+        }
+        operationalRetriesRemaining -= 1;
+        const retry = await executeReadyTask(
+          paths,
+          loaded,
+          handled.incident.profile_id,
+          timeoutOverride,
+          repair,
+          handled.incident.task_id,
+        );
+        if ('empty' in retry) {
+          return {
+            status: 'HUMAN_REQUIRED',
+            execution: null,
+            executions,
+            human_required: operationalRetryHumanRequired(
+              recoveredIncidentId,
+              `retry operacional da mesma task não pôde executar: ${retry.stop.status}: ${retry.stop.reason}`,
+              recoveredEvidencePaths,
+            ),
+          };
+        }
+        executions.push(retry);
+        execution = retry;
+        break;
+      }
+      default:
+        return assertNever(handled);
+    }
   }
-  return { execution: retry, retried: true, human_required: null };
+
+  return { status: 'EXECUTED', execution, executions, human_required: null };
 }
 
 async function main(): Promise<void> {
@@ -409,14 +600,8 @@ async function main(): Promise<void> {
         stop = executed.stop;
         break;
       }
-      iterations.push(executed.iteration);
-      if (
-        autonomy === 'routine' &&
-        executed.closeKind !== 'PASS' &&
-        executed.closeKind !== 'FAIL' &&
-        executed.stop !== null
-      ) {
-        const handled = await handleRoutinePostLaunch(
+      if (autonomy === 'routine') {
+        const settled = await settleRoutinePostLaunch(
           paths,
           loaded,
           executed,
@@ -424,16 +609,18 @@ async function main(): Promise<void> {
           timeoutOverride,
           repairMeta,
         );
-        if (handled.human_required !== null || handled.execution === null) {
-          humanRequired = handled.human_required;
+        iterations.push(...settled.executions.map((item) => item.iteration));
+        if (settled.status === 'HUMAN_REQUIRED') {
+          humanRequired = settled.human_required;
           stop = {
             status: 'HUMAN_REQUIRED',
-            reason: handled.human_required?.why_automation_stopped ?? 'decisão humana necessária',
+            reason: settled.human_required.why_automation_stopped,
           };
           break;
         }
-        if (handled.retried) iterations.push(handled.execution.iteration);
-        executed = handled.execution;
+        executed = settled.execution;
+      } else {
+        iterations.push(executed.iteration);
       }
       if (executed.closeKind === 'PASS') {
         stop = { status: 'ALL_DONE', reason: 'nenhuma tarefa pendente' };
@@ -483,14 +670,8 @@ async function main(): Promise<void> {
         stop = repair.stop;
         break;
       }
-      iterations.push(repair.iteration);
-      if (
-        autonomy === 'routine' &&
-        repair.closeKind !== 'PASS' &&
-        repair.closeKind !== 'FAIL' &&
-        repair.stop !== null
-      ) {
-        const handled = await handleRoutinePostLaunch(
+      if (autonomy === 'routine') {
+        const settled = await settleRoutinePostLaunch(
           paths,
           loaded,
           repair,
@@ -498,16 +679,18 @@ async function main(): Promise<void> {
           timeoutOverride,
           capabilityRepairMeta,
         );
-        if (handled.human_required !== null || handled.execution === null) {
-          humanRequired = handled.human_required;
+        iterations.push(...settled.executions.map((item) => item.iteration));
+        if (settled.status === 'HUMAN_REQUIRED') {
+          humanRequired = settled.human_required;
           stop = {
             status: 'HUMAN_REQUIRED',
-            reason: handled.human_required?.why_automation_stopped ?? 'decisão humana necessária',
+            reason: settled.human_required.why_automation_stopped,
           };
           break;
         }
-        if (handled.retried) iterations.push(handled.execution.iteration);
-        repair = handled.execution;
+        repair = settled.execution;
+      } else {
+        iterations.push(repair.iteration);
       }
       if (repair.closeKind === 'PASS') {
         stop = { status: 'ALL_DONE', reason: 'nenhuma tarefa pendente' };

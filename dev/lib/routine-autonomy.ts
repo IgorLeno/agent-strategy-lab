@@ -286,15 +286,29 @@ export interface ResolveRoutinePostLaunchInput<T> {
     actionId: string,
     incident: RoutinePostLaunchIncident,
   ) => Promise<{ readonly incident: RoutinePostLaunchIncident; readonly value: T }>;
+  readonly operationalRetryAllowed?: boolean;
   readonly now?: () => string;
 }
 
-export type RoutinePostLaunchResolution<T> = {
-  readonly status: 'RETRIED' | 'RECOVERED' | 'HUMAN_REQUIRED';
-  readonly retry: T | null;
-  readonly record: RoutineIncidentRecord;
-  readonly human_required: HumanRequiredOutput | null;
-};
+export type RoutinePostLaunchResolution<T> =
+  | {
+      readonly status: 'RETRIED';
+      readonly retry: T;
+      readonly record: RoutineIncidentRecord;
+      readonly human_required: null;
+    }
+  | {
+      readonly status: 'RECOVERED';
+      readonly retry: null;
+      readonly record: RoutineIncidentRecord;
+      readonly human_required: null;
+    }
+  | {
+      readonly status: 'HUMAN_REQUIRED';
+      readonly retry: null;
+      readonly record: RoutineIncidentRecord;
+      readonly human_required: HumanRequiredOutput;
+    };
 
 function blockerOf(context: RoutineIncidentContext): string {
   return context.preflight.blocker ?? 'UNKNOWN_BLOCKER';
@@ -1127,6 +1141,16 @@ export async function resolveRoutinePostLaunch<T>(
         null,
       );
     }
+  }
+
+  if (input.operationalRetryAllowed === false) {
+    return finishPostLaunchHuman(
+      input,
+      base,
+      `budget operacional da recipe ${triage.recipe_id ?? 'desconhecida'} esgotado; ` +
+        'incidente persistente de protocol/tooling recuperado sem novo retry',
+      null,
+    );
   }
 
   if (recovery.skip_retry === true) {
