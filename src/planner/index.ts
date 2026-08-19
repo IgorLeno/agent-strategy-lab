@@ -11,3 +11,16 @@ export {
   TaskRisk,
   ValidationCommand,
 } from './task.js';
+
+/**
+ * Motor de decomposição AVC (Atomic Validatable Change) — avalia um
+ * `PlannedTask` já formado e decide, por sinais estruturais, se ele precisa
+ * ser dividido. Ver `decomposition.ts` para a lista de sinais e limiares.
+ */
+export {
+  DecompositionSignalId,
+  DecompositionVerdict,
+  evaluateDecomposition,
+  SignalProvenance,
+  TriggeredSignal,
+} from './decomposition.js';
