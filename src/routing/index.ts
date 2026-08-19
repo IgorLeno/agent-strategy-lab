@@ -15,3 +15,24 @@ export {
   type ProfileCapabilityInput,
   type ReasoningEffortSource,
 } from './capability.js';
+
+/** Router inicial determinístico e budget de runtime do worker (M78). */
+export {
+  BudgetUnsupported,
+  CandidateConsideration,
+  CandidateRejectionCode,
+  CapabilityTier,
+  InitialRoutingResult,
+  RoutingBlocked,
+  RoutingCandidate,
+  RoutingDecision,
+  RuntimeBoundSource,
+  StructuredWorkUnit,
+  WorkerRole,
+  WorkerRuntimeBound,
+  WorkerRuntimeBudget,
+  WorkUnitSource,
+  routeInitialProfile,
+  type BudgetViolation,
+  type InitialRoutingInput,
+} from './router.js';
