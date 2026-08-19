@@ -20,6 +20,7 @@ const AREAS = [
   'inspection',
   'intake',
   'performance',
+  'planner',
   'project',
   'reporting',
   'runner',
