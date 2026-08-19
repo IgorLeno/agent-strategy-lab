@@ -75,6 +75,7 @@ function git(args) {
 }
 
 function main() {
+  console.log(`AGENTLAB_WORKER_CWD=${process.cwd()}`);
   const packet = JSON.parse(readFileSync(packetPath, 'utf8'));
 
   if (mode === 'leak') {

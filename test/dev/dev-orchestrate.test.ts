@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { resolveHarnessPaths } from '../../dev/lib/paths.js';
+import { readLaunchRecord } from '../../dev/lib/records.js';
 import { readState } from '../../dev/lib/state.js';
 import { makeSandboxRepo, runDevCli, type Sandbox } from './helpers.js';
 
@@ -44,6 +45,9 @@ describe('dev-orchestrate — compatibilidade histórica e overrides aditivos', 
     expect(summary.iterations.map((item) => item.task_id)).toEqual(['T1', 'T2']);
     const state = await readState(defaults);
     expect(state.tasks.map((task) => task.status)).toEqual(['PASS', 'PASS']);
+    const launch = await readLaunchRecord(defaults, 'T1');
+    expect(launch?.profile_id).toBe('fake-worker-v1');
+    expect(launch?.argv).toContain('fixtures/fake-worker.mjs');
   }, 60_000);
 
   it('aceita --plan-file e --runtime-dir aditivos sem copiar o plan', async () => {

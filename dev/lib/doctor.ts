@@ -21,6 +21,7 @@ import {
   assertNoForbiddenFlags,
   buildEnvironment,
   loadProfile,
+  resolveCatalogResource,
   type LauncherProfile,
 } from './profile.js';
 
@@ -194,22 +195,22 @@ interface PermissionPolicy {
   readonly deny: readonly string[];
 }
 
-async function readPolicy(repoRoot: string, profile: LauncherProfile): Promise<PermissionPolicy | null> {
+async function readPolicy(catalogRoot: string, profile: LauncherProfile): Promise<PermissionPolicy | null> {
   const index = profile.argv.indexOf('--settings');
   const file = index >= 0 ? profile.argv[index + 1] : undefined;
   if (file === undefined) return null;
-  const parsed = JSON.parse(await readFile(path.resolve(repoRoot, file), 'utf8')) as {
+  const parsed = JSON.parse(await readFile(resolveCatalogResource(catalogRoot, file), 'utf8')) as {
     permissions?: { allow?: string[]; deny?: string[] };
   };
   return { allow: parsed.permissions?.allow ?? [], deny: parsed.permissions?.deny ?? [] };
 }
 
-async function checkPolicy(repoRoot: string, profile: LauncherProfile): Promise<Check> {
+async function checkPolicy(catalogRoot: string, profile: LauncherProfile): Promise<Check> {
   if (profile.agent !== 'claude') {
     return check('política de permissões', 'SKIP', `não se aplica ao agente ${profile.agent}`);
   }
   try {
-    const policy = await readPolicy(repoRoot, profile);
+    const policy = await readPolicy(catalogRoot, profile);
     if (!policy) {
       return check(
         'política de permissões',
@@ -706,14 +707,14 @@ export function uncoveredValidationCommands(
 }
 
 async function checkValidationCoverage(
-  repoRoot: string,
+  catalogRoot: string,
   profile: LauncherProfile,
   loaded: LoadedPlan | null,
 ): Promise<Check> {
   if (profile.agent !== 'claude' || !loaded) {
     return check('validações do plano', 'SKIP', 'sem política de Bash a conferir');
   }
-  const policy = await readPolicy(repoRoot, profile).catch(() => null);
+  const policy = await readPolicy(catalogRoot, profile).catch(() => null);
   if (!policy) return check('validações do plano', 'SKIP', 'perfil sem --settings');
 
   const uncovered = uncoveredValidationCommands(loaded, policy.allow);
@@ -835,12 +836,15 @@ export interface DoctorInput {
   readonly loaded?: LoadedPlan | null;
   readonly env?: NodeJS.ProcessEnv;
   readonly runtimeDir?: string;
+  /** Catálogo de profiles. Omitir reproduz o histórico (`repoRoot`). */
+  readonly profileCatalogRoot?: string;
   /** Injetado pelos testes: prova a credencial sem chamar CLI de verdade. */
   readonly credentialRunner?: CommandRunner;
 }
 
 export async function diagnose(input: DoctorInput): Promise<DoctorReport> {
-  const profile = await loadProfile(input.repoRoot, input.profileId);
+  const catalogRoot = input.profileCatalogRoot ?? input.repoRoot;
+  const profile = await loadProfile(input.repoRoot, input.profileId, { catalogRoot });
   const env = input.env ?? process.env;
   const runtimeDir = input.runtimeDir ?? path.join(input.repoRoot, '.dev');
   const sanitizedHome = path.join(runtimeDir, 'homes', profile.id);
@@ -875,9 +879,9 @@ export async function diagnose(input: DoctorInput): Promise<DoctorReport> {
     checkModelPinned(profile, model),
     checkOutputFormat(profile, outputFormat),
     checkReasoningEffort(profile, reasoning),
-    await checkPolicy(input.repoRoot, profile),
+    await checkPolicy(catalogRoot, profile),
     checkPersonalSettings(profile),
-    await checkValidationCoverage(input.repoRoot, profile, input.loaded ?? null),
+    await checkValidationCoverage(catalogRoot, profile, input.loaded ?? null),
     checkBillingMode(profile),
     checkApiVariables(profile, workerEnv ?? {}, env),
     credential.check,

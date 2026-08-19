@@ -4,7 +4,7 @@ import { runOrchestrate } from './orchestrate.js';
 import { exitCodeForOrchestrationStop } from './orchestration-termination.js';
 import type { HarnessPaths } from './paths.js';
 import { loadPlan, type LoadedPlan } from './plan.js';
-import { loadProfile } from './profile.js';
+import { loadProfileFromCatalog, profileProvenance, type ProfileProvenance } from './profile.js';
 import type { DevelopmentState } from './schemas.js';
 import { selectNextTask } from './select.js';
 import { buildInitialState, readState } from './state.js';
@@ -89,16 +89,19 @@ async function requireGitRepo(repoRoot: string): Promise<string> {
   }
 }
 
-async function requireProfile(repoRoot: string, profileId: string): Promise<void> {
+async function requireProfile(catalogRoot: string, profileId: string): Promise<ProfileProvenance> {
+  const provenance = profileProvenance(catalogRoot, profileId);
   try {
-    await loadProfile(repoRoot, profileId);
+    await loadProfileFromCatalog(catalogRoot, profileId);
   } catch (error) {
     throw new PlanSetupError(
       `perfil ${profileId} recusado antes de qualquer provider spawn: ${describeError(error)}\n` +
+        `Catálogo consultado: ${provenance.catalog_root} (arquivo ${provenance.source_file})\n` +
         'Nenhum attempt foi consumido. Nenhum state autoritativo foi alterado.\n' +
-        'Ação segura: informar um --profile existente e autorizado neste repositório.',
+        'Ação segura: informar um --profile existente no catálogo do Agent Strategy Lab (ou --profile-root).',
     );
   }
+  return provenance;
 }
 
 function mismatchPayload(
@@ -152,11 +155,14 @@ export async function runPlan(input: PlanRunInput): Promise<PlanRunResult> {
   const existing = await readExistingState(paths);
   const runtimeExists = existing !== 'missing';
   const loaded = await loadRequestedPlan(paths, runtimeExists);
-  await requireProfile(paths.repoRoot, profileId);
+  const profile = await requireProfile(paths.profileCatalogRoot, profileId);
 
   if (existing !== 'missing' && existing.plan_sha256 !== loaded.planSha256) {
     return {
-      payload: mismatchPayload(input, loaded, existing.plan_sha256, existing.authorized_head_sha ?? head),
+      payload: {
+        ...mismatchPayload(input, loaded, existing.plan_sha256, existing.authorized_head_sha ?? head),
+        profile,
+      },
       exitCode: 9,
     };
   }
@@ -180,6 +186,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanRunResult> {
     plan_sha256: loaded.planSha256,
     runtime_dir: paths.devDir,
     profile_id: profileId,
+    profile,
     base_sha: existing === 'missing' ? head : (existing.authorized_head_sha ?? head),
     runtime_state: runtimeState,
     next_task: nextTask,

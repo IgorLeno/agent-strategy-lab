@@ -21,6 +21,7 @@ import {
   assertNoForbiddenFlags,
   buildEnvironment,
   loadProfile,
+  resolveProfileArgv,
   type LauncherProfile,
 } from './profile.js';
 import { recover } from './recover.js';
@@ -322,7 +323,14 @@ async function runAgentProcess(
     orchestratorEnv: process.env,
   });
   if (!billing.ok) throw new Error(billing.refusal ?? 'billing preflight recusou a sessão');
-  const agentArgv = buildRoutineAgentArgv(profile, input);
+  const resolvedProfile: LauncherProfile = {
+    ...profile,
+    argv: resolveProfileArgv(profile.argv, {
+      catalogRoot: paths.profileCatalogRoot,
+      workerCwd: input.clone.clonePath,
+    }),
+  };
+  const agentArgv = buildRoutineAgentArgv(resolvedProfile, input);
   const [program, ...args] = buildTimeoutArgv(agentArgv, profile.timeout_seconds);
   return new Promise((resolve, reject) => {
     const child = spawn(program as string, args, {
@@ -454,7 +462,9 @@ function createProductionPort(options: RoutineAutonomyRuntimeOptions): RoutineRu
       };
     },
     async runAgent(input) {
-      const profile = await loadProfile(paths.repoRoot, input.profileId);
+      const profile = await loadProfile(paths.repoRoot, input.profileId, {
+        catalogRoot: paths.profileCatalogRoot,
+      });
       return runAgentProcess(paths, profile, input);
     },
     async inspectCandidate(clone, baseSha) {

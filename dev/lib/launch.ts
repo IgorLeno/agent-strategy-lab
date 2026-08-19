@@ -39,6 +39,7 @@ import {
   assertNoForbiddenFlags,
   buildEnvironment,
   deriveControlledFacts,
+  resolveProfileArgv,
   type LauncherProfile,
 } from './profile.js';
 import { buildWorkerPrompt } from './prompt.js';
@@ -198,8 +199,12 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
   const prompt = buildWorkerPrompt(packet, io, executionPolicy);
   await ensureTaskInbox(paths, packet.task_id);
 
+  const resolvedArgv = resolveProfileArgv(profile.argv, {
+    catalogRoot: paths.profileCatalogRoot,
+    workerCwd: paths.repoRoot,
+  });
   const agentArgv =
-    profile.prompt_delivery === 'argv' ? [...profile.argv, prompt] : [...profile.argv];
+    profile.prompt_delivery === 'argv' ? [...resolvedArgv, prompt] : [...resolvedArgv];
   assertNoForbiddenFlags(profile, agentArgv);
 
   const argv = [

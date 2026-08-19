@@ -117,13 +117,101 @@ export const LauncherProfile = z
   });
 export type LauncherProfile = z.infer<typeof LauncherProfile>;
 
-export async function loadProfile(repoRoot: string, id: string): Promise<LauncherProfile> {
-  const file = path.join(repoRoot, 'dev', 'profiles', `${id}.yaml`);
-  const profile = LauncherProfile.parse(parseYaml(await readFile(file, 'utf8')));
+export interface LoadProfileOptions {
+  /** Catálogo de profiles. Omitir reproduz o histórico: `<repoRoot>/dev/profiles`. */
+  readonly catalogRoot?: string;
+}
+
+export interface ProfileProvenance {
+  readonly id: string;
+  readonly catalog_root: string;
+  readonly source_file: string;
+}
+
+function isInsideRoot(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+function looksLikeRelativeResourcePath(token: string): boolean {
+  if (path.isAbsolute(token)) return false;
+  if (token.startsWith('-')) return false;
+  return token.includes('/') || token.includes('\\');
+}
+
+export function profileCatalogFile(catalogRoot: string, id: string): string {
+  return path.join(path.resolve(catalogRoot), 'dev', 'profiles', `${id}.yaml`);
+}
+
+export function profileProvenance(catalogRoot: string, id: string): ProfileProvenance {
+  const catalog_root = path.resolve(catalogRoot);
+  return { id, catalog_root, source_file: profileCatalogFile(catalog_root, id) };
+}
+
+/**
+ * Recurso pertencente ao catálogo (settings, fixture, script do launcher).
+ * Relativos resolvem contra o catalog root; absolutos passam intactos.
+ */
+export function resolveCatalogResource(catalogRoot: string, token: string): string {
+  if (path.isAbsolute(token)) return token;
+  const root = path.resolve(catalogRoot);
+  const resolved = path.resolve(root, token);
+  if (!isInsideRoot(root, resolved)) {
+    throw new Error(`recurso de profile ${token} escapa o catálogo ${root}`);
+  }
+  return resolved;
+}
+
+/**
+ * Reescreve tokens de argv que são paths relativos do catálogo. Quando o cwd
+ * do worker já é o próprio catálogo (uso histórico), o argv permanece igual —
+ * a CLI relativa continua válida. Quando o worker roda no repositório alvo, os
+ * recursos passam a absolutos no catálogo para não serem lidos no target.
+ */
+export function resolveProfileArgv(
+  argv: readonly string[],
+  options: { readonly catalogRoot: string; readonly workerCwd: string },
+): string[] {
+  const catalogRoot = path.resolve(options.catalogRoot);
+  const workerCwd = path.resolve(options.workerCwd);
+  if (catalogRoot === workerCwd) return [...argv];
+  return argv.map((token) =>
+    looksLikeRelativeResourcePath(token) ? resolveCatalogResource(catalogRoot, token) : token,
+  );
+}
+
+export async function loadProfileFromCatalog(
+  catalogRoot: string,
+  id: string,
+): Promise<LauncherProfile> {
+  const file = profileCatalogFile(catalogRoot, id);
+  let raw: string;
+  try {
+    raw = await readFile(file, 'utf8');
+  } catch (error) {
+    const detail =
+      (error as NodeJS.ErrnoException).code === 'ENOENT'
+        ? 'arquivo inexistente'
+        : error instanceof Error
+          ? error.message
+          : String(error);
+    throw new Error(
+      `perfil ${id} ausente no catálogo ${path.resolve(catalogRoot)} (consultado ${file}): ${detail}`,
+    );
+  }
+  const profile = LauncherProfile.parse(parseYaml(raw));
   if (profile.id !== id) {
     throw new Error(`perfil ${file} declara id ${profile.id}, esperado ${id}`);
   }
   return profile;
+}
+
+export async function loadProfile(
+  repoRoot: string,
+  id: string,
+  options: LoadProfileOptions = {},
+): Promise<LauncherProfile> {
+  return loadProfileFromCatalog(options.catalogRoot ?? repoRoot, id);
 }
 
 export class ForbiddenFlagError extends Error {

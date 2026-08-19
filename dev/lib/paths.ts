@@ -1,7 +1,14 @@
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 export interface HarnessPaths {
   readonly repoRoot: string;
+  /**
+   * Raiz do catálogo de profiles. Histórico: igual a `repoRoot`. Em
+   * `dev-run-plan` sobre repositório externo, aponta para a instalação do
+   * Agent Strategy Lab — o alvo não precisa conter `dev/profiles`.
+   */
+  readonly profileCatalogRoot: string;
   /** Definição versionada das tarefas — fonte autoritativa. */
   readonly planFile: string;
   /** Runtime do ORQUESTRADOR, NÃO versionado (.gitignore). O worker não escreve aqui. */
@@ -33,15 +40,20 @@ export interface HarnessPaths {
 
 /**
  * Override ADITIVO usado quando o harness opera sobre um repositório ALVO que
- * não é o seu próprio: o plano do projeto e o runtime do orquestrador vivem
- * fora do layout default. Omitir os dois campos reproduz exatamente o
- * comportamento histórico — nenhum caminho muda de lugar por causa deste tipo.
+ * não é o seu próprio: o plano do projeto, o runtime e (opcionalmente) o
+ * catálogo de profiles vivem fora do layout default. Omitir os campos reproduz
+ * exatamente o comportamento histórico — nenhum caminho muda de lugar.
  */
 export interface HarnessPathsOverride {
   /** Caminho absoluto do plan file do repositório alvo. */
   readonly planFile?: string;
   /** Runtime do orquestrador para este alvo; o inbox continua derivado dele. */
   readonly devDir?: string;
+  /**
+   * Catálogo de profiles. Omitir preserva o default histórico (`repoRoot`).
+   * `dev-run-plan` preenche com a instalação do harness.
+   */
+  readonly profileCatalogRoot?: string;
 }
 
 /**
@@ -53,17 +65,29 @@ export interface HarnessPathsOverride {
  * explícita do control plane sobre QUAL repositório está sendo conduzido, não
  * uma preferência de ambiente do operador.
  */
+
 /**
- * Traduz flags aditivas das CLIs (`--plan-file`, `--runtime-dir`) no override
- * de `resolveHarnessPaths`. Omitir os dois campos reproduz o layout histórico.
+ * Raiz da instalação do Agent Strategy Lab. Determinada pelo módulo versionado,
+ * nunca por `process.cwd()` — o operador pode invocar de qualquer diretório.
+ */
+export function resolveHarnessInstallationRoot(): string {
+  return path.resolve(fileURLToPath(new URL('../..', import.meta.url)));
+}
+
+/**
+ * Traduz flags aditivas das CLIs (`--plan-file`, `--runtime-dir`,
+ * `--profile-root`) no override de `resolveHarnessPaths`. Omitir os campos
+ * reproduz o layout histórico.
  */
 export function harnessOverrideFromCli(options: {
   readonly planFile?: string | undefined;
   readonly runtimeDir?: string | undefined;
+  readonly profileRoot?: string | undefined;
 }): HarnessPathsOverride {
   return {
     ...(options.planFile === undefined ? {} : { planFile: options.planFile }),
     ...(options.runtimeDir === undefined ? {} : { devDir: options.runtimeDir }),
+    ...(options.profileRoot === undefined ? {} : { profileCatalogRoot: options.profileRoot }),
   };
 }
 
@@ -79,6 +103,9 @@ export function resolveHarnessPaths(
       : path.join(root, '.dev');
   return {
     repoRoot: root,
+    profileCatalogRoot: override.profileCatalogRoot
+      ? path.resolve(override.profileCatalogRoot)
+      : root,
     planFile: override.planFile
       ? path.resolve(override.planFile)
       : path.join(root, 'dev', 'plan.yaml'),

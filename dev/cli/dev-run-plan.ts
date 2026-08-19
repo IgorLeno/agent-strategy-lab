@@ -9,7 +9,7 @@ import {
   parseRoutineAutonomy,
   runMain,
 } from '../lib/cli.js';
-import { harnessOverrideFromCli, resolveHarnessPaths } from '../lib/paths.js';
+import { harnessOverrideFromCli, resolveHarnessInstallationRoot, resolveHarnessPaths } from '../lib/paths.js';
 import { PlanSetupError, runPlan } from '../lib/run-plan.js';
 
 const DRY_RUN_FLAG = 'dry-run';
@@ -33,6 +33,8 @@ function requireOption(args: ReturnType<typeof parseArgs>, name: string): string
  * `--profile` é obrigatório: esta CLI não escolhe um default implícito.
  * `--plan` aponta para o PlanFile autoritativo e NÃO o copia para
  * `<repo>/dev/plan.yaml`.
+ * `--profile` é carregado do catálogo do Agent Strategy Lab (não do alvo).
+ * `--profile-root` é override opcional; o happy path não o exige.
  *
  * Exit codes: 0 READY/ALL_DONE/LIMIT_REACHED | 1 setup inválido |
  * 9 mismatch ou término bloqueante | 10 harness ocupado.
@@ -47,6 +49,7 @@ async function main(): Promise<void> {
     harnessOverrideFromCli({
       planFile: plan,
       runtimeDir: args.options.get('runtime-dir'),
+      profileRoot: args.options.get('profile-root') ?? resolveHarnessInstallationRoot(),
     }),
   );
 

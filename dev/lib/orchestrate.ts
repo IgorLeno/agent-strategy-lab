@@ -475,7 +475,9 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
 
   // Só para o relatório: perfil quebrado continua falhando no lançamento, que é
   // onde a falha significa alguma coisa. Ler aqui não muda o fluxo.
-  const profile = await loadProfile(paths.repoRoot, profileId).catch(() => null);
+  const profile = await loadProfile(paths.repoRoot, profileId, {
+    catalogRoot: paths.profileCatalogRoot,
+  }).catch(() => null);
   const facts = profile ? experimentFactsOf(profile) : null;
 
   const iterations: IterationInput[] = [];

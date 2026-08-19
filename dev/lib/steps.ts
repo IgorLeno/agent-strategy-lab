@@ -100,7 +100,9 @@ export async function launchTask(
   timeoutSecondsOverride?: number,
 ): Promise<LaunchStepResult> {
   const taskId = packet.task_id;
-  const profile = await loadProfile(paths.repoRoot, profileId);
+  const profile = await loadProfile(paths.repoRoot, profileId, {
+    catalogRoot: paths.profileCatalogRoot,
+  });
   const stateBefore = await readState(paths);
   const before = getTaskState(stateBefore, taskId);
   if (before.status !== 'READY') {

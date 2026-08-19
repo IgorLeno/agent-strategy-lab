@@ -238,6 +238,8 @@ describe('HarnessPaths override aditivo', () => {
     const withEmptyOverride = resolveHarnessPaths('/repo', {});
     expect(withEmptyOverride).toEqual(withoutOverride);
     expect(withoutOverride.planFile).toBe(path.join('/repo', 'dev', 'plan.yaml'));
+    expect(withoutOverride.profileCatalogRoot).toBe(path.resolve('/repo'));
+    expect(withoutOverride.profileCatalogRoot).toBe(withoutOverride.repoRoot);
   });
 
   it('redireciona plan file e runtime dir do repositório alvo sem mover o repoRoot', () => {

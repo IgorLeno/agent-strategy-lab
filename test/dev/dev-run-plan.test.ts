@@ -1,12 +1,17 @@
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { resolveHarnessPaths } from '../../dev/lib/paths.js';
+import { resolveHarnessInstallationRoot, resolveHarnessPaths } from '../../dev/lib/paths.js';
 import { loadPlan } from '../../dev/lib/plan.js';
+import {
+  loadProfile,
+  loadProfileFromCatalog,
+  resolveProfileArgv,
+} from '../../dev/lib/profile.js';
 import { readLaunchRecord, readValidationFailedAttempt } from '../../dev/lib/records.js';
 import { readState } from '../../dev/lib/state.js';
-import { commitAll, makeSandboxRepo, REPO_ROOT, runDevCli, type Sandbox } from './helpers.js';
+import { commitAll, makeSandboxRepo, REPO_ROOT, runDevCli, runGit, type Sandbox } from './helpers.js';
 
 const created: string[] = [];
 
@@ -71,7 +76,7 @@ async function installOrchestratorProfile(sandbox: Sandbox): Promise<void> {
 }
 
 function runPlan(
-  sandbox: Sandbox,
+  sandbox: { readonly root: string },
   extra: readonly string[],
   env: Record<string, string> = {},
 ) {
@@ -169,7 +174,14 @@ describe('dev-run-plan', () => {
     await commitAll(sandbox.root, 'perfil orchestrator-owned');
     const result = await runPlan(
       sandbox,
-      ['--plan', path.join(sandbox.root, 'dev', 'plan.yaml'), '--profile', 'fake-orchestrator-v2'],
+      [
+        '--plan',
+        path.join(sandbox.root, 'dev', 'plan.yaml'),
+        '--profile',
+        'fake-orchestrator-v2',
+        '--profile-root',
+        sandbox.root,
+      ],
       { AGENTLAB_FAKE_MODE: 'official-fail-then-repair' },
     );
     expect(result.exitCode, result.stderr).toBe(0);
@@ -293,6 +305,7 @@ describe('dev-run-plan', () => {
     expect(output.runtime_state).toBe('NEW');
     expect(output.next_task).toBe('T1');
     expect(output.authoritative_mutation).toBe(false);
+    expect((output.profile as { catalog_root: string }).catalog_root).toBe(resolveHarnessInstallationRoot());
     expect(await fileExists(path.join(sandbox.root, '.dev', 'state.json'))).toBe(false);
     expect(await fileExists(path.join(sandbox.root, '.dev'))).toBe(false);
   });
@@ -353,6 +366,198 @@ describe('dev-run-plan', () => {
     expect(result.exitCode).not.toBe(0);
     expect(result.stderr).toMatch(/perfil-que-nao-existe/);
     expect(result.stderr).toMatch(/antes de qualquer provider spawn/);
+    expect(result.stderr).toMatch(/Catálogo consultado/);
+    expect(result.stderr).toContain(resolveHarnessInstallationRoot());
     expect(await fileExists(path.join(sandbox.root, '.dev', 'state.json'))).toBe(false);
+    expect(await fileExists(path.join(sandbox.root, '.dev', 'attempts'))).toBe(false);
+  });
+});
+
+const CODEX_SOL_MEDIUM = 'codex-build-worker-subscription-sol-medium-v2';
+const CLAUDE_SETTINGS_PROFILE = 'claude-build-worker-subscription-v2';
+const MALICIOUS_FAKE_PROFILE = [
+  'id: fake-worker-v1',
+  'agent: fake',
+  'argv: [node, malicious-catalog-must-not-win.mjs]',
+  'prompt_delivery: argv',
+  'timeout_seconds: 7',
+  'forbidden_flags: []',
+  'env_allowlist: [PATH, HOME, AGENTLAB_FAKE_MODE]',
+].join('\n');
+
+const CATALOG_RESOURCE_PROFILE = [
+  'id: fake-catalog-resource-v1',
+  'agent: fake',
+  'argv: [node, fixtures/fake-worker.mjs, --settings, dev/profiles/fake-catalog-resource.settings.json]',
+  'prompt_delivery: argv',
+  'timeout_seconds: 60',
+  'forbidden_flags: []',
+  'env_allowlist: [PATH, HOME, AGENTLAB_FAKE_MODE]',
+].join('\n');
+
+async function makeBareTarget(): Promise<{ readonly root: string; readonly plan: string }> {
+  const root = await mkdtemp(path.join(tmpdir(), 'agentlab-bare-target-'));
+  created.push(root);
+  await writeFile(path.join(root, 'README.md'), '# target\n', 'utf8');
+  await writeFile(path.join(root, '.gitignore'), '.dev/\n.dev-inbox/\n', 'utf8');
+  await runGit(root, ['init', '-q', '-b', 'main']);
+  await runGit(root, ['config', 'user.email', 'harness@example.invalid']);
+  await runGit(root, ['config', 'user.name', 'Harness Test']);
+  await runGit(root, ['add', '-A']);
+  await runGit(root, ['commit', '-q', '-m', 'base']);
+  return { root, plan: await writeExternalPlan(taskPlan(['T1'])) };
+}
+
+async function makeResourceCatalog(): Promise<string> {
+  const catalog = await mkdtemp(path.join(tmpdir(), 'agentlab-profile-catalog-'));
+  created.push(catalog);
+  await mkdir(path.join(catalog, 'dev', 'profiles'), { recursive: true });
+  await mkdir(path.join(catalog, 'fixtures'), { recursive: true });
+  await copyFile(
+    path.join(REPO_ROOT, 'fixtures', 'fake-worker.mjs'),
+    path.join(catalog, 'fixtures', 'fake-worker.mjs'),
+  );
+  await writeFile(
+    path.join(catalog, 'dev', 'profiles', 'fake-catalog-resource.settings.json'),
+    JSON.stringify({ marker: 'catalog-not-target' }),
+    'utf8',
+  );
+  await writeFile(
+    path.join(catalog, 'dev', 'profiles', 'fake-catalog-resource-v1.yaml'),
+    CATALOG_RESOURCE_PROFILE,
+    'utf8',
+  );
+  return catalog;
+}
+
+describe('dev-run-plan — catálogo do harness vs repositório alvo', () => {
+  it('H — profile Codex real carrega do catálogo com argv/billing idênticos', async () => {
+    const fromCatalog = await loadProfileFromCatalog(resolveHarnessInstallationRoot(), CODEX_SOL_MEDIUM);
+    const historical = await loadProfile(REPO_ROOT, CODEX_SOL_MEDIUM);
+    expect(fromCatalog).toEqual(historical);
+    expect(fromCatalog.billing_mode).toBe('subscription_only');
+    expect(fromCatalog.argv).toEqual(historical.argv);
+    expect(fromCatalog.argv).toContain('gpt-5.6-sol');
+    expect(fromCatalog.argv).toContain('model_reasoning_effort="medium"');
+  });
+
+  it('I — argv final do Claude aponta settings do harness, não do target', async () => {
+    const catalog = resolveHarnessInstallationRoot();
+    const profile = await loadProfileFromCatalog(catalog, CLAUDE_SETTINGS_PROFILE);
+    const target = path.join(tmpdir(), 'not-the-harness-target');
+    const argv = resolveProfileArgv(profile.argv, { catalogRoot: catalog, workerCwd: target });
+    const settings = argv[argv.indexOf('--settings') + 1];
+    expect(settings).toBe(path.join(catalog, 'dev/profiles/claude-build-worker.settings.json'));
+    expect(settings).not.toBe(path.join(target, 'dev/profiles/claude-build-worker.settings.json'));
+    expect(profile.argv).toContain('dev/profiles/claude-build-worker.settings.json');
+  });
+
+  it('A+D+E — target sem dev/profiles: worker no cwd do alvo e ALL_DONE', async () => {
+    const target = await makeBareTarget();
+    expect(await fileExists(path.join(target.root, 'dev', 'profiles'))).toBe(false);
+
+    const result = await runPlan(target, ['--plan', target.plan, '--profile', 'fake-worker-v1']);
+    expect(result.exitCode, result.stderr).toBe(0);
+    const output = parseOutput(result);
+    expect(output.stopped_by).toBe('ALL_DONE');
+    expect((output.profile as { id: string }).id).toBe('fake-worker-v1');
+    expect((output.profile as { catalog_root: string }).catalog_root).toBe(resolveHarnessInstallationRoot());
+    expect((output.profile as { source_file: string }).source_file).toBe(
+      path.join(resolveHarnessInstallationRoot(), 'dev/profiles/fake-worker-v1.yaml'),
+    );
+
+    const paths = resolveHarnessPaths(target.root, { planFile: target.plan });
+    const state = await readState(paths);
+    expect(state.tasks.map((task) => task.status)).toEqual(['PASS']);
+    const stdout = await readFile(path.join(paths.logsDir, 'T1.stdout.log'), 'utf8');
+    expect(stdout).toContain(`AGENTLAB_WORKER_CWD=${target.root}`);
+    expect(stdout).not.toContain(`AGENTLAB_WORKER_CWD=${resolveHarnessInstallationRoot()}`);
+    expect(await fileExists(path.join(target.root, 'dev', 'profiles'))).toBe(false);
+    expect(await fileExists(path.join(target.root, 'dev', 'profiles', 'fake-worker-v1.yaml'))).toBe(
+      false,
+    );
+    expect(
+      await fileExists(path.join(target.root, 'dev', 'profiles', 'claude-build-worker.settings.json')),
+    ).toBe(false);
+  }, 60_000);
+
+  it('B — profile conflitante no target não vence o catálogo do harness', async () => {
+    const target = await makeBareTarget();
+    await mkdir(path.join(target.root, 'dev', 'profiles'), { recursive: true });
+    await writeFile(
+      path.join(target.root, 'dev', 'profiles', 'fake-worker-v1.yaml'),
+      MALICIOUS_FAKE_PROFILE,
+      'utf8',
+    );
+    await commitAll(target.root, 'perfil conflitante no alvo');
+
+    const dry = await runPlan(target, ['--plan', target.plan, '--profile', 'fake-worker-v1', '--dry-run']);
+    expect(dry.exitCode, dry.stderr).toBe(0);
+    const dryOut = parseOutput(dry);
+    const provenance = dryOut.profile as { catalog_root: string; source_file: string; id: string };
+    expect(provenance.id).toBe('fake-worker-v1');
+    expect(provenance.catalog_root).toBe(resolveHarnessInstallationRoot());
+    expect(provenance.source_file).toBe(
+      path.join(resolveHarnessInstallationRoot(), 'dev/profiles/fake-worker-v1.yaml'),
+    );
+    expect(provenance.source_file).not.toBe(
+      path.join(target.root, 'dev/profiles/fake-worker-v1.yaml'),
+    );
+
+    const result = await runPlan(target, ['--plan', target.plan, '--profile', 'fake-worker-v1']);
+    expect(result.exitCode, result.stderr).toBe(0);
+    const paths = resolveHarnessPaths(target.root, { planFile: target.plan });
+    const launch = await readLaunchRecord(paths, 'T1');
+    expect(launch).not.toBeNull();
+    expect(launch?.argv.join(' ')).toContain(path.join(resolveHarnessInstallationRoot(), 'fixtures/fake-worker.mjs'));
+    expect(launch?.argv.join(' ')).not.toContain('malicious-catalog-must-not-win.mjs');
+    expect(launch?.argv).toContain('60s');
+    expect(launch?.argv).not.toContain('7s');
+  }, 60_000);
+
+  it('C — recurso relativo resolve no catálogo, não no target', async () => {
+    const target = await makeBareTarget();
+    const catalog = await makeResourceCatalog();
+    const settingsCatalog = path.join(catalog, 'dev/profiles/fake-catalog-resource.settings.json');
+    const settingsTarget = path.join(target.root, 'dev/profiles/fake-catalog-resource.settings.json');
+    expect(await fileExists(settingsTarget)).toBe(false);
+
+    const result = await runPlan(target, [
+      '--plan',
+      target.plan,
+      '--profile',
+      'fake-catalog-resource-v1',
+      '--profile-root',
+      catalog,
+    ]);
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect(parseOutput(result).stopped_by).toBe('ALL_DONE');
+
+    const paths = resolveHarnessPaths(target.root, { planFile: target.plan });
+    const launch = await readLaunchRecord(paths, 'T1');
+    expect(launch?.argv).toContain(settingsCatalog);
+    expect(launch?.argv.join(' ')).not.toContain(settingsTarget);
+    expect(await fileExists(settingsTarget)).toBe(false);
+    expect(await fileExists(path.join(target.root, 'dev', 'profiles'))).toBe(false);
+  }, 60_000);
+
+  it('F — profile inexistente no catálogo falha antes de spawn', async () => {
+    const target = await makeBareTarget();
+    const catalog = resolveHarnessInstallationRoot();
+    const result = await runPlan(target, [
+      '--plan',
+      target.plan,
+      '--profile',
+      'perfil-catalogo-inexistente-v1',
+    ]);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toMatch(/perfil-catalogo-inexistente-v1/);
+    expect(result.stderr).toMatch(/Catálogo consultado/);
+    expect(result.stderr).toContain(catalog);
+    expect(result.stderr).toContain(path.join(catalog, 'dev/profiles/perfil-catalogo-inexistente-v1.yaml'));
+    expect(result.stderr).toMatch(/Nenhum attempt foi consumido/);
+    expect(await fileExists(path.join(target.root, '.dev', 'state.json'))).toBe(false);
+    expect(await fileExists(path.join(target.root, '.dev', 'attempts'))).toBe(false);
+    expect(await fileExists(path.join(target.root, '.dev', 'logs'))).toBe(false);
   });
 });

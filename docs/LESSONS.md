@@ -504,3 +504,12 @@ repair bounded existente nem chegou a rodar — parecia falha do wrapper.
 Rule: fixture de perfil no sandbox git entra no commit de baseline ANTES de
 init/run-plan. Working tree suja não é caminho para exercitar repair, DAG ou
 resume; a guarda de progressão continua valendo para a entrypoint ergonômica.
+
+[2026-08-19] Contexto: `dev-run-plan` sobre repositório externo.
+Mistake: resolver `--profile` com `loadProfile(paths.repoRoot, id)` obrigava o
+alvo a copiar `dev/profiles` e fazia `--settings` relativos caírem no cwd do
+worker (o target), não no catálogo do harness.
+Rule: catálogo de profiles é a instalação do Agent Strategy Lab (módulo
+versionado, nunca `process.cwd()`). O repositório alvo é só workspace. Recursos
+relativos do profile resolvem contra o catalog root em runtime; `loadProfile`
+histórico continua lendo `<repoRoot>/dev/profiles`.

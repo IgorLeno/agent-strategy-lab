@@ -374,16 +374,29 @@ com `blocked_by` são um projeto/DAG — o mesmo comando serve para os dois.
 Happy path:
 
 ```bash
+cd /path/to/agent-strategy-lab
 pnpm dev-run-plan \
-  --repo ~/Projetos/meu-projeto \
-  --plan ~/Projetos/meu-projeto/agentlab-plan.yaml \
+  --repo ~/Projetos/minesweeper \
+  --plan ~/Projetos/plans/minesweeper.yaml \
   --profile codex-build-worker-subscription-sol-medium-v2 \
   --autonomy routine
 ```
 
+O repositório alvo **não** precisa conter `dev/profiles`, settings do Agent
+Lab nem cópia do harness. Três raízes distintas:
+
+- **profile / configuração** — catálogo versionado do Agent Strategy Lab
+  (`dev/profiles/*.yaml` e settings relativos). Default de `dev-run-plan`.
+- **repo** — somente o código inspecionado, modificado e validado; cwd do
+  worker.
+- **plan** — qualquer caminho absoluto; **não** é copiado para
+  `<repo>/dev/plan.yaml`.
+- **runtime** — default `<repo>/.dev`, persistente e separado do catálogo.
+
 O operador não precisa encadear `dev-init` + `dev-orchestrate` no caso normal
 de um plan novo. O arquivo em `--plan` é a identidade autoritativa: **não** é
 copiado para `<repo>/dev/plan.yaml` e pode viver dentro ou fora do repo alvo.
+`--profile-root` é override opcional; o happy path não o exige.
 
 Runtime default: `<repo>/.dev` (o mesmo do harness histórico). `--runtime-dir`
 é override aditivo. O runtime é persistente:
