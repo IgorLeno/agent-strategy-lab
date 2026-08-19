@@ -486,3 +486,13 @@ com `luna-medium` / `terra-high` / `sol-medium`.
 Rule: novos IDs Codex são `codex-build-worker-subscription-<model>-<effort>-vN`.
 IDs históricos não se renomeiam. Modelo e effort saem do argv via doctor,
 nunca de substring (`sol`/`terra`/`luna`/`medium`/`high`) no `profile_id`.
+
+[2026-08-19] Context: M86 — revisão do control plane antes do primeiro projeto real.
+Mistake: tratar intenção do usuário, duração estimada, runtime do worker e
+timeout de validação como uma única autorização ou um único relógio tornaria
+gates redundantes dentro do escopo e permissivos fora dele, além de induzir
+decomposição artificial ou truncamento silencioso.
+Rule: autorização é um boundary explícito de capabilities, nunca consequência
+de `requested_scope` nem gate por spawn; AVC decide a unidade de mudança, e
+estimated task duration, worker runtime budget e validation command timeout são
+validados exclusivamente contra seus próprios bounds, com violação nomeada.

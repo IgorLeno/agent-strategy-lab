@@ -1231,3 +1231,127 @@ em aberto para a aprovação humana que vem depois deste documento. Nenhum dos
 - `docs/BACKLOG.md`/`docs/LESSONS.md`/`docs/ARCHITECTURE.md` coerentes com
   M53–M67.
 - Gates verdes; nenhum pilot real lançado; parada humana registrada.
+
+## Marco 3 — Control plane universal de projetos
+
+O Agent Strategy Lab possui o control plane; Claude Code e Codex são workers
+descartáveis subordinados. A sequência M71–M85 constrói intake, inspection,
+planning AVC, routing, escalation, história comparável, roles estruturais e o
+lifecycle universal, e M86 fecha com revisão humana antes de qualquer projeto
+real. O `pilot-v1` do Marco 2 permanece congelado e disponível.
+
+### M71 — Project Intake + Execution Authorization Contract
+**Depende de:** M70 · **Teste:** `test/intake/intake-request.test.ts`
+
+Contratos strict/versionados para pedido sobre repo externo e autorização de
+escopo. `requested_scope` registra intenção, mas não autoriza billing,
+credenciais, destruição, efeito externo, deploy, expansão ou provider/profile
+fora da policy. O boundary permite workspaces, workers configurados, validation,
+bounded repair e escalation autorizada sem gate por spawn.
+
+### M72 — Repository Inspector + Context/Environment Facts
+**Depende de:** M71 · **Teste:** `test/inspection/inspect-repository.test.ts`
+
+Inspeção read-only com fatos e provenance. Instruções entram como mapa de
+caminhos/source anchors, nunca como documentação concatenada; unknown não vira
+READY nem valor inventado.
+
+### M73 — Planning Task Schema / Adaptive Task Envelope
+**Depende de:** M72 · **Teste:** `test/planner/planned-task.test.ts`
+
+`PlannedTask` compõe taxonomia e budgets por task, acrescenta risk, requisitos
+de contexto/ambiente e mantém separados estimated task duration, worker runtime
+budget e timeout por validation command. Não existe teto universal de duração.
+
+### M74 — AVC Task Decomposition Engine
+**Depende de:** M73 · **Teste:** `test/planner/decomposition.test.ts`
+
+Decomposição pura por Atomic Validatable Change: coesão, blast radius,
+ambiguidade, contexto, retry, rollback e verificação objetiva. Duração absoluta
+não obriga split e budget adequado não é substituído por fragmentação artificial.
+
+### M75 — Plan Policy Validator
+**Depende de:** M74 · **Teste:** `test/planner/validate-plan.test.ts`
+
+Valida DAG e política Direct/Reviewed. DIRECT exige minimal factual preflight e
+Direct Task Normalization sem fatos inventados; insuficiência encaminha ao fluxo
+REVIEWED. Plano inválido falha fechado.
+
+### M76 — Execution Assessment
+**Depende de:** M75 · **Teste:** `test/planner/assess.test.ts`
+
+Deriva risk, context pressure, environment readiness, verification, review e
+confidence. UNKNOWN não é READY; review independente e diversidade de profile/
+model/provider são dimensões separadas e proporcionais ao risco.
+
+### M77 — Profile Capability Registry
+**Depende de:** M76 · **Teste:** `test/routing/capability-registry.test.ts`
+
+Registry provider-neutral derivado dos facts do doctor, com isolamento,
+mutation/read-only, ownership e compatibilidade de role explícitos, sem inferir
+capacidade de notes ou reparsear identidade do argv.
+
+### M78 — Initial Router + Adaptive Execution Budget
+**Depende de:** M77 · **Teste:** `test/routing/router.test.ts`
+
+Router determinístico por work unit e capability. Deriva worker runtime budget
+adaptativo e o valida somente contra seu runtime bound; violação produz
+`BUDGET_UNSUPPORTED` nomeando o bound.
+
+### M79 — Failure Diagnosis + Selective Escalation
+**Depende de:** M78 · **Teste:** `test/routing/escalation.test.ts`
+
+Diagnóstico precede escalation. Só CAPABILITY após bounded repair percorre uma
+ladder finita autorizada; demais classes seguem recovery, environment repair,
+context repair ou replan. Fora da policy termina em `HUMAN_REQUIRED`.
+
+### M80 — Cross-provider Escalation
+**Depende de:** M79 · **Teste:** `test/routing/escalation-cross-provider.test.ts`
+
+Escalation Claude/Codex dentro de profiles de assinatura permitidos, com
+billing/credential/quota preflight por degrau, decisão e provenance do control
+plane. Degrau indisponível não vira capability FAIL.
+
+### M81 — Performance History Query
+**Depende de:** M80 · **Teste:** `test/performance/query.test.ts`
+
+Consulta read-only de histórico e contrato puro `ComparableRunFacts` em `src`.
+Identidade comparável usa profile id + fingerprint canônico; ausência permanece
+`UNKNOWN` com provenance, sem backfill ou escrita.
+
+### M82 — History-informed Router
+**Depende de:** M81 · **Teste:** `test/routing/history-router.test.ts`
+
+Usa apenas séries comparáveis e amostra suficiente; deriva recomendação e
+runtime budget observados sem inventar precisão. Lacuna, empate ou ambiguidade
+cai no fallback determinístico M78 inalterado.
+
+### M83 — Project Plan Generator + Untrusted Planning Worker
+**Depende de:** M82 · **Teste:** `test/planner/generate-plan.test.ts`
+
+Compõe o plano autorizado e uma porta provider-agnostic para planner read-only.
+Draft é não confiável, bounded e submetido ao pipeline determinístico antes de
+projeção; não pode alterar policy, acceptance, safety ou authorization.
+
+### M84 — Universal Project Orchestration Lifecycle
+**Depende de:** M83 · **Teste:** `test/dev/project-orchestrate.test.ts`
+
+Conecta DIRECT e REVIEWED ao orquestrador existente, roles estruturais,
+budgets/bounds separados, writer aditivo de `ComparableRunFacts`, diagnosis,
+review fresco e human gates proporcionais. Provider real existe desligado por
+default; nenhum provider ou projeto real foi executado.
+
+### M85 — External Project Fake E2E
+**Depende de:** M84 · **Teste:** `test/e2e/project-orchestration-e2e.test.ts`
+
+Oito cenários fake provam DIRECT, REVIEWED, CAPABILITY, INFRA, ENVIRONMENT,
+TASK/CONTEXT, CROSS_PROVIDER e HUMAN_GATE, incluindo write→read dos facts,
+autonomia dentro do boundary e zero spawn após a fronteira.
+
+### M86 — Human Review + First Real Project Checklist
+**Depende de:** M85 · **Gate:** `pnpm build`
+
+[`docs/reviews/M3-REVIEW.md`](reviews/M3-REVIEW.md) confere M71–M85, gates,
+recover, contratos/policies, preservação do `pilot-v1` e coerência documental.
+Nenhum projeto real é executado. Termina com **HUMAN STOP**: o primeiro projeto
+real depende de aprovação humana explícita posterior.

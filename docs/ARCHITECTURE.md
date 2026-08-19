@@ -5,10 +5,11 @@ estratégias, modelos e stacks. O produto é a CLI `agentlab` (`src/`); o harnes
 de sessões descartáveis que o constrói é outra coisa e vive em `dev/`
 ([HARNESS.md](HARNESS.md)).
 
-> **Estado em M40B (fim do Marco 1).** Todas as microtarefas M01–M40A estão
-> implementadas; este documento foi conferido contra `src/` na revisão de
-> fechamento do marco. Onde houver divergência futura, o código é a
-> autoridade.
+> **Estado em M86 (fim do Marco 3).** M01–M85 estão implementadas. Além do
+> laboratório experimental, o projeto possui um control plane universal para
+> planejar, rotear, executar, revisar e recuperar work units em projetos
+> externos. O primeiro projeto real continua bloqueado por HUMAN STOP. Onde
+> houver divergência futura, o código é a autoridade.
 
 ---
 
@@ -249,11 +250,13 @@ fronteira.
 | `evaluator` | workspace do evaluator, graders, orquestração da avaliação | EXECUTION CONTRACT | M27A–M28 |
 | `scorer` | perfis de score, qualificação | EXECUTION CONTRACT | M29 |
 | `reporting` | relatório de terminal e `--json`; compare entre arms do piloto | EXTENSIONS | M38, M66 |
-| `performance` | fatos de attempt e records de performance derivados, sem I/O | EXTENSIONS | M45–M48 |
+| `performance` | fatos de attempt, records derivados e consulta read-only de séries comparáveis | EXTENSIONS | M45–M48, M81 |
 | `project` | `.agentlab/project.yaml`, resolução do data dir | CONTROL PLANE | M11, M33 |
 | `cli` | comandos `agentlab` | CONTROL PLANE | M32–M38 |
 | `intake` | `ProjectIntakeRequest` e `ExecutionAuthorizationScope`: pedido formal sobre repo externo e separação entre escopo pedido e ações autorizadas sem novo gate | CONTROL PLANE | M71 |
-| `routing` | `ProfileCapability`/`CapabilityRegistry`: visão estruturada das capacidades de profile (session isolation, mutation/read-only, ownership, compatibilidade de role) para o control plane impor política, sem decidir routing | CONTROL PLANE | M77 |
+| `inspection` | inspeção read-only, facts de repositório/ambiente e mapa de instruções/source anchors | CONTROL PLANE | M72 |
+| `planner` | `PlannedTask`, AVC, policy Direct/Reviewed, assessment, planning draft não confiável e projeção autorizada | CONTROL PLANE | M73–M76, M83 |
+| `routing` | capability registry, routing inicial/histórico, diagnosis e escalation seletiva/cross-provider | CONTROL PLANE | M77–M82 |
 
 - **STABLE KERNEL** — vocabulário e contratos que todo o resto importa; zero
   I/O ou serialização canônica, muda raramente e qualquer mudança é
@@ -270,7 +273,61 @@ fronteira.
 
 Dependências apontam para baixo: `cli` → tudo; `core` não importa ninguém.
 
-### 6.1 Divergências entre este documento e o código
+### 6.1 Control plane universal do Marco 3
+
+O **Agent Strategy Lab é o control plane**. Claude Code e Codex são workers
+descartáveis: recebem packet bounded, role, workspace e budget; não possuem o
+DAG, o estado autoritativo, routing/escalation, billing policy, commit oficial
+ou decisão de PASS. O lifecycle em `dev/lib/project-orchestrate.ts` reutiliza as
+primitives existentes de launch, close, recovery e evidence.
+
+```text
+ProjectIntakeRequest + ExecutionAuthorizationScope
+  → inspection read-only / minimal factual preflight
+  → Direct Task Normalization OU planning worker draft não confiável
+  → PlannedTask + AVC + plan/assessment policy
+  → capability/history routing + worker runtime budget
+  → implementer → validation → fresh review (quando exigido)
+  → PASS | repair/replan | CAPABILITY escalation | HUMAN_REQUIRED
+```
+
+As fronteiras principais são:
+
+- **AVC não é um relógio.** Decomposição responde à coerência e validação
+  independente da mudança. Task longa pode permanecer una; task curta pode
+  precisar de split.
+- **Tempos não se cruzam.** `estimated_duration` estima a task;
+  `worker_runtime_budget` limita o processo contra o bound do launcher/profile;
+  `validation[].timeout_seconds` limita um comando contra o contrato de
+  validation. Violação de runtime é `BUDGET_UNSUPPORTED` com bound nomeado.
+- **Contexto é montado por mapa.** Inspection registra instruction files,
+  source anchors e relevância; documentação não é concatenada num prompt.
+- **DIRECT não significa sem fatos.** Ele exige minimal factual preflight e
+  normalização determinística. Ambiguidade ou fato ausente segue REVIEWED.
+- **Autorização é de escopo.** `requested_scope` registra o pedido, enquanto o
+  boundary enumera capabilities autônomas. Spawns, bounded repair e escalation
+  dentro da ladder/policy não criam aprovação repetitiva; billing/credential
+  novo, destruição, efeitos externos, deploy, expansão, risco crítico ou
+  profile/provider fora da policy exigem `HUMAN_REQUIRED`.
+- **Roles são estruturais.** Planner/reviewer são read-only por argv/settings e
+  ownership, não por promessa no prompt; implementer muta apenas o workspace
+  autorizado. Review usa invocação e contexto frescos; diversidade adicional é
+  proporcional ao risco.
+- **Escalation começa por diagnosis.** Só CAPABILITY após bounded repair usa a
+  ladder. Environment, context, task definition, tooling e infra não são
+  transformados em pedido de modelo maior.
+- **História não é completada por imaginação.** M81 lê sem escrever;
+  `ComparableRunFacts` é contrato puro em `src/performance/comparable-run.ts`,
+  gravado aditivamente pelo evidence path de M84. `UNKNOWN` e provenance
+  impedem fusão indevida; M82 cai no router determinístico M78 quando a série
+  não decide.
+
+O `pilot-v1` permanece uma superfície experimental separada: seu
+`ExperimentSpec` congelado, fingerprint, profiles, corpus e
+`runExperimentSchedule` genérico não são reconfigurados pelo lifecycle de
+projetos.
+
+### 6.2 Divergências entre este documento e o código
 
 Registradas aqui, em vez de silenciosamente corrigidas, porque cada uma tem
 uma decisão por trás que vale preservar.
