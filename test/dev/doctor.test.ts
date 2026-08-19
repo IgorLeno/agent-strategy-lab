@@ -8,6 +8,7 @@ import {
   claudeReasoningEffort,
   codexReasoningEffort,
   diagnose,
+  experimentFactsOf,
   flagsOf,
   helpInvocation,
   uncoveredValidationCommands,
@@ -749,8 +750,11 @@ describe('perfil Codex Sol High por assinatura', () => {
 const CODEX_BASELINE = 'codex-build-worker-subscription-high-v2';
 const CLAUDE_BASELINE = 'claude-build-worker-subscription-v2';
 
+const CODEX_EXPLICIT_SOL_HIGH = 'codex-build-worker-subscription-sol-high-v2';
+
 const CODEX_EXPERIMENTS = [
   { id: CODEX_BASELINE, model: 'gpt-5.6-sol', effort: 'high' },
+  { id: CODEX_EXPLICIT_SOL_HIGH, model: 'gpt-5.6-sol', effort: 'high' },
   { id: 'codex-build-worker-subscription-sol-medium-v2', model: 'gpt-5.6-sol', effort: 'medium' },
   { id: 'codex-build-worker-subscription-terra-high-v2', model: 'gpt-5.6-terra', effort: 'high' },
   {
@@ -923,6 +927,64 @@ describe('perfis históricos permanecem semanticamente imutáveis', () => {
     expect(profile.argv).not.toContain('--effort');
     expect(Object.values(profile.control_markers)).not.toContain('--effort');
     expect(claudeReasoningEffort(profile.argv)).toEqual({ pinning: 'unpinned', effort: null });
+  });
+});
+
+describe('identidade explícita Codex Sol High', () => {
+  it('legacy high-v2 e sol-high-v2 são IDs distintos com a mesma semântica operacional', async () => {
+    const legacy = await loadProfile(REPO_ROOT, CODEX_BASELINE);
+    const explicit = await loadProfile(REPO_ROOT, CODEX_EXPLICIT_SOL_HIGH);
+
+    expect(legacy.id).toBe(CODEX_BASELINE);
+    expect(explicit.id).toBe(CODEX_EXPLICIT_SOL_HIGH);
+    expect(legacy.id).not.toBe(explicit.id);
+    expect(explicit.argv).toEqual(legacy.argv);
+    expect(explicit.control_markers).toEqual(legacy.control_markers);
+    expect(explicit.forbidden_flags).toEqual(legacy.forbidden_flags);
+    expect(explicit.env_allowlist).toEqual(legacy.env_allowlist);
+    expect(explicit.env_extra).toEqual(legacy.env_extra);
+    expect(nonExperimentalFields(explicit)).toEqual(nonExperimentalFields(legacy));
+    expect(codexReasoningEffort(legacy.argv)).toBe('high');
+    expect(codexReasoningEffort(explicit.argv)).toBe('high');
+  });
+
+  it('experimentFactsOf do legacy e do sol-high explícito coincidem nas dimensões', async () => {
+    const legacy = experimentFactsOf(await loadProfile(REPO_ROOT, CODEX_BASELINE));
+    const explicit = experimentFactsOf(await loadProfile(REPO_ROOT, CODEX_EXPLICIT_SOL_HIGH));
+
+    expect(legacy).toEqual({
+      agent: 'codex',
+      model: 'gpt-5.6-sol',
+      reasoning_effort: 'high',
+      reasoning_effort_source: 'codex_config_override',
+    });
+    expect(explicit).toEqual(legacy);
+  });
+
+  it('modelo e effort saem do argv, não de substring sol/terra/luna/medium/high no profile_id', async () => {
+    const misleadingId = 'codex-build-worker-subscription-luna-medium-v9';
+    await writeProfile(misleadingId, codexProfile(misleadingId, 'high', true, 'gpt-5.6-sol'));
+    const profile = await loadProfile(sandbox.root, misleadingId);
+
+    expect(profile.id).toMatch(/luna-medium/);
+    expect(experimentFactsOf(profile)).toEqual({
+      agent: 'codex',
+      model: 'gpt-5.6-sol',
+      reasoning_effort: 'high',
+      reasoning_effort_source: 'codex_config_override',
+    });
+
+    const report = await diagnose({
+      repoRoot: sandbox.root,
+      profileId: misleadingId,
+      loaded,
+      env: fakeCodexEnv(),
+    });
+    expect(report.model).toBe('gpt-5.6-sol');
+    expect(report.reasoning_effort).toBe('high');
+    expect(report.reasoning_effort_source).toBe('codex_config_override');
+    expect(report.model).not.toContain('luna');
+    expect(report.reasoning_effort).not.toBe('medium');
   });
 });
 

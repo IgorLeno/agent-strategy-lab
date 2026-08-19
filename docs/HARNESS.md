@@ -296,8 +296,27 @@ publica `model`, `reasoning_effort` e `reasoning_effort_source`, de modo que
   como um valor: é o caso de `claude-build-worker-subscription-v2`, e pinar o
   effort nele retroativamente falsificaria os runs já registrados.
 
+Novos profiles Codex de worker usam identidade explícita nas duas dimensões:
+
+`codex-build-worker-subscription-<model>-<effort>-vN`
+
+- `<model>` = `luna` | `terra` | `sol`
+- `<effort>` = `medium` | `high` | outra opção explicitamente suportada
+
+Exemplos: `codex-build-worker-subscription-sol-high-v2`,
+`codex-build-worker-subscription-terra-high-v2`,
+`codex-build-worker-subscription-luna-medium-v2`.
+Não completar a matriz por simetria: cada combinação nova é uma capability
+decidida à parte. Modelo e effort **nunca** se inferem do texto do
+`profile_id` — saem do argv via doctor/`experimentFactsOf`.
+
+`codex-build-worker-subscription-high-v2` é **legacy alias histórico de Sol
+High** (`gpt-5.6-sol` + `high`). Permanece no repositório para preservar
+LaunchRecords e evidência passada; não usar para novos runs. Não reescrever
+histórico nem alterar bytes do YAML legado.
+
 Perfis de experimento (mesmas garantias do baseline; só modelo e effort mudam):
-`codex-build-worker-subscription-{high,sol-medium,terra-high,terra-medium,luna-medium}-v2`
+`codex-build-worker-subscription-{high,sol-high,sol-medium,terra-high,terra-medium,luna-medium}-v2`
 e `claude-build-worker-subscription-{opus5,sonnet5}-{high,medium}-v3`.
 
 `claude-build-worker-v1`, `claude-build-worker-v2` e `codex-build-worker-v1`

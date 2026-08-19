@@ -478,3 +478,11 @@ Mistake: aplicar uma substituição sem contexto suficiente alcançou um teste
 vizinho de `HUMAN_REQUIRED` em vez do segundo caso de `LIMIT_REACHED`.
 Rule: patch em asserções repetidas inclui o nome do teste e o `stopped_by`
 esperado no contexto; estado bloqueante nunca muda por substituição posicional.
+
+[2026-08-19] Contexto: identidade de profiles Codex antes do router (M78).
+Mistake: `codex-build-worker-subscription-high-v2` fixava `gpt-5.6-sol` +
+`high` no argv, mas o `profile_id` omitia a dimensão MODEL — inconsistente
+com `luna-medium` / `terra-high` / `sol-medium`.
+Rule: novos IDs Codex são `codex-build-worker-subscription-<model>-<effort>-vN`.
+IDs históricos não se renomeiam. Modelo e effort saem do argv via doctor,
+nunca de substring (`sol`/`terra`/`luna`/`medium`/`high`) no `profile_id`.

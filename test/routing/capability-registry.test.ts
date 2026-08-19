@@ -168,4 +168,64 @@ describe('CapabilityRegistry', () => {
     });
     expect(registry.diversityFacts('nao-existe')).toBeUndefined();
   });
+
+  it('registra o Sol High explícito e o legacy high-v2 como IDs distintos com as mesmas facts', async () => {
+    const legacy = await capabilityFor('codex-build-worker-subscription-high-v2');
+    const explicit = await capabilityFor('codex-build-worker-subscription-sol-high-v2');
+    const registry = new CapabilityRegistry([legacy, explicit]);
+
+    expect(legacy.profile_id).toBe('codex-build-worker-subscription-high-v2');
+    expect(explicit.profile_id).toBe('codex-build-worker-subscription-sol-high-v2');
+    expect(legacy.profile_id).not.toBe(explicit.profile_id);
+    expect(registry.get(explicit.profile_id)).toEqual(explicit);
+    for (const capability of [legacy, explicit]) {
+      expect(capability.agent).toBe('codex');
+      expect(capability.model).toBe('gpt-5.6-sol');
+      expect(capability.reasoning_effort).toBe('high');
+      expect(capability.reasoning_effort_source).toBe('codex_config_override');
+    }
+    expect(registry.diversityFacts(explicit.profile_id)).toEqual({
+      provider: 'codex',
+      model: 'gpt-5.6-sol',
+      reasoning_effort: 'high',
+      environment_mode: 'real-world',
+    });
+  });
+
+  it('capabilityOf e diversityFacts não derivam model/effort do texto do profile_id', () => {
+    const capability = capabilityOf(
+      inputFrom({
+        profile_id: 'codex-build-worker-subscription-luna-medium-v2',
+        agent: 'codex',
+        model: 'gpt-5.6-sol',
+        output_format: 'json',
+        reasoning_effort: 'high',
+        reasoning_effort_source: 'codex_config_override',
+        billing_mode: 'subscription_only',
+        credential_source: 'chatgpt_subscription',
+        environment_mode: 'real-world',
+        instruction_environment: 'sanitized_user_home',
+        commit_owner: 'orchestrator',
+        official_validation_owner: 'orchestrator',
+        worker_validation_policy: 'targeted',
+        sandbox: 'workspace-write',
+        session_persistence: 'ephemeral',
+        user_config_ignored: true,
+        execpolicy_rules_ignored: true,
+        ok: true,
+        checks: [],
+      }),
+    );
+    const registry = new CapabilityRegistry([capability]);
+
+    expect(capability.profile_id).toMatch(/luna-medium/);
+    expect(capability.model).toBe('gpt-5.6-sol');
+    expect(capability.reasoning_effort).toBe('high');
+    expect(registry.diversityFacts(capability.profile_id)).toEqual({
+      provider: 'codex',
+      model: 'gpt-5.6-sol',
+      reasoning_effort: 'high',
+      environment_mode: 'real-world',
+    });
+  });
 });
