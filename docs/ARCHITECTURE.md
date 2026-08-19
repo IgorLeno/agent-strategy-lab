@@ -252,6 +252,7 @@ fronteira.
 | `performance` | fatos de attempt e records de performance derivados, sem I/O | EXTENSIONS | M45–M48 |
 | `project` | `.agentlab/project.yaml`, resolução do data dir | CONTROL PLANE | M11, M33 |
 | `cli` | comandos `agentlab` | CONTROL PLANE | M32–M38 |
+| `intake` | `ProjectIntakeRequest` e `ExecutionAuthorizationScope`: pedido formal sobre repo externo e separação entre escopo pedido e ações autorizadas sem novo gate | CONTROL PLANE | M71 |
 
 - **STABLE KERNEL** — vocabulário e contratos que todo o resto importa; zero
   I/O ou serialização canônica, muda raramente e qualquer mudança é
