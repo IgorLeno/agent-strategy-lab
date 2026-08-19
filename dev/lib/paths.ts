@@ -53,6 +53,20 @@ export interface HarnessPathsOverride {
  * explícita do control plane sobre QUAL repositório está sendo conduzido, não
  * uma preferência de ambiente do operador.
  */
+/**
+ * Traduz flags aditivas das CLIs (`--plan-file`, `--runtime-dir`) no override
+ * de `resolveHarnessPaths`. Omitir os dois campos reproduz o layout histórico.
+ */
+export function harnessOverrideFromCli(options: {
+  readonly planFile?: string | undefined;
+  readonly runtimeDir?: string | undefined;
+}): HarnessPathsOverride {
+  return {
+    ...(options.planFile === undefined ? {} : { planFile: options.planFile }),
+    ...(options.runtimeDir === undefined ? {} : { devDir: options.runtimeDir }),
+  };
+}
+
 export function resolveHarnessPaths(
   repoRoot: string = process.cwd(),
   override: HarnessPathsOverride = {},

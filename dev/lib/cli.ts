@@ -55,6 +55,32 @@ export function isVerbose(args: ParsedArgs): boolean {
   return args.flags.has(VERBOSE_FLAG);
 }
 
+/**
+ * `--autonomy` só existe como `routine`. Qualquer outro valor (ou a flag sem
+ * valor) é recusado aqui para que init/orchestrate/run-plan não inventem modos.
+ */
+export function parseRoutineAutonomy(args: ParsedArgs): 'routine' | undefined {
+  const autonomy = args.options.get('autonomy');
+  if (args.flags.has('autonomy') || (autonomy !== undefined && autonomy !== 'routine')) {
+    fail('--autonomy aceita somente routine');
+  }
+  return autonomy === 'routine' ? 'routine' : undefined;
+}
+
+/**
+ * Limite de ciclos primários do orquestrador. Ausência preserva o default
+ * histórico (100). Inteiro < 1 é recusado antes de qualquer launch.
+ */
+export function parseMaxIterations(args: ParsedArgs, fallback = 100): number {
+  const raw = args.options.get('max-iterations');
+  if (raw === undefined) return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1) {
+    fail(`--max-iterations precisa ser inteiro positivo: ${raw}`);
+  }
+  return value;
+}
+
 /** stdout é reservado para saída de máquina (JSON); diagnóstico vai em stderr. */
 export function emit(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);

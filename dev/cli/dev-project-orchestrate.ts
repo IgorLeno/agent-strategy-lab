@@ -2,7 +2,7 @@
 import { readFile } from 'node:fs/promises';
 
 import { emit, fail, parseArgs, runMain } from '../lib/cli.js';
-import { resolveHarnessPaths } from '../lib/paths.js';
+import { harnessOverrideFromCli, resolveHarnessPaths } from '../lib/paths.js';
 import { loadProfile } from '../lib/profile.js';
 import { planDirectLifecycle, type ObservedTaxonomyFacts } from '../lib/project-orchestrate.js';
 import type { DirectTaskClassification } from '../../src/planner/validate.js';
@@ -35,12 +35,13 @@ async function main(): Promise<void> {
   if (!profileId) fail('--profile <id> é obrigatório');
 
   const repoRoot = args.options.get('repo') ?? process.cwd();
-  const planFile = args.options.get('plan-file');
-  const runtimeDir = args.options.get('runtime-dir');
-  const paths = resolveHarnessPaths(repoRoot, {
-    ...(planFile === undefined ? {} : { planFile }),
-    ...(runtimeDir === undefined ? {} : { devDir: runtimeDir }),
-  });
+  const paths = resolveHarnessPaths(
+    repoRoot,
+    harnessOverrideFromCli({
+      planFile: args.options.get('plan-file'),
+      runtimeDir: args.options.get('runtime-dir'),
+    }),
+  );
 
   const request = JSON.parse(await readFile(requestFile, 'utf8')) as LifecycleRequestFile;
   const profile = await loadProfile(paths.repoRoot, profileId);

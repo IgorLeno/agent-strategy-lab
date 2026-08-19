@@ -70,6 +70,7 @@ dev-close      confirma commit e escopo, re-executa as validações do packet,
                grava CompletionRecord e sela o HandoffRecord
                                  -> PASS
 dev-orchestrate  roda o loop acima; o worker nunca roda o loop
+dev-run-plan     resolve repo/plan/profile, inicializa se preciso, delega ao loop
 dev-recover      reconcilia plano + commits + completions + runtime
 ```
 
@@ -359,7 +360,47 @@ pnpm dev-recover-infra --task M33 --reason '...'   # attempt morto por falha do 
 pnpm dev-recover-protocol-output --task M56 --reason '...' # SUCCESS/PASS com metadata de protocolo inválida
 pnpm dev-recover-incomplete-worker-output --task M71 --reason '...' # worker terminou sem report/handoff
 pnpm dev-orchestrate --profile claude-build-worker-subscription-v1
+pnpm dev-run-plan --repo <alvo> --plan <plan.yaml> --profile <id>
 ```
+
+### Rodar um PlanFile já existente
+
+`dev-run-plan` é a entrada ergonômica para executar um plano já válido sobre um
+repositório alvo. Não é um segundo executor: resolve o setup, inicializa o
+runtime só quando ele ainda não existe e delega ao lifecycle canônico
+(`dev-init` / `dev-orchestrate`). Uma task no YAML é uma tarefa; várias tasks
+com `blocked_by` são um projeto/DAG — o mesmo comando serve para os dois.
+
+Happy path:
+
+```bash
+pnpm dev-run-plan \
+  --repo ~/Projetos/meu-projeto \
+  --plan ~/Projetos/meu-projeto/agentlab-plan.yaml \
+  --profile codex-build-worker-subscription-sol-medium-v2 \
+  --autonomy routine
+```
+
+O operador não precisa encadear `dev-init` + `dev-orchestrate` no caso normal
+de um plan novo. O arquivo em `--plan` é a identidade autoritativa: **não** é
+copiado para `<repo>/dev/plan.yaml` e pode viver dentro ou fora do repo alvo.
+
+Runtime default: `<repo>/.dev` (o mesmo do harness histórico). `--runtime-dir`
+é override aditivo. O runtime é persistente:
+
+- primeira execução cria o runtime (NEW) e conduz o DAG;
+- rerun com o mesmo plan continua de onde parou (RESUMED);
+- ALL_DONE não relança worker;
+- `--dry-run` valida repo/plan/profile/runtime sem provider, sem attempt e
+  sem mutação autoritativa;
+- plan SHA diferente no mesmo runtime falha fechado (`RUNTIME_PLAN_MISMATCH`):
+  use outro `--runtime-dir` ou uma operação explícita de adoção/reset fora
+  deste comando. Não há `--force` / `--yes` aqui.
+
+`--profile` é obrigatório: esta entrypoint não escolhe um default implícito.
+`--plan-file` / `--runtime-dir` nas primitives (`dev-init`, `dev-orchestrate`)
+são o mesmo override aditivo; omiti-los preserva `<repo>/dev/plan.yaml` e
+`<repo>/.dev`.
 
 `dev-recover-protocol-output` cobre somente o caso estreito em que um worker
 terminou com report `SUCCESS`, handoff `PASS` e `candidate_commit == null`, mas
@@ -489,8 +530,8 @@ evidência e billing são gravados iguais nos dois modos.
 
 Exit codes: `dev-doctor` 3 = algum check FAIL · `dev-next` 4 = fluxo
 parado/ocupado · `dev-close` 5 = FAIL, 6 = guarda pendente · `dev-launch` 7 = TIMED_OUT, 8 = INFRA_ERROR ·
-`dev-orchestrate` 9 = término bloqueante/anormal (`LIMIT_REACHED` usa 0) · **10 = harness ocupado** (qualquer
-comando que muda estado).
+`dev-orchestrate` / `dev-run-plan` 9 = término bloqueante/anormal (`LIMIT_REACHED` usa 0; mismatch de plan no `dev-run-plan` também) · **10 = harness ocupado** (qualquer
+comando que muda estado). `dev-run-plan` ainda usa 1 para setup inválido (repo/plan/profile) antes de qualquer launch.
 
 ## Exclusão mútua
 
@@ -498,7 +539,9 @@ comando que muda estado).
 comando que **muda estado**: `dev-init`, `dev-launch`, `dev-close`,
 `dev-recover` (sem `--dry-run`), `dev-recover-infra`,
 `dev-recover-protocol-output`, `dev-recover-incomplete-worker-output` e `dev-orchestrate` —
-este último segura o lock pelo loop inteiro. `dev-next` e `dev-recover --dry-run` são somente
+este último segura o lock pelo loop inteiro. `dev-run-plan` não tem lock próprio:
+delega para `dev-init` / `dev-orchestrate`. `--dry-run` do `dev-run-plan` é
+somente leitura e não pega lock. `dev-next` e `dev-recover --dry-run` são somente
 leitura e não pegam lock.
 
 Sem isso, dois orquestradores podiam ler `READY`, gerar packet e lançar dois

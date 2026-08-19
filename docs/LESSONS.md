@@ -496,3 +496,11 @@ Rule: autorização é um boundary explícito de capabilities, nunca consequênc
 de `requested_scope` nem gate por spawn; AVC decide a unidade de mudança, e
 estimated task duration, worker runtime budget e validation command timeout são
 validados exclusivamente contra seus próprios bounds, com violação nomeada.
+
+[2026-08-19] Contexto: teste de repair via entrypoint `dev-run-plan`.
+Mistake: gravar o perfil `orchestrator-owned` no sandbox sem commitá-lo deixou
+a working tree suja; o primeiro launch parou em guarda de base (exit 9) e o
+repair bounded existente nem chegou a rodar — parecia falha do wrapper.
+Rule: fixture de perfil no sandbox git entra no commit de baseline ANTES de
+init/run-plan. Working tree suja não é caminho para exercitar repair, DAG ou
+resume; a guarda de progressão continua valendo para a entrypoint ergonômica.

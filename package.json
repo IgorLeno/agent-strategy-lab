@@ -30,6 +30,7 @@
     "dev-adopt-maintenance-range": "tsx dev/cli/dev-adopt-maintenance-range.ts",
     "dev-adopt-plan": "tsx dev/cli/dev-adopt-plan.ts",
     "dev-orchestrate": "tsx dev/cli/dev-orchestrate.ts",
+    "dev-run-plan": "tsx dev/cli/dev-run-plan.ts",
     "dev-project-orchestrate": "tsx dev/cli/dev-project-orchestrate.ts"
   },
   "devDependencies": {
