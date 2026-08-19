@@ -53,3 +53,27 @@ export type {
   PlanValidationResult,
   WorkflowEvaluationContext,
 } from './validate.js';
+
+/**
+ * Avaliação determinística e rule-based de execução de uma `PlannedTask`
+ * (M76): difficulty, risk, context pressure, environment readiness,
+ * verification strength, review requirement e confidence. Ver `assess.ts`.
+ */
+export {
+  ConfidenceLevel,
+  ContextPressureLevel,
+  DifficultyLevel,
+  DiversityRequirement,
+  ENVIRONMENT_READINESS_REQUIREMENTS,
+  EnvironmentReadinessAssessment,
+  EnvironmentReadinessCheck,
+  EnvironmentReadinessCheckStatus,
+  EnvironmentReadinessRequirement,
+  EnvironmentReadinessStatus,
+  ExecutionAssessment,
+  ReadinessFactsSource,
+  ReviewRequirementAssessment,
+  VerificationStrengthLevel,
+  assessExecution,
+} from './assess.js';
+export type { ExecutionAssessmentContext } from './assess.js';
