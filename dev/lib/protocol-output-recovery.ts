@@ -112,6 +112,14 @@ function relativeToRepo(paths: HarnessPaths, file: string): string {
   return relative;
 }
 
+/** Recusa estreita: o worker morreu sem o par de completion artifacts. */
+export function isMissingWorkerCompletionArtifact(error: unknown): boolean {
+  if (!(error instanceof ProtocolOutputRecoveryError)) return false;
+  return (
+    error.message === 'AgentCompletionReport ausente' || error.message === 'HandoffDraft ausente'
+  );
+}
+
 async function readRequired(file: string, label: string): Promise<Buffer> {
   try {
     return await readFile(file);

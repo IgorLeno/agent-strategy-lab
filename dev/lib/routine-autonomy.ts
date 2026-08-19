@@ -223,11 +223,11 @@ export interface RoutinePostLaunchDriver {
   recoverProtocolOutput(
     actionId: string,
     incident: RoutinePostLaunchIncident,
-  ): Promise<{ readonly action: string }>;
+  ): Promise<{ readonly action: string; readonly skip_retry?: boolean }>;
   recoverInfra(
     actionId: string,
     incident: RoutinePostLaunchIncident,
-  ): Promise<{ readonly action: string }>;
+  ): Promise<{ readonly action: string; readonly skip_retry?: boolean }>;
 }
 
 export interface HumanRequiredOutput {
@@ -290,7 +290,7 @@ export interface ResolveRoutinePostLaunchInput<T> {
 }
 
 export type RoutinePostLaunchResolution<T> = {
-  readonly status: 'RETRIED' | 'HUMAN_REQUIRED';
+  readonly status: 'RETRIED' | 'RECOVERED' | 'HUMAN_REQUIRED';
   readonly retry: T | null;
   readonly record: RoutineIncidentRecord;
   readonly human_required: HumanRequiredOutput | null;
@@ -1042,6 +1042,23 @@ async function finishPostLaunchRetried<T>(
   return { status: 'RETRIED', retry, record, human_required: null };
 }
 
+async function finishPostLaunchRecovered<T>(
+  input: ResolveRoutinePostLaunchInput<T>,
+  base: ReturnType<typeof postLaunchBaseRecord>,
+): Promise<RoutinePostLaunchResolution<T>> {
+  const record: RoutineIncidentRecord = {
+    ...base,
+    maintenance_commit: null,
+    review_decision: null,
+    authorized_head_after: input.incident.authorized_head_before,
+    retry_result: null,
+    human_required: false,
+    human_reason: null,
+  };
+  await writeTerminalRecord(input.paths, record);
+  return { status: 'RECOVERED', retry: null, record, human_required: null };
+}
+
 export async function resolveRoutinePostLaunch<T>(
   input: ResolveRoutinePostLaunchInput<T>,
 ): Promise<RoutinePostLaunchResolution<T>> {
@@ -1090,14 +1107,14 @@ export async function resolveRoutinePostLaunch<T>(
   }
 
   const actionId = `${incidentId}:recover`;
-  const savedRecovery = await readRoutineIncidentEvent<{ readonly action: string }>(
-    input.paths,
-    incidentId,
-    'recover-completed',
-  );
-  if (savedRecovery === null) {
+  const savedRecovery = await readRoutineIncidentEvent<{
+    readonly action: string;
+    readonly skip_retry?: boolean;
+  }>(input.paths, incidentId, 'recover-completed');
+  let recovery = savedRecovery;
+  if (recovery === null) {
     try {
-      const recovery =
+      recovery =
         triage.recipe_id === 'protocol-output-recovery'
           ? await input.driver.recoverProtocolOutput(actionId, input.incident)
           : await input.driver.recoverInfra(actionId, input.incident);
@@ -1110,6 +1127,10 @@ export async function resolveRoutinePostLaunch<T>(
         null,
       );
     }
+  }
+
+  if (recovery.skip_retry === true) {
+    return finishPostLaunchRecovered(input, base);
   }
 
   const retryActionId = `${incidentId}:retry`;

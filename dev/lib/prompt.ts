@@ -2,8 +2,9 @@ import { canonicalJson } from './canonical.js';
 import type { ExecutionPolicy } from './execution-policy.js';
 import type { TaskPacket } from './schemas.js';
 
-/** Limite do preâmbulo fixo: o prompt não pode reintroduzir contexto pela porta dos fundos. */
-export const MAXIMUM_PREAMBLE_BYTES = 4_096;
+/** Limite do preâmbulo fixo: o prompt não pode reintroduzir contexto pela porta dos fundos.
+ * Targeted precisa caber as proibições de suíte/background sem inflar o packet. */
+export const MAXIMUM_PREAMBLE_BYTES = 5_120;
 
 export interface PromptIo {
   readonly repoRoot: string;
@@ -29,8 +30,13 @@ export function buildWorkerPrompt(
       : `Execute SOMENTE checks pequenos necessários para desenvolver o patch.
    Pode executar typecheck, o teste direcionado da tarefa e testes adicionais pequenos e diretamente
    relacionados. NÃO execute o \`pnpm test\` completo. NÃO execute o \`pnpm build\` global.
-   NÃO execute novamente toda a lista \`packet.validation\`. As validações oficiais completas
-   pertencem exclusivamente ao orquestrador e serão executadas fora do sandbox do provider.
+   NÃO execute novamente toda a lista \`packet.validation\`.
+   NÃO use \`run_in_background\`. NÃO crie background jobs para validação.
+   NÃO use Monitor/ScheduleWakeup para aguardar validação.
+   Checks direcionados + typecheck/testes locais suficientes → escreva IMEDIATAMENTE
+   AgentCompletionReport e HandoffDraft; depois encerre a sessão.
+   As validações oficiais completas pertencem exclusivamente ao orquestrador
+   e serão executadas fora do sandbox do provider.
    Uma falha ambiental de uma validação global que o worker não deveria executar
    não deve ser investigada pelo worker.`;
   const preamble =

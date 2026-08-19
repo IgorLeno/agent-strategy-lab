@@ -72,6 +72,12 @@ describe('prompt lean do worker', () => {
     expect(prompt).toMatch(/NÃO execute o `pnpm test` completo/i);
     expect(prompt).toMatch(/NÃO execute o `pnpm build` global/i);
     expect(prompt).toMatch(/NÃO execute novamente toda a lista `packet\.validation`/i);
+    expect(prompt).toMatch(/NÃO use `run_in_background`/i);
+    expect(prompt).toMatch(/NÃO crie background jobs para validação/i);
+    expect(prompt).toMatch(/NÃO use Monitor\/ScheduleWakeup para aguardar validação/i);
+    expect(prompt).toMatch(
+      /escreva IMEDIATAMENTE\s+AgentCompletionReport e HandoffDraft;\s+depois encerre a sessão/i,
+    );
     expect(prompt).toMatch(
       /validações oficiais completas\s+pertencem exclusivamente ao orquestrador\s+e serão executadas fora do sandbox do provider/i,
     );

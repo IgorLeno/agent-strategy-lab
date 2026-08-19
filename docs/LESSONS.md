@@ -447,3 +447,19 @@ threshold numérico, a revisão precisa localizar explicitamente o consumidor
 que lê a medição observada e decide com base nele — se esse consumidor não
 existe, o threshold é dado inerte, e isso precisa virar risco registrado
 antes de qualquer aprovação humana que dependa dele.
+
+[2026-08-19] Context: M71 attempt 2 — `worker_validation_policy=targeted`.
+Mistake: o prompt já pedia para não rodar `pnpm test` completo, mas o worker
+ainda lançou a suíte oficial em background e encerrou sem
+`AgentCompletionReport` nem `HandoffDraft`. O recovery existente exigia os
+dois artifacts e recusava, deixando o patch na working tree e o harness em
+`HUMAN_REQUIRED`.
+Rule: processo morto + LaunchRecord finished + patch real + completion
+artifacts ausentes é PROTOCOL/OUTPUT INCOMPLETE, não capability failure.
+Preserve-then-reset; nunca inventar report/handoff. Mitigação de prompt para
+`targeted` é bootstrap — enforcement estrutural (bloquear `pnpm test` /
+`pnpm build` / background jobs no sandbox targeted) ainda é necessário; não
+resolver isso mutando profile ids históricos nem o settings compartilhado
+com a policy `full`. Reset path-scoped que remove arquivos ADDED também
+precisa podar diretórios pais que ficaram vazios: git fica limpo, mas
+`readdir` ainda vê `src/intake` e o scaffold test falha na adoção.

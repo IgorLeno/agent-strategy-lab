@@ -616,8 +616,14 @@ async function postAutonomyModule() {
       paths: ReturnType<typeof resolveHarnessPaths>;
       incident: PostIncident;
       driver: {
-        recoverProtocolOutput(actionId: string, incident: PostIncident): Promise<{ action: string }>;
-        recoverInfra(actionId: string, incident: PostIncident): Promise<{ action: string }>;
+        recoverProtocolOutput(actionId: string, incident: PostIncident): Promise<{
+          action: string;
+          skip_retry?: boolean;
+        }>;
+        recoverInfra(actionId: string, incident: PostIncident): Promise<{
+          action: string;
+          skip_retry?: boolean;
+        }>;
       };
       retrySameTask(actionId: string, incident: PostIncident): Promise<{
         incident: PostIncident;
@@ -625,7 +631,7 @@ async function postAutonomyModule() {
       }>;
       now?: () => string;
     }): Promise<{
-      status: 'RETRIED' | 'HUMAN_REQUIRED';
+      status: 'RETRIED' | 'RECOVERED' | 'HUMAN_REQUIRED';
       retry: T | null;
       record: { phase?: string; outcome?: string; recipe_id?: string | null };
       human_required: { why_automation_stopped: string } | null;
@@ -711,6 +717,40 @@ describe('post-launch known incident autonomy', () => {
     expect(result.status).toBe('HUMAN_REQUIRED');
     expect(result.human_required?.why_automation_stopped).toMatch(/contrato estreito recusado/);
     expect(retries).toBe(0);
+  });
+
+  it('output incompleto reabre READY sem retry de provider', async () => {
+    const module = await postAutonomyModule();
+    const { paths } = await fixture();
+    const calls: string[] = [];
+    const result = await module.resolveRoutinePostLaunch({
+      paths,
+      incident: postIncident(),
+      driver: {
+        async recoverProtocolOutput(actionId) {
+          calls.push(`protocol:${actionId}`);
+          return { action: 'dev-recover-incomplete-worker-output', skip_retry: true };
+        },
+        async recoverInfra() {
+          throw new Error('não deveria executar');
+        },
+      },
+      async retrySameTask() {
+        calls.push('retry');
+        throw new Error('não deveria executar');
+      },
+      now: () => NOW,
+    });
+
+    expect(result.status).toBe('RECOVERED');
+    expect(result.retry).toBeNull();
+    expect(calls.filter((call) => call.startsWith('protocol:'))).toHaveLength(1);
+    expect(calls).not.toContain('retry');
+    expect(result.record).toMatchObject({
+      phase: 'POST_LAUNCH',
+      outcome: 'PENDING',
+      recipe_id: 'protocol-output-recovery',
+    });
   });
 
   it('INFRA_ERROR recuperável usa a primitive oficial e repete uma vez o mesmo slot/profile', async () => {

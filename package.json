@@ -20,6 +20,7 @@
     "dev-recover": "tsx dev/cli/dev-recover.ts",
     "dev-recover-infra": "tsx dev/cli/dev-recover-infra.ts",
     "dev-recover-protocol-output": "tsx dev/cli/dev-recover-protocol-output.ts",
+    "dev-recover-incomplete-worker-output": "tsx dev/cli/dev-recover-incomplete-worker-output.ts",
     "dev-retry": "tsx dev/cli/dev-retry.ts",
     "dev-retry-failed": "tsx dev/cli/dev-retry-failed.ts",
     "dev-finalize-recovered": "tsx dev/cli/dev-finalize-recovered.ts",

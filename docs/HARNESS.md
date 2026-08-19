@@ -207,7 +207,7 @@ evidência derivada é a autoridade.
 - `TaskPacket` ≤ **12 KiB** UTF-8 — impede critérios e restrições de inflarem
   o prompt de volta.
 - `HandoffRecord` / `HandoffDraft` ≤ **4 KiB** UTF-8.
-- Preâmbulo do prompt ≤ 4 KiB.
+- Preâmbulo do prompt ≤ 5 KiB.
 
 Medidos em bytes sobre JSON canônico: schema válido acima do budget continua
 sendo rejeição.
@@ -336,6 +336,7 @@ pnpm dev-close                # valida e fecha a tarefa RUNNING
 pnpm dev-recover --dry-run    # relata reconciliações sem gravar
 pnpm dev-recover-infra --task M33 --reason '...'   # attempt morto por falha do provider
 pnpm dev-recover-protocol-output --task M56 --reason '...' # SUCCESS/PASS com metadata de protocolo inválida
+pnpm dev-recover-incomplete-worker-output --task M71 --reason '...' # worker terminou sem report/handoff
 pnpm dev-orchestrate --profile claude-build-worker-subscription-v1
 ```
 
@@ -354,6 +355,17 @@ libera o inbox e, por último, devolve a task a `READY`. A classificação
 `PROTOCOL_OUTPUT_INVALID` registra explicitamente que não houve capability
 verdict nem official-validation verdict; uma repetição com a mesma evidência
 converge, e bytes divergentes recusam.
+
+`dev-recover-incomplete-worker-output` cobre o caso complementar: o processo
+morreu, o LaunchRecord está finished, há patch real na working tree, e
+`AgentCompletionReport` e/ou `HandoffDraft` estão ausentes. Não inventa
+artifacts, não produz capability verdict nem official-validation verdict.
+Preserva o patch (bundle + fingerprint), copia stdout/stderr/launch, registra
+`AttemptAbandonmentRecord` com `report_present`/`handoff_present` factuais do
+par completo, restaura só os arquivos do patch ao base e devolve a task a
+`READY`. Routine autonomy pode executar isso quando
+`protocol-output-recovery` recusa especificamente por artifact ausente;
+preconditions insuficientes continuam `HUMAN_REQUIRED`. Não lança provider.
 
 `dev-recover-infra` arquiva o attempt que morreu por **falha terminal do
 provider** e devolve a tarefa a `READY` sem tocar em `attempts` — o attempt
@@ -464,7 +476,7 @@ comando que muda estado).
 `.dev/orchestrator.lock` é criado com `wx` (criação exclusiva) por todo
 comando que **muda estado**: `dev-init`, `dev-launch`, `dev-close`,
 `dev-recover` (sem `--dry-run`), `dev-recover-infra`,
-`dev-recover-protocol-output` e `dev-orchestrate` —
+`dev-recover-protocol-output`, `dev-recover-incomplete-worker-output` e `dev-orchestrate` —
 este último segura o lock pelo loop inteiro. `dev-next` e `dev-recover --dry-run` são somente
 leitura e não pegam lock.
 

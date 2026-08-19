@@ -15,6 +15,7 @@ import { adoptMaintenance, adoptionValidationCommands } from './maintenance.js';
 import { runOrchestrationPreflight } from './orchestrate-preflight.js';
 import type { HarnessPaths } from './paths.js';
 import type { LoadedPlan } from './plan.js';
+import { recoverIncompleteWorkerOutput } from './incomplete-worker-output-recovery.js';
 import { recoverInfraAttempt } from './infra-recover.js';
 import {
   assertNoForbiddenFlags,
@@ -23,7 +24,7 @@ import {
   type LauncherProfile,
 } from './profile.js';
 import { recover } from './recover.js';
-import { recoverProtocolOutput } from './protocol-output-recovery.js';
+import { isMissingWorkerCompletionArtifact, recoverProtocolOutput } from './protocol-output-recovery.js';
 import type {
   RoutineAutonomyDriver,
   RoutineCandidate,
@@ -103,6 +104,7 @@ export interface RoutineAutonomyRuntimeOptions {
 
 export interface RoutinePostLaunchRuntimePort {
   recoverProtocolOutput: typeof recoverProtocolOutput;
+  recoverIncompleteWorkerOutput: typeof recoverIncompleteWorkerOutput;
   recoverInfraAttempt: typeof recoverInfraAttempt;
 }
 
@@ -116,16 +118,27 @@ export function createRoutinePostLaunchRuntime(
 ): RoutinePostLaunchDriver {
   const port: RoutinePostLaunchRuntimePort = options.port ?? {
     recoverProtocolOutput,
+    recoverIncompleteWorkerOutput,
     recoverInfraAttempt,
   };
   return {
     async recoverProtocolOutput(_actionId, incident) {
-      await port.recoverProtocolOutput({
-        paths: options.paths,
-        taskId: incident.task_id,
-        reason: `routine recipe protocol-output-recovery: ${incident.reason}`,
-      });
-      return { action: 'dev-recover-protocol-output' };
+      try {
+        await port.recoverProtocolOutput({
+          paths: options.paths,
+          taskId: incident.task_id,
+          reason: `routine recipe protocol-output-recovery: ${incident.reason}`,
+        });
+        return { action: 'dev-recover-protocol-output' };
+      } catch (error) {
+        if (!isMissingWorkerCompletionArtifact(error)) throw error;
+        await port.recoverIncompleteWorkerOutput({
+          paths: options.paths,
+          taskId: incident.task_id,
+          reason: `routine recipe protocol-output-recovery: incomplete worker output: ${incident.reason}`,
+        });
+        return { action: 'dev-recover-incomplete-worker-output', skip_retry: true };
+      }
     },
     async recoverInfra(_actionId, incident) {
       await port.recoverInfraAttempt({
