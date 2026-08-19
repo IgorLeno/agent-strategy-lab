@@ -24,3 +24,32 @@ export {
   SignalProvenance,
   TriggeredSignal,
 } from './decomposition.js';
+
+/**
+ * Validação determinística do plano inteiro (M75) mais a policy de workflow
+ * proporcional (`DECOMPOSITION_REQUIRED` / `MERGE_RECOMMENDED` /
+ * `DIRECT_ALLOWED` / `REVIEWED_REQUIRED`) e a Direct Task Normalization. Ver
+ * `validate.ts` para o contrato completo.
+ */
+export {
+  DirectAllowanceCriterion,
+  DirectAllowanceCriterionStatus,
+  MINIMAL_FACTUAL_PREFLIGHT_REQUIREMENTS,
+  MinimalFactualPreflightRequirement,
+  MinimalFactualPreflightSource,
+  PlanValidationIssue,
+  PlanValidationIssueCode,
+  TaskWorkflowVerdict,
+  evaluatePlan,
+  evaluatePlanWorkflow,
+  normalizeDirectTask,
+  validatePlan,
+} from './validate.js';
+export type {
+  DirectTaskClassification,
+  DirectTaskNormalizationInput,
+  DirectTaskNormalizationResult,
+  PlanEvaluationResult,
+  PlanValidationResult,
+  WorkflowEvaluationContext,
+} from './validate.js';
