@@ -17,6 +17,7 @@ const AREAS = [
   'envelope',
   'evaluator',
   'experiment',
+  'inspection',
   'intake',
   'performance',
   'project',
