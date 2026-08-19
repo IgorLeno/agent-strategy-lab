@@ -36,3 +36,31 @@ export {
   type BudgetViolation,
   type InitialRoutingInput,
 } from './router.js';
+
+/** Failure diagnosis e intervenção provider-neutral (M79). */
+export {
+  BoundedRepairBudget,
+  FailureDiagnosis,
+  FailureDiagnosisClassification,
+  FailureInterventionAction,
+  FailureInterventionDecision,
+  HumanInterventionDecision,
+  decideFailureIntervention,
+  type FailureInterventionOptions,
+} from './diagnosis.js';
+
+/** Ladder e autorização pura de escalation (M79). */
+export {
+  DEFAULT_ESCALATION_ORDER_RATIONALE,
+  EscalationAuthorization,
+  EscalationDecision,
+  EscalationExecutionPolicy,
+  EscalationLadder,
+  EscalationStep,
+  HumanEscalationReason,
+  RepairSequenceEvidence,
+  decideEscalation,
+  resolveEscalationLadder,
+  type EscalationDecisionInput,
+  type ResolvedEscalationLadder,
+} from './escalation.js';
