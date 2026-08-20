@@ -7,8 +7,10 @@ import {
   reconcileAutomaticRepair,
 } from './automatic-repair.js';
 import { ESTIMATED_COST_LABEL } from './billing.js';
+import type { ValidatedCandidateAcceptancePolicy } from './candidate-review.js';
 import { closeTaskByLaunchPolicy } from './close-dispatch.js';
 import { experimentFactsOf } from './doctor.js';
+import { resumePendingAcceptance } from './finalize-orchestrated.js';
 import { withHarnessLock } from './lock.js';
 import { runOrchestrationPreflight, type PreflightResult } from './orchestrate-preflight.js';
 import {
@@ -55,11 +57,18 @@ export const SKIP_PREFLIGHT_FLAG = 'skip-preflight';
  * close -> PASS? continua : para. O worker nunca executa este loop; ele encerra
  * e o orquestrador decide o que vem depois.
  *
- * `--max-iterations` limita ciclos primários de tarefa, não o único reparo
- * bounded da mesma tarefa. Uma invocação com `--max-iterations 1` PODE produzir
- * iteration 1 = FIRST_PASS FAIL + iteration 2 = REPAIR, sem lançar a próxima
- * tarefa do plano. Depois do repair: se PASS, o budget primário já foi
- * consumido; se FAIL, para imediatamente. Nunca existe terceiro repair automático.
+ * `--max-iterations` limita ciclos primários de tarefa, não os launches
+ * internos da MESMA tarefa. Uma invocação com `--max-iterations 1` PODE
+ * produzir iteration 1 = FIRST_PASS FAIL + iteration 2 = REPAIR + iteration 3 =
+ * escalation autorizada, sem lançar a próxima tarefa do plano: os três são
+ * tentativas de concluir a mesma unidade de trabalho. Depois delas: se PASS, o
+ * budget primário já foi consumido e uma tarefa pendente vira LIMIT_REACHED; se
+ * FAIL, para imediatamente. Nunca existe terceiro repair automático, e a
+ * escalation continua dependendo de autorização do control plane.
+ *
+ * Com control plane, um candidate já preparado e validado que aguarda review
+ * independente é retomado ANTES do pre-flight: concluir a fronteira de
+ * aceitação é pré-requisito para selecionar qualquer tarefa nova.
  *
  * Antes do loop roda o PRE-FLIGHT (maintenance -> recover dry-run ->
  * automatic-repair reconcile -> readiness), dentro do MESMO lock.
@@ -91,6 +100,7 @@ async function executeReadyTask(
   timeoutOverride: string | undefined,
   repair: { automaticRepair: boolean; repairSourceAttempt: number } | null,
   expectedTaskId?: string,
+  acceptance?: ValidatedCandidateAcceptancePolicy,
 ): Promise<ReadyTaskExecution> {
   let prepared;
   try {
@@ -180,7 +190,12 @@ async function executeReadyTask(
     };
   }
 
-  const close = await closeTaskByLaunchPolicy({ paths, loaded, taskId: packet.task_id });
+  const close = await closeTaskByLaunchPolicy({
+    paths,
+    loaded,
+    taskId: packet.task_id,
+    ...(acceptance === undefined ? {} : { acceptance }),
+  });
   const iteration: IterationInput = {
     ...iterationBase,
     close: close.kind,
@@ -293,6 +308,7 @@ async function handleRoutinePostLaunch(
   profileId: string,
   timeoutOverride: string | undefined,
   repair: { automaticRepair: boolean; repairSourceAttempt: number } | null,
+  acceptance: ValidatedCandidateAcceptancePolicy | undefined,
   operationalRetryAllowed = true,
 ): Promise<RoutinePostLaunchHandling> {
   const incident = await postLaunchIncidentOf(paths, execution, profileId);
@@ -309,6 +325,7 @@ async function handleRoutinePostLaunch(
         timeoutOverride,
         repair,
         original.task_id,
+        acceptance,
       );
       if ('empty' in retry) {
         throw new Error(
@@ -357,6 +374,7 @@ async function settleRoutinePostLaunch(
   profileId: string,
   timeoutOverride: string | undefined,
   repair: { automaticRepair: boolean; repairSourceAttempt: number } | null,
+  acceptance: ValidatedCandidateAcceptancePolicy | undefined,
 ): Promise<RoutinePostLaunchSettlement> {
   const executions: ExecutionResult[] = [initial];
   let execution = initial;
@@ -372,6 +390,7 @@ async function settleRoutinePostLaunch(
       profileId,
       timeoutOverride,
       repair,
+      acceptance,
       operationalRetriesRemaining !== 0,
     );
     switch (handled.status) {
@@ -415,6 +434,7 @@ async function settleRoutinePostLaunch(
           timeoutOverride,
           repair,
           handled.incident.task_id,
+          acceptance,
         );
         if ('empty' in retry) {
           return {
@@ -501,7 +521,30 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
   let preflight: PreflightResult | null = null;
   let humanRequired: HumanRequiredOutput | null = null;
 
+  const acceptance = controlPlane?.acceptance;
+
   await withHarnessLock(paths, 'dev-orchestrate', async () => {
+    // FRONTEIRA DE ACEITAÇÃO retomada ANTES de qualquer coisa.
+    //
+    // Um candidate já preparado e validado que aguarda review independente é
+    // trabalho em curso desta run, não incidente do repositório: concluí-lo é
+    // pré-requisito para o preflight, que legitimamente recusa operar com uma
+    // tarefa RUNNING. É isto que faz um REJECT sobreviver ao fim do processo —
+    // rerodar o mesmo comando reencontra o veredito publicado em vez de
+    // esquecê-lo — e faz um ACCEPT já publicado ser promovido sem repetir
+    // implementer nem reviewer.
+    if (acceptance !== undefined) {
+      const resumed = await resumePendingAcceptance({ paths, loaded, acceptance });
+      if (resumed.status === 'BLOCKED') {
+        humanRequired = controlPlane?.snapshot().human_gate ?? null;
+        stop = {
+          status: 'HUMAN_REQUIRED',
+          reason: humanRequired?.why_automation_stopped ?? resumed.reason,
+        };
+        return;
+      }
+    }
+
     if (!skipPreflight) {
       let currentPreflight = await runOrchestrationPreflight({
         paths,
@@ -603,7 +646,26 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
       return 'HALT';
     };
 
-    for (let index = 0; index < maxIterations; index += 1) {
+    /**
+     * `--max-iterations` conta CICLOS PRIMÁRIOS DE TASK, não launches internos.
+     *
+     * First pass, o único bounded repair e a escalation autorizada da MESMA
+     * task pertencem ao mesmo ciclo primário: são tentativas de concluir uma
+     * unidade de trabalho, não unidades de trabalho diferentes. Contá-los
+     * separadamente fazia `--max-iterations 1` interromper a escalation logo
+     * depois de autorizá-la — e reportar ALL_DONE com a task ainda em aberto.
+     *
+     * `escalationContinuation` marca exatamente essa retomada: a próxima volta
+     * do laço continua o ciclo já contado em vez de abrir um novo.
+     */
+    let cycle = 0;
+    let escalationContinuation = false;
+    for (;;) {
+      if (!escalationContinuation) {
+        if (cycle >= maxIterations) break;
+        cycle += 1;
+      }
+      escalationContinuation = false;
       const failed = (await readState(paths)).tasks.find((task) => task.status === 'FAIL');
       if (failed) {
         const pendingDecision = await decideAutomaticRepair(paths, failed.id);
@@ -617,7 +679,10 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
         const rec = await reconcileAutomaticRepair({ paths, taskId: failed.id });
         const halt = haltFromAutomaticRepair(rec.decision);
         if (halt) {
-          if ((await escalateOrHalt(failed.id, halt)) === 'CONTINUE') continue;
+          if ((await escalateOrHalt(failed.id, halt)) === 'CONTINUE') {
+            escalationContinuation = true;
+            continue;
+          }
           stop = stop.status === 'HUMAN_REQUIRED' ? stop : halt;
           break;
         }
@@ -677,7 +742,15 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
         launchTimeout = String(decision.timeout_seconds);
       }
 
-      let executed = await executeReadyTask(paths, loaded, launchProfile, launchTimeout, repairMeta);
+      let executed = await executeReadyTask(
+        paths,
+        loaded,
+        launchProfile,
+        launchTimeout,
+        repairMeta,
+        undefined,
+        acceptance,
+      );
       if ('empty' in executed) {
         stop = executed.stop;
         break;
@@ -690,6 +763,7 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
           launchProfile,
           launchTimeout,
           repairMeta,
+          acceptance,
         );
         iterations.push(...settled.executions.map((item) => item.iteration));
         if (settled.status === 'HUMAN_REQUIRED') {
@@ -724,7 +798,7 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
       }
       if (executed.closeKind === 'PASS') {
         stop = { status: 'ALL_DONE', reason: 'nenhuma tarefa pendente' };
-        exhausted = index === maxIterations - 1;
+        exhausted = cycle >= maxIterations;
         continue;
       }
       if (executed.closeKind !== 'FAIL' || executed.stop === null) {
@@ -780,6 +854,8 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
         rec.decision.profile_id,
         repairTimeout,
         capabilityRepairMeta,
+        undefined,
+        acceptance,
       );
       if ('empty' in repair) {
         stop = repair.stop;
@@ -793,6 +869,7 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
           rec.decision.profile_id,
           repairTimeout,
           capabilityRepairMeta,
+          acceptance,
         );
         iterations.push(...settled.executions.map((item) => item.iteration));
         if (settled.status === 'HUMAN_REQUIRED') {
@@ -827,7 +904,7 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
       }
       if (repair.closeKind === 'PASS') {
         stop = { status: 'ALL_DONE', reason: 'nenhuma tarefa pendente' };
-        exhausted = index === maxIterations - 1;
+        exhausted = cycle >= maxIterations;
         continue;
       }
       if (repair.closeKind === 'FAIL') {
@@ -841,7 +918,10 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
         // Repair esgotado: o control plane pode autorizar o degrau seguinte da
         // ladder configurada e reabrir a task pela primitive oficial. Sem
         // control plane, o comportamento histórico é intocado.
-        if ((await escalateOrHalt(repair.iteration.taskId, repairHalt)) === 'CONTINUE') continue;
+        if ((await escalateOrHalt(repair.iteration.taskId, repairHalt)) === 'CONTINUE') {
+          escalationContinuation = true;
+          continue;
+        }
         stop = stop.status === 'HUMAN_REQUIRED' ? stop : repairHalt;
         break;
       }

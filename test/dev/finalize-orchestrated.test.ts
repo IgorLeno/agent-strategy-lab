@@ -6,6 +6,11 @@ import {
   finalizeOrchestratedTask,
   type OrchestratedValidationRunner,
 } from '../../dev/lib/finalize-orchestrated.js';
+import {
+  finalizationFingerprint,
+  validationResultsFingerprint,
+  type ValidatedCandidateAcceptancePolicy,
+} from '../../dev/lib/candidate-review.js';
 import { closeTaskByLaunchPolicy } from '../../dev/lib/close-dispatch.js';
 import { headSha, parentShas, stagedFiles, workingTreeFiles } from '../../dev/lib/git.js';
 import { readProcStartTicks } from '../../dev/lib/process-identity.js';
@@ -16,16 +21,22 @@ import {
   ensureTaskInbox,
   handoffDraftPath,
   orchestratedFinalizationPath,
+  readCandidateReview,
+  readCloseManifest,
   readCompletion,
   readHandoff,
   readOrchestratedFinalization,
   reportPath,
+  writeCandidateReview,
   writeLaunchRecord,
   writeOrchestratedFinalization,
   writePacket,
 } from '../../dev/lib/records.js';
 import { recover, verifyCloseBundle } from '../../dev/lib/recover.js';
-import type { OrchestratedFinalizationRecord } from '../../dev/lib/schemas.js';
+import type {
+  CandidateReviewRequirement,
+  OrchestratedFinalizationRecord,
+} from '../../dev/lib/schemas.js';
 import {
   buildInitialState,
   ensureRuntimeDirs,
@@ -206,6 +217,208 @@ async function commitCount(): Promise<number> {
 
 afterEach(async () => {
   await rm(root, { recursive: true, force: true });
+});
+
+/**
+ * Autoridade de review usada pelos testes de fronteira. Não lança provider
+ * nenhum: exercita exatamente o contrato que o control plane implementa —
+ * declarar a exigência antes do candidate existir e publicar um veredito
+ * DURÁVEL antes de qualquer promoção.
+ */
+const REVIEW_REQUIREMENT: CandidateReviewRequirement = {
+  required: true,
+  reviewer_profile_id: 'fake-reviewer-v1',
+  diversity_requirement: 'preferred',
+  policy_provenance: 'teste de fronteira de aceitação',
+};
+
+async function publishVerdict(
+  record: OrchestratedFinalizationRecord,
+  decision: 'ACCEPT' | 'REJECT',
+): Promise<void> {
+  await writeCandidateReview(paths, {
+    schema_version: 1,
+    task_id: record.task_id,
+    attempt: record.attempt,
+    candidate_sha: record.candidate_commit,
+    finalization_record_sha256: finalizationFingerprint(record),
+    validation_results_sha256: validationResultsFingerprint(record),
+    reviewer_profile_id: REVIEW_REQUIREMENT.reviewer_profile_id,
+    reviewer_invocation: {
+      role: 'reviewer',
+      workspace_access: 'READ_ONLY',
+      read_only_mechanism: 'argv do worker falso: --agentlab-read-only',
+      argv: ['node', 'fixtures/fake-worker.mjs', '--agentlab-read-only'],
+      diversity_requirement: REVIEW_REQUIREMENT.diversity_requirement,
+      fresh_context: true,
+    },
+    decision,
+    reason: `veredito ${decision} do teste`,
+    decided_at: NOW,
+  });
+}
+
+function reviewingPolicy(
+  decision: 'ACCEPT' | 'REJECT',
+  onReview?: (record: OrchestratedFinalizationRecord) => Promise<void>,
+): ValidatedCandidateAcceptancePolicy {
+  return {
+    requirementFor: () => REVIEW_REQUIREMENT,
+    async review({ record }) {
+      await onReview?.(record);
+      await publishVerdict(record, decision);
+      return decision === 'ACCEPT'
+        ? { outcome: 'ACCEPT', reason: 'veredito ACCEPT do teste' }
+        : { outcome: 'BLOCKED', code: 'REVIEW_REJECTED', reason: 'veredito REJECT do teste' };
+    },
+  };
+}
+
+/** Fotografia do runtime no instante EXATO em que o reviewer decide. */
+interface ObservedAtReview {
+  readonly candidate: string;
+  readonly head: string;
+  readonly status: string;
+  readonly phase: string | null;
+  readonly acceptedCommit: string | null;
+  readonly completion: unknown;
+  readonly handoff: unknown;
+  readonly manifest: unknown;
+  readonly authorizedHead: string | null;
+}
+
+describe('fronteira entre candidate validado e PASS aceito', () => {
+  it('o reviewer decide ANTES de existir qualquer artefato de aceitação', async () => {
+    await prepareRun(['src/reviewed.ts']);
+    const observed: ObservedAtReview[] = [];
+
+    const outcome = await finalize({
+      acceptance: reviewingPolicy('ACCEPT', async (record) => {
+        const state = await readState(paths);
+        const task = getTaskState(state, 'T1');
+        observed.push({
+          candidate: record.candidate_commit,
+          head: await headSha(root),
+          status: task.status,
+          phase: task.phase,
+          acceptedCommit: task.accepted_commit,
+          completion: await readCompletion(paths, 'T1'),
+          handoff: await readHandoff(paths, 'T1'),
+          manifest: await readCloseManifest(paths, 'T1'),
+          authorizedHead: state.authorized_head_sha,
+        });
+      }),
+    });
+
+    expect(outcome.kind).toBe('PASS');
+    expect(observed).toHaveLength(1);
+    const seen = observed[0] as ObservedAtReview;
+    // O candidate JÁ existe, validado e commitado: é isso que o reviewer revisa.
+    expect(seen.candidate).toBe(seen.head);
+    expect(seen.candidate).not.toBe(baseSha);
+    // E NADA de aceitação existe ainda.
+    expect(seen.status).toBe('RUNNING');
+    expect(seen.phase).toBe('FINALIZING');
+    expect(seen.acceptedCommit).toBeNull();
+    expect(seen.completion).toBeNull();
+    expect(seen.handoff).toBeNull();
+    expect(seen.manifest).toBeNull();
+    expect(seen.authorizedHead).toBe(baseSha);
+
+    // Só depois do ACCEPT a aceitação passa a existir.
+    const state = await readState(paths);
+    expect(getTaskState(state, 'T1').status).toBe('PASS');
+    expect(getTaskState(state, 'T1').accepted_commit).toBe(seen.candidate);
+    expect(state.authorized_head_sha).toBe(seen.candidate);
+    expect((await verifyCloseBundle(paths, 'T1')).status).toBe('VALID');
+  });
+
+  it('REJECT preserva o candidate, não aceita nada e nem o recover promove', async () => {
+    await prepareRun(['src/rejected.ts']);
+    const outcome = await finalize({ acceptance: reviewingPolicy('REJECT') });
+
+    expect(outcome.kind).toBe('PENDING');
+    const candidate = await headSha(root);
+    const record = await readOrchestratedFinalization(paths, 'T1', 1);
+    expect(record?.candidate_commit).toBe(candidate);
+    expect(record?.review_requirement?.required).toBe(true);
+    expect((await readCandidateReview(paths, 'T1', 1))?.decision).toBe('REJECT');
+
+    const state = await readState(paths);
+    expect(getTaskState(state, 'T1').status).toBe('RUNNING');
+    expect(getTaskState(state, 'T1').accepted_commit).toBeNull();
+    expect(state.authorized_head_sha).toBe(baseSha);
+    expect(await readCompletion(paths, 'T1')).toBeNull();
+
+    // Repetir o fechamento SEM autoridade de review não promove.
+    expect((await finalize()).kind).toBe('PENDING');
+    expect(getTaskState(await readState(paths), 'T1').status).toBe('RUNNING');
+
+    // E o `dev-recover`, que sela finalizações válidas, também não: a guarda
+    // vive na selagem, então nenhum promotor a contorna.
+    const recovered = await recover(paths, loaded, { applyRecovered: true });
+    const reconciled = recovered.state.tasks.find((task) => task.id === 'T1');
+    expect(reconciled?.status).toBe('RUNNING');
+    expect(reconciled?.diagnostics).toContain('review independente');
+    expect(await readCompletion(paths, 'T1')).toBeNull();
+  });
+
+  it('crash depois do ACCEPT durável: rerun promove o MESMO candidate, sem novo reviewer', async () => {
+    await prepareRun(['src/crashed.ts']);
+    await expect(
+      finalize({
+        acceptance: {
+          requirementFor: () => REVIEW_REQUIREMENT,
+          async review({ record }) {
+            await publishVerdict(record, 'ACCEPT');
+            throw new Error('crash entre o ACCEPT durável e a promoção');
+          },
+        },
+      }),
+    ).rejects.toThrow('crash entre o ACCEPT durável e a promoção');
+
+    const candidate = await headSha(root);
+    expect(getTaskState(await readState(paths), 'T1').status).toBe('RUNNING');
+    expect(await readCompletion(paths, 'T1')).toBeNull();
+
+    let reviewed = 0;
+    const outcome = await finalize({
+      acceptance: {
+        requirementFor: () => REVIEW_REQUIREMENT,
+        async review() {
+          reviewed += 1;
+          return { outcome: 'BLOCKED', code: 'REVIEWER_REINVOCADO', reason: 'não deveria ocorrer' };
+        },
+      },
+    });
+
+    expect(reviewed).toBe(0);
+    expect(outcome.kind).toBe('PASS');
+    expect(await commitCount()).toBe(1);
+    const state = await readState(paths);
+    expect(getTaskState(state, 'T1').accepted_commit).toBe(candidate);
+    expect(state.authorized_head_sha).toBe(candidate);
+    expect((await verifyCloseBundle(paths, 'T1')).status).toBe('VALID');
+  });
+
+  it('veredito que não amarra ao candidate nunca promove', async () => {
+    await prepareRun(['src/divergente.ts']);
+    const outcome = await finalize({
+      acceptance: {
+        requirementFor: () => REVIEW_REQUIREMENT,
+        async review({ record }) {
+          // ACCEPT emitido sobre OUTRO candidate: evidência de outra coisa,
+          // não permissão para promover esta.
+          await publishVerdict({ ...record, candidate_commit: SHA }, 'ACCEPT');
+          return { outcome: 'ACCEPT', reason: 'aceite não amarrado' };
+        },
+      },
+    });
+
+    expect(outcome.kind).toBe('PENDING');
+    expect(getTaskState(await readState(paths), 'T1').status).toBe('RUNNING');
+    expect(await readCompletion(paths, 'T1')).toBeNull();
+  });
 });
 
 describe('OrchestratedFinalizationRecord IO', () => {

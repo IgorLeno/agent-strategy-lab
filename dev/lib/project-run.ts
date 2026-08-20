@@ -34,7 +34,7 @@ import {
   ExecutionAuthorizationScope,
 } from '../../src/intake/index.js';
 import { inspectRepository, type ProjectInspection } from '../../src/inspection/index.js';
-import { assessExecution, type ExecutionAssessment } from '../../src/planner/assess.js';
+import { assessExecution } from '../../src/planner/assess.js';
 import { PlannedTask, type TaskRisk } from '../../src/planner/task.js';
 import { evaluatePlanWorkflow } from '../../src/planner/validate.js';
 import { AttemptRole } from '../../src/performance/attempt-facts.js';
@@ -53,6 +53,13 @@ import {
 } from '../../src/routing/index.js';
 import type { FailureDiagnosis } from '../../src/routing/diagnosis.js';
 import { assertNoApiCredentials, runBillingPreflight } from './billing.js';
+import {
+  finalizationFingerprint,
+  lookupCandidateReview,
+  validationResultsFingerprint,
+  type ValidatedCandidateAcceptance,
+  type ValidatedCandidateAcceptancePolicy,
+} from './candidate-review.js';
 import { experimentFactsOf, sandboxOf, sessionPersistenceOf } from './doctor.js';
 import { headSha } from './git.js';
 import type { HarnessPaths } from './paths.js';
@@ -87,12 +94,18 @@ import {
   workerRuntimeBoundsOf,
 } from './project-roles.js';
 import {
+  candidateReviewPath,
   completionPath,
   readCompletion,
   readLaunchRecord,
   readValidationFailedAttempt,
   validationFailedAttemptPath,
+  writeCandidateReview,
 } from './records.js';
+import type {
+  CandidateReviewRequirement,
+  OrchestratedFinalizationRecord,
+} from './schemas.js';
 import { retryFailedAttempt } from './retry-failed.js';
 import type { HumanRequiredOutput } from './routine-autonomy.js';
 import { getTaskState, readState } from './state.js';
@@ -271,6 +284,19 @@ export type WorkUnitFollowUp =
   | { readonly status: 'CONTINUE' }
   | { readonly status: 'HUMAN_REQUIRED'; readonly human_required: HumanRequiredOutput };
 
+/**
+ * Decisão da autoridade de review sobre UM candidate preparado e validado.
+ * `HUMAN_REQUIRED` cobre REJECT, review indisponível e veredito não amarrado
+ * ao candidate: para a promoção as três são a mesma coisa — não aceito.
+ */
+export type CandidateAcceptanceDecision =
+  | { readonly status: 'ACCEPTED'; readonly reason: string }
+  | {
+      readonly status: 'HUMAN_REQUIRED';
+      readonly code: string;
+      readonly human_required: HumanRequiredOutput;
+    };
+
 export type RepairExhaustedFollowUp =
   | { readonly status: 'ESCALATED'; readonly profile_id: string }
   | { readonly status: 'HUMAN_REQUIRED'; readonly human_required: HumanRequiredOutput }
@@ -289,6 +315,13 @@ export interface ProjectControlPlane {
     readonly taskId: string;
     readonly reason: string;
   }): Promise<RepairExhaustedFollowUp>;
+  /**
+   * Autoridade de review consumida pela FINALIZAÇÃO, e não pelo loop: é ela
+   * que decide se um candidate validado pode virar PASS. Entregue como
+   * `ValidatedCandidateAcceptancePolicy` porque quem faz a pergunta é a
+   * primitive de finalização, que não conhece profile, policy nem reviewer.
+   */
+  readonly acceptance: ValidatedCandidateAcceptancePolicy;
   snapshot(): ProjectLifecycleReport;
 }
 
@@ -532,13 +565,20 @@ export interface CreateProjectControlPlaneInput {
   readonly inspect?: (repoRoot: string) => Promise<ProjectInspection>;
 }
 
-interface ActiveWorkUnit {
-  readonly report: ProjectWorkUnitReport;
-  readonly assessment: ExecutionAssessment;
-  readonly task: PlannedTask;
-  readonly scope: ExecutionAuthorizationScope;
-  readonly budgetMs: number;
-  readonly reviewerProfile: LauncherProfile | null;
+/**
+ * Worker runtime budget do REVIEWER, derivado do envelope DECLARADO na
+ * autorização da run. Declarado, e não roteado, de propósito: a review de um
+ * candidate precisa ser decidível também por um processo que reabriu o runtime
+ * depois de um crash, onde nenhuma decisão de routing em memória existe. O
+ * mesmo número nos dois caminhos é o que faz a retomada não ser um segundo
+ * regime de execução.
+ */
+function reviewerBudgetMsOf(
+  authorization: ProjectRunAuthorizationFile,
+  taskId: string,
+): number {
+  return classificationFor(authorization, taskId).classification.resource_envelope.duration_ms
+    .maximum;
 }
 
 export async function createProjectControlPlane(
@@ -600,8 +640,18 @@ export async function createProjectControlPlane(
   const escalations: ProjectEscalationReport[] = [];
   const escalatedProfileByTask = new Map<string, string>();
   const priorAuthorizations: EscalationAuthorization[] = [];
-  let active: ActiveWorkUnit | null = null;
+  /** Relatório da work unit em curso — o único estado por-launch do control plane. */
+  let active: ProjectWorkUnitReport | null = null;
   let humanGate: HumanRequiredOutput | null = null;
+  /**
+   * Exigência de review POR TASK, decidida uma vez em `beforeWorkUnit` e
+   * consumida pela finalização do mesmo attempt. Fica num mapa por task, e não
+   * só na work unit ativa, porque quem pergunta é a primitive de finalização —
+   * que só conhece o `task_id`.
+   */
+  const reviewRequirementByTask = new Map<string, CandidateReviewRequirement>();
+  /** Gate humano do último candidate recusado pela review, lido por `afterWorkUnit`. */
+  let blockedReview: HumanRequiredOutput | null = null;
 
   function candidatesFor(eligible: readonly string[]): RoutingCandidate[] {
     return eligible.map((id) => {
@@ -782,6 +832,21 @@ export async function createProjectControlPlane(
     const reviewerProfile = decision.review_required
       ? (profiles.get(reviewerProfileId) ?? null)
       : null;
+    blockedReview = null;
+    if (decision.review_required) {
+      // A exigência é registrada ANTES do launch e vale para o candidate que
+      // este attempt vier a produzir. Um reviewer que não pertença à policy
+      // NÃO relaxa a exigência: ela continua gravada, e a impossibilidade de
+      // decidir vira gate humano em vez de aceite silencioso.
+      reviewRequirementByTask.set(request.taskId, {
+        required: true,
+        reviewer_profile_id: reviewerProfileId,
+        diversity_requirement: decision.diversity_requirement,
+        policy_provenance: `assessment.review_requirement + ${input.authorizationFile}`,
+      });
+    } else {
+      reviewRequirementByTask.delete(request.taskId);
+    }
 
     const report: ProjectWorkUnitReport = {
       task_id: request.taskId,
@@ -832,7 +897,7 @@ export async function createProjectControlPlane(
       escalation: escalatedProfileByTask.get(request.taskId) ?? null,
     };
     workUnits.push(report);
-    active = { report, assessment, task: built.task, scope, budgetMs, reviewerProfile };
+    active = report;
 
     if (launchAuthorization.outcome === 'HUMAN_REQUIRED') {
       return {
@@ -918,79 +983,232 @@ export async function createProjectControlPlane(
     report.comparable_run_facts_path = recorded.file;
   }
 
-  async function afterWorkUnit(observation: WorkUnitObservation): Promise<WorkUnitFollowUp> {
-    const current = active;
-    const report = current?.report ?? workUnits.at(-1);
-    if (report === undefined || current === null) return { status: 'CONTINUE' };
-    report.validation_outcome = observation.closeKind ?? observation.launch;
-    await recordEvidence(observation, report);
+  /** Relatório da work unit a que este candidate pertence, se existir neste processo. */
+  function reportFor(taskId: string): ProjectWorkUnitReport | undefined {
+    return [...workUnits].reverse().find((entry) => entry.task_id === taskId);
+  }
 
-    if (observation.closeKind !== 'PASS') return { status: 'CONTINUE' };
-    if (!report.review.required) {
-      report.review = { ...report.review, outcome: 'NOT_REQUIRED', reason: 'policy não exigiu review independente' };
-      return { status: 'CONTINUE' };
+  function reviewRequirementFor(taskId: string): CandidateReviewRequirement | null {
+    return reviewRequirementByTask.get(taskId) ?? null;
+  }
+
+  function reviewBlocked(
+    taskId: string,
+    code: string,
+    outcome: string,
+    reason: string,
+    decisionNeeded: string,
+    options: readonly string[],
+    evidencePaths: readonly string[],
+  ): CandidateAcceptanceDecision {
+    const report = reportFor(taskId);
+    if (report !== undefined) report.review = { ...report.review, outcome, reason };
+    const output = humanRequired(
+      `project:${taskId}:review`,
+      decisionNeeded,
+      reason,
+      options,
+      evidencePaths,
+    );
+    blockedReview = output;
+    return { status: 'HUMAN_REQUIRED', code, human_required: output };
+  }
+
+  /**
+   * DECISÃO de aceitação sobre um candidate JÁ preparado e validado.
+   *
+   * Roda depois do commit e da validação oficial, e ANTES de existir qualquer
+   * artefato de aceitação: nenhum CompletionRecord PASS, nenhum Handoff selado,
+   * nenhum `accepted_commit` e nenhum avanço de `authorized_head_sha` foram
+   * publicados quando esta função é chamada. O reviewer recebe evidência
+   * objetiva (SHA do candidate, arquivos, validação oficial) e a decisão dele
+   * é publicada em disco antes de qualquer promoção.
+   *
+   * Um veredito durável já publicado NÃO é reexecutado: um REJECT continua
+   * valendo depois que o processo termina, e rerodar o mesmo comando não o
+   * esquece. Reabrir a task é intervenção humana explícita, nunca automação.
+   */
+  async function reviewValidatedCandidate(request: {
+    readonly taskId: string;
+    readonly record: OrchestratedFinalizationRecord;
+  }): Promise<CandidateAcceptanceDecision> {
+    const { taskId, record } = request;
+    const evidencePaths = [
+      candidateReviewPath(paths, taskId, record.attempt),
+      paths.validationLogsDir,
+    ];
+    const lookup = await lookupCandidateReview(paths, record);
+    if (lookup.status === 'NOT_REQUIRED' || lookup.status === 'ACCEPTED') {
+      const report = reportFor(taskId);
+      if (report !== undefined) {
+        report.review = {
+          ...report.review,
+          outcome: lookup.status === 'ACCEPTED' ? 'ACCEPT' : 'NOT_REQUIRED',
+          reason: lookup.reason,
+        };
+      }
+      return { status: 'ACCEPTED', reason: lookup.reason };
+    }
+    if (lookup.status === 'REJECTED') {
+      return reviewBlocked(
+        taskId,
+        'REVIEW_REJECTED',
+        'REJECT',
+        `review independente não aceitou a mudança: ${lookup.reason}`,
+        'decidir sobre a mudança reprovada pela review independente',
+        ['inspecionar o candidate e a evidência preservada', 'reabrir a task explicitamente'],
+        evidencePaths,
+      );
+    }
+    if (lookup.status === 'DIVERGENT') {
+      return reviewBlocked(
+        taskId,
+        'REVIEW_EVIDENCE_DIVERGENT',
+        'REVIEW_EVIDENCE_DIVERGENT',
+        `veredito de review não corresponde ao candidate preparado: ${lookup.reason}`,
+        'reconciliar manualmente veredito e candidate antes de qualquer promoção',
+        ['inspecionar o veredito preservado', 'inspecionar o candidate preparado'],
+        evidencePaths,
+      );
     }
 
-    const reviewerProfile = current.reviewerProfile;
+    const requirement = lookup.requirement as CandidateReviewRequirement;
+    const reviewerProfile = profiles.get(requirement.reviewer_profile_id) ?? null;
     if (reviewerProfile === null) {
-      report.review = { ...report.review, outcome: 'UNAVAILABLE', reason: 'reviewer não pertence à profile policy' };
-      return {
-        status: 'HUMAN_REQUIRED',
-        human_required: humanRequired(
-          `project:${observation.taskId}:review-profile`,
-          'declarar um reviewer elegível na profile policy',
-          'a policy exigiu review independente e nenhum reviewer autorizado existe',
-          ['declarar review.reviewer_profile_id', 'reduzir o risco declarado'],
-          [input.authorizationFile],
-        ),
-      };
+      return reviewBlocked(
+        taskId,
+        'REVIEW_PROFILE_OUTSIDE_POLICY',
+        'UNAVAILABLE',
+        `a policy exigiu review independente e o reviewer ${requirement.reviewer_profile_id} não pertence à profile policy`,
+        'declarar um reviewer elegível na profile policy',
+        ['declarar review.reviewer_profile_id', 'reduzir o risco declarado'],
+        [input.authorizationFile],
+      );
+    }
+    const planTask = loaded.byId.get(taskId);
+    if (planTask === undefined) {
+      return reviewBlocked(
+        taskId,
+        'REVIEW_TASK_OUTSIDE_PLAN',
+        'UNAVAILABLE',
+        `task ${taskId} do candidate não existe no PlanFile carregado`,
+        'reconciliar plano e runtime antes de qualquer promoção',
+        ['revisar o PlanFile', 'inspecionar o runtime'],
+        [paths.planFile],
+      );
     }
 
-    const completion = await readCompletion(paths, observation.taskId);
-    const evidence = completion?.orchestrator_evidence ?? null;
     const verdict: ProjectReviewResult = await launchProjectReviewer({
       paths,
       profile: reviewerProfile,
-      scope: current.scope,
-      implementerProfileId: observation.profileId,
-      diversityRequirement: report.review.diversity_requirement as never,
-      risk: report.risk,
-      workerRuntimeBudgetMs: current.budgetMs,
+      scope,
+      implementerProfileId: record.profile_id,
+      diversityRequirement: requirement.diversity_requirement as never,
+      risk: classificationFor(authorization, taskId).classification.risk,
+      workerRuntimeBudgetMs: reviewerBudgetMsOf(authorization, taskId),
       quotaAvailable: true,
       credentialProved: true,
       packet: {
-        task_id: observation.taskId,
-        objective: current.task.objective,
-        acceptance: current.task.acceptance,
-        validation: current.task.validation.map((command) => ({ argv: command.argv })),
-        changed_files: evidence?.changed_files ?? [],
-        candidate_sha: evidence?.accepted_commit ?? null,
-        official_validation_outcome: observation.closeKind,
+        task_id: taskId,
+        objective: planTask.objective,
+        acceptance: [...planTask.acceptance],
+        validation: planTask.validation.map((command) => ({ argv: [...command.argv] })),
+        changed_files: [...record.changed_files],
+        // O candidate REVISADO, não um accepted_commit: no instante da review
+        // nada foi aceito ainda.
+        candidate_sha: record.candidate_commit,
+        official_validation_outcome: 'PASS',
         evidence_paths: [paths.validationLogsDir],
       },
     });
 
-    if (verdict.outcome === 'ACCEPT') {
-      report.review = { ...report.review, outcome: 'ACCEPT', reason: verdict.reason };
-      return { status: 'CONTINUE' };
+    if (verdict.outcome === 'REVIEW_UNAVAILABLE') {
+      // Review exigida que não pôde ser concluída não vira aceite nem vira
+      // reprovação permanente: nada é publicado, e a próxima tentativa
+      // continua encontrando o candidate aguardando decisão.
+      return reviewBlocked(
+        taskId,
+        verdict.code,
+        verdict.code,
+        `review independente não pôde ser concluída: ${verdict.reason}`,
+        'tornar a review independente executável ou decidir manualmente',
+        ['corrigir a configuração do reviewer', 'inspecionar o candidate preparado'],
+        evidencePaths,
+      );
     }
-    const outcome = verdict.outcome === 'REJECT' ? 'REJECT' : verdict.code;
-    const reason = verdict.reason;
-    report.review = {
-      ...report.review,
-      outcome,
-      reason,
-    };
-    return {
-      status: 'HUMAN_REQUIRED',
-      human_required: humanRequired(
-        `project:${observation.taskId}:review`,
-        'decidir sobre a mudança reprovada ou não revisável',
-        `review independente não aceitou a mudança: ${reason}`,
-        ['inspecionar o commit e a evidência', 'reabrir a task explicitamente'],
-        [paths.validationLogsDir],
-      ),
-    };
+
+    await writeCandidateReview(paths, {
+      schema_version: 1,
+      task_id: taskId,
+      attempt: record.attempt,
+      candidate_sha: record.candidate_commit,
+      finalization_record_sha256: finalizationFingerprint(record),
+      validation_results_sha256: validationResultsFingerprint(record),
+      reviewer_profile_id: reviewerProfile.id,
+      reviewer_invocation: {
+        role: 'reviewer',
+        workspace_access: verdict.workspace_access as 'READ_ONLY',
+        read_only_mechanism: verdict.read_only_mechanism,
+        argv: [...verdict.argv],
+        diversity_requirement: requirement.diversity_requirement,
+        fresh_context: true,
+      },
+      decision: verdict.outcome,
+      reason: verdict.reason,
+      decided_at: new Date().toISOString(),
+    });
+
+    if (verdict.outcome === 'ACCEPT') {
+      const report = reportFor(taskId);
+      if (report !== undefined) {
+        report.review = { ...report.review, outcome: 'ACCEPT', reason: verdict.reason };
+      }
+      return { status: 'ACCEPTED', reason: verdict.reason };
+    }
+    return reviewBlocked(
+      taskId,
+      'REVIEW_REJECTED',
+      'REJECT',
+      `review independente não aceitou a mudança: ${verdict.reason}`,
+      'decidir sobre a mudança reprovada pela review independente',
+      ['inspecionar o candidate e a evidência preservada', 'reabrir a task explicitamente'],
+      evidencePaths,
+    );
+  }
+
+  const acceptance: ValidatedCandidateAcceptancePolicy = {
+    requirementFor: reviewRequirementFor,
+    async review(request): Promise<ValidatedCandidateAcceptance> {
+      const decision = await reviewValidatedCandidate(request);
+      return decision.status === 'ACCEPTED'
+        ? { outcome: 'ACCEPT', reason: decision.reason }
+        : {
+            outcome: 'BLOCKED',
+            code: decision.code,
+            reason: decision.human_required.why_automation_stopped,
+          };
+    },
+  };
+
+  async function afterWorkUnit(observation: WorkUnitObservation): Promise<WorkUnitFollowUp> {
+    const report = active ?? workUnits.at(-1);
+    if (report === undefined) return { status: 'CONTINUE' };
+    report.validation_outcome = observation.closeKind ?? observation.launch;
+    await recordEvidence(observation, report);
+
+    // A review já aconteceu — na FRONTEIRA DE ACEITAÇÃO, antes de o candidate
+    // virar PASS. Aqui só resta propagar o gate humano que ela produziu.
+    if (blockedReview !== null) {
+      return { status: 'HUMAN_REQUIRED', human_required: blockedReview };
+    }
+    if (observation.closeKind === 'PASS' && !report.review.required) {
+      report.review = {
+        ...report.review,
+        outcome: 'NOT_REQUIRED',
+        reason: 'policy não exigiu review independente',
+      };
+    }
+    return { status: 'CONTINUE' };
   }
 
   async function onRepairExhausted(request: {
@@ -1130,6 +1348,7 @@ export async function createProjectControlPlane(
     beforeWorkUnit,
     afterWorkUnit,
     onRepairExhausted,
+    acceptance,
     snapshot(): ProjectLifecycleReport {
       return {
         schema_version: PROJECT_RUN_SCHEMA_VERSION,

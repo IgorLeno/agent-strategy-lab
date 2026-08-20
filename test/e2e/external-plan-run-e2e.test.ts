@@ -20,8 +20,16 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { resolveHarnessInstallationRoot, resolveHarnessPaths } from '../../dev/lib/paths.js';
-import { readState } from '../../dev/lib/state.js';
+import { resolveHarnessInstallationRoot, resolveHarnessPaths, type HarnessPaths } from '../../dev/lib/paths.js';
+import {
+  candidateReviewPath,
+  launchRecordPath,
+  orchestratedFinalizationPath,
+  readCandidateReview,
+  readLaunchRecord,
+  readOrchestratedFinalization,
+} from '../../dev/lib/records.js';
+import { getTaskState, readState } from '../../dev/lib/state.js';
 import { runDevCli, runGit, type CliResult } from '../dev/helpers.js';
 
 const created: string[] = [];
@@ -85,7 +93,7 @@ async function externalTarget(): Promise<string> {
   return target;
 }
 
-function planYaml(options: { readonly secondValidation: string }): string {
+function firstTaskYaml(firstValidation: string): readonly string[] {
   return [
     'schema_version: 1',
     'tasks:',
@@ -95,8 +103,22 @@ function planYaml(options: { readonly secondValidation: string }): string {
     '    initial_files: [src/greet.ts]',
     "    acceptance: ['marcador de T1 criado']",
     '    validation:',
-    "      - argv: ['true']",
+    `      - argv: ${firstValidation}`,
     '        timeout_seconds: 30',
+  ];
+}
+
+/** Plano de UMA work unit: usado onde a existência de T2 mudaria o desfecho. */
+function singleTaskPlanYaml(firstValidation = "['true']"): string {
+  return [...firstTaskYaml(firstValidation), ''].join('\n');
+}
+
+function planYaml(options: {
+  readonly secondValidation: string;
+  readonly firstValidation?: string;
+}): string {
+  return [
+    ...firstTaskYaml(options.firstValidation ?? "['true']"),
     '  - id: T2',
     '    title: segunda work unit',
     '    blocked_by: [T1]',
@@ -349,6 +371,16 @@ describe('external plan run — dev-run-plan pelo lifecycle universal', () => {
     expect(await exists(path.join(target.target, 'dev', 'profiles', `${ECONOMY}.yaml`))).toBe(false);
 
     expect((await readState(paths)).tasks.map((task) => task.status)).toEqual(['PASS', 'PASS']);
+
+    // Sem review exigida, o caminho rápido continua: nenhum candidate declara
+    // exigência e nenhum veredito é gravado.
+    for (const taskId of ['T1', 'T2']) {
+      const attempts = getTaskState(await readState(paths), taskId).attempts;
+      expect(
+        (await readOrchestratedFinalization(paths, taskId, attempts))?.review_requirement,
+      ).toBeUndefined();
+      expect(await exists(candidateReviewPath(paths, taskId, attempts))).toBe(false);
+    }
   }, 120_000);
 
   it('CAPABILITY — FAIL, repair FAIL, diagnosis, escalation autorizada e PASS sem gate humano', async () => {
@@ -398,6 +430,59 @@ describe('external plan run — dev-run-plan pelo lifecycle universal', () => {
     expect((await readState(paths)).tasks.map((task) => task.status)).toEqual(['PASS', 'PASS']);
   }, 180_000);
 
+  it('MAX-ITERATIONS — escalation da MESMA task cabe no ciclo primário; T2 não lança', async () => {
+    const target = await fixture(
+      planYaml({
+        firstValidation: "['grep', '-qx', 'repaired', 'src/t1.txt']",
+        secondValidation: "['true']",
+      }),
+      authorizationYaml(),
+    );
+
+    const result = await runPlan(target, 'official-fail-until-escalation', [
+      '--max-iterations',
+      '1',
+    ]);
+    expect(result.exitCode, result.stderr).toBe(0);
+    const output = parse(result);
+
+    // Um único ciclo primário cobriu first pass, bounded repair e escalation.
+    expect(output.iterations.map((item) => [item.task_id, item.result])).toEqual([
+      ['T1', 'FAIL'],
+      ['T1', 'FAIL'],
+      ['T1', 'PASS'],
+    ]);
+    expect(output.project_lifecycle.escalations.map((item) => item.task_id)).toEqual(['T1']);
+
+    // O budget primário acabou: T2 continua pendente e o desfecho diz isso.
+    expect(output.stopped_by).toBe('LIMIT_REACHED');
+    expect(output.reason).toContain('T2');
+    const paths = resolveHarnessPaths(target.target, { planFile: target.plan });
+    const state = await readState(paths);
+    expect(getTaskState(state, 'T1').status).toBe('PASS');
+    expect(getTaskState(state, 'T2').status).toBe('READY');
+    expect(await exists(launchRecordPath(paths, 'T2'))).toBe(false);
+  }, 180_000);
+
+  it('MAX-ITERATIONS — escalation conclui a única task do plano com ALL_DONE', async () => {
+    const target = await fixture(
+      singleTaskPlanYaml("['grep', '-qx', 'repaired', 'src/t1.txt']"),
+      authorizationYaml(),
+    );
+
+    const result = await runPlan(target, 'official-fail-until-escalation', [
+      '--max-iterations',
+      '1',
+    ]);
+    expect(result.exitCode, result.stderr).toBe(0);
+    const output = parse(result);
+
+    expect(output.iterations.map((item) => item.result)).toEqual(['FAIL', 'FAIL', 'PASS']);
+    expect(output.stopped_by).toBe('ALL_DONE');
+    const paths = resolveHarnessPaths(target.target, { planFile: target.plan });
+    expect(getTaskState(await readState(paths), 'T1').status).toBe('PASS');
+  }, 180_000);
+
   it('BENCHMARK — policy de profile único nunca é ampliada: escalation exigida vira HUMAN_REQUIRED', async () => {
     const target = await fixture(
       planYaml({ secondValidation: "['grep', '-qx', 'repaired', 'src/t2.txt']" }),
@@ -444,6 +529,47 @@ describe('external plan run — dev-run-plan pelo lifecycle universal', () => {
     }
   }, 120_000);
 
+  it('REVIEW ACCEPT — PASS só existe DEPOIS do veredito durável, e então libera T2', async () => {
+    const target = await fixture(
+      planYaml({ secondValidation: "['true']" }),
+      authorizationYaml({ risk: 'high' }),
+    );
+
+    const result = await runPlan(target, 'orchestrator-success');
+    expect(result.exitCode, result.stderr).toBe(0);
+    const output = parse(result);
+    expect(output.stopped_by).toBe('ALL_DONE');
+
+    const paths = resolveHarnessPaths(target.target, { planFile: target.plan });
+    const state = await readState(paths);
+    const t1 = getTaskState(state, 'T1');
+
+    // O candidate preparado DECLARA a exigência de review: é o que faz a
+    // fronteira sobreviver ao processo que a criou.
+    const finalization = await readOrchestratedFinalization(paths, 'T1', t1.attempts);
+    expect(finalization?.review_requirement?.required).toBe(true);
+    expect(finalization?.review_requirement?.reviewer_profile_id).toBe(ADVANCED);
+
+    // O veredito é DURÁVEL e amarrado ao candidate revisado.
+    const review = await readCandidateReview(paths, 'T1', t1.attempts);
+    expect(review?.decision).toBe('ACCEPT');
+    expect(review?.candidate_sha).toBe(finalization?.candidate_commit);
+    expect(review?.reviewer_invocation.workspace_access).toBe('READ_ONLY');
+    expect(review?.reviewer_invocation.fresh_context).toBe(true);
+    expect(review?.reviewer_invocation.argv.join(' ')).toContain('--agentlab-read-only');
+
+    // Só DEPOIS do ACCEPT a aceitação existe.
+    expect(t1.status).toBe('PASS');
+    expect(t1.accepted_commit).toBe(finalization?.candidate_commit);
+
+    // E a próxima work unit foi liberada sobre o commit aceito.
+    expect(getTaskState(state, 'T2').status).toBe('PASS');
+    expect(output.iterations.map((item) => [item.task_id, item.result])).toEqual([
+      ['T1', 'PASS'],
+      ['T2', 'PASS'],
+    ]);
+  }, 120_000);
+
   it('REVIEW — veredito REJECT para a automação com gate humano, sem PASS silencioso', async () => {
     const target = await fixture(
       planYaml({ secondValidation: "['true']" }),
@@ -460,7 +586,99 @@ describe('external plan run — dev-run-plan pelo lifecycle universal', () => {
     expect(output.project_lifecycle.human_gate?.why_automation_stopped).toContain(
       'review independente não aceitou a mudança',
     );
+
+    // O bug original: o reviewer REJEITAVA e a task já estava aceita.
+    const paths = resolveHarnessPaths(target.target, { planFile: target.plan });
+    const state = await readState(paths);
+    const t1 = getTaskState(state, 'T1');
+    expect(t1.status).not.toBe('PASS');
+    expect(t1.accepted_commit).toBeNull();
+
+    // O candidate REPROVADO continua preservado, mas não é autoridade nenhuma.
+    const finalization = await readOrchestratedFinalization(paths, 'T1', t1.attempts);
+    expect(finalization?.candidate_commit).toBeTruthy();
+    expect(state.authorized_head_sha).not.toBe(finalization?.candidate_commit);
+    const review = await readCandidateReview(paths, 'T1', t1.attempts);
+    expect(review?.decision).toBe('REJECT');
+    expect(review?.candidate_sha).toBe(finalization?.candidate_commit);
+
+    // T2 nunca foi lançada.
+    expect(getTaskState(state, 'T2').status).toBe('READY');
+    expect(await exists(launchRecordPath(paths, 'T2'))).toBe(false);
   }, 120_000);
+
+  it('REVIEW REJECT — rerun do mesmo comando continua HUMAN_REQUIRED, sem novo launch', async () => {
+    const target = await fixture(
+      planYaml({ secondValidation: "['true']" }),
+      authorizationYaml({ risk: 'high' }),
+    );
+
+    const first = await runPlan(target, 'orchestrator-success', [], {
+      AGENTLAB_FAKE_REVIEW: 'reject',
+    });
+    expect(first.exitCode).toBe(9);
+
+    const paths = resolveHarnessPaths(target.target, { planFile: target.plan });
+    const before = await readLaunchRecord(paths, 'T1');
+    const attemptsBefore = getTaskState(await readState(paths), 'T1').attempts;
+
+    // Rerun SEM intervenção humana e SEM o env que causou o REJECT: o veredito
+    // durável é que continua valendo, não a configuração do rerun.
+    const second = await runPlan(target, 'orchestrator-success');
+    expect(second.exitCode).toBe(9);
+    const output = parse(second);
+    expect(output.stopped_by).toBe('HUMAN_REQUIRED');
+    expect(output.reason).toContain('review independente não aceitou a mudança');
+
+    // Zero implementer novo, zero attempt novo, zero bypass para T2.
+    expect(output.iteration_count).toBe(0);
+    const after = await readLaunchRecord(paths, 'T1');
+    expect(after?.launch_id).toBe(before?.launch_id);
+    const state = await readState(paths);
+    expect(getTaskState(state, 'T1').attempts).toBe(attemptsBefore);
+    expect(getTaskState(state, 'T1').status).not.toBe('PASS');
+    expect(getTaskState(state, 'T1').accepted_commit).toBeNull();
+    expect(getTaskState(state, 'T2').status).toBe('READY');
+    expect(await exists(launchRecordPath(paths, 'T2'))).toBe(false);
+  }, 180_000);
+
+  it('REVIEW pendente — crash antes do veredito retoma a review, sem repetir o implementer', async () => {
+    const target = await fixture(
+      planYaml({ secondValidation: "['true']" }),
+      authorizationYaml({ risk: 'high' }),
+    );
+
+    // Review exigida que não pôde ser CONCLUÍDA: o candidate fica preparado e
+    // validado, sem veredito publicado — exatamente o estado em disco de um
+    // crash entre a preparação do candidate e a decisão do reviewer.
+    const interrupted = await runPlan(target, 'orchestrator-success', [], {
+      AGENTLAB_FAKE_REVIEW: 'invalid',
+    });
+    expect(interrupted.exitCode).toBe(9);
+
+    const paths = resolveHarnessPaths(target.target, { planFile: target.plan });
+    const beforeState = await readState(paths);
+    const t1Before = getTaskState(beforeState, 'T1');
+    const candidate = (await readOrchestratedFinalization(paths, 'T1', t1Before.attempts))
+      ?.candidate_commit;
+    expect(candidate).toBeTruthy();
+    expect(t1Before.status).not.toBe('PASS');
+    expect(await exists(candidateReviewPath(paths, 'T1', t1Before.attempts))).toBe(false);
+    const launchBefore = await readLaunchRecord(paths, 'T1');
+
+    const resumed = await runPlan(target, 'orchestrator-success');
+    expect(resumed.exitCode, resumed.stderr).toBe(0);
+    expect(parse(resumed).stopped_by).toBe('ALL_DONE');
+
+    // Mesmo candidate promovido; nenhum implementer novo para T1.
+    const state = await readState(paths);
+    const t1 = getTaskState(state, 'T1');
+    expect(t1.status).toBe('PASS');
+    expect(t1.accepted_commit).toBe(candidate);
+    expect(t1.attempts).toBe(t1Before.attempts);
+    expect((await readCandidateReview(paths, 'T1', t1.attempts))?.candidate_sha).toBe(candidate);
+    expect((await readLaunchRecord(paths, 'T1'))?.launch_id).toBe(launchBefore?.launch_id);
+  }, 180_000);
 
   it('HUMAN GATE — capability fora do boundary para antes de qualquer spawn', async () => {
     const target = await fixture(

@@ -1,6 +1,10 @@
 import { readFile } from 'node:fs/promises';
 import { jsonBytes, writeFileAtomic } from './atomic.js';
 import { canonicalJson, canonicalSha256, sha256Hex } from './canonical.js';
+import {
+  lookupCandidateReview,
+  type ValidatedCandidateAcceptancePolicy,
+} from './candidate-review.js';
 import type { CloseOutcome } from './close.js';
 import { materializeFailedAttemptSource } from './failed-attempt-source.js';
 import {
@@ -87,6 +91,13 @@ export interface FinalizeOrchestratedInput {
   readonly afterCompletionWritten?: (completion: CompletionRecordType) => Promise<void>;
   /** Ponto de crash injetado pelos testes, entre selar a fonte do FAIL e publicá-lo. */
   readonly afterFailSourceSealed?: (completion: CompletionRecordType) => Promise<void>;
+  /**
+   * Autoridade de review independente. Ausente (todo uso histórico e todo
+   * fechamento sem control plane), o candidate validado é aceito no mesmo
+   * passo, exatamente como sempre foi. Presente, ela decide se este candidate
+   * PODE virar PASS — e a promoção só acontece depois do ACCEPT durável.
+   */
+  readonly acceptance?: ValidatedCandidateAcceptancePolicy;
 }
 
 interface SourceEvidence {
@@ -605,10 +616,32 @@ export async function verifyOrchestratedFinalizationRecord(
   return source;
 }
 
+/**
+ * Guarda ÚNICA e obrigatória da fronteira "candidate validado -> PASS aceito".
+ *
+ * Fica aqui, e não no chamador, porque `sealOrchestratedFinalization` é o
+ * gargalo por onde passam TODOS os promotores: a finalização normal, a
+ * retomada de finalização e o `recover`. Um candidate que exige review não
+ * pode ser selado por nenhum deles sem um ACCEPT durável amarrado a ele —
+ * inclusive por um `dev-recover` rodado por um humano que não sabe da review.
+ */
+async function assertCandidateReviewAccepted(
+  input: FinalizeOrchestratedInput,
+  record: OrchestratedFinalizationRecordType,
+): Promise<void> {
+  const lookup = await lookupCandidateReview(input.paths, record);
+  if (lookup.status === 'NOT_REQUIRED' || lookup.status === 'ACCEPTED') return;
+  throw new OrchestratedFinalizationError(
+    `candidate ${record.candidate_commit} exige review independente e não pode ser selado ` +
+      `(${lookup.status}): ${lookup.reason}`,
+  );
+}
+
 export async function sealOrchestratedFinalization(
   input: FinalizeOrchestratedInput,
   record: OrchestratedFinalizationRecordType,
 ): Promise<{ completion: CompletionRecordType; handoff: HandoffRecord }> {
+  await assertCandidateReviewAccepted(input, record);
   const source = await verifyOrchestratedFinalizationRecord(input, record);
   const completion = deterministicCompletion(record, source);
   const handoff = deterministicHandoff(record, source);
@@ -663,6 +696,151 @@ async function promoteState(
   await writeState(input.paths, updated);
 }
 
+/**
+ * Metade da ACEITAÇÃO. Recebe um candidate já preparado e validado e conclui —
+ * ou não conclui — a promoção. Nada aqui reexecuta validação, refaz commit ou
+ * relança worker: o candidate é exatamente o mesmo em toda retomada.
+ *
+ * Idempotente por construção: `sealOrchestratedFinalization` converge para os
+ * mesmos bytes e `promoteState` aceita uma tarefa já PASS. Um crash em
+ * qualquer ponto depois do ACCEPT durável é retomável promovendo o MESMO
+ * candidate, sem novo implementer e sem novo reviewer.
+ */
+async function acceptValidatedCandidate(
+  input: FinalizeOrchestratedInput,
+  state: DevelopmentState,
+  record: OrchestratedFinalizationRecordType,
+  passReason: string,
+): Promise<CloseOutcome> {
+  const lookup = await lookupCandidateReview(input.paths, record);
+  if (lookup.status !== 'NOT_REQUIRED' && lookup.status !== 'ACCEPTED') {
+    if (input.acceptance === undefined) {
+      // Sem autoridade de review não existe quem possa decidir: o candidate
+      // fica preparado e preservado, a tarefa não é aceita e a próxima não é
+      // liberada. É o caminho de um `dev-close` avulso sobre um candidate que
+      // pertence a uma run com review exigida.
+      return stayPending(
+        input.paths,
+        state,
+        input.taskId,
+        `candidate ${record.candidate_commit} não foi aceito pela review independente: ${lookup.reason}`,
+      );
+    }
+    // O veredito durável já publicado é reexaminado pela AUTORIDADE, não aqui:
+    // é ela que sabe que um REJECT não se reabre por automação e que produz o
+    // gate humano correspondente.
+    const decision = await input.acceptance.review({ taskId: input.taskId, record });
+    if (decision.outcome === 'BLOCKED') {
+      return stayPending(
+        input.paths,
+        state,
+        input.taskId,
+        `candidate ${record.candidate_commit} não foi aceito pela review independente ` +
+          `(${decision.code}): ${decision.reason}`,
+      );
+    }
+    // Um ACCEPT em memória não promove nada: o que promove é o veredito
+    // DURÁVEL amarrado a este candidate. Sem ele publicado, a aceitação não
+    // sobreviveria a um crash — e é justamente a sobrevivência que a fronteira
+    // existe para garantir.
+    const published = await lookupCandidateReview(input.paths, record);
+    if (published.status !== 'ACCEPTED') {
+      return stayPending(
+        input.paths,
+        state,
+        input.taskId,
+        `autoridade de review devolveu ACCEPT sem veredito durável amarrado ao candidate ` +
+          `${record.candidate_commit}: ${published.reason}`,
+      );
+    }
+  }
+
+  const sealed = await sealOrchestratedFinalization(input, record);
+  await promoteState(input, record);
+  return closeOutcome(
+    'PASS',
+    input.taskId,
+    passReason,
+    sealed.completion,
+    sealed.handoff,
+    sealed.completion.discrepancies,
+  );
+}
+
+export type PendingAcceptanceStatus = 'NONE' | 'PROMOTED' | 'BLOCKED';
+
+export interface PendingAcceptanceResolution {
+  readonly status: PendingAcceptanceStatus;
+  readonly taskId: string | null;
+  readonly candidateCommit: string | null;
+  readonly reason: string;
+}
+
+/**
+ * Retomada da fronteira de aceitação entre PROCESSOS.
+ *
+ * Um candidate preparado que aguarda review é trabalho legítimo em curso, não
+ * incidente: quem reabre o runtime precisa concluí-lo — pedindo o veredito que
+ * falta, promovendo o ACCEPT que já existe, ou parando no REJECT que já foi
+ * publicado — ANTES de qualquer seleção de tarefa nova. É isso que faz um
+ * REJECT sobreviver ao fim do processo em vez de ser esquecido no rerun.
+ *
+ * Só age sobre candidate que DECLARA review exigida. Todo o resto do fluxo de
+ * retomada continua sendo do `recover`/preflight, intocado.
+ */
+export async function resumePendingAcceptance(input: {
+  readonly paths: HarnessPaths;
+  readonly loaded: LoadedPlan;
+  readonly acceptance: ValidatedCandidateAcceptancePolicy;
+  readonly now?: () => string;
+}): Promise<PendingAcceptanceResolution> {
+  const none = (reason: string): PendingAcceptanceResolution => ({
+    status: 'NONE',
+    taskId: null,
+    candidateCommit: null,
+    reason,
+  });
+
+  let state: DevelopmentState;
+  try {
+    state = await readState(input.paths);
+  } catch {
+    return none('runtime ainda não tem state autoritativo');
+  }
+  const pending = state.tasks.find(
+    (task) => task.status === 'RUNNING' && task.phase === 'FINALIZING' && task.attempts > 0,
+  );
+  if (pending === undefined) return none('nenhuma finalização pendente');
+  if (!input.loaded.byId.has(pending.id)) return none(`${pending.id} não existe no plano carregado`);
+
+  const record = await readOrchestratedFinalization(input.paths, pending.id, pending.attempts).catch(
+    () => null,
+  );
+  if (record === null) return none(`${pending.id} não tem candidate preparado neste attempt`);
+  if (record.review_requirement === undefined) {
+    return none(`candidate de ${pending.id} não exige review independente`);
+  }
+
+  const outcome = await acceptValidatedCandidate(
+    {
+      paths: input.paths,
+      loaded: input.loaded,
+      taskId: pending.id,
+      acceptance: input.acceptance,
+      ...(input.now === undefined ? {} : { now: input.now }),
+    },
+    state,
+    record,
+    'candidate retomado e aceito pela review independente',
+  );
+  return {
+    status: outcome.kind === 'PASS' ? 'PROMOTED' : 'BLOCKED',
+    taskId: pending.id,
+    candidateCommit: record.candidate_commit,
+    reason: outcome.reason,
+  };
+}
+
 export async function finalizeOrchestratedTask(
   input: FinalizeOrchestratedInput,
 ): Promise<CloseOutcome> {
@@ -676,15 +854,11 @@ export async function finalizeOrchestratedTask(
       ? await readOrchestratedFinalization(input.paths, input.taskId, task.attempts)
       : null;
   if (existing) {
-    const sealed = await sealOrchestratedFinalization(input, existing);
-    await promoteState(input, existing);
-    return closeOutcome(
-      'PASS',
-      input.taskId,
+    return acceptValidatedCandidate(
+      input,
+      state,
+      existing,
       task.status === 'PASS' ? 'já fechada anteriormente' : 'selagem retomada',
-      sealed.completion,
-      sealed.handoff,
-      sealed.completion.discrepancies,
     );
   }
   if (task.status === 'PASS') {
@@ -727,6 +901,11 @@ export async function finalizeOrchestratedTask(
   if ((await stagedFiles(input.paths.repoRoot)).length > 0) {
     return stayPending(input.paths, state, input.taskId, 'index contém mudanças staged prévias');
   }
+
+  // A exigência de review é resolvida ANTES de o candidate ser gravado: é ela
+  // que torna o record "preparado e validado, ainda não aceito", e ela precisa
+  // estar dentro do próprio record para sobreviver ao processo.
+  const reviewRequirement = input.acceptance?.requirementFor(input.taskId) ?? null;
 
   const message = commitMessageFor(input);
   let currentHead = await headSha(input.paths.repoRoot);
@@ -777,13 +956,12 @@ export async function finalizeOrchestratedTask(
         patch_fingerprint: sha256Hex(await commitTree(input.paths.repoRoot, currentHead)),
         candidate_commit: currentHead,
         commit_origin: 'orchestrator',
+        ...(reviewRequirement === null ? {} : { review_requirement: reviewRequirement }),
         finalized_at: (input.now ?? (() => new Date().toISOString()))(),
       });
       await writeOrchestratedFinalization(input.paths, record);
       await input.afterFinalizationWritten?.(record);
-      const sealed = await sealOrchestratedFinalization(input, record);
-      await promoteState(input, record);
-      return closeOutcome('PASS', input.taskId, 'candidate retomado e aceito', sealed.completion, sealed.handoff);
+      return await acceptValidatedCandidate(input, state, record, 'candidate retomado e aceito');
     } catch (error) {
       return stayPending(
         input.paths,
@@ -947,11 +1125,10 @@ export async function finalizeOrchestratedTask(
     patch_fingerprint: fingerprintBefore,
     candidate_commit: currentHead,
     commit_origin: 'orchestrator',
+    ...(reviewRequirement === null ? {} : { review_requirement: reviewRequirement }),
     finalized_at: (input.now ?? (() => new Date().toISOString()))(),
   });
   await writeOrchestratedFinalization(input.paths, record);
   await input.afterFinalizationWritten?.(record);
-  const sealed = await sealOrchestratedFinalization(input, record);
-  await promoteState(input, record);
-  return closeOutcome('PASS', input.taskId, 'aceita', sealed.completion, sealed.handoff, sealed.completion.discrepancies);
+  return await acceptValidatedCandidate(input, state, record, 'aceita');
 }

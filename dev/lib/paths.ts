@@ -29,6 +29,8 @@ export interface HarnessPaths {
   readonly recoveriesDir: string;
   readonly finalizationsDir: string;
   readonly revalidationsDir: string;
+  /** Vereditos duráveis da review independente sobre candidates validados. */
+  readonly reviewsDir: string;
   /**
    * Attempts encerrados sem solução aceita: rejeitados pela validation oficial
    * (com a solução preservada) ou abortados por falha de infraestrutura do
@@ -121,6 +123,7 @@ export function resolveHarnessPaths(
     recoveriesDir: path.join(devDir, 'recoveries'),
     finalizationsDir: path.join(devDir, 'finalizations'),
     revalidationsDir: path.join(devDir, 'revalidations'),
+    reviewsDir: path.join(devDir, 'reviews'),
     failedAttemptsDir: path.join(devDir, 'failed-attempts'),
     validationLogsDir: path.join(devDir, 'validation-logs'),
   };

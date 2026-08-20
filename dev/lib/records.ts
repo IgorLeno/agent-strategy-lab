@@ -5,6 +5,7 @@ import type { HarnessPaths } from './paths.js';
 import {
   AgentCompletionReport,
   AttemptAbandonmentRecord,
+  CandidateReviewRecord,
   CloseManifest,
   CompletionRecord,
   InfraFailedAttemptRecord,
@@ -101,6 +102,19 @@ export function orchestratedFinalizationPath(
   attempt: number,
 ): string {
   return path.join(paths.finalizationsDir, taskId, `attempt-${attempt}.json`);
+}
+
+/**
+ * Um veredito por (task, attempt): o candidate de um attempt é único, e um
+ * segundo veredito para o mesmo attempt seria uma segunda decisão sobre a
+ * mesma coisa. Attempts diferentes têm diretórios diferentes.
+ */
+export function candidateReviewPath(
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+): string {
+  return path.join(paths.reviewsDir, taskId, `attempt-${attempt}`, 'review.json');
 }
 
 export function revalidationAttemptDir(
@@ -434,6 +448,25 @@ export const writeOrchestratedFinalization = (
   writeJson(
     orchestratedFinalizationPath(paths, record.task_id, record.attempt),
     OrchestratedFinalizationRecord.parse(record),
+  );
+
+export const readCandidateReview = (
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+): Promise<CandidateReviewRecord | null> =>
+  readOptional(candidateReviewPath(paths, taskId, attempt), (input) =>
+    CandidateReviewRecord.parse(input),
+  );
+
+/** Append-only: um veredito publicado nunca é reescrito com outro conteúdo. */
+export const writeCandidateReview = (
+  paths: HarnessPaths,
+  record: CandidateReviewRecord,
+): Promise<void> =>
+  writeJsonOnce(
+    candidateReviewPath(paths, record.task_id, record.attempt),
+    CandidateReviewRecord.parse(record),
   );
 
 export const readRevalidationSourceBinding = (

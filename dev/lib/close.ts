@@ -1,3 +1,4 @@
+import type { ValidatedCandidateAcceptancePolicy } from './candidate-review.js';
 import {
   changedFiles,
   commitExists,
@@ -57,6 +58,12 @@ export interface CloseInput {
   readonly loaded: LoadedPlan;
   readonly taskId: string;
   readonly now?: () => string;
+  /**
+   * Autoridade de review independente do fechamento orchestrator-owned.
+   * Ignorada no fechamento worker-owned, que não possui candidate preparado
+   * pelo orquestrador para revisar.
+   */
+  readonly acceptance?: ValidatedCandidateAcceptancePolicy;
 }
 
 interface Guard {

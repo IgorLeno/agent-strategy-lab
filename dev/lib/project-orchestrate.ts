@@ -92,6 +92,7 @@ import {
   buildRoleArgv,
   resolveWorkerRuntimeBudget,
   type ProjectWorkerRole,
+  type RoleWorkspaceAccess,
   type WorkerRuntimeBudgetResolution,
 } from './project-roles.js';
 import type { HumanRequiredOutput } from './routine-autonomy.js';
@@ -1032,6 +1033,13 @@ interface ProjectReviewVerdict<Outcome extends 'ACCEPT' | 'REJECT'> {
   readonly reason: string;
   readonly policy: ReviewerInvocationPolicy;
   readonly argv: readonly string[];
+  /**
+   * Prova ESTRUTURAL do contexto em que o veredito nasceu. Publicada junto com
+   * a decisão porque um veredito só vale se o reviewer não podia escrever — e
+   * quem audita depois precisa ver o mecanismo, não uma afirmação.
+   */
+  readonly workspace_access: RoleWorkspaceAccess;
+  readonly read_only_mechanism: string;
 }
 
 export type ProjectReviewResult =
@@ -1136,7 +1144,14 @@ export async function launchProjectReviewer(
       'saída do reviewer não contém um único JSON {"decision":"ACCEPT|REJECT","reason":"..."}',
     );
   }
-  return { outcome: decision, reason: reason.trim(), policy: plan.policy, argv: overlay.argv };
+  return {
+    outcome: decision,
+    reason: reason.trim(),
+    policy: plan.policy,
+    argv: overlay.argv,
+    workspace_access: overlay.workspace_access,
+    read_only_mechanism: overlay.mechanism,
+  };
 }
 
 // ---------------------------------------------------------------------------

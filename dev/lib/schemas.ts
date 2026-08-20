@@ -1032,6 +1032,26 @@ export const CommitMessage = z.string().superRefine((message, ctx) => {
 // Finalização normal do orquestrador (.dev/finalizations/<task>/attempt-N.json)
 // ---------------------------------------------------------------------------
 
+/**
+ * Exigência de review INDEPENDENTE amarrada ao candidate preparado. Vive
+ * dentro do `OrchestratedFinalizationRecord` porque a pergunta "este candidate
+ * precisa de reviewer?" tem que sobreviver ao processo que o preparou: quem
+ * retomar a finalização depois de um crash — `recover`, um novo
+ * `dev-run-plan`, um `dev-close` — precisa saber disso sem control plane em
+ * memória. Campo OPCIONAL: sua ausência significa "nenhuma review exigida", que
+ * é exatamente o histórico de todo record gravado antes desta manutenção.
+ */
+export const CandidateReviewRequirement = z
+  .object({
+    required: z.literal(true),
+    reviewer_profile_id: nonEmpty,
+    diversity_requirement: nonEmpty,
+    /** De onde veio a exigência; nunca um default silencioso do harness. */
+    policy_provenance: nonEmpty,
+  })
+  .strict();
+export type CandidateReviewRequirement = z.infer<typeof CandidateReviewRequirement>;
+
 export const OrchestratedFinalizationRecord = z
   .object({
     schema_version: z.literal(DEV_SCHEMA_VERSION),
@@ -1052,6 +1072,11 @@ export const OrchestratedFinalizationRecord = z
     patch_fingerprint: z.string().regex(/^[0-9a-f]{64}$/),
     candidate_commit: shaHex,
     commit_origin: z.literal('orchestrator'),
+    /**
+     * Presente = o candidate está PREPARADO e VALIDADO, mas ainda NÃO aceito:
+     * a promoção depende de um `CandidateReviewRecord` ACCEPT ligado a ele.
+     */
+    review_requirement: CandidateReviewRequirement.optional(),
     finalized_at: z.string().datetime(),
   })
   .strict()
@@ -1077,6 +1102,57 @@ export const OrchestratedFinalizationRecord = z
     }
   });
 export type OrchestratedFinalizationRecord = z.infer<typeof OrchestratedFinalizationRecord>;
+
+// ---------------------------------------------------------------------------
+// Review independente do candidate validado
+// (.dev/reviews/<task>/attempt-<n>/review.json) — NÃO versionado
+// ---------------------------------------------------------------------------
+
+/**
+ * Prova ESTRUTURAL de que o reviewer decidiu num contexto fresco e somente
+ * leitura. O mecanismo é o argv efetivamente lançado (dev/lib/project-roles.ts),
+ * nunca uma frase do prompt — é por isso que o argv inteiro é evidência.
+ */
+export const ReviewerInvocationProvenance = z
+  .object({
+    role: z.literal('reviewer'),
+    workspace_access: z.literal('READ_ONLY'),
+    read_only_mechanism: nonEmpty,
+    argv: z.array(nonEmpty).min(1),
+    diversity_requirement: nonEmpty,
+    /** Processo NOVO por review: nenhuma sessão é compartilhada com o implementer. */
+    fresh_context: z.literal(true),
+  })
+  .strict();
+export type ReviewerInvocationProvenance = z.infer<typeof ReviewerInvocationProvenance>;
+
+/**
+ * Veredito DURÁVEL da review independente sobre UM candidate preparado.
+ * Append-only e amarrado ao candidate por três hashes: o SHA do commit, o hash
+ * canônico do `OrchestratedFinalizationRecord` e o hash canônico dos resultados
+ * da validação oficial. Um veredito que não amarra a esses três não decide nada
+ * sobre este candidate.
+ *
+ * Existe em disco — e não só na memória do control plane — porque um REJECT
+ * precisa continuar bloqueando depois que o processo termina: rerodar o mesmo
+ * comando sem intervenção humana não pode esquecer a reprovação.
+ */
+export const CandidateReviewRecord = z
+  .object({
+    schema_version: z.literal(DEV_SCHEMA_VERSION),
+    task_id: identifier,
+    attempt: z.number().int().positive(),
+    candidate_sha: shaHex,
+    finalization_record_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    validation_results_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    reviewer_profile_id: nonEmpty,
+    reviewer_invocation: ReviewerInvocationProvenance,
+    decision: z.enum(['ACCEPT', 'REJECT']),
+    reason: nonEmpty,
+    decided_at: z.string().datetime(),
+  })
+  .strict();
+export type CandidateReviewRecord = z.infer<typeof CandidateReviewRecord>;
 
 // ---------------------------------------------------------------------------
 // Revalidação de FAIL por validation oficial
