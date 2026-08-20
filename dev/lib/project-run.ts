@@ -52,7 +52,6 @@ import {
   type RoutingCandidate,
 } from '../../src/routing/index.js';
 import type { FailureDiagnosis } from '../../src/routing/diagnosis.js';
-import { assertNoApiCredentials, runBillingPreflight } from './billing.js';
 import {
   finalizationFingerprint,
   lookupCandidateReview,
@@ -60,17 +59,27 @@ import {
   type ValidatedCandidateAcceptance,
   type ValidatedCandidateAcceptancePolicy,
 } from './candidate-review.js';
+import type { CandidateReviewLookup } from './candidate-review.js';
+import type { CommandRunner } from './billing.js';
 import { experimentFactsOf, sandboxOf, sessionPersistenceOf } from './doctor.js';
+import { inspectPendingAcceptance } from './finalize-orchestrated.js';
 import { headSha } from './git.js';
 import type { HarnessPaths } from './paths.js';
 import type { LoadedPlan } from './plan.js';
 import {
-  buildEnvironment,
   loadProfileFromCatalog,
   profileProvenance,
   type LauncherProfile,
   type ProfileProvenance,
 } from './profile.js';
+import {
+  collectProjectLaunchFacts,
+  escalationPreflightOf,
+  evidenceOf,
+  type LaunchFact,
+  type LaunchFactEvidence,
+  type ProjectLaunchFacts,
+} from './project-preflight.js';
 import {
   classificationFor,
   ProjectAuthorizationError,
@@ -186,7 +195,36 @@ export interface ProjectRoutingReport {
   readonly source: string;
   readonly selected_profile_id: string;
   readonly pinned: boolean;
+  /**
+   * Estado da série histórica consultada em M82. `EMPTY` é o valor honesto do
+   * caminho de produção hoje: uma run de projeto externo ainda não materializa
+   * suas execuções como história consultável, e o routing decide pelo fallback
+   * de M78 sabendo disso.
+   */
+  readonly history_status: 'EMPTY' | 'AVAILABLE' | 'INSUFFICIENT';
   readonly rationale: readonly string[];
+}
+
+/** Fato de launch como ele aparece no relatório: valor, qualidade e origem. */
+export interface ProjectLaunchFactReport {
+  readonly availability: boolean | null;
+  readonly evidence: LaunchFactEvidence;
+  readonly provenance: string;
+}
+
+function factReportOf(fact: LaunchFact): ProjectLaunchFactReport {
+  return {
+    availability: fact.availability,
+    evidence: evidenceOf(fact),
+    provenance: fact.provenance,
+  };
+}
+
+function historyStatusOf(
+  history: PerformanceHistoryQueryResult,
+): ProjectRoutingReport['history_status'] {
+  if (history.series.length === 0) return 'EMPTY';
+  return history.series.length < history.minimum_sample_size ? 'INSUFFICIENT' : 'AVAILABLE';
 }
 
 export interface ProjectBudgetReport {
@@ -221,6 +259,8 @@ export interface ProjectWorkUnitReport {
   readonly classification_provenance: string;
   readonly routing: ProjectRoutingReport;
   readonly worker_runtime_budget: ProjectBudgetReport;
+  readonly credential: ProjectLaunchFactReport;
+  readonly quota: ProjectLaunchFactReport;
   readonly launch_authorization: string;
   review: ProjectReviewReport;
   validation_outcome: string | null;
@@ -271,6 +311,50 @@ export type WorkUnitDecision =
     }
   | { readonly outcome: 'HUMAN_REQUIRED'; readonly human_required: HumanRequiredOutput };
 
+/** Gate humano ainda NÃO publicado: descrição pura, sem efeito em memória. */
+interface WorkUnitGate {
+  readonly incidentId: string;
+  readonly decisionNeeded: string;
+  readonly why: string;
+  readonly options: readonly string[];
+  readonly evidencePaths: readonly string[];
+}
+
+/** Resultado da avaliação read-only compartilhada por runtime real e preview. */
+interface WorkUnitAssessment {
+  readonly outcome: 'LAUNCH' | 'HUMAN_REQUIRED';
+  readonly gate: WorkUnitGate | null;
+  /** `null` quando a avaliação parou antes de existir uma work unit avaliada. */
+  readonly report: ProjectWorkUnitReport | null;
+  readonly selectedProfileId: string | null;
+  readonly timeoutSeconds: number | null;
+  readonly reviewRequirement: CandidateReviewRequirement | null;
+}
+
+/** Projeção read-only da próxima ação; nada aqui foi decidido nem gravado. */
+export interface ProjectWorkUnitPreview {
+  readonly status: 'READY' | 'HUMAN_REQUIRED';
+  readonly task_id: string | null;
+  readonly blocked_by: string | null;
+  readonly reason: string | null;
+  readonly candidate_commit: string | null;
+  readonly evidence_paths: readonly string[];
+  readonly work_unit: {
+    readonly task_id: string;
+    readonly path: ProjectLifecyclePathName;
+    readonly attempt_role: AttemptRole;
+    readonly inspection_provenance: string;
+    readonly environment_readiness: EnvironmentReadinessGate;
+    readonly routing: ProjectRoutingReport;
+    readonly worker_runtime_budget: ProjectBudgetReport;
+    readonly credential: ProjectLaunchFactReport;
+    readonly quota: ProjectLaunchFactReport;
+    readonly launch_authorization: string;
+    readonly review_required: boolean;
+    readonly reviewer_profile_id: string | null;
+  } | null;
+}
+
 export interface WorkUnitObservation {
   readonly taskId: string;
   readonly attempt: number;
@@ -310,6 +394,17 @@ export type RepairExhaustedFollowUp =
 export interface ProjectControlPlane {
   readonly kind: 'project_lifecycle';
   beforeWorkUnit(request: WorkUnitRequest): Promise<WorkUnitDecision>;
+  /**
+   * MESMA avaliação de `beforeWorkUnit`, sem nenhum efeito. É a porta do
+   * dry-run: existe para que a pré-visualização seja a decisão real, e não uma
+   * segunda implementação que pode divergir dela. `taskId` é `null` quando o
+   * runtime não tem work unit selecionável — o que não impede a resposta,
+   * porque a próxima ação segura pode ser uma decisão de review pendente.
+   */
+  previewNextAction(request: {
+    readonly taskId: string | null;
+    readonly attemptKind?: 'FIRST_PASS' | 'REPAIR';
+  }): Promise<ProjectWorkUnitPreview>;
   afterWorkUnit(observation: WorkUnitObservation): Promise<WorkUnitFollowUp>;
   onRepairExhausted(input: {
     readonly taskId: string;
@@ -563,6 +658,13 @@ export interface CreateProjectControlPlaneInput {
   readonly authorizationFile: string;
   /** Injetável nos testes; default é a inspeção read-only real do alvo. */
   readonly inspect?: (repoRoot: string) => Promise<ProjectInspection>;
+  /**
+   * Injetável nos testes: o probe de credencial roda com este runner em vez de
+   * spawnar o binário do provider. Nenhum provider real é chamado por causa
+   * dele — o default continua sendo o probe LOCAL e gratuito do harness.
+   */
+  readonly credentialRunner?: CommandRunner;
+  readonly now?: () => Date;
 }
 
 /**
@@ -653,6 +755,21 @@ export async function createProjectControlPlane(
   /** Gate humano do último candidate recusado pela review, lido por `afterWorkUnit`. */
   let blockedReview: HumanRequiredOutput | null = null;
 
+  /**
+   * Fatos de launch de UM profile, coletados pela primitive canônica. É a
+   * mesma coleta para implementer, reviewer e degrau de escalation: um único
+   * lugar produz credencial e quota, e nenhum deles pode afirmar mais do que
+   * os outros sobre a mesma máquina.
+   */
+  function launchFactsFor(profile: LauncherProfile): Promise<ProjectLaunchFacts> {
+    return collectProjectLaunchFacts({
+      paths,
+      profile,
+      ...(input.credentialRunner === undefined ? {} : { runner: input.credentialRunner }),
+      ...(input.now === undefined ? {} : { now: input.now }),
+    });
+  }
+
   function candidatesFor(eligible: readonly string[]): RoutingCandidate[] {
     return eligible.map((id) => {
       const profile = profiles.get(id) as LauncherProfile;
@@ -687,19 +804,38 @@ export async function createProjectControlPlane(
     return output;
   }
 
-  async function beforeWorkUnit(request: WorkUnitRequest): Promise<WorkUnitDecision> {
+  /**
+   * AVALIAÇÃO READ-ONLY de uma work unit — a decisão factual inteira, sem um
+   * único efeito.
+   *
+   * Existe separada de `beforeWorkUnit` porque o dry-run precisa PROVAR a
+   * mesma decisão que a execução real vai tomar, e não uma reconstrução
+   * plausível dela. Um segundo assessment só para preview seria exatamente o
+   * tipo de duplicação que faz o dry-run divergir do runtime no dia em que
+   * importa. Aqui roda inspeção, M75, M76, readiness, routing, budget e o gate
+   * de launch com fatos honestos; o que NÃO roda é o registro de nada:
+   * `workUnits`, `active`, `reviewRequirementByTask`, `blockedReview` e
+   * `humanGate` pertencem exclusivamente ao chamador com efeitos.
+   */
+  async function assessWorkUnit(request: WorkUnitRequest): Promise<WorkUnitAssessment> {
+    const blocked = (gate: WorkUnitGate): WorkUnitAssessment => ({
+      outcome: 'HUMAN_REQUIRED',
+      gate,
+      report: null,
+      selectedProfileId: null,
+      timeoutSeconds: null,
+      reviewRequirement: null,
+    });
+
     const planTask = loaded.byId.get(request.taskId);
     if (planTask === undefined) {
-      return {
-        outcome: 'HUMAN_REQUIRED',
-        human_required: humanRequired(
-          `project:${request.taskId}:unknown-task`,
-          'reconciliar plano e runtime antes de novo launch',
-          `task ${request.taskId} selecionada pelo runtime não existe no PlanFile carregado`,
-          ['revisar o PlanFile', 'inspecionar o runtime'],
-          [paths.planFile],
-        ),
-      };
+      return blocked({
+        incidentId: `project:${request.taskId}:unknown-task`,
+        decisionNeeded: 'reconciliar plano e runtime antes de novo launch',
+        why: `task ${request.taskId} selecionada pelo runtime não existe no PlanFile carregado`,
+        options: ['revisar o PlanFile', 'inspecionar o runtime'],
+        evidencePaths: [paths.planFile],
+      });
     }
 
     const inspection = await inspect(paths.repoRoot);
@@ -732,21 +868,19 @@ export async function createProjectControlPlane(
       minimalFactsSource: 'fresh_minimal_collection',
     });
     if (workflow === undefined) {
-      return {
-        outcome: 'HUMAN_REQUIRED',
-        human_required: humanRequired(
-          `project:${request.taskId}:workflow`,
-          'revisar a work unit antes de novo launch',
-          `workflow de ${request.taskId} não pôde ser avaliado`,
-          ['revisar o PlanFile', 'revisar a classificação declarada'],
-          [paths.planFile],
-        ),
-      };
+      return blocked({
+        incidentId: `project:${request.taskId}:workflow`,
+        decisionNeeded: 'revisar a work unit antes de novo launch',
+        why: `workflow de ${request.taskId} não pôde ser avaliado`,
+        options: ['revisar o PlanFile', 'revisar a classificação declarada'],
+        evidencePaths: [paths.planFile],
+      });
     }
     const decision = combineWorkflowAndReview(workflow, assessment.review_requirement);
     const environment = evaluateEnvironmentReadiness(assessment.environment_readiness);
 
     const eligible = [...profiles.keys()];
+    const history = emptyPerformanceHistory();
     const routed = routeInitialProfileWithHistory({
       work_unit: {
         source: 'direct_task_normalization',
@@ -757,7 +891,7 @@ export async function createProjectControlPlane(
       role: 'implementer',
       capability_registry: registry,
       candidates: candidatesFor(eligible),
-      history: emptyPerformanceHistory(),
+      history,
     });
 
     const fallback = routed.fallback;
@@ -770,19 +904,16 @@ export async function createProjectControlPlane(
                 .map((violation) => `${violation.profile_id}=${violation.requested_budget_ms}ms`)
                 .join(', ')}`
             : fallback.reason;
-      return {
-        outcome: 'HUMAN_REQUIRED',
-        human_required: humanRequired(
-          `project:${request.taskId}:routing`,
-          'ampliar ou corrigir a profile policy autorizada',
-          `routing não encontrou profile elegível dentro da policy: ${reason}`,
-          [
-            'declarar um profile compatível na profile_policy',
-            'revisar a classificação declarada da work unit',
-          ],
-          [input.authorizationFile],
-        ),
-      };
+      return blocked({
+        incidentId: `project:${request.taskId}:routing`,
+        decisionNeeded: 'ampliar ou corrigir a profile policy autorizada',
+        why: `routing não encontrou profile elegível dentro da policy: ${reason}`,
+        options: [
+          'declarar um profile compatível na profile_policy',
+          'revisar a classificação declarada da work unit',
+        ],
+        evidencePaths: [input.authorizationFile],
+      });
     }
 
     const routedProfileId = fallback.profile.profile_id;
@@ -790,39 +921,38 @@ export async function createProjectControlPlane(
     const selectedProfileId = pinned ?? routedProfileId;
     const profile = profiles.get(selectedProfileId);
     if (profile === undefined) {
-      return {
-        outcome: 'HUMAN_REQUIRED',
-        human_required: humanRequired(
-          `project:${request.taskId}:profile-outside-policy`,
-          'usar somente profiles da policy autorizada',
-          `profile ${selectedProfileId} exigido pelo runtime está fora da profile policy ${authorization.profile_policy.id}`,
-          ['declarar o profile na policy', 'rerodar sem o pin de profile'],
-          [input.authorizationFile],
-        ),
-      };
+      return blocked({
+        incidentId: `project:${request.taskId}:profile-outside-policy`,
+        decisionNeeded: 'usar somente profiles da policy autorizada',
+        why: `profile ${selectedProfileId} exigido pelo runtime está fora da profile policy ${authorization.profile_policy.id}`,
+        options: ['declarar o profile na policy', 'rerodar sem o pin de profile'],
+        evidencePaths: [input.authorizationFile],
+      });
     }
 
     const budgetMs = fallback.worker_runtime_budget.milliseconds;
     const budget = resolveWorkerRuntimeBudget({ profile, budgetMs });
     if (budget.outcome === 'BUDGET_UNSUPPORTED') {
-      return {
-        outcome: 'HUMAN_REQUIRED',
-        human_required: humanRequired(
-          `project:${request.taskId}:budget`,
-          'reconfigurar runtime ou replanejar a work unit',
-          budget.reason,
-          [...budget.allowed_next_steps],
-          [input.authorizationFile],
-        ),
-      };
+      return blocked({
+        incidentId: `project:${request.taskId}:budget`,
+        decisionNeeded: 'reconfigurar runtime ou replanejar a work unit',
+        why: budget.reason,
+        options: [...budget.allowed_next_steps],
+        evidencePaths: [input.authorizationFile],
+      });
     }
 
+    // Fatos honestos, coletados pelas primitives canônicas imediatamente antes
+    // do gate. Nenhum é afirmado por conveniência: o que não puder ser sabido
+    // sem chamar provider permanece UNKNOWN, e a policy de UNKNOWN vive em
+    // `authorizeProjectLaunch`, não aqui.
+    const facts = await launchFactsFor(profile);
     const launchAuthorization = authorizeProjectLaunch({
       scope,
       capability: request.attemptKind === 'REPAIR' ? 'BOUNDED_REPAIR' : 'CONFIGURED_SUBSCRIPTION_WORKER',
       billing_mode: profile.billing_mode,
-      quota_available: true,
-      credential_proved: true,
+      quota: facts.quota,
+      credential: facts.credential,
       risk: assessment.risk.value,
       worker_owns_commit: profile.commit_owner !== 'orchestrator',
       worker_owns_official_validation: profile.official_validation_owner !== 'orchestrator',
@@ -832,21 +962,18 @@ export async function createProjectControlPlane(
     const reviewerProfile = decision.review_required
       ? (profiles.get(reviewerProfileId) ?? null)
       : null;
-    blockedReview = null;
-    if (decision.review_required) {
-      // A exigência é registrada ANTES do launch e vale para o candidate que
-      // este attempt vier a produzir. Um reviewer que não pertença à policy
-      // NÃO relaxa a exigência: ela continua gravada, e a impossibilidade de
-      // decidir vira gate humano em vez de aceite silencioso.
-      reviewRequirementByTask.set(request.taskId, {
-        required: true,
-        reviewer_profile_id: reviewerProfileId,
-        diversity_requirement: decision.diversity_requirement,
-        policy_provenance: `assessment.review_requirement + ${input.authorizationFile}`,
-      });
-    } else {
-      reviewRequirementByTask.delete(request.taskId);
-    }
+    // A exigência vale para o candidate que ESTE attempt vier a produzir. Um
+    // reviewer que não pertença à policy NÃO relaxa a exigência: ela continua
+    // registrada, e a impossibilidade de decidir vira gate humano em vez de
+    // aceite silencioso.
+    const reviewRequirement: CandidateReviewRequirement | null = decision.review_required
+      ? {
+          required: true,
+          reviewer_profile_id: reviewerProfileId,
+          diversity_requirement: decision.diversity_requirement,
+          policy_provenance: `assessment.review_requirement + ${input.authorizationFile}`,
+        }
+      : null;
 
     const report: ProjectWorkUnitReport = {
       task_id: request.taskId,
@@ -872,6 +999,7 @@ export async function createProjectControlPlane(
         source: routed.source,
         selected_profile_id: selectedProfileId,
         pinned: pinned !== null,
+        history_status: historyStatusOf(history),
         rationale: [...routed.rationale, ...fallback.rationale],
       },
       worker_runtime_budget: {
@@ -882,6 +1010,8 @@ export async function createProjectControlPlane(
           (bound) => `${bound.source}=${bound.maximum_ms}ms`,
         ),
       },
+      credential: factReportOf(facts.credential),
+      quota: factReportOf(facts.quota),
       launch_authorization: launchAuthorization.outcome,
       review: {
         required: decision.review_required,
@@ -896,42 +1026,162 @@ export async function createProjectControlPlane(
       diagnosis: null,
       escalation: escalatedProfileByTask.get(request.taskId) ?? null,
     };
-    workUnits.push(report);
-    active = report;
 
-    if (launchAuthorization.outcome === 'HUMAN_REQUIRED') {
+    const gate: WorkUnitGate | null =
+      launchAuthorization.outcome === 'HUMAN_REQUIRED'
+        ? {
+            incidentId: `project:${request.taskId}:launch-authorization`,
+            decisionNeeded: 'autorizar explicitamente a capability exigida por esta work unit',
+            why: launchAuthorization.reason,
+            options: [
+              'ampliar autonomous_execution_boundary de forma explícita',
+              'reduzir o risco declarado da work unit',
+              'executar a ação manualmente',
+            ],
+            evidencePaths: [input.authorizationFile],
+          }
+        : environment.outcome !== 'READY'
+          ? {
+              incidentId: `project:${request.taskId}:environment`,
+              decisionNeeded: 'preparar o ambiente do repositório alvo antes de novo launch',
+              why: `${environment.outcome}: ${environment.reason}`,
+              options: ['remediar o ambiente', 'declarar os requisitos ausentes'],
+              evidencePaths: [paths.repoRoot],
+            }
+          : null;
+
+    return {
+      outcome: gate === null ? 'LAUNCH' : 'HUMAN_REQUIRED',
+      gate,
+      report,
+      selectedProfileId,
+      timeoutSeconds: budget.timeout_seconds_override,
+      reviewRequirement,
+    };
+  }
+
+  /**
+   * Aplica a MESMA avaliação, agora com os efeitos que só o runtime real pode
+   * ter: registrar a work unit, publicar a exigência de review do attempt e
+   * abrir o gate humano.
+   */
+  async function beforeWorkUnit(request: WorkUnitRequest): Promise<WorkUnitDecision> {
+    const assessment = await assessWorkUnit(request);
+    const gate = assessment.gate;
+
+    if (assessment.report === null) {
+      const blocking = gate as WorkUnitGate;
       return {
         outcome: 'HUMAN_REQUIRED',
         human_required: humanRequired(
-          `project:${request.taskId}:launch-authorization`,
-          'autorizar explicitamente a capability exigida por esta work unit',
-          launchAuthorization.reason,
-          [
-            'ampliar autonomous_execution_boundary de forma explícita',
-            'reduzir o risco declarado da work unit',
-            'executar a ação manualmente',
-          ],
-          [input.authorizationFile],
+          blocking.incidentId,
+          blocking.decisionNeeded,
+          blocking.why,
+          blocking.options,
+          blocking.evidencePaths,
         ),
       };
     }
-    if (environment.outcome !== 'READY') {
+
+    blockedReview = null;
+    if (assessment.reviewRequirement === null) {
+      reviewRequirementByTask.delete(request.taskId);
+    } else {
+      reviewRequirementByTask.set(request.taskId, assessment.reviewRequirement);
+    }
+    workUnits.push(assessment.report);
+    active = assessment.report;
+
+    if (gate !== null) {
       return {
         outcome: 'HUMAN_REQUIRED',
         human_required: humanRequired(
-          `project:${request.taskId}:environment`,
-          'preparar o ambiente do repositório alvo antes de novo launch',
-          `${environment.outcome}: ${environment.reason}`,
-          ['remediar o ambiente', 'declarar os requisitos ausentes'],
-          [paths.repoRoot],
+          gate.incidentId,
+          gate.decisionNeeded,
+          gate.why,
+          gate.options,
+          gate.evidencePaths,
         ),
       };
     }
 
     return {
       outcome: 'LAUNCH',
-      profile_id: selectedProfileId,
-      timeout_seconds: budget.timeout_seconds_override,
+      profile_id: assessment.selectedProfileId as string,
+      timeout_seconds: assessment.timeoutSeconds as number,
+    };
+  }
+
+  /**
+   * PRÉ-VISUALIZAÇÃO do próximo passo — mesma avaliação, zero efeito.
+   *
+   * Antes de qualquer avaliação de work unit vem a FRONTEIRA DE ACEITAÇÃO: se
+   * existe candidate preparado aguardando (ou já reprovado por) review, a
+   * próxima ação segura não é lançar nada, é decidir sobre ele. Dizer READY
+   * ali seria prever um launch que o runtime real jamais faria.
+   */
+  async function previewNextAction(request: {
+    readonly taskId: string | null;
+    readonly attemptKind?: 'FIRST_PASS' | 'REPAIR';
+  }): Promise<ProjectWorkUnitPreview> {
+    const pending = await inspectPendingAcceptance({ paths, loaded });
+    if (pending.status === 'PENDING') {
+      const lookup: CandidateReviewLookup = pending.review;
+      const accepted = lookup.status === 'ACCEPTED' || lookup.status === 'NOT_REQUIRED';
+      if (!accepted) {
+        return {
+          status: 'HUMAN_REQUIRED',
+          task_id: pending.taskId,
+          blocked_by: `CANDIDATE_REVIEW_${lookup.status}`,
+          reason: lookup.reason,
+          candidate_commit: pending.candidateCommit,
+          evidence_paths: [lookup.evidence_path],
+          work_unit: null,
+        };
+      }
+    }
+
+    if (request.taskId === null) {
+      return {
+        status: 'READY',
+        task_id: null,
+        blocked_by: null,
+        reason: 'nenhuma work unit selecionável pelo runtime neste momento',
+        candidate_commit: null,
+        evidence_paths: [],
+        work_unit: null,
+      };
+    }
+
+    const assessment = await assessWorkUnit({
+      taskId: request.taskId,
+      attemptKind: request.attemptKind ?? 'FIRST_PASS',
+      pinnedProfileId: null,
+    });
+    return {
+      status: assessment.outcome === 'LAUNCH' ? 'READY' : 'HUMAN_REQUIRED',
+      task_id: request.taskId,
+      blocked_by: assessment.gate === null ? null : assessment.gate.incidentId,
+      reason: assessment.gate === null ? null : assessment.gate.why,
+      candidate_commit: null,
+      evidence_paths: assessment.gate === null ? [] : [...assessment.gate.evidencePaths],
+      work_unit:
+        assessment.report === null
+          ? null
+          : {
+              task_id: assessment.report.task_id,
+              path: assessment.report.path,
+              attempt_role: assessment.report.attempt_role,
+              inspection_provenance: assessment.report.inspection_provenance,
+              environment_readiness: assessment.report.environment_readiness,
+              routing: assessment.report.routing,
+              worker_runtime_budget: assessment.report.worker_runtime_budget,
+              credential: assessment.report.credential,
+              quota: assessment.report.quota,
+              launch_authorization: assessment.report.launch_authorization,
+              review_required: assessment.report.review.required,
+              reviewer_profile_id: assessment.report.review.reviewer_profile_id,
+            },
     };
   }
 
@@ -1098,6 +1348,7 @@ export async function createProjectControlPlane(
       );
     }
 
+    const reviewerFacts = await launchFactsFor(reviewerProfile);
     const verdict: ProjectReviewResult = await launchProjectReviewer({
       paths,
       profile: reviewerProfile,
@@ -1106,8 +1357,12 @@ export async function createProjectControlPlane(
       diversityRequirement: requirement.diversity_requirement as never,
       risk: classificationFor(authorization, taskId).classification.risk,
       workerRuntimeBudgetMs: reviewerBudgetMsOf(authorization, taskId),
-      quotaAvailable: true,
-      credentialProved: true,
+      // Os MESMOS fatos honestos do implementer, coletados agora para o
+      // profile do reviewer. Review read-only não ganha autorização mais
+      // fraca — e uma review que não pode ser autorizada vira
+      // `REVIEW_UNAVAILABLE`, nunca ACCEPT.
+      credential: reviewerFacts.credential,
+      quota: reviewerFacts.quota,
       packet: {
         task_id: taskId,
         objective: planTask.objective,
@@ -1273,7 +1528,7 @@ export async function createProjectControlPlane(
     for (const entry of ladderSteps) {
       const candidate = profiles.get(entry.id);
       if (candidate === undefined) continue;
-      preflights.push(await escalationPreflight(paths, candidate));
+      preflights.push(escalationPreflightOf(candidate, await launchFactsFor(candidate)));
     }
 
     const escalation = decideEscalation({
@@ -1346,6 +1601,7 @@ export async function createProjectControlPlane(
   return {
     kind: 'project_lifecycle',
     beforeWorkUnit,
+    previewNextAction,
     afterWorkUnit,
     onRepairExhausted,
     acceptance,
@@ -1362,71 +1618,6 @@ export async function createProjectControlPlane(
         escalations: [...escalations],
         human_gate: humanGate,
       };
-    },
-  };
-}
-
-/**
- * Evidência de preflight de um degrau da ladder. Vem do MESMO
- * `runBillingPreflight` que o launcher usa — nenhum fato é inventado, e quota
- * permanece desconhecida porque não é probada antes do launch (desconhecido
- * não bloqueia por si só, mas também nunca vira "suficiente").
- */
-async function escalationPreflight(
-  paths: HarnessPaths,
-  profile: LauncherProfile,
-): Promise<EscalationCandidatePreflight> {
-  const home = path.join(paths.devDir, 'project', 'homes', profile.id);
-  const env = buildEnvironment(profile, process.env, { sanitizedHome: home });
-  assertNoApiCredentials(`preflight de escalation de ${profile.id}`, env);
-  const billing = await runBillingPreflight({
-    agent: profile.agent,
-    billingMode: profile.billing_mode,
-    binary: profile.argv[0] as string,
-    env,
-    orchestratorEnv: process.env,
-  });
-  const credentialKnown =
-    profile.agent === 'fake' ? true : billing.credential.verified;
-  return {
-    profile_id: profile.id,
-    provider_availability: {
-      value: billing.ok,
-      provenance: `runBillingPreflight(${profile.id}): ${billing.refusal ?? 'sem recusa'}`,
-    },
-    credential_availability: {
-      value: credentialKnown,
-      provenance: `${billing.credential.source}: ${billing.credential.detail}`,
-    },
-    real_execution_authorization: {
-      authorization: {
-        value: billing.ok ? 'AUTHORIZED' : 'DENIED',
-        provenance: 'runBillingPreflight do harness',
-      },
-      billing_mode: {
-        value: profile.billing_mode === 'subscription_only' ? 'SUBSCRIPTION' : 'NO_CHARGE',
-        provenance: 'launcher_profile.billing_mode',
-      },
-      quota: {
-        availability: { value: null, provenance: 'quota não é probada antes do launch' },
-        remaining: { value: null, provenance: 'quota não é probada antes do launch' },
-        unit: null,
-      },
-      cost: {
-        api_equivalent_usd: { value: null, provenance: 'nenhuma cobrança projetada em assinatura' },
-        projected_incremental_charge_usd: {
-          value: null,
-          provenance: 'nenhuma cobrança projetada em assinatura',
-        },
-        actual_incremental_charge_usd: { value: null, provenance: 'não observada' },
-        actual_incremental_charge_authoritative: false,
-      },
-      budget: {
-        maximum_incremental_charge_usd: {
-          value: null,
-          provenance: 'nenhum budget de cobrança em assinatura',
-        },
-      },
     },
   };
 }

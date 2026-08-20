@@ -569,6 +569,47 @@ describe('dev-run-plan — catálogo do harness vs repositório alvo', () => {
 
 const AUTHORIZED_POLICY_PROFILE = 'fake-worker-economy-v1';
 
+/**
+ * Alvo externo com o MÍNIMO que a inspeção de M72 precisa observar para que
+ * environment readiness fique READY sem inventar nada. `makeBareTarget` existe
+ * para provar que o harness não escreve no alvo; este existe para provar o
+ * caminho em que o lifecycle universal de fato avalia a work unit.
+ */
+async function makeLifecycleTarget(): Promise<{ readonly root: string; readonly plan: string }> {
+  const root = await mkdtemp(path.join(tmpdir(), 'agentlab-lifecycle-target-'));
+  created.push(root);
+  await mkdir(path.join(root, 'src'), { recursive: true });
+  await mkdir(path.join(root, 'test'), { recursive: true });
+  await mkdir(path.join(root, 'node_modules'), { recursive: true });
+  await writeFile(
+    path.join(root, 'package.json'),
+    JSON.stringify(
+      {
+        name: 'dev-run-plan-lifecycle-fixture',
+        version: '1.0.0',
+        private: true,
+        scripts: { typecheck: 'true', test: 'true' },
+        devDependencies: { vitest: '^2.1.8' },
+      },
+      null,
+      2,
+    ),
+    'utf8',
+  );
+  await writeFile(path.join(root, 'tsconfig.json'), '{}\n', 'utf8');
+  await writeFile(path.join(root, 'pnpm-lock.yaml'), 'lockfileVersion: 9.0\n', 'utf8');
+  await writeFile(path.join(root, 'src', 'greet.ts'), 'export const greet = 1;\n', 'utf8');
+  await writeFile(path.join(root, 'test', 'greet.test.ts'), 'it("ok", () => {});\n', 'utf8');
+  await writeFile(path.join(root, 'CLAUDE.md'), '# fixture sintética\n', 'utf8');
+  await writeFile(path.join(root, '.gitignore'), '.dev/\n.dev-inbox/\n', 'utf8');
+  await runGit(root, ['init', '-q', '-b', 'main']);
+  await runGit(root, ['config', 'user.email', 'harness@example.invalid']);
+  await runGit(root, ['config', 'user.name', 'Harness Test']);
+  await runGit(root, ['add', '-A']);
+  await runGit(root, ['commit', '-q', '-m', 'base']);
+  return { root, plan: await writeExternalPlan(taskPlan(['T1'])) };
+}
+
 function authorizationFor(profiles: readonly string[]): string {
   return [
     'schema_version: 1',
@@ -674,8 +715,42 @@ describe('dev-run-plan — autorização explícita da run', () => {
     expect(result.stderr).toMatch(/--profile é obrigatório/);
   });
 
-  it('o profile do lifecycle vem do catálogo do lab; um homônimo no alvo não vence', async () => {
+  it('P — sem control plane o output histórico não ganha reporting multi-profile', async () => {
     const target = await makeBareTarget();
+    const result = await runPlan(target, ['--plan', target.plan, '--profile', 'fake-worker-v1']);
+    expect(result.exitCode, result.stderr).toBe(0);
+    const output = parseOutput(result);
+
+    // O perfil continua sendo único na invocação: nada muda de significado.
+    expect(output.profile_id).toBe('fake-worker-v1');
+    expect(output.agent).toBe('fake');
+    expect(output).toHaveProperty('model');
+    expect(output).toHaveProperty('reasoning_effort');
+    expect(output).not.toHaveProperty('profile_selection_owner');
+    expect(output).not.toHaveProperty('profile_id_role');
+    expect(output).not.toHaveProperty('profiles_used');
+    expect(output).not.toHaveProperty('project_lifecycle');
+  }, 60_000);
+
+  it('P — dry-run sem --authorization continua sem pré-visualizar lifecycle nenhum', async () => {
+    const target = await makeBareTarget();
+    const result = await runPlan(target, [
+      '--plan',
+      target.plan,
+      '--profile',
+      'fake-worker-v1',
+      '--dry-run',
+    ]);
+    expect(result.exitCode, result.stderr).toBe(0);
+    const output = parseOutput(result);
+    expect(output.status).toBe('READY');
+    expect(output.dry_run).toBe(true);
+    expect(output).not.toHaveProperty('project_lifecycle_preview');
+    expect(output).not.toHaveProperty('project_lifecycle');
+  });
+
+  it('o profile do lifecycle vem do catálogo do lab; um homônimo no alvo não vence', async () => {
+    const target = await makeLifecycleTarget();
     await mkdir(path.join(target.root, 'dev', 'profiles'), { recursive: true });
     await writeFile(
       path.join(target.root, 'dev', 'profiles', `${AUTHORIZED_POLICY_PROFILE}.yaml`),

@@ -3,6 +3,7 @@ import { jsonBytes, writeFileAtomic } from './atomic.js';
 import { canonicalJson, canonicalSha256, sha256Hex } from './canonical.js';
 import {
   lookupCandidateReview,
+  type CandidateReviewLookup,
   type ValidatedCandidateAcceptancePolicy,
 } from './candidate-review.js';
 import type { CloseOutcome } from './close.js';
@@ -788,38 +789,85 @@ export interface PendingAcceptanceResolution {
  * Só age sobre candidate que DECLARA review exigida. Todo o resto do fluxo de
  * retomada continua sendo do `recover`/preflight, intocado.
  */
+export type PendingAcceptanceInspection =
+  | { readonly status: 'NONE'; readonly reason: string }
+  | {
+      readonly status: 'PENDING';
+      readonly taskId: string;
+      readonly attempt: number;
+      readonly candidateCommit: string;
+      readonly record: OrchestratedFinalizationRecordType;
+      readonly state: DevelopmentState;
+      /** Veredito durável já publicado sobre ESTE candidate, se existir. */
+      readonly review: CandidateReviewLookup;
+    };
+
+/**
+ * LEITURA da fronteira de aceitação — quem está esperando decisão, e qual
+ * veredito durável já existe sobre ele. Zero efeito: nenhuma promoção, nenhum
+ * reviewer, nenhuma escrita.
+ *
+ * Separada de `resumePendingAcceptance` porque a mesma pergunta é feita por
+ * dois consumidores com direitos diferentes: a retomada, que pode promover ou
+ * bloquear, e o dry-run, que só pode relatar. Um dry-run que respondesse
+ * "READY" com um REJECT durável em disco estaria prevendo um launch que o
+ * runtime real jamais faria.
+ */
+export async function inspectPendingAcceptance(input: {
+  readonly paths: HarnessPaths;
+  readonly loaded: LoadedPlan;
+}): Promise<PendingAcceptanceInspection> {
+  let state: DevelopmentState;
+  try {
+    state = await readState(input.paths);
+  } catch {
+    return { status: 'NONE', reason: 'runtime ainda não tem state autoritativo' };
+  }
+  const pending = state.tasks.find(
+    (task) => task.status === 'RUNNING' && task.phase === 'FINALIZING' && task.attempts > 0,
+  );
+  if (pending === undefined) return { status: 'NONE', reason: 'nenhuma finalização pendente' };
+  if (!input.loaded.byId.has(pending.id)) {
+    return { status: 'NONE', reason: `${pending.id} não existe no plano carregado` };
+  }
+
+  const record = await readOrchestratedFinalization(input.paths, pending.id, pending.attempts).catch(
+    () => null,
+  );
+  if (record === null) {
+    return { status: 'NONE', reason: `${pending.id} não tem candidate preparado neste attempt` };
+  }
+  if (record.review_requirement === undefined) {
+    return {
+      status: 'NONE',
+      reason: `candidate de ${pending.id} não exige review independente`,
+    };
+  }
+
+  return {
+    status: 'PENDING',
+    taskId: pending.id,
+    attempt: pending.attempts,
+    candidateCommit: record.candidate_commit,
+    record,
+    state,
+    review: await lookupCandidateReview(input.paths, record),
+  };
+}
+
 export async function resumePendingAcceptance(input: {
   readonly paths: HarnessPaths;
   readonly loaded: LoadedPlan;
   readonly acceptance: ValidatedCandidateAcceptancePolicy;
   readonly now?: () => string;
 }): Promise<PendingAcceptanceResolution> {
-  const none = (reason: string): PendingAcceptanceResolution => ({
-    status: 'NONE',
-    taskId: null,
-    candidateCommit: null,
-    reason,
-  });
-
-  let state: DevelopmentState;
-  try {
-    state = await readState(input.paths);
-  } catch {
-    return none('runtime ainda não tem state autoritativo');
+  const inspected = await inspectPendingAcceptance(input);
+  if (inspected.status === 'NONE') {
+    return { status: 'NONE', taskId: null, candidateCommit: null, reason: inspected.reason };
   }
-  const pending = state.tasks.find(
-    (task) => task.status === 'RUNNING' && task.phase === 'FINALIZING' && task.attempts > 0,
-  );
-  if (pending === undefined) return none('nenhuma finalização pendente');
-  if (!input.loaded.byId.has(pending.id)) return none(`${pending.id} não existe no plano carregado`);
-
-  const record = await readOrchestratedFinalization(input.paths, pending.id, pending.attempts).catch(
-    () => null,
-  );
-  if (record === null) return none(`${pending.id} não tem candidate preparado neste attempt`);
-  if (record.review_requirement === undefined) {
-    return none(`candidate de ${pending.id} não exige review independente`);
-  }
+  const pending = { id: inspected.taskId };
+  const state = inspected.state;
+  const record = inspected.record;
 
   const outcome = await acceptValidatedCandidate(
     {

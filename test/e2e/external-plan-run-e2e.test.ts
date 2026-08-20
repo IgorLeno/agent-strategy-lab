@@ -29,6 +29,7 @@ import {
   readLaunchRecord,
   readOrchestratedFinalization,
 } from '../../dev/lib/records.js';
+import { loadProjectRunAuthorization } from '../../dev/lib/project-authorization.js';
 import { getTaskState, readState } from '../../dev/lib/state.js';
 import { runDevCli, runGit, type CliResult } from '../dev/helpers.js';
 
@@ -283,6 +284,37 @@ interface RunOutput {
       readonly options: readonly string[];
     } | null;
   };
+}
+
+interface DryRunPreviewOutput {
+  readonly status: string;
+  readonly task_id: string | null;
+  readonly blocked_by: string | null;
+  readonly reason: string | null;
+  readonly candidate_commit: string | null;
+  readonly work_unit: {
+    readonly path: string;
+    readonly inspection_provenance: string;
+    readonly environment_readiness: { readonly outcome: string };
+    readonly routing: {
+      readonly selected_profile_id: string;
+      readonly history_status: string;
+    };
+    readonly worker_runtime_budget: { readonly timeout_seconds: number };
+    readonly credential: { readonly availability: boolean | null; readonly evidence: string; readonly provenance: string };
+    readonly quota: { readonly availability: boolean | null; readonly evidence: string; readonly provenance: string };
+    readonly launch_authorization: string;
+    readonly review_required: boolean;
+    readonly reviewer_profile_id: string | null;
+  } | null;
+}
+
+interface DryRunOutput {
+  readonly status: string;
+  readonly dry_run: boolean;
+  readonly provider_called: boolean;
+  readonly authoritative_mutation: boolean;
+  readonly project_lifecycle_preview: DryRunPreviewOutput;
 }
 
 function parse(result: CliResult): RunOutput {
@@ -678,6 +710,192 @@ describe('external plan run — dev-run-plan pelo lifecycle universal', () => {
     expect(t1.attempts).toBe(t1Before.attempts);
     expect((await readCandidateReview(paths, 'T1', t1.attempts))?.candidate_sha).toBe(candidate);
     expect((await readLaunchRecord(paths, 'T1'))?.launch_id).toBe(launchBefore?.launch_id);
+  }, 180_000);
+
+  it('N — reporting multi-profile: profiles_used sai dos LaunchRecords, com os papéis reais', async () => {
+    const target = await fixture(
+      planYaml({ secondValidation: "['grep', '-qx', 'repaired', 'src/t2.txt']" }),
+      authorizationYaml(),
+    );
+
+    const result = await runPlan(target, 'official-fail-until-escalation');
+    expect(result.exitCode, result.stderr).toBe(0);
+    const output = parse(result) as RunOutput & {
+      readonly profile_selection_owner: string;
+      readonly profile_id_role: string;
+      readonly profile_id: string;
+      readonly profiles_used: readonly {
+        readonly profile_id: string;
+        readonly agent: string;
+        readonly model: string;
+        readonly reasoning_effort: string;
+        readonly attempt_roles: readonly string[];
+        readonly launch_count: number;
+      }[];
+    };
+
+    // O profile do topo não representa mais a run inteira, e o output diz isso.
+    expect(output.profile_selection_owner).toBe('project_control_plane');
+    expect(output.profile_id_role).toBe('bootstrap_default');
+
+    const used = [...output.profiles_used].sort((left, right) =>
+      left.profile_id.localeCompare(right.profile_id),
+    );
+    expect(used.map((entry) => entry.profile_id)).toEqual([ADVANCED, ECONOMY].sort());
+    const economy = used.find((entry) => entry.profile_id === ECONOMY);
+    const advanced = used.find((entry) => entry.profile_id === ADVANCED);
+    expect([...(economy?.attempt_roles ?? [])].sort()).toEqual(['initial', 'repair']);
+    expect(advanced?.attempt_roles).toEqual(['escalation']);
+    // Identidade vem do profile autoritativo, não do nome: o perfil falso
+    // declara o modelo que representa, e é ele que aparece.
+    expect(advanced?.agent).toBe('fake');
+    expect(economy?.launch_count).toBeGreaterThan(0);
+  }, 180_000);
+
+  it('O — policy de profile único reporta exatamente um profile usado', async () => {
+    const target = await fixture(
+      singleTaskPlanYaml(),
+      authorizationYaml({ profiles: [{ id: ECONOMY, rank: 0 }] }),
+    );
+
+    const result = await runPlan(target, 'orchestrator-success');
+    expect(result.exitCode, result.stderr).toBe(0);
+    const output = parse(result) as RunOutput & {
+      readonly profiles_used: readonly { readonly profile_id: string }[];
+    };
+    expect(output.stopped_by).toBe('ALL_DONE');
+    expect(output.profiles_used.map((entry) => entry.profile_id)).toEqual([ECONOMY]);
+    expect(output.project_lifecycle.eligible_profile_ids).toEqual([ECONOMY]);
+  }, 120_000);
+
+  it('O — a policy fixa do benchmark continua declarando um único profile elegível', async () => {
+    const policy = await readFile(
+      path.join(resolveHarnessInstallationRoot(), 'docs/agentlab-run.codex-sol-medium-only.yaml'),
+      'utf8',
+    );
+    const loaded = await loadProjectRunAuthorization(
+      path.join(resolveHarnessInstallationRoot(), 'docs/agentlab-run.codex-sol-medium-only.yaml'),
+    );
+    expect(loaded.file.profile_policy.profiles.map((entry) => entry.id)).toEqual([
+      'codex-build-worker-subscription-sol-medium-v2',
+    ]);
+    expect(policy).toContain('nunca é ampliada em silêncio');
+  });
+
+  it('I/M — dry-run DIRECT pré-visualiza o control plane sem mutação, attempt ou provider', async () => {
+    const target = await fixture(singleTaskPlanYaml(), authorizationYaml());
+    const paths = resolveHarnessPaths(target.target, { planFile: target.plan });
+    const headBefore = (await runGit(target.target, ['rev-parse', 'HEAD'])).stdout.trim();
+
+    const result = await runPlan(target, 'orchestrator-success', ['--dry-run']);
+    expect(result.exitCode, result.stderr).toBe(0);
+    const output = JSON.parse(result.stdout) as DryRunOutput;
+
+    expect(output.status).toBe('READY');
+    expect(output.dry_run).toBe(true);
+    expect(output.provider_called).toBe(false);
+    expect(output.authoritative_mutation).toBe(false);
+
+    const preview = output.project_lifecycle_preview;
+    const unit = preview.work_unit;
+    expect(preview.status).toBe('READY');
+    expect(preview.task_id).toBe('T1');
+    // A avaliação universal INTEIRA acontece: M72, M75/M76, readiness, M78/M82,
+    // budget e o gate de launch com fatos honestos.
+    expect(unit?.inspection_provenance).toContain('inspectRepository');
+    expect(unit?.path).toBe('DIRECT');
+    expect(unit?.environment_readiness.outcome).toBe('READY');
+    expect(unit?.routing.selected_profile_id).toBe(ECONOMY);
+    expect(unit?.routing.history_status).toBe('EMPTY');
+    expect(unit?.worker_runtime_budget.timeout_seconds).toBeGreaterThan(0);
+    expect(unit?.launch_authorization).toBe('ALLOW');
+    expect(unit?.review_required).toBe(false);
+    // Proveniência dos fatos, não afirmações.
+    expect(unit?.credential.evidence).toBe('PROVEN_TRUE');
+    expect(unit?.credential.provenance).toContain('não fala com provider nenhum');
+    expect(unit?.quota.evidence).toBe('UNKNOWN');
+    expect(unit?.quota.availability).toBeNull();
+
+    // ZERO efeito: nenhum runtime, attempt, candidate, validação, review,
+    // provider ou mudança no alvo.
+    expect(await exists(paths.stateFile)).toBe(false);
+    expect(await exists(launchRecordPath(paths, 'T1'))).toBe(false);
+    expect(await exists(path.join(paths.logsDir, 'T1.stdout.log'))).toBe(false);
+    expect((await runGit(target.target, ['rev-parse', 'HEAD'])).stdout.trim()).toBe(headBefore);
+    expect((await runGit(target.target, ['status', '--porcelain'])).stdout.trim()).toBe('');
+  }, 120_000);
+
+  it('J — dry-run REVIEWED antecipa a exigência de review e o reviewer escolhido', async () => {
+    const target = await fixture(singleTaskPlanYaml(), authorizationYaml({ risk: 'high' }));
+
+    const result = await runPlan(target, 'orchestrator-success', ['--dry-run']);
+    expect(result.exitCode, result.stderr).toBe(0);
+    const preview = (JSON.parse(result.stdout) as DryRunOutput).project_lifecycle_preview;
+
+    expect(preview.status).toBe('READY');
+    expect(preview.work_unit?.path).toBe('REVIEWED');
+    expect(preview.work_unit?.review_required).toBe(true);
+    expect(preview.work_unit?.reviewer_profile_id).toBe(ADVANCED);
+    expect(preview.work_unit?.routing.selected_profile_id).toBe(ADVANCED);
+
+    const paths = resolveHarnessPaths(target.target, { planFile: target.plan });
+    expect(await exists(paths.stateFile)).toBe(false);
+    expect(await exists(candidateReviewPath(paths, 'T1', 1))).toBe(false);
+  }, 120_000);
+
+  it('K — dry-run HUMAN_REQUIRED quando o gate de launch recusaria a work unit', async () => {
+    const target = await fixture(
+      singleTaskPlanYaml(),
+      authorizationYaml({ boundary: ['DISPOSABLE_LOCAL_WORKSPACE', 'DETERMINISTIC_VALIDATION'] }),
+    );
+
+    const result = await runPlan(target, 'orchestrator-success', ['--dry-run']);
+    expect(result.exitCode).toBe(9);
+    const output = JSON.parse(result.stdout) as DryRunOutput;
+    expect(output.status).toBe('HUMAN_REQUIRED');
+    expect(output.project_lifecycle_preview.status).toBe('HUMAN_REQUIRED');
+    expect(output.project_lifecycle_preview.reason).toContain(
+      'fora do autonomous_execution_boundary',
+    );
+    expect(output.project_lifecycle_preview.work_unit?.launch_authorization).toBe(
+      'HUMAN_REQUIRED',
+    );
+
+    const paths = resolveHarnessPaths(target.target, { planFile: target.plan });
+    expect(await exists(paths.stateFile)).toBe(false);
+  }, 120_000);
+
+  it('L — dry-run com REVIEW REJECT durável reporta o gate, sem fingir READY', async () => {
+    const target = await fixture(
+      planYaml({ secondValidation: "['true']" }),
+      authorizationYaml({ risk: 'high' }),
+    );
+
+    const first = await runPlan(target, 'orchestrator-success', [], {
+      AGENTLAB_FAKE_REVIEW: 'reject',
+    });
+    expect(first.exitCode).toBe(9);
+
+    const paths = resolveHarnessPaths(target.target, { planFile: target.plan });
+    const before = await readLaunchRecord(paths, 'T1');
+    const attemptsBefore = getTaskState(await readState(paths), 'T1').attempts;
+
+    const dry = await runPlan(target, 'orchestrator-success', ['--dry-run']);
+    expect(dry.exitCode).toBe(9);
+    const output = JSON.parse(dry.stdout) as DryRunOutput;
+    expect(output.status).toBe('HUMAN_REQUIRED');
+    expect(output.project_lifecycle_preview.status).toBe('HUMAN_REQUIRED');
+    expect(output.project_lifecycle_preview.blocked_by).toBe('CANDIDATE_REVIEW_REJECTED');
+    expect(output.project_lifecycle_preview.task_id).toBe('T1');
+    expect(output.project_lifecycle_preview.work_unit).toBeNull();
+
+    // O dry-run não decidiu nada: mesmo attempt, mesmo launch, T2 intocada.
+    expect((await readLaunchRecord(paths, 'T1'))?.launch_id).toBe(before?.launch_id);
+    const state = await readState(paths);
+    expect(getTaskState(state, 'T1').attempts).toBe(attemptsBefore);
+    expect(getTaskState(state, 'T1').status).not.toBe('PASS');
+    expect(getTaskState(state, 'T2').status).toBe('READY');
+    expect(await exists(launchRecordPath(paths, 'T2'))).toBe(false);
   }, 180_000);
 
   it('HUMAN GATE — capability fora do boundary para antes de qualquer spawn', async () => {

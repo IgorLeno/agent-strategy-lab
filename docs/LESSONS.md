@@ -513,3 +513,32 @@ Rule: catálogo de profiles é a instalação do Agent Strategy Lab (módulo
 versionado, nunca `process.cwd()`). O repositório alvo é só workspace. Recursos
 relativos do profile resolvem contra o catalog root em runtime; `loadProfile`
 histórico continua lendo `<repoRoot>/dev/profiles`.
+
+[2026-08-20] Contexto: gate de review independente antes da promoção a PASS.
+Mistake: a review era consultada por UM promotor, e não pela primitive de
+selagem — um `dev-recover` ou uma retomada de finalização podiam promover um
+candidate cujo reviewer havia REPROVADO.
+Rule: um gate capaz de reprovar uma mudança precisa preceder a promoção
+autoritativa; a invariável pertence à primitive de selagem compartilhada por
+todos os promotores (`sealOrchestratedFinalization`), nunca apenas ao chamador.
+
+[2026-08-20] Contexto: fatos de credencial e quota no control plane de projeto
+externo.
+Mistake: `authorizeProjectLaunch` recebia `quota_available: true` e
+`credential_proved: true` hardcoded. O launcher continuava rodando o preflight
+canônico, então nada era cobrado indevidamente — mas o relatório afirmava
+"quota disponível" e "credencial provada" sem nenhuma observação por trás.
+Rule: fato operacional é tri-state com proveniência (PROVEN TRUE / PROVEN
+FALSE / UNKNOWN), nunca boolean. UNKNOWN não vira TRUE para destravar
+progresso, e cada dimensão tem policy própria: credencial é probável local e
+gratuitamente, então desconhecida BLOQUEIA; quota só é medida chamando o
+provider, então desconhecida SEGUE — sem jamais ser reportada como disponível.
+
+[2026-08-20] Contexto: `--dry-run` do `dev-run-plan --authorization`.
+Mistake: o dry-run retornava antes de construir o control plane, então
+prometia READY sem ter avaliado inspeção, review, readiness, routing, budget
+nem o gate de launch — e ignorava um REJECT durável pendente em disco.
+Rule: pré-visualização e execução compartilham a MESMA primitive de avaliação
+(`assessWorkUnit`); o preview é a decisão real sem efeitos, nunca uma segunda
+implementação. Um segundo assessment só para dry-run diverge do runtime
+exatamente no dia em que a diferença importa.

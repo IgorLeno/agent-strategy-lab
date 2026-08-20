@@ -219,31 +219,10 @@ export async function runPlan(input: PlanRunInput): Promise<PlanRunResult> {
     next_task: nextTask,
   };
 
-  if (dryRun) {
-    const status = runtimeState === 'ALL_DONE' ? 'ALL_DONE' : runtimeState === 'NEW' || runtimeState === 'RESUMABLE' ? 'READY' : 'BLOCKED';
-    return {
-      payload: {
-        status,
-        dry_run: true,
-        provider_called: false,
-        authoritative_mutation: false,
-        ...context,
-      },
-      exitCode: status === 'BLOCKED' ? 9 : 0,
-    };
-  }
-
-  let initialized = false;
-  if (runtimeState === 'NEW') {
-    const init = await initializeHarnessRuntime(paths);
-    initialized = true;
-    context['base_sha'] = init.baseline_sha;
-  }
-
-  let controlPlane: ProjectControlPlane | null = null;
-  if (authorization !== null) {
+  async function buildControlPlane(): Promise<ProjectControlPlane | null> {
+    if (authorization === null) return null;
     try {
-      controlPlane = await createProjectControlPlane({
+      return await createProjectControlPlane({
         paths,
         loaded,
         authorization: authorization.file,
@@ -255,6 +234,65 @@ export async function runPlan(input: PlanRunInput): Promise<PlanRunResult> {
         : error;
     }
   }
+
+  if (dryRun) {
+    const runtimeStatus =
+      runtimeState === 'ALL_DONE'
+        ? 'ALL_DONE'
+        : runtimeState === 'NEW' || runtimeState === 'RESUMABLE'
+          ? 'READY'
+          : 'BLOCKED';
+
+    // Sem `--authorization` o dry-run continua sendo exatamente o que sempre
+    // foi: inspeção de runtime e seleção da próxima task, nada mais.
+    if (authorization === null) {
+      return {
+        payload: {
+          status: runtimeStatus,
+          dry_run: true,
+          provider_called: false,
+          authoritative_mutation: false,
+          ...context,
+        },
+        exitCode: runtimeStatus === 'BLOCKED' ? 9 : 0,
+      };
+    }
+
+    // Com autorização, o dry-run PRÉ-VISUALIZA o control plane universal pela
+    // mesma avaliação que o runtime real consome. O control plane é
+    // construído aqui — carregar e recusar profiles fora da policy é leitura,
+    // não mutação — e nada além disso acontece: nenhum runtime é inicializado,
+    // nenhum attempt é consumido, nenhum provider é chamado.
+    const previewPlane = await buildControlPlane();
+    const preview =
+      runtimeStatus === 'ALL_DONE' || previewPlane === null
+        ? null
+        : await previewPlane.previewNextAction({ taskId: nextTask });
+    const status =
+      preview === null ? runtimeStatus : preview.status === 'READY' ? 'READY' : 'HUMAN_REQUIRED';
+
+    return {
+      payload: {
+        status,
+        dry_run: true,
+        provider_called: false,
+        authoritative_mutation: false,
+        ...context,
+        ...(preview === null ? {} : { project_lifecycle_preview: preview }),
+        ...(previewPlane === null ? {} : { project_lifecycle: previewPlane.snapshot() }),
+      },
+      exitCode: status === 'READY' || status === 'ALL_DONE' ? 0 : 9,
+    };
+  }
+
+  let initialized = false;
+  if (runtimeState === 'NEW') {
+    const init = await initializeHarnessRuntime(paths);
+    initialized = true;
+    context['base_sha'] = init.baseline_sha;
+  }
+
+  const controlPlane = await buildControlPlane();
 
   const orchestrated = await runOrchestrate({
     paths,

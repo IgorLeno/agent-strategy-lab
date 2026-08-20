@@ -60,9 +60,13 @@ async function main(): Promise<void> {
       : { observedTaxonomy: request.observed_taxonomy }),
     profile,
     workerRuntimeBudgetMs: request.worker_runtime_budget_ms,
-    // Dry-run não prova quota nem credencial: ambas são medidas no launch real.
-    quotaAvailable: false,
-    credentialProved: false,
+    // Dry-run não prova quota nem credencial: ambas permanecem UNKNOWN, e
+    // UNKNOWN nunca é promovido a provado só para o plano seguir adiante.
+    quota: { availability: null, provenance: 'dry-run: quota não é probada sem launch' },
+    credential: {
+      availability: null,
+      provenance: 'dry-run: credencial não é probada sem preflight de launch',
+    },
   });
 
   if (result.outcome === 'REVIEWED_REQUIRED') {

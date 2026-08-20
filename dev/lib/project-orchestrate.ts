@@ -85,6 +85,7 @@ import {
 import { writeJsonOnce } from './atomic.js';
 import { assertNoApiCredentials, runBillingPreflight } from './billing.js';
 import { buildTimeoutArgv } from './exec.js';
+import { evidenceOf, type LaunchFact, type LaunchFactEvidence } from './project-preflight.js';
 import type { HarnessPaths } from './paths.js';
 import { buildEnvironment, resolveProfileArgv, type LauncherProfile } from './profile.js';
 import {
@@ -110,6 +111,14 @@ export interface ProjectLaunchCheck {
   readonly name: string;
   readonly decision: ExecutionAuthorizationDecision;
   readonly reason: string;
+  /**
+   * Qualidade da evidência por trás do check. Um check pode ser `ALLOWED` com
+   * evidência `UNKNOWN` — é exatamente o caso da quota, que não é probada
+   * antes do launch. Separar as duas coisas impede que "não bloqueou" seja
+   * lido depois como "foi provado".
+   */
+  readonly evidence?: LaunchFactEvidence;
+  readonly provenance?: string;
 }
 
 export interface ProjectLaunchContext {
@@ -119,8 +128,14 @@ export interface ProjectLaunchContext {
   /** Categorias human-gated que a ação implica de fato; `requested_scope` nunca as cobre. */
   readonly implied_human_gated?: readonly HumanGatedCapability[];
   readonly billing_mode: LauncherProfile['billing_mode'];
-  readonly quota_available: boolean;
-  readonly credential_proved: boolean;
+  /**
+   * Fatos tri-state com proveniência, coletados por
+   * `collectProjectLaunchFacts`. Booleans foram removidos de propósito: eles
+   * obrigavam o chamador a escolher entre `true` e `false` quando a verdade
+   * era "não observado", e a escolha que destrava o progresso é sempre `true`.
+   */
+  readonly quota: LaunchFact;
+  readonly credential: LaunchFact;
   readonly risk: TaskRisk;
   readonly worker_owns_commit: boolean;
   readonly worker_owns_official_validation: boolean;
@@ -188,19 +203,51 @@ export function authorizeProjectLaunch(context: ProjectLaunchContext): ProjectLa
   }
   checks.push({ name: 'billing', decision: 'ALLOWED', reason: `billing_mode=${context.billing_mode}` });
 
-  if (!context.quota_available) {
-    return deny('quota', 'quota da assinatura indisponível para este launch', null);
+  // POLICY DE QUOTA DESCONHECIDA. Quota só é medida chamando o provider, e
+  // medi-la antes de cada launch cobraria o experimento pelo direito de saber.
+  // Desconhecida NÃO significa suficiente e NÃO significa insuficiente: o
+  // launch segue, porque o provider é quem impõe rate limit e o fará no
+  // próprio launch, mas o relatório nunca diz "quota disponível". Só evidência
+  // POSITIVA de recusa por limite bloqueia aqui.
+  if (context.quota.availability === false) {
+    return deny(
+      'quota',
+      `quota da assinatura indisponível para este launch: ${context.quota.provenance}`,
+      null,
+    );
   }
-  checks.push({ name: 'quota', decision: 'ALLOWED', reason: 'quota disponível' });
+  checks.push({
+    name: 'quota',
+    decision: 'ALLOWED',
+    reason:
+      context.quota.availability === true
+        ? 'quota observada como suficiente'
+        : 'quota não observada antes do launch; desconhecida não é suficiente nem insuficiente',
+    evidence: evidenceOf(context.quota),
+    provenance: context.quota.provenance,
+  });
 
-  if (!context.credential_proved) {
+  // POLICY DE CREDENCIAL DESCONHECIDA. Aqui a assimetria é oposta à da quota:
+  // a credencial É probável localmente e de graça, então não tê-la provado é
+  // resultado de um probe que falhou, não de uma medição cara evitada. A
+  // política de cobrança do laboratório já diz que ausência de prova positiva
+  // recusa — desconhecida bloqueia, e nunca é promovida a provada.
+  if (context.credential.availability !== true) {
     return deny(
       'credentials',
-      'credencial não provada antes do launch',
+      context.credential.availability === false
+        ? `credencial provada como incompatível com a policy: ${context.credential.provenance}`
+        : `credencial não provada antes do launch: ${context.credential.provenance}`,
       'NEW_CREDENTIAL_BOUNDARY',
     );
   }
-  checks.push({ name: 'credentials', decision: 'ALLOWED', reason: 'credencial provada antes do launch' });
+  checks.push({
+    name: 'credentials',
+    decision: 'ALLOWED',
+    reason: 'credencial provada antes do launch',
+    evidence: evidenceOf(context.credential),
+    provenance: context.credential.provenance,
+  });
 
   if (context.risk === 'critical') {
     return deny('risk', 'risco crítico ou security-sensitive', 'CRITICAL_OR_SECURITY_SENSITIVE_ACTION');
@@ -723,8 +770,9 @@ export interface LaunchedPlanningWorkerOptions {
   readonly providerEnabled?: boolean;
   /** Default `true`: dry-run/preflight jamais chama provider. */
   readonly dryRun?: boolean;
-  readonly credentialProved: boolean;
-  readonly quotaAvailable: boolean;
+  /** Fatos tri-state com proveniência; nunca booleans afirmados pelo chamador. */
+  readonly credential: LaunchFact;
+  readonly quota: LaunchFact;
   /** Budget de runtime do worker, derivado por policy; validado só contra o bound de runtime. */
   readonly workerRuntimeBudgetMs: number;
   readonly port?: ProviderRoleInvocationPort;
@@ -805,8 +853,8 @@ export function createLaunchedPlanningWorker(
         scope: options.scope,
         capability: 'CONFIGURED_SUBSCRIPTION_WORKER',
         billing_mode: options.profile.billing_mode,
-        quota_available: options.quotaAvailable,
-        credential_proved: options.credentialProved,
+        quota: options.quota,
+        credential: options.credential,
         risk: 'low',
         worker_owns_commit: options.profile.commit_owner !== 'orchestrator',
         worker_owns_official_validation: options.profile.official_validation_owner !== 'orchestrator',
@@ -1023,8 +1071,13 @@ export interface ProjectReviewerLaunchOptions {
   readonly packet: ProjectReviewPacket;
   readonly risk: TaskRisk;
   readonly workerRuntimeBudgetMs: number;
-  readonly quotaAvailable: boolean;
-  readonly credentialProved: boolean;
+  /**
+   * Os MESMOS fatos honestos do implementer. Review read-only não ganha
+   * autorização mais fraca: um reviewer lançado com credencial não provada
+   * seria uma segunda porta para o que o gate do implementer recusa.
+   */
+  readonly credential: LaunchFact;
+  readonly quota: LaunchFact;
   readonly port?: ProviderRoleInvocationPort;
 }
 
@@ -1073,8 +1126,8 @@ export async function launchProjectReviewer(
     scope: options.scope,
     capability: 'CONFIGURED_SUBSCRIPTION_WORKER',
     billing_mode: options.profile.billing_mode,
-    quota_available: options.quotaAvailable,
-    credential_proved: options.credentialProved,
+    quota: options.quota,
+    credential: options.credential,
     risk: options.risk,
     worker_owns_commit: options.profile.commit_owner !== 'orchestrator',
     worker_owns_official_validation: options.profile.official_validation_owner !== 'orchestrator',
@@ -1174,8 +1227,8 @@ export interface ProjectLifecyclePlan {
 export interface ProjectLifecyclePlanInput extends DirectPathInput {
   readonly profile: LauncherProfile;
   readonly workerRuntimeBudgetMs: number;
-  readonly quotaAvailable: boolean;
-  readonly credentialProved: boolean;
+  readonly quota: LaunchFact;
+  readonly credential: LaunchFact;
 }
 
 export type ProjectLifecyclePlanResult =
@@ -1198,8 +1251,8 @@ export function planDirectLifecycle(input: ProjectLifecyclePlanInput): ProjectLi
     scope: ExecutionAuthorizationScope.parse(input.authorizationScope),
     capability: 'CONFIGURED_SUBSCRIPTION_WORKER',
     billing_mode: input.profile.billing_mode,
-    quota_available: input.quotaAvailable,
-    credential_proved: input.credentialProved,
+    quota: input.quota,
+    credential: input.credential,
     risk: direct.assessment.risk.value,
     worker_owns_commit: input.profile.commit_owner !== 'orchestrator',
     worker_owns_official_validation: input.profile.official_validation_owner !== 'orchestrator',

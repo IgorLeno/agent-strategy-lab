@@ -7,7 +7,7 @@
  * Nenhum provider real e nenhum projeto real: os únicos perfis usados apontam
  * para `fixtures/fake-worker.mjs`.
  */
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -27,6 +27,15 @@ import {
   ProjectRunAuthorizationFile,
 } from '../../dev/lib/project-authorization.js';
 import { buildWorkUnitFromPlan, capabilityInputOf } from '../../dev/lib/project-run.js';
+import type { CommandRunner } from '../../dev/lib/billing.js';
+import {
+  collectProjectLaunchFacts,
+  escalationPreflightOf,
+  evidenceOf,
+  quotaFactOf,
+  type ProjectLaunchFacts,
+} from '../../dev/lib/project-preflight.js';
+import { launchRecordPath } from '../../dev/lib/records.js';
 import {
   resolveRoutinePreflight,
   type RoutineAutonomyDriver,
@@ -90,6 +99,60 @@ async function writeAuthorization(contents: string): Promise<string> {
   const file = path.join(dir, 'agentlab-run.yaml');
   await writeFile(file, contents, 'utf8');
   return file;
+}
+
+/**
+ * LaunchRecord mínimo com observação de rate limit — evidência gravada por um
+ * launch anterior, exatamente como o launcher a grava. Nenhum provider é
+ * chamado para produzi-la.
+ */
+async function writeRateLimitedLaunchRecord(
+  paths: ReturnType<typeof resolveHarnessPaths>,
+  profileId: string,
+  observation: { readonly status: string; readonly resetsAt: string | number },
+): Promise<void> {
+  await mkdir(paths.logsDir, { recursive: true });
+  await writeFile(
+    launchRecordPath(paths, 'T1'),
+    JSON.stringify({
+      schema_version: 1,
+      task_id: 'T1',
+      profile_id: profileId,
+      argv: ['claude', '--print'],
+      process: {
+        pid: 1,
+        pgid: 1,
+        started_at: '2029-01-01T00:00:00.000Z',
+        proc_start_ticks: 0,
+        command_sha256: '0'.repeat(64),
+      },
+      launch_id: '00000000-0000-4000-8000-000000000000',
+      started_at: '2029-01-01T00:00:00.000Z',
+      finished_at: '2029-01-01T00:01:00.000Z',
+      duration_ms: 60_000,
+      exit_code: 0,
+      timed_out: false,
+      controlled: {},
+      rate_limit_observations: {
+        source: 'claude_stream_json',
+        observed: [
+          {
+            sequence: 1,
+            status: observation.status,
+            rate_limit_type: 'five_hour',
+            utilization: 100,
+            utilization_scale: 'percentage',
+            utilization_percentage: 100,
+            resets_at: observation.resetsAt,
+            session_id: null,
+            raw: {},
+          },
+        ],
+        window_deltas: [],
+      },
+    }),
+    'utf8',
+  );
 }
 
 describe('contrato de autorização da run', () => {
@@ -170,6 +233,176 @@ function minimalAuthorizationObject(): unknown {
     },
   };
 }
+
+// ---------------------------------------------------------------------------
+// Fatos de credencial e quota: nada aqui chama provider real. O probe de
+// credencial roda com um `CommandRunner` injetado, e a quota é derivada de
+// evidência já gravada em disco.
+// ---------------------------------------------------------------------------
+
+const CLAUDE_LIKE_PROFILE = LauncherProfile.parse({
+  id: 'claude-fatos-de-teste-v1',
+  agent: 'claude',
+  billing_mode: 'subscription_only',
+  commit_owner: 'orchestrator',
+  official_validation_owner: 'orchestrator',
+  worker_validation_policy: 'targeted',
+  argv: ['claude', '--print'],
+  prompt_delivery: 'argv',
+  timeout_seconds: 60,
+  forbidden_flags: [],
+  env_allowlist: ['PATH', 'HOME'],
+});
+
+function runnerReturning(output: string): CommandRunner {
+  return async () => ({ code: 0, output });
+}
+
+async function factsFor(
+  profile: LauncherProfile,
+  options: { readonly runner?: CommandRunner; readonly now?: () => Date } = {},
+): Promise<ProjectLaunchFacts> {
+  const repoRoot = await temporaryDir();
+  return collectProjectLaunchFacts({
+    paths: resolveHarnessPaths(repoRoot),
+    profile,
+    ...(options.runner === undefined ? {} : { runner: options.runner }),
+    ...(options.now === undefined ? {} : { now: options.now }),
+  });
+}
+
+describe('proveniência de credencial e quota', () => {
+  it('A — credencial PROVEN TRUE quando o probe local prova a assinatura', async () => {
+    const facts = await factsFor(CLAUDE_LIKE_PROFILE, {
+      runner: runnerReturning(
+        JSON.stringify({
+          loggedIn: true,
+          authMethod: 'claude.ai',
+          apiProvider: 'firstParty',
+          subscriptionType: 'max',
+        }),
+      ),
+    });
+    expect(facts.credential.availability).toBe(true);
+    expect(evidenceOf(facts.credential)).toBe('PROVEN_TRUE');
+    expect(facts.credential.provenance).toContain('claude_subscription_oauth');
+  });
+
+  it('A — worker falso é PROVEN TRUE por não falar com provider nenhum', async () => {
+    const profile = await loadProfileFromCatalog(
+      resolveHarnessInstallationRoot(),
+      'fake-worker-economy-v1',
+    );
+    const facts = await factsFor(profile);
+    expect(facts.credential.availability).toBe(true);
+    expect(facts.credential.provenance).toContain('não fala com provider nenhum');
+  });
+
+  it('B — credencial PROVEN FALSE quando o probe prova fonte de API', async () => {
+    const facts = await factsFor(CLAUDE_LIKE_PROFILE, {
+      runner: runnerReturning(
+        JSON.stringify({ loggedIn: true, authMethod: 'apiKey', apiProvider: 'console' }),
+      ),
+    });
+    expect(facts.credential.availability).toBe(false);
+    expect(evidenceOf(facts.credential)).toBe('PROVEN_FALSE');
+    // O preflight canônico recusa pelo mesmo fato: as duas camadas concordam.
+    expect(facts.provider.availability).toBe(false);
+  });
+
+  it('C — credencial UNKNOWN quando o probe não prova nada, e UNKNOWN não vira TRUE', async () => {
+    for (const output of ['', 'saída que não é JSON', JSON.stringify({ loggedIn: false })]) {
+      const facts = await factsFor(CLAUDE_LIKE_PROFILE, { runner: runnerReturning(output) });
+      expect(facts.credential.availability).toBeNull();
+      expect(evidenceOf(facts.credential)).toBe('UNKNOWN');
+    }
+  });
+
+  it('E — quota UNKNOWN sem observação, e nenhum probe pago é executado para sabê-la', async () => {
+    const facts = await factsFor(CLAUDE_LIKE_PROFILE, {
+      runner: runnerReturning(JSON.stringify({ loggedIn: false })),
+    });
+    expect(facts.quota.availability).toBeNull();
+    expect(evidenceOf(facts.quota)).toBe('UNKNOWN');
+    expect(facts.quota.provenance).toContain('não é probada antes do launch');
+  });
+
+  it('D — quota PROVEN FALSE com recusa observada e janela ainda aberta', async () => {
+    const repoRoot = await temporaryDir();
+    const paths = resolveHarnessPaths(repoRoot);
+    await writeRateLimitedLaunchRecord(paths, CLAUDE_LIKE_PROFILE.id, {
+      status: 'rejected',
+      resetsAt: '2030-01-01T00:00:00.000Z',
+    });
+
+    const fact = await quotaFactOf({
+      paths,
+      profile: CLAUDE_LIKE_PROFILE,
+      now: () => new Date('2029-12-31T23:00:00.000Z'),
+    });
+    expect(fact.availability).toBe(false);
+    expect(fact.provenance).toContain('2030-01-01T00:00:00.000Z');
+  });
+
+  it('E — janela já resetada volta a UNKNOWN: reset não prova quota suficiente', async () => {
+    const repoRoot = await temporaryDir();
+    const paths = resolveHarnessPaths(repoRoot);
+    await writeRateLimitedLaunchRecord(paths, CLAUDE_LIKE_PROFILE.id, {
+      status: 'rejected',
+      resetsAt: '2030-01-01T00:00:00.000Z',
+    });
+
+    const fact = await quotaFactOf({
+      paths,
+      profile: CLAUDE_LIKE_PROFILE,
+      now: () => new Date('2030-01-01T01:00:00.000Z'),
+    });
+    expect(fact.availability).toBeNull();
+    expect(fact.provenance).toContain('já resetou');
+  });
+
+  it('E — reset não datável nunca vira quota insuficiente nem suficiente', async () => {
+    const repoRoot = await temporaryDir();
+    const paths = resolveHarnessPaths(repoRoot);
+    await writeRateLimitedLaunchRecord(paths, CLAUDE_LIKE_PROFILE.id, {
+      status: 'rejected',
+      resetsAt: 1893456000,
+    });
+
+    const fact = await quotaFactOf({ paths, profile: CLAUDE_LIKE_PROFILE });
+    expect(fact.availability).toBeNull();
+    expect(fact.provenance).toContain('não é datável');
+  });
+
+  it('E — observação sem recusa continua UNKNOWN: ausência de recusa não é prova', async () => {
+    const repoRoot = await temporaryDir();
+    const paths = resolveHarnessPaths(repoRoot);
+    await writeRateLimitedLaunchRecord(paths, CLAUDE_LIKE_PROFILE.id, {
+      status: 'allowed',
+      resetsAt: '2030-01-01T00:00:00.000Z',
+    });
+
+    const fact = await quotaFactOf({ paths, profile: CLAUDE_LIKE_PROFILE });
+    expect(fact.availability).toBeNull();
+    expect(fact.provenance).toContain('ausência de recusa não prova');
+  });
+
+  it('F — a evidência da escalation reusa os MESMOS fatos, sem segundo preflight', async () => {
+    const facts = await factsFor(CLAUDE_LIKE_PROFILE, {
+      runner: runnerReturning(JSON.stringify({ loggedIn: false })),
+    });
+    const preflight = escalationPreflightOf(CLAUDE_LIKE_PROFILE, facts);
+    expect(preflight.credential_availability.value).toBeNull();
+    expect(preflight.credential_availability.provenance).toBe(facts.credential.provenance);
+    expect(preflight.real_execution_authorization.quota.availability.value).toBeNull();
+
+    const insufficient = escalationPreflightOf(CLAUDE_LIKE_PROFILE, {
+      ...facts,
+      quota: { availability: false, provenance: 'provider recusou por limite' },
+    });
+    expect(insufficient.real_execution_authorization.quota.availability.value).toBe('INSUFFICIENT');
+  });
+});
 
 describe('capability de profile para routing real', () => {
   it('perfil falso sem test_double_of continua sem modelo e fora do routing', async () => {

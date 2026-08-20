@@ -486,6 +486,67 @@ export interface OrchestrateResult {
   readonly iterationCount: number;
 }
 
+/** Um profile que de fato executou nesta run, com os papéis que ele exerceu. */
+export interface ProfileUsageReport {
+  readonly profile_id: string;
+  readonly agent: string;
+  readonly model: string;
+  readonly reasoning_effort: string;
+  readonly attempt_roles: readonly string[];
+  readonly launch_count: number;
+}
+
+/**
+ * Quais profiles executaram, derivado de FATO AUTORITATIVO.
+ *
+ * A identidade vem do `LaunchRecord` de cada iteração — o que nasceu de fato,
+ * não o que foi pedido — e os papéis vêm das decisões que o control plane
+ * registrou para aquele profile. Agente/modelo/effort continuam saindo de
+ * `experimentFactsOf` sobre o profile do catálogo: nada é inferido a partir do
+ * NOME do profile, que é rótulo e não evidência.
+ *
+ * Um profile sem `LaunchRecord` não entra: gate humano antes do spawn não é
+ * execução, e listá-lo diria que alguém rodou quando ninguém rodou.
+ */
+async function summarizeProfilesUsed(
+  paths: HarnessPaths,
+  controlPlane: ProjectControlPlane,
+  iterations: readonly IterationInput[],
+): Promise<ProfileUsageReport[]> {
+  const launchCounts = new Map<string, number>();
+  for (const iteration of iterations) {
+    const id = iteration.record?.profile_id;
+    if (id === undefined) continue;
+    launchCounts.set(id, (launchCounts.get(id) ?? 0) + 1);
+  }
+
+  const rolesByProfile = new Map<string, Set<string>>();
+  for (const unit of controlPlane.snapshot().work_units) {
+    const id = unit.routing.selected_profile_id;
+    if (!launchCounts.has(id)) continue;
+    const roles = rolesByProfile.get(id) ?? new Set<string>();
+    roles.add(unit.attempt_role);
+    rolesByProfile.set(id, roles);
+  }
+
+  const reports: ProfileUsageReport[] = [];
+  for (const [id, launchCount] of launchCounts) {
+    const profile = await loadProfile(paths.repoRoot, id, {
+      catalogRoot: paths.profileCatalogRoot,
+    }).catch(() => null);
+    const profileFacts = profile === null ? null : experimentFactsOf(profile);
+    reports.push({
+      profile_id: id,
+      agent: profileFacts?.agent ?? 'unknown',
+      model: profileFacts?.model ?? 'unknown',
+      reasoning_effort: profileFacts?.reasoning_effort ?? 'unknown',
+      attempt_roles: [...(rolesByProfile.get(id) ?? new Set<string>())],
+      launch_count: launchCount,
+    });
+  }
+  return reports;
+}
+
 /**
  * Loop canônico do orquestrador. `dev-orchestrate` e `dev-run-plan` consomem
  * esta função; nenhum wrapper reimplementa selection, repair, recovery ou launch.
@@ -953,6 +1014,12 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
   const total = estimates.length ? estimates.reduce((sum, value) => sum + value, 0) : null;
 
   const preflightReport: PreflightResult | null = preflight;
+  // Quem escolheu os profiles desta run. Sem control plane a resposta é a
+  // histórica — um profile por invocação — e o output não muda em nada.
+  const profilesUsed =
+    controlPlane === undefined
+      ? null
+      : await summarizeProfilesUsed(paths, controlPlane, iterations);
   const payload = {
     ...(humanRequired ?? {}),
     ...(preflightReport === null
@@ -962,13 +1029,25 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
         }),
     stopped_by: stop.status,
     reason: stop.reason,
-    // O perfil é único na invocação: repetir agente/modelo/effort em cada
-    // iteração seria ruído, não evidência adicional.
+    // SEM control plane o perfil É único na invocação: repetir agente/modelo/
+    // effort em cada iteração seria ruído, não evidência adicional.
+    //
+    // COM control plane deixou de ser verdade — routing e escalation podem
+    // trocar de profile entre attempts. Os campos abaixo continuam existindo
+    // por compatibilidade, mas passam a ser explicitamente o BOOTSTRAP da
+    // invocação, e `profiles_used` diz quem de fato executou.
     profile_id: profileId,
     agent: facts?.agent ?? 'unknown',
     model: facts?.model ?? 'unknown',
     reasoning_effort: facts?.reasoning_effort ?? 'unknown',
     ...(verbose ? { reasoning_effort_source: facts?.reasoning_effort_source ?? 'unknown' } : {}),
+    ...(profilesUsed === null
+      ? {}
+      : {
+          profile_selection_owner: 'project_control_plane',
+          profile_id_role: 'bootstrap_default',
+          profiles_used: profilesUsed,
+        }),
     iteration_count: iterations.length,
     iterations: iterations.map((iteration) =>
       verbose ? detailIteration(iteration) : summarizeIteration(iteration),

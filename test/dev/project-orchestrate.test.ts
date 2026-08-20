@@ -10,6 +10,7 @@ import {
   buildPlannerPrompt,
   combineWorkflowAndReview,
   createLaunchedPlanningWorker,
+  launchProjectReviewer,
   planDirectLifecycle,
   planReviewerInvocation,
   recordComparableRunFacts,
@@ -509,8 +510,8 @@ describe('gate humano proporcional e autorização de escopo', () => {
   const base = {
     scope: authorizationScope(),
     billing_mode: 'subscription_only' as const,
-    quota_available: true,
-    credential_proved: true,
+    quota: { availability: null, provenance: 'quota não probada antes do launch' },
+    credential: { availability: true, provenance: 'probe local provou a assinatura' },
     risk: 'low' as const,
     worker_owns_commit: false,
     worker_owns_official_validation: false,
@@ -556,13 +557,87 @@ describe('gate humano proporcional e autorização de escopo', () => {
       authorizeProjectLaunch({
         ...base,
         capability: 'CONFIGURED_SUBSCRIPTION_WORKER',
-        credential_proved: false,
+        credential: { availability: false, provenance: 'probe local provou fonte de API' },
       }).outcome,
     ).toBe('HUMAN_REQUIRED');
     expect(
       authorizeProjectLaunch({ ...base, capability: 'CONFIGURED_SUBSCRIPTION_WORKER', risk: 'critical' })
         .outcome,
     ).toBe('HUMAN_REQUIRED');
+  });
+
+  it('A/B/C — credencial provada libera; provada-falsa e desconhecida param, sem promoção', () => {
+    const proven = authorizeProjectLaunch({
+      ...base,
+      capability: 'CONFIGURED_SUBSCRIPTION_WORKER',
+      credential: { availability: true, provenance: 'probe local provou a assinatura' },
+    });
+    expect(proven.outcome).toBe('ALLOW');
+    const credentialCheck = proven.checks.find((check) => check.name === 'credentials');
+    expect(credentialCheck?.evidence).toBe('PROVEN_TRUE');
+
+    for (const credential of [
+      { availability: false as const, provenance: 'probe local provou fonte de API' },
+      { availability: null, provenance: 'CLI não está autenticada' },
+    ]) {
+      const authorization = authorizeProjectLaunch({
+        ...base,
+        capability: 'CONFIGURED_SUBSCRIPTION_WORKER',
+        credential,
+      });
+      expect(authorization.outcome).toBe('HUMAN_REQUIRED');
+      if (authorization.outcome !== 'HUMAN_REQUIRED') continue;
+      expect(authorization.gated_capability).toBe('NEW_CREDENTIAL_BOUNDARY');
+      // A proveniência do que NÃO foi provado precisa chegar a quem decide.
+      expect(authorization.reason).toContain(credential.provenance);
+    }
+  });
+
+  it('D/E — quota provada-falsa bloqueia; quota desconhecida segue sem virar "disponível"', () => {
+    const insufficient = authorizeProjectLaunch({
+      ...base,
+      capability: 'CONFIGURED_SUBSCRIPTION_WORKER',
+      quota: { availability: false, provenance: 'provider recusou por limite; janela não resetou' },
+    });
+    expect(insufficient.outcome).toBe('HUMAN_REQUIRED');
+    expect(insufficient.checks.at(-1)?.name).toBe('quota');
+
+    const unknown = authorizeProjectLaunch({
+      ...base,
+      capability: 'CONFIGURED_SUBSCRIPTION_WORKER',
+      quota: { availability: null, provenance: 'quota não probada antes do launch' },
+    });
+    // Desconhecida não bloqueia — o provider é quem impõe rate limit, e ele o
+    // fará no próprio launch — mas o relatório JAMAIS afirma disponibilidade.
+    expect(unknown.outcome).toBe('ALLOW');
+    const quotaCheck = unknown.checks.find((check) => check.name === 'quota');
+    expect(quotaCheck?.evidence).toBe('UNKNOWN');
+    expect(quotaCheck?.reason).not.toContain('quota disponível');
+    expect(quotaCheck?.provenance).toContain('não probada');
+  });
+
+  it('F — nenhum UNKNOWN é reportado como provado em nenhuma combinação', () => {
+    const values: readonly (boolean | null)[] = [true, false, null];
+    for (const credential of values) {
+      for (const quota of values) {
+        const authorization = authorizeProjectLaunch({
+          ...base,
+          capability: 'CONFIGURED_SUBSCRIPTION_WORKER',
+          credential: { availability: credential, provenance: 'evidência declarada pelo teste' },
+          quota: { availability: quota, provenance: 'evidência declarada pelo teste' },
+        });
+        for (const check of authorization.checks) {
+          if (check.name === 'credentials' && credential === null) {
+            expect(check.evidence).not.toBe('PROVEN_TRUE');
+          }
+          if (check.name === 'quota' && quota === null) {
+            expect(check.evidence).not.toBe('PROVEN_TRUE');
+          }
+        }
+        // Só credencial PROVEN TRUE chega a ALLOW; UNKNOWN nunca destrava.
+        expect(authorization.outcome === 'ALLOW').toBe(credential === true && quota !== false);
+      }
+    }
   });
 
   it('capability fora do boundary é scope expansion', () => {
@@ -686,8 +761,8 @@ describe('adapter real da PlanningWorkerPort', () => {
       paths,
       profile,
       scope: authorizationScope(),
-      credentialProved: true,
-      quotaAvailable: true,
+      credential: { availability: true, provenance: 'probe local provou a assinatura' },
+      quota: { availability: null, provenance: 'quota não probada antes do launch' },
       workerRuntimeBudgetMs: 600_000,
       ...overrides,
     });
@@ -788,7 +863,11 @@ describe('adapter real da PlanningWorkerPort', () => {
   });
 
   it('recusa antes de qualquer efeito quando o launch exige gate humano', async () => {
-    const port = await worker({ credentialProved: false, providerEnabled: true, dryRun: false });
+    const port = await worker({
+      credential: { availability: null, provenance: 'credencial não provada' },
+      providerEnabled: true,
+      dryRun: false,
+    });
     const result = await port.invoke(invocation());
 
     expect(result.outcome).toBe('INVOCATION_FAILED');
@@ -947,6 +1026,82 @@ describe('dev-project-orchestrate', () => {
   });
 });
 
+describe('G — reviewer não ganha autorização mais fraca que o implementer', () => {
+  const paths = resolveHarnessPaths(REPO_ROOT);
+
+  function reviewerPacket() {
+    return {
+      task_id: 'T1',
+      objective: 'objetivo declarado pelo PlanFile',
+      acceptance: ['aceitação declarada'],
+      validation: [{ argv: ['true'] }],
+      changed_files: ['src/greet.ts'],
+      candidate_sha: 'b'.repeat(40),
+      official_validation_outcome: 'PASS' as const,
+      evidence_paths: [paths.validationLogsDir],
+    };
+  }
+
+  for (const [label, credential] of [
+    ['desconhecida', { availability: null, provenance: 'CLI não está autenticada' }],
+    ['provada-falsa', { availability: false as const, provenance: 'fonte da credencial é API' }],
+  ] as const) {
+    it(`credencial ${label} vira REVIEW_UNAVAILABLE, nunca ACCEPT, e não invoca provider`, async () => {
+      const profile = await loadProfile(REPO_ROOT, CODEX_PROFILE_ID);
+      let invoked = false;
+      const result = await launchProjectReviewer({
+        paths,
+        profile,
+        scope: authorizationScope(),
+        implementerProfileId: CLAUDE_PROFILE_ID,
+        diversityRequirement: 'required',
+        risk: 'low',
+        workerRuntimeBudgetMs: 600_000,
+        credential,
+        quota: { availability: null, provenance: 'quota não probada antes do launch' },
+        packet: reviewerPacket(),
+        port: {
+          run: async () => {
+            invoked = true;
+            return '{"decision":"ACCEPT","reason":"jamais deveria ser perguntado"}';
+          },
+        },
+      });
+
+      expect(result.outcome).toBe('REVIEW_UNAVAILABLE');
+      if (result.outcome !== 'REVIEW_UNAVAILABLE') return;
+      expect(result.code).toBe('REVIEW_LAUNCH_HUMAN_REQUIRED');
+      expect(invoked).toBe(false);
+    });
+  }
+
+  it('quota provada-falsa também para a review antes de qualquer invocação', async () => {
+    const profile = await loadProfile(REPO_ROOT, CODEX_PROFILE_ID);
+    let invoked = false;
+    const result = await launchProjectReviewer({
+      paths,
+      profile,
+      scope: authorizationScope(),
+      implementerProfileId: CLAUDE_PROFILE_ID,
+      diversityRequirement: 'required',
+      risk: 'low',
+      workerRuntimeBudgetMs: 600_000,
+      credential: { availability: true, provenance: 'probe local provou a assinatura' },
+      quota: { availability: false, provenance: 'provider recusou por limite' },
+      packet: reviewerPacket(),
+      port: {
+        run: async () => {
+          invoked = true;
+          return '{"decision":"ACCEPT","reason":"jamais deveria ser perguntado"}';
+        },
+      },
+    });
+
+    expect(result.outcome).toBe('REVIEW_UNAVAILABLE');
+    expect(invoked).toBe(false);
+  });
+});
+
 describe('vista consolidada do lifecycle', () => {
   it('publica caminho, budget e gate de launch sem tocar em provider', async () => {
     const profile = await loadProfile(REPO_ROOT, CODEX_PROFILE_ID);
@@ -954,8 +1109,8 @@ describe('vista consolidada do lifecycle', () => {
       ...directInput(),
       profile,
       workerRuntimeBudgetMs: 900_000,
-      quotaAvailable: true,
-      credentialProved: true,
+      quota: { availability: null, provenance: 'quota não probada antes do launch' },
+      credential: { availability: true, provenance: 'probe local provou a assinatura' },
     });
 
     expect(result.outcome).toBe('PLANNED');
