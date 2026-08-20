@@ -15,7 +15,8 @@
  * `test_double_of` porque `capabilityOf` (M77) e o router (M78) classificam
  * MODELOS — sem isso o routing real não seria exercitável sem gastar dinheiro.
  */
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -230,7 +231,11 @@ function runPlan(
       '6',
       ...extra,
     ],
-    { AGENTLAB_FAKE_MODE: mode, ...env },
+    {
+      AGENTLAB_FAKE_MODE: mode,
+      AGENTLAB_DATA_DIR: path.join(target.root, 'control-plane-data'),
+      ...env,
+    },
   );
 }
 
@@ -297,8 +302,18 @@ interface DryRunPreviewOutput {
     readonly inspection_provenance: string;
     readonly environment_readiness: { readonly outcome: string };
     readonly routing: {
+      readonly source: string;
       readonly selected_profile_id: string;
       readonly history_status: string;
+      readonly history_evidence: {
+        readonly episode_count: number;
+        readonly series_count: number;
+        readonly selected_series_sample_size: number;
+        readonly series_considered: readonly {
+          readonly trial_sample_size: number;
+          readonly status: string;
+        }[];
+      };
     };
     readonly worker_runtime_budget: { readonly timeout_seconds: number };
     readonly credential: { readonly availability: boolean | null; readonly evidence: string; readonly provenance: string };
@@ -327,6 +342,16 @@ async function exists(target: string): Promise<boolean> {
     () => true,
     () => false,
   );
+}
+
+async function snapshotTree(root: string): Promise<Readonly<Record<string, string>>> {
+  const result: Record<string, string> = {};
+  for (const entry of await readdir(root, { recursive: true, withFileTypes: true })) {
+    if (!entry.isFile()) continue;
+    const absolute = path.join(entry.parentPath, entry.name);
+    result[path.relative(root, absolute)] = createHash('sha256').update(await readFile(absolute)).digest('hex');
+  }
+  return result;
 }
 
 describe('external plan run — dev-run-plan pelo lifecycle universal', () => {
@@ -823,6 +848,52 @@ describe('external plan run — dev-run-plan pelo lifecycle universal', () => {
     expect(await exists(path.join(paths.logsDir, 'T1.stdout.log'))).toBe(false);
     expect((await runGit(target.target, ['rev-parse', 'HEAD'])).stdout.trim()).toBe(headBefore);
     expect((await runGit(target.target, ['status', '--porcelain'])).stdout.trim()).toBe('');
+  }, 120_000);
+
+  it('dry-run consulta history canônica existente sem criar nem alterar evidência', async () => {
+    const profiles = [{ id: ECONOMY, rank: 0 }] as const;
+    const producer = await fixture(singleTaskPlanYaml(), authorizationYaml({ profiles }));
+    const preview = await fixture(singleTaskPlanYaml(), authorizationYaml({ profiles }));
+    const sharedData = path.join(producer.root, 'shared-control-plane-data');
+
+    const produced = await runPlan(
+      producer,
+      'orchestrator-success',
+      [],
+      { AGENTLAB_DATA_DIR: sharedData },
+    );
+    expect(produced.exitCode, produced.stderr).toBe(0);
+    const before = await snapshotTree(sharedData);
+
+    const result = await runPlan(
+      preview,
+      'orchestrator-success',
+      ['--dry-run'],
+      { AGENTLAB_DATA_DIR: sharedData },
+    );
+    expect(result.exitCode, result.stderr).toBe(0);
+    const output = JSON.parse(result.stdout) as DryRunOutput;
+    const routing = output.project_lifecycle_preview.work_unit?.routing;
+
+    expect(routing).toMatchObject({
+      source: 'M78_FALLBACK',
+      selected_profile_id: ECONOMY,
+      history_status: 'INSUFFICIENT',
+      history_evidence: {
+        episode_count: 1,
+        series_count: 1,
+        selected_series_sample_size: 0,
+      },
+    });
+    expect(routing?.history_evidence.series_considered).toContainEqual(
+      expect.objectContaining({ trial_sample_size: 1, status: 'INSUFFICIENT_EVIDENCE' }),
+    );
+    expect(output.provider_called).toBe(false);
+    expect(output.authoritative_mutation).toBe(false);
+    expect(await snapshotTree(sharedData)).toEqual(before);
+    const previewPaths = resolveHarnessPaths(preview.target, { planFile: preview.plan });
+    expect(await exists(previewPaths.stateFile)).toBe(false);
+    expect(await exists(launchRecordPath(previewPaths, 'T1'))).toBe(false);
   }, 120_000);
 
   it('J — dry-run REVIEWED antecipa a exigência de review e o reviewer escolhido', async () => {

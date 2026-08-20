@@ -41,7 +41,7 @@ export {
   QuotaUsage,
   QuotaWindow,
 } from './quota-usage.js';
-export { InterventionRecord, InterventionType } from './intervention.js';
+export { InterventionRecord, InterventionType, RunInterventionsRecord } from './intervention.js';
 export { RunPerformanceRecord, TaskPerformanceRecord } from './performance.js';
 export {
   ExtensionKind,

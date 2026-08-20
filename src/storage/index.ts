@@ -44,10 +44,13 @@ export {
 export {
   RunIndex,
   RunIndexSchemaVersionError,
+  listRunRecords,
   RUN_INDEX_SCHEMA_VERSION,
   RUN_RECORD_FILE_NAME,
   type RebuildReport,
+  type DiscoveredRunRecord,
   type RunIndexRow,
+  type RunHistoryContextV1,
   type RunRebuildResult,
   type RunRecord,
   type TaskIndexRow,

@@ -17,12 +17,14 @@ import path from 'node:path';
 import { EvaluationOutcome, QualificationStatus } from '../core/enums.js';
 import type { ExecutionEnvelopeManifest } from '../envelope/index.js';
 import { EvaluationRecord, ExecutionMetrics, ExecutionRecord } from '../schemas/execution-record.js';
-import { ScoreRecord } from '../schemas/evaluation-record.js';
+import { RunInterventionsRecord, type InterventionRecord } from '../schemas/intervention.js';
+import { QualificationRecord, ScoreRecord } from '../schemas/evaluation-record.js';
 import { QuotaUsage } from '../schemas/quota-usage.js';
 import { RunPerformanceRecord } from '../schemas/performance.js';
 import {
   RUN_RECORD_FILE_NAME,
   verifyRunIntegrity,
+  type RunHistoryContextV1,
   type RunRecord,
 } from '../storage/index.js';
 import { AttemptRole, deriveAttemptFacts, type AttemptFacts, type InferenceEvidence } from './attempt-facts.js';
@@ -36,6 +38,8 @@ const EXECUTION_RECORD_FILE_NAME = 'execution-record.json';
 const QUOTA_USAGE_FILE_NAME = 'quota-usage.json';
 const EVALUATION_RECORD_FILE_NAME = 'evaluation-record.json';
 const SCORE_RECORD_FILE_NAME = 'score-record.json';
+const INTERVENTIONS_FILE_NAME = 'interventions.json';
+const QUALIFICATION_RECORD_FILE_NAME = 'qualification-record.json';
 
 /** Referências pinadas para um run: nunca inferidas, sempre fornecidas pelo chamador. */
 export interface EvaluationSelectionEntry {
@@ -54,6 +58,8 @@ export interface ExcludedRun {
 
 export interface RunReadResult {
   readonly run_id: string;
+  readonly trial_id: string;
+  readonly history_context: RunHistoryContextV1 | null;
   readonly facts: AttemptFacts;
   readonly performance: RunPerformanceRecord;
 }
@@ -181,12 +187,15 @@ async function readRun(
   const quota = await readQuotaUsage(runDir);
   if (quota.status === 'EXCLUDED') return quota;
 
+  const interventions = await readInterventions(runDir);
+  if (interventions.status === 'EXCLUDED') return interventions;
+
   const inferenceEvidence = deriveInferenceEvidence(executionRecord.metrics);
   const facts = deriveAttemptFacts({
     execution_status: executionRecord.status,
     evaluation_outcome: evaluation.record === null ? null : evaluation.record.outcome,
     attempt_role: AttemptRole.UNKNOWN,
-    interventions: null,
+    interventions: interventions.value,
     inference_evidence: inferenceEvidence,
   });
 
@@ -215,7 +224,9 @@ async function readRun(
     quality: {
       execution_status: executionRecord.status,
       evaluation_outcome: evaluation.record?.outcome ?? EvaluationOutcome.NOT_EVALUATED,
-      qualification_status: score.record === null ? QualificationStatus.UNSCORABLE : QualificationStatus.QUALIFIED,
+      qualification_status:
+        score.qualification?.status ??
+        (score.record === null ? QualificationStatus.UNSCORABLE : QualificationStatus.QUALIFIED),
       score_profile_id: score.record?.score_profile_id ?? null,
       score_profile_version: score.record?.score_profile_version ?? null,
       sub_scores: score.record?.sub_scores ?? null,
@@ -234,7 +245,38 @@ async function readRun(
     },
   });
 
-  return { status: 'OK', run: { run_id: runId, facts, performance } };
+  return {
+    status: 'OK',
+    run: {
+      run_id: runId,
+      trial_id: record.trial.id,
+      history_context: record.history_context ?? null,
+      facts,
+      performance,
+    },
+  };
+}
+
+/**
+ * Intervenções humanas do attempt. O artifact só existe quando o writer pôde
+ * PROVAR o conjunto observado: lista vazia é prova positiva de zero, ausência
+ * continua sendo desconhecimento e artifact corrompido falha fechado — nunca
+ * vira zero.
+ */
+async function readInterventions(
+  runDir: string,
+): Promise<
+  | { status: 'OK'; value: readonly InterventionRecord[] | null }
+  | { status: 'EXCLUDED'; reason: string }
+> {
+  const read = await readJson<unknown>(path.join(runDir, EXECUTION_DIR, INTERVENTIONS_FILE_NAME));
+  if (read === undefined) return { status: 'OK', value: null };
+  if (read === null) return { status: 'EXCLUDED', reason: 'interventions.json não é JSON válido' };
+  const parsed = RunInterventionsRecord.safeParse(read);
+  if (!parsed.success) {
+    return { status: 'EXCLUDED', reason: 'interventions.json não corresponde ao schema RunInterventionsRecord' };
+  }
+  return { status: 'OK', value: parsed.data.interventions };
 }
 
 async function readSelectedEvaluation(
@@ -261,8 +303,13 @@ async function readSelectedEvaluation(
 async function readSelectedScore(
   runDir: string,
   selection: EvaluationSelectionEntry | null,
-): Promise<{ status: 'OK'; record: ScoreRecord | null } | { status: 'EXCLUDED'; reason: string }> {
-  if (selection === null || selection.score_id === null) return { status: 'OK', record: null };
+): Promise<
+  | { status: 'OK'; record: ScoreRecord | null; qualification: QualificationRecord | null }
+  | { status: 'EXCLUDED'; reason: string }
+> {
+  if (selection === null || selection.score_id === null) {
+    return { status: 'OK', record: null, qualification: null };
+  }
 
   const filePath = path.join(runDir, SCORES_DIR, selection.score_id, SCORE_RECORD_FILE_NAME);
   const read = await readJson<unknown>(filePath);
@@ -276,7 +323,26 @@ async function readSelectedScore(
   if (!parsed.success) {
     return { status: 'EXCLUDED', reason: `score pinado não corresponde ao schema: ${selection.score_id}` };
   }
-  return { status: 'OK', record: parsed.data };
+  const qualificationPath = path.join(
+    runDir,
+    SCORES_DIR,
+    selection.score_id,
+    QUALIFICATION_RECORD_FILE_NAME,
+  );
+  const qualificationRead = await readJson<unknown>(qualificationPath);
+  if (qualificationRead === null) {
+    return { status: 'EXCLUDED', reason: `qualification pinada não é JSON válido: ${selection.score_id}` };
+  }
+  if (qualificationRead === undefined) {
+    // Compatibilidade histórica: scores anteriores a QualificationRecord no
+    // artifact continuam com a semântica v1 já existente.
+    return { status: 'OK', record: parsed.data, qualification: null };
+  }
+  const qualification = QualificationRecord.safeParse(qualificationRead);
+  if (!qualification.success) {
+    return { status: 'EXCLUDED', reason: `qualification pinada não corresponde ao schema: ${selection.score_id}` };
+  }
+  return { status: 'OK', record: parsed.data, qualification: qualification.data };
 }
 
 /**

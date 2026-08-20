@@ -50,6 +50,28 @@ export interface RunIndexRow {
 }
 
 /**
+ * Link versionado entre um run homogêneo e o lifecycle maior da work unit.
+ * A seleção é uma decisão explícita do writer; leitores nunca escolhem o
+ * evaluation/score "mais recente".
+ */
+export interface RunHistoryContextV1 {
+  readonly schema_version: 1;
+  readonly execution_episode_id: string;
+  readonly episode_attempt_ordinal: number;
+  readonly work_definition_fingerprint_sha256: string;
+  readonly initial_profile_id: string;
+  readonly initial_profile_fingerprint_sha256: string;
+  readonly observed_had_inference?: {
+    readonly value: boolean;
+    readonly provenance: string;
+  };
+  readonly selection: {
+    readonly evaluation_id: string;
+    readonly score_id: string | null;
+  };
+}
+
+/**
  * Nome do arquivo, na raiz do run, que registra tudo que o índice precisa para
  * reindexar aquele run sem depender do banco: task, trial e run. É a
  * contrapartida em disco de `insertTask`/`insertTrial`/`insertRun` — sem ele,
@@ -62,6 +84,7 @@ export interface RunRecord {
   readonly task: TaskIndexRow;
   readonly trial: TrialIndexRow;
   readonly run: RunIndexRow;
+  readonly history_context?: RunHistoryContextV1;
 }
 
 /** Resultado da reindexação de um único run durante o rebuild. */
@@ -80,6 +103,25 @@ export interface RebuildReport {
   readonly runsScanned: number;
   readonly runsIndexed: number;
   readonly results: readonly RunRebuildResult[];
+}
+
+export interface DiscoveredRunRecord {
+  readonly runDir: string;
+  readonly record: RunRecord;
+}
+
+/**
+ * Descoberta canônica e somente-leitura a partir dos RunRecords reconstruíveis.
+ * Records ausentes ou inválidos não são promovidos a catálogo paralelo.
+ */
+export async function listRunRecords(runsDir: string): Promise<DiscoveredRunRecord[]> {
+  const records: DiscoveredRunRecord[] = [];
+  for (const runId of await listRunDirectories(runsDir)) {
+    const runDir = path.join(runsDir, runId);
+    const read = await readRunRecord(runDir);
+    if (read.status === 'OK') records.push({ runDir, record: read.record });
+  }
+  return records;
 }
 
 /**
@@ -392,10 +434,69 @@ function asRunRecord(value: unknown): RunRecord | null {
   const task = asTaskIndexRow(value['task']);
   const trial = asTrialIndexRow(value['trial']);
   const run = asRunIndexRow(value['run']);
+  const historyContext = asRunHistoryContext(value['history_context']);
   if (task === null || trial === null || run === null) return null;
+  if (historyContext === null) return null;
   if (trial.task_id !== task.id || run.trial_id !== trial.id) return null;
 
-  return { task, trial, run };
+  return {
+    task,
+    trial,
+    run,
+    ...(historyContext === undefined ? {} : { history_context: historyContext }),
+  };
+}
+
+function asRunHistoryContext(value: unknown): RunHistoryContextV1 | null | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value) || value['schema_version'] !== 1) return null;
+  const selection = value['selection'];
+  if (!isRecord(selection)) return null;
+  const executionEpisodeId = value['execution_episode_id'];
+  const ordinal = value['episode_attempt_ordinal'];
+  const workFingerprint = value['work_definition_fingerprint_sha256'];
+  const initialProfileId = value['initial_profile_id'];
+  const initialFingerprint = value['initial_profile_fingerprint_sha256'];
+  const evaluationId = selection['evaluation_id'];
+  const scoreId = selection['score_id'];
+  const observedInference = value['observed_had_inference'];
+  if (
+    typeof executionEpisodeId !== 'string' || executionEpisodeId.length === 0 ||
+    !Number.isInteger(ordinal) || (ordinal as number) < 1 ||
+    !isSha256(workFingerprint) ||
+    typeof initialProfileId !== 'string' || initialProfileId.length === 0 ||
+    !isSha256(initialFingerprint) ||
+    typeof evaluationId !== 'string' || evaluationId.length === 0 ||
+    !(scoreId === null || typeof scoreId === 'string') ||
+    !isObservedInference(observedInference)
+  ) {
+    return null;
+  }
+  return {
+    schema_version: 1,
+    execution_episode_id: executionEpisodeId,
+    episode_attempt_ordinal: ordinal as number,
+    work_definition_fingerprint_sha256: workFingerprint,
+    initial_profile_id: initialProfileId,
+    initial_profile_fingerprint_sha256: initialFingerprint,
+    ...(observedInference === undefined ? {} : { observed_had_inference: observedInference }),
+    selection: { evaluation_id: evaluationId, score_id: scoreId },
+  };
+}
+
+function isObservedInference(
+  value: unknown,
+): value is RunHistoryContextV1['observed_had_inference'] {
+  return value === undefined || (
+    isRecord(value) &&
+    typeof value['value'] === 'boolean' &&
+    typeof value['provenance'] === 'string' &&
+    value['provenance'].length > 0
+  );
+}
+
+function isSha256(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 }
 
 function asTaskIndexRow(value: unknown): TaskIndexRow | null {

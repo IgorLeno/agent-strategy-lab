@@ -31,3 +31,20 @@ export const InterventionRecord = z
   })
   .strict();
 export type InterventionRecord = z.infer<typeof InterventionRecord>;
+
+/**
+ * Artifact canônico, por run, das intervenções humanas observadas naquele
+ * attempt. A existência do arquivo é a prova positiva: um writer só o publica
+ * quando o lifecycle consegue provar o conjunto observado. Lista vazia
+ * significa "zero intervenções PROVADAS", nunca "não encontrei registro" —
+ * ausência do artifact continua sendo UNKNOWN para os leitores.
+ */
+export const RunInterventionsRecord = z
+  .object({
+    schema_version: z.literal(1),
+    /** Como o lifecycle provou o conjunto; auditável junto do run selado. */
+    provenance: nonEmpty,
+    interventions: z.array(InterventionRecord),
+  })
+  .strict();
+export type RunInterventionsRecord = z.infer<typeof RunInterventionsRecord>;

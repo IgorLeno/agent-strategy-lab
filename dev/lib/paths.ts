@@ -38,6 +38,8 @@ export interface HarnessPaths {
    */
   readonly failedAttemptsDir: string;
   readonly validationLogsDir: string;
+  /** Binding append-only entre attempts do target e runs canônicos do control plane. */
+  readonly projectHistoryBindingsDir: string;
 }
 
 /**
@@ -126,5 +128,6 @@ export function resolveHarnessPaths(
     reviewsDir: path.join(devDir, 'reviews'),
     failedAttemptsDir: path.join(devDir, 'failed-attempts'),
     validationLogsDir: path.join(devDir, 'validation-logs'),
+    projectHistoryBindingsDir: path.join(devDir, 'project', 'history-bindings'),
   };
 }

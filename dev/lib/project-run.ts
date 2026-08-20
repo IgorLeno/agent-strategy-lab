@@ -27,6 +27,8 @@
  *   autoriza nada: ele deixa de ser necessário quando existe policy.
  */
 
+import { createHash } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import {
@@ -37,8 +39,10 @@ import { inspectRepository, type ProjectInspection } from '../../src/inspection/
 import { assessExecution } from '../../src/planner/assess.js';
 import { PlannedTask, type TaskRisk } from '../../src/planner/task.js';
 import { evaluatePlanWorkflow } from '../../src/planner/validate.js';
+import { resolveDataDir } from '../../src/project/index.js';
 import { AttemptRole } from '../../src/performance/attempt-facts.js';
-import type { PerformanceHistoryQueryResult } from '../../src/performance/query.js';
+import { InterventionType, type InterventionRecord } from '../../src/schemas/index.js';
+import type { PerformanceHistoryQueryResultV2 } from '../../src/performance/query.js';
 import {
   CapabilityRegistry,
   capabilityOf,
@@ -48,6 +52,7 @@ import {
   type EscalationCandidatePreflight,
   type EscalationExecutionPolicy,
   type EscalationLadder,
+  type HistoryInformedRoutingResult,
   type ProfileCapabilityInput,
   type RoutingCandidate,
 } from '../../src/routing/index.js';
@@ -62,10 +67,12 @@ import {
 import type { CandidateReviewLookup } from './candidate-review.js';
 import type { CommandRunner } from './billing.js';
 import { experimentFactsOf, sandboxOf, sessionPersistenceOf } from './doctor.js';
+import { executionPolicyOf } from './execution-policy.js';
 import { inspectPendingAcceptance } from './finalize-orchestrated.js';
 import { headSha } from './git.js';
-import type { HarnessPaths } from './paths.js';
+import { resolveHarnessInstallationRoot, type HarnessPaths } from './paths.js';
 import type { LoadedPlan } from './plan.js';
+import { buildWorkerPrompt } from './prompt.js';
 import {
   loadProfileFromCatalog,
   profileProvenance,
@@ -91,7 +98,6 @@ import {
   combineWorkflowAndReview,
   evaluateEnvironmentReadiness,
   launchProjectReviewer,
-  recordComparableRunFacts,
   resolveFailureFollowUp,
   toHumanRequiredOutput,
   type EnvironmentReadinessGate,
@@ -103,11 +109,24 @@ import {
   workerRuntimeBoundsOf,
 } from './project-roles.js';
 import {
+  materializeCanonicalProjectAttempt,
+  projectProfileFingerprint,
+  projectWorkDefinitionFingerprint,
+  queryCanonicalProjectHistory,
+} from './project-history.js';
+import {
   candidateReviewPath,
   completionPath,
+  handoffDraftPath,
+  packetPath,
+  readCandidateReview,
   readCompletion,
   readLaunchRecord,
+  readOrchestratedFinalization,
+  readPacket,
+  readProjectHistoryBinding,
   readValidationFailedAttempt,
+  reportPath,
   validationFailedAttemptPath,
   writeCandidateReview,
 } from './records.js';
@@ -121,19 +140,7 @@ import { getTaskState, readState } from './state.js';
 
 export const PROJECT_RUN_SCHEMA_VERSION = 1;
 
-/** M82 exige uma consulta já feita; uma run de projeto externo não tem série. */
 const HISTORY_MINIMUM_SAMPLE_SIZE = 3;
-
-function emptyPerformanceHistory(): PerformanceHistoryQueryResult {
-  return {
-    schema_version: 1,
-    minimum_sample_size: HISTORY_MINIMUM_SAMPLE_SIZE,
-    series: [],
-    excluded_runs: [],
-    excluded_trials: [],
-    comparable_facts_issues: [],
-  };
-}
 
 // ---------------------------------------------------------------------------
 // Capability de profile — derivação única, sem duplicar a do doctor.
@@ -202,6 +209,12 @@ export interface ProjectRoutingReport {
    * de M78 sabendo disso.
    */
   readonly history_status: 'EMPTY' | 'AVAILABLE' | 'INSUFFICIENT';
+  readonly history_evidence: {
+    readonly episode_count: number;
+    readonly series_count: number;
+    readonly selected_series_sample_size: number;
+    readonly series_considered: HistoryInformedRoutingResult['evidence']['series_considered'];
+  };
   readonly rationale: readonly string[];
 }
 
@@ -221,10 +234,19 @@ function factReportOf(fact: LaunchFact): ProjectLaunchFactReport {
 }
 
 function historyStatusOf(
-  history: PerformanceHistoryQueryResult,
+  routed: HistoryInformedRoutingResult,
 ): ProjectRoutingReport['history_status'] {
-  if (history.series.length === 0) return 'EMPTY';
-  return history.series.length < history.minimum_sample_size ? 'INSUFFICIENT' : 'AVAILABLE';
+  const considered = routed.evidence.series_considered;
+  if (considered.some((series) => series.status === 'ELIGIBLE' || series.status === 'AMBIGUOUS')) {
+    return 'AVAILABLE';
+  }
+  if (considered.some((series) => series.series_key !== null && series.status === 'INSUFFICIENT_EVIDENCE')) {
+    return 'INSUFFICIENT';
+  }
+  if (considered.some((series) => series.status === 'INCOMPATIBLE' && series.reason.includes('UNKNOWN'))) {
+    return 'INSUFFICIENT';
+  }
+  return 'EMPTY';
 }
 
 export interface ProjectBudgetReport {
@@ -329,6 +351,17 @@ interface WorkUnitAssessment {
   readonly selectedProfileId: string | null;
   readonly timeoutSeconds: number | null;
   readonly reviewRequirement: CandidateReviewRequirement | null;
+  readonly history: PerformanceHistoryQueryResultV2 | null;
+  readonly materialization: WorkUnitMaterializationContext | null;
+}
+
+interface WorkUnitMaterializationContext {
+  readonly planTask: LoadedPlan['plan']['tasks'][number];
+  readonly classification: WorkUnitClassification;
+  readonly inspection: ProjectInspection;
+  readonly baseSha: string;
+  readonly instructionFiles: readonly { readonly path: string; readonly sha256: string }[];
+  readonly instructionInventoryComplete: boolean;
 }
 
 /** Projeção read-only da próxima ação; nada aqui foi decidido nem gravado. */
@@ -450,6 +483,32 @@ function contextAreasOf(
   }
   const all = [...new Set(inspection.source_anchors.map((anchor) => anchor.area))];
   return { areas: all, provenance: 'inspection.source_anchors (nenhum initial_file ancorado)' };
+}
+
+async function fingerprintProjectInstructions(
+  repoRoot: string,
+  inspection: ProjectInspection,
+): Promise<{
+  readonly files: readonly { readonly path: string; readonly sha256: string }[];
+  readonly complete: boolean;
+}> {
+  const root = path.resolve(repoRoot);
+  const files: { path: string; sha256: string }[] = [];
+  for (const instruction of inspection.project_instructions) {
+    const absolute = path.resolve(root, instruction.path);
+    const relative = path.relative(root, absolute);
+    if (relative.startsWith('..') || path.isAbsolute(relative)) return { files, complete: false };
+    try {
+      const bytes = await readFile(absolute);
+      files.push({
+        path: instruction.path,
+        sha256: createHash('sha256').update(bytes).digest('hex'),
+      });
+    } catch {
+      return { files, complete: false };
+    }
+  }
+  return { files, complete: true };
 }
 
 export interface WorkUnitBuild {
@@ -665,6 +724,8 @@ export interface CreateProjectControlPlaneInput {
    */
   readonly credentialRunner?: CommandRunner;
   readonly now?: () => Date;
+  /** Data root do control plane; injetável para isolar testes. */
+  readonly historyLabRoot?: string;
 }
 
 /**
@@ -688,6 +749,7 @@ export async function createProjectControlPlane(
 ): Promise<ProjectControlPlane> {
   const { paths, loaded, authorization } = input;
   const inspect = input.inspect ?? ((repoRoot: string) => inspectRepository({ repoRoot }));
+  const historyLabRoot = input.historyLabRoot ?? resolveHarnessInstallationRoot();
 
   const profiles = new Map<string, LauncherProfile>();
   const provenances = new Map<string, ProfileProvenance>();
@@ -754,6 +816,23 @@ export async function createProjectControlPlane(
   const reviewRequirementByTask = new Map<string, CandidateReviewRequirement>();
   /** Gate humano do último candidate recusado pela review, lido por `afterWorkUnit`. */
   let blockedReview: HumanRequiredOutput | null = null;
+  const historySnapshotByTask = new Map<string, PerformanceHistoryQueryResultV2>();
+  /**
+   * Attempts que ESTE processo observou de ponta a ponta. É a única prova
+   * positiva de que nenhum humano autorizou a continuação entre dois attempts
+   * do mesmo episódio: o processo nunca parou entre eles.
+   */
+  const observedAttemptsByTask = new Map<string, Set<number>>();
+  const materializationByTask = new Map<string, WorkUnitMaterializationContext>();
+  const episodeByTask = new Map<
+    string,
+    {
+      readonly id: string;
+      readonly initialProfileId: string;
+      readonly initialProfileFingerprintSha256: string;
+      nextOrdinal: number;
+    }
+  >();
 
   /**
    * Fatos de launch de UM profile, coletados pela primitive canônica. É a
@@ -825,6 +904,8 @@ export async function createProjectControlPlane(
       selectedProfileId: null,
       timeoutSeconds: null,
       reviewRequirement: null,
+      history: null,
+      materialization: null,
     });
 
     const planTask = loaded.byId.get(request.taskId);
@@ -879,8 +960,29 @@ export async function createProjectControlPlane(
     const decision = combineWorkflowAndReview(workflow, assessment.review_requirement);
     const environment = evaluateEnvironmentReadiness(assessment.environment_readiness);
 
-    const eligible = [...profiles.keys()];
-    const history = emptyPerformanceHistory();
+    const pinned = request.pinnedProfileId ?? escalatedProfileByTask.get(request.taskId) ?? null;
+    const eligible = pinned === null ? [...profiles.keys()] : [pinned];
+    if (eligible.some((profileId) => !profiles.has(profileId))) {
+      return blocked({
+        incidentId: `project:${request.taskId}:profile-outside-policy`,
+        decisionNeeded: 'usar somente profiles da policy autorizada',
+        why: `profile ${pinned} exigido pelo runtime está fora da profile policy ${authorization.profile_policy.id}`,
+        options: ['declarar o profile na policy', 'rerodar sem o pin de profile'],
+        evidencePaths: [input.authorizationFile],
+      });
+    }
+    const workDefinitionFingerprint = projectWorkDefinitionFingerprint({ planTask, classification });
+    const history = historySnapshotByTask.get(request.taskId) ?? await queryCanonicalProjectHistory({
+      labRoot: historyLabRoot,
+      workDefinitionFingerprintSha256: workDefinitionFingerprint,
+      eligibleProfileIds: eligible,
+      minimumSampleSize: HISTORY_MINIMUM_SAMPLE_SIZE,
+      filter: {
+        task_class: classification.task_class,
+        difficulty: classification.difficulty_declared,
+        ...(inspection.stack.known ? { stack: inspection.stack.value.ecosystems_detected } : {}),
+      },
+    });
     const routed = routeInitialProfileWithHistory({
       work_unit: {
         source: 'direct_task_normalization',
@@ -892,18 +994,21 @@ export async function createProjectControlPlane(
       capability_registry: registry,
       candidates: candidatesFor(eligible),
       history,
+      profile_fingerprints_sha256: Object.fromEntries(
+        eligible.map((profileId) => [profileId, projectProfileFingerprint(profiles.get(profileId) as LauncherProfile)]),
+      ),
     });
 
-    const fallback = routed.fallback;
-    if (fallback === null || fallback.outcome !== 'ROUTED') {
+    const routingDecision = routed.source === 'HISTORY' ? routed.recommendation : routed.fallback;
+    if (routingDecision === null || routingDecision.outcome !== 'ROUTED') {
       const reason =
-        fallback === null
-          ? 'recomendação histórica não pôde ser aplicada'
-          : fallback.outcome === 'BUDGET_UNSUPPORTED'
-            ? `worker runtime budget não cabe nos bounds dos profiles autorizados: ${fallback.violations
+        routingDecision === null
+          ? 'routing histórico/base não produziu decisão aplicável'
+          : routingDecision.outcome === 'BUDGET_UNSUPPORTED'
+            ? `worker runtime budget não cabe nos bounds dos profiles autorizados: ${routingDecision.violations
                 .map((violation) => `${violation.profile_id}=${violation.requested_budget_ms}ms`)
                 .join(', ')}`
-            : fallback.reason;
+            : 'routing não produziu profile executável';
       return blocked({
         incidentId: `project:${request.taskId}:routing`,
         decisionNeeded: 'ampliar ou corrigir a profile policy autorizada',
@@ -916,8 +1021,7 @@ export async function createProjectControlPlane(
       });
     }
 
-    const routedProfileId = fallback.profile.profile_id;
-    const pinned = request.pinnedProfileId ?? escalatedProfileByTask.get(request.taskId) ?? null;
+    const routedProfileId = routingDecision.profile.profile_id;
     const selectedProfileId = pinned ?? routedProfileId;
     const profile = profiles.get(selectedProfileId);
     if (profile === undefined) {
@@ -930,7 +1034,7 @@ export async function createProjectControlPlane(
       });
     }
 
-    const budgetMs = fallback.worker_runtime_budget.milliseconds;
+    const budgetMs = routingDecision.worker_runtime_budget.milliseconds;
     const budget = resolveWorkerRuntimeBudget({ profile, budgetMs });
     if (budget.outcome === 'BUDGET_UNSUPPORTED') {
       return blocked({
@@ -999,13 +1103,22 @@ export async function createProjectControlPlane(
         source: routed.source,
         selected_profile_id: selectedProfileId,
         pinned: pinned !== null,
-        history_status: historyStatusOf(history),
-        rationale: [...routed.rationale, ...fallback.rationale],
+        history_status: historyStatusOf(routed),
+        history_evidence: {
+          episode_count: history.episodes.length,
+          series_count: history.series.length,
+          selected_series_sample_size: routed.evidence.selected_series_sample_size,
+          series_considered: routed.evidence.series_considered,
+        },
+        rationale: [
+          ...routed.rationale,
+          ...(routed.fallback?.outcome === 'ROUTED' ? routed.fallback.rationale : []),
+        ],
       },
       worker_runtime_budget: {
         requested_ms: budget.requested_budget_ms,
         timeout_seconds: budget.timeout_seconds_override,
-        source: 'M78 adaptive worker runtime budget',
+        source: routed.source === 'HISTORY' ? 'M81/M82 observed duration p90' : 'M78 adaptive worker runtime budget',
         checked_bounds: budget.checked_bounds.map(
           (bound) => `${bound.source}=${bound.maximum_ms}ms`,
         ),
@@ -1050,6 +1163,7 @@ export async function createProjectControlPlane(
             }
           : null;
 
+    const instructionInventory = await fingerprintProjectInstructions(paths.repoRoot, inspection);
     return {
       outcome: gate === null ? 'LAUNCH' : 'HUMAN_REQUIRED',
       gate,
@@ -1057,7 +1171,63 @@ export async function createProjectControlPlane(
       selectedProfileId,
       timeoutSeconds: budget.timeout_seconds_override,
       reviewRequirement,
+      history,
+      materialization: {
+        planTask,
+        classification,
+        inspection,
+        baseSha: head,
+        instructionFiles: instructionInventory.files,
+        instructionInventoryComplete: instructionInventory.complete,
+      },
     };
+  }
+
+  async function ensureEpisode(
+    request: WorkUnitRequest,
+    selectedProfileId: string,
+  ): Promise<void> {
+    if (episodeByTask.has(request.taskId)) return;
+    const state = await readState(paths);
+    const taskState = getTaskState(state, request.taskId);
+    const previousAttempt = taskState.attempts;
+    if (previousAttempt > 0 && (request.attemptKind === 'REPAIR' || escalatedProfileByTask.has(request.taskId))) {
+      const previousLaunch = await readLaunchRecord(paths, request.taskId);
+      if (previousLaunch !== null) {
+        const binding = await readProjectHistoryBinding(
+          paths,
+          request.taskId,
+          previousAttempt,
+          previousLaunch.launch_id,
+        );
+        if (binding !== null) {
+          episodeByTask.set(request.taskId, {
+            id: binding.execution_episode_id,
+            initialProfileId: binding.initial_profile_id,
+            initialProfileFingerprintSha256: binding.initial_profile_fingerprint_sha256,
+            nextOrdinal: binding.episode_attempt_ordinal + 1,
+          });
+          return;
+        }
+      }
+    }
+    const profile = profiles.get(selectedProfileId) as LauncherProfile;
+    const primaryAttempt = previousAttempt + 1;
+    const digest = createHash('sha256')
+      .update(JSON.stringify({
+        schema_version: 1,
+        target: path.resolve(paths.repoRoot),
+        runtime: path.resolve(paths.devDir),
+        task_id: request.taskId,
+        primary_attempt: primaryAttempt,
+      }))
+      .digest('hex');
+    episodeByTask.set(request.taskId, {
+      id: `episode-${digest.slice(0, 24)}`,
+      initialProfileId: selectedProfileId,
+      initialProfileFingerprintSha256: projectProfileFingerprint(profile),
+      nextOrdinal: 1,
+    });
   }
 
   /**
@@ -1104,6 +1274,14 @@ export async function createProjectControlPlane(
         ),
       };
     }
+
+    if (assessment.history !== null && !historySnapshotByTask.has(request.taskId)) {
+      historySnapshotByTask.set(request.taskId, assessment.history);
+    }
+    if (assessment.materialization !== null) {
+      materializationByTask.set(request.taskId, assessment.materialization);
+    }
+    await ensureEpisode(request, assessment.selectedProfileId as string);
 
     return {
       outcome: 'LAUNCH',
@@ -1185,52 +1363,158 @@ export async function createProjectControlPlane(
     };
   }
 
-  async function recordEvidence(
+  /**
+   * Evidência canônica de intervenção humana do attempt observado.
+   *
+   * - REJECT durável de review em attempt anterior do episódio seguido de novo
+   *   attempt: um humano liberou o gate, e isso é registrado como intervenção.
+   * - primeiro attempt do episódio, ou attempt cujo antecessor foi observado
+   *   por este mesmo processo: o lifecycle PROVA zero intervenções.
+   * - qualquer outro caso (episódio retomado de disco, antecessor não
+   *   observado aqui): desconhecido — nenhum artifact é publicado.
+   */
+  async function proveInterventionEvidence(
+    observation: WorkUnitObservation,
+    episode: { readonly nextOrdinal: number },
+    observedAttempts: ReadonlySet<number>,
+    startedAt: string,
+  ): Promise<{ readonly provenance: string; readonly interventions: readonly InterventionRecord[] } | null> {
+    const episodeFirstAttempt = observation.attempt - (episode.nextOrdinal - 1);
+    const humanReleases: InterventionRecord[] = [];
+    for (let attempt = episodeFirstAttempt; attempt < observation.attempt; attempt += 1) {
+      const review = await readCandidateReview(paths, observation.taskId, attempt);
+      if (review === null || review.decision !== 'REJECT') continue;
+      humanReleases.push({
+        intervention_id: `human-release:${observation.taskId}:attempt-${attempt}`,
+        type: InterventionType.DESIGN_DECISION,
+        description: `humano liberou o gate de review REJECT do attempt ${attempt} e autorizou o attempt ${observation.attempt}`,
+        occurred_at: startedAt,
+        affects_autonomy: true,
+      });
+    }
+    if (humanReleases.length > 0) {
+      return {
+        provenance: 'CandidateReviewRecord REJECT do episódio seguido de novo attempt autorizado por humano',
+        interventions: humanReleases,
+      };
+    }
+    const autonomousContinuity =
+      episode.nextOrdinal === 1 || observedAttempts.has(observation.attempt - 1);
+    if (!autonomousContinuity) return null;
+    return {
+      provenance:
+        'attempt conduzido integralmente pelo control plane dentro do autonomous_execution_boundary, sem gate humano no episódio até aqui',
+      interventions: [],
+    };
+  }
+
+  async function materializeObservedAttempt(
     observation: WorkUnitObservation,
     report: ProjectWorkUnitReport,
   ): Promise<void> {
     const profile = profiles.get(observation.profileId);
-    if (profile === undefined) return;
-    const executionDir = path.join(
-      paths.devDir,
-      'project',
-      'executions',
-      observation.taskId,
-      `attempt-${observation.attempt}`,
+    const context = materializationByTask.get(observation.taskId);
+    const episode = episodeByTask.get(observation.taskId);
+    const launch = await readLaunchRecord(paths, observation.taskId);
+    const packet = await readPacket(paths, observation.taskId);
+    if (profile === undefined || context === undefined || episode === undefined || launch === null || packet === null) return;
+
+    const [completion, failed, finalization, reviewRecord] = await Promise.all([
+      readCompletion(paths, observation.taskId),
+      readValidationFailedAttempt(paths, observation.taskId, observation.attempt),
+      readOrchestratedFinalization(paths, observation.taskId, observation.attempt),
+      readCandidateReview(paths, observation.taskId, observation.attempt),
+    ]);
+    const validationResults =
+      failed?.original_validation_results ??
+      completion?.orchestrator_evidence.revalidation ??
+      finalization?.validation_results ??
+      [];
+    const validationEvidence =
+      failed?.original_validation_evidence ??
+      completion?.orchestrator_evidence.validation_evidence ??
+      finalization?.validation_evidence ??
+      [];
+    const changedFiles =
+      failed?.changed_files ??
+      completion?.orchestrator_evidence.changed_files ??
+      finalization?.changed_files ??
+      null;
+    const baseSha =
+      failed?.source_base_sha ??
+      completion?.orchestrator_evidence.base_sha ??
+      finalization?.base_sha ??
+      context.baseSha;
+    const fakeInference = profile.agent === 'fake' && profile.test_double_of !== undefined
+      ? {
+          value: failed !== null || (completion !== null && completion.report !== null) || finalization !== null,
+          provenance: 'LauncherProfile.test_double_of + durable worker/finalization evidence',
+        }
+      : undefined;
+    if (report.environment_readiness.outcome !== 'READY') {
+      throw new Error(
+        `attempt observado não pode ser materializado com environment_readiness=${report.environment_readiness.outcome}`,
+      );
+    }
+    const observedAttempts = observedAttemptsByTask.get(observation.taskId) ?? new Set<number>();
+    const interventionEvidence = await proveInterventionEvidence(
+      observation,
+      episode,
+      observedAttempts,
+      launch.started_at,
     );
-    const recorded = await recordComparableRunFacts({
-      executionDir,
-      evidence: {
-        authoritative_profile: { id: profile.id },
-        profile_provenance: 'authoritative_launcher_profile',
-        provider: { value: profile.agent, provenance: 'launcher_profile.agent' },
-        transport: { value: profile.prompt_delivery, provenance: 'launcher_profile.prompt_delivery' },
-        worker_role: { value: 'implementer', provenance: 'project_lifecycle.role' },
-        attempt_role: { value: report.attempt_role, provenance: 'project_lifecycle.attempt_role' },
-        context_pressure: {
-          value: report.context_pressure,
-          provenance: 'assessment.context_pressure',
+    observedAttempts.add(observation.attempt);
+    observedAttemptsByTask.set(observation.taskId, observedAttempts);
+    const result = await materializeCanonicalProjectAttempt({
+      paths,
+      labRoot: historyLabRoot,
+      planTask: context.planTask,
+      classification: context.classification,
+      inspection: context.inspection,
+      profile,
+      capability: capabilityInputOf(profile),
+      launch,
+      attempt: observation.attempt,
+      attemptRole: report.attempt_role as Exclude<AttemptRole, AttemptRole.UNKNOWN>,
+      executionEpisodeId: episode.id,
+      episodeAttemptOrdinal: episode.nextOrdinal,
+      initialProfileId: episode.initialProfileId,
+      initialProfileFingerprintSha256: episode.initialProfileFingerprintSha256,
+      baseSha,
+      compiledPrompt: buildWorkerPrompt(
+        packet,
+        {
+          repoRoot: paths.repoRoot,
+          packetPath: packetPath(paths, observation.taskId),
+          reportPath: reportPath(paths, observation.taskId),
+          handoffDraftPath: handoffDraftPath(paths, observation.taskId),
         },
-        // `ENVIRONMENT_UNKNOWN` não existe no contrato comparável de M81 e não
-        // pode ser reescrito como READY: fato desconhecido fica UNKNOWN.
-        ...(report.environment_readiness.outcome === 'READY'
-          ? {
-              environment_readiness: {
-                value: 'READY' as const,
-                provenance: 'assessment.environment_readiness',
-              },
-            }
-          : report.environment_readiness.outcome === 'ENVIRONMENT_NOT_READY'
-            ? {
-                environment_readiness: {
-                  value: 'NOT_READY' as const,
-                  provenance: 'assessment.environment_readiness',
-                },
-              }
-            : {}),
-      },
+        executionPolicyOf(profile),
+      ),
+      validationResults,
+      validationEvidence,
+      reviewRequired: report.review.required,
+      reviewRecord,
+      reviewUnavailableReason: report.review.reason,
+      changedFiles,
+      contextPressure: report.context_pressure,
+      environmentReadiness: 'READY',
+      instructionFiles: context.instructionFiles,
+      instructionInventoryComplete: context.instructionInventoryComplete,
+      interventionEvidence,
+      ...(fakeInference === undefined ? {} : { observedHadInference: fakeInference }),
+      ...(input.now === undefined ? {} : { now: input.now() }),
     });
-    report.comparable_run_facts_path = recorded.file;
+    episode.nextOrdinal += 1;
+    if (result.outcome !== 'SKIPPED') {
+      report.comparable_run_facts_path = path.join(
+        resolveDataDir({ labRoot: historyLabRoot }),
+        'runs',
+        result.run_id,
+        'execution',
+        'comparable-run-facts.json',
+      );
+    }
   }
 
   /** Relatório da work unit a que este candidate pertence, se existir neste processo. */
@@ -1449,7 +1733,7 @@ export async function createProjectControlPlane(
     const report = active ?? workUnits.at(-1);
     if (report === undefined) return { status: 'CONTINUE' };
     report.validation_outcome = observation.closeKind ?? observation.launch;
-    await recordEvidence(observation, report);
+    await materializeObservedAttempt(observation, report);
 
     // A review já aconteceu — na FRONTEIRA DE ACEITAÇÃO, antes de o candidate
     // virar PASS. Aqui só resta propagar o gate humano que ela produziu.

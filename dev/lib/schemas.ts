@@ -582,6 +582,32 @@ export const LaunchRecord = z
 export type LaunchRecord = z.infer<typeof LaunchRecord>;
 export type LaunchRecordInput = z.input<typeof LaunchRecord>;
 
+/**
+ * Binding durável e append-only entre um attempt do harness e sua única
+ * materialização canônica. O binding não contém métricas: aponta para o
+ * RunRecord selado que continua sendo a fonte de verdade.
+ */
+export const ProjectHistoryBinding = z
+  .object({
+    schema_version: z.literal(DEV_SCHEMA_VERSION),
+    binding_key_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    target_repo_root: nonEmpty,
+    runtime_dir: nonEmpty,
+    task_id: identifier,
+    attempt: z.number().int().positive(),
+    launch_id: z.string().uuid(),
+    attempt_role: z.enum(['initial', 'repair', 'escalation']),
+    execution_episode_id: nonEmpty,
+    episode_attempt_ordinal: z.number().int().positive(),
+    initial_profile_id: nonEmpty,
+    initial_profile_fingerprint_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    canonical_trial_id: identifier,
+    canonical_run_id: z.string().regex(/^[0-7][0-9A-HJKMNP-TV-Z]{25}$/),
+    bound_at: z.string().datetime(),
+  })
+  .strict();
+export type ProjectHistoryBinding = z.infer<typeof ProjectHistoryBinding>;
+
 export const ATTEMPT_ABANDONMENT_REASON_CODES = [
   'WORKER_ENVIRONMENT_BLOCKED',
   'WORKER_REPORTED_FAILURE',

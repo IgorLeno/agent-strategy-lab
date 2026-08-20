@@ -65,9 +65,21 @@ export interface PerformanceHistoryFilter {
 }
 
 export interface PerformanceHistoryQueryInput {
+  readonly schema_version?: 1;
   readonly runs_dir: string;
   readonly trials: readonly TrialPerformanceQuery[];
   readonly minimum_sample_size: number;
+  readonly filter?: PerformanceHistoryFilter;
+}
+
+export interface PerformanceHistoryQueryInputV2 {
+  readonly schema_version: 2;
+  readonly runs_dir: string;
+  readonly trials: readonly TrialPerformanceQuery[];
+  readonly minimum_sample_size: number;
+  readonly work_definition_fingerprint_sha256?: string;
+  /** Policy corrente: filtra séries retornadas sem amputar lifecycle do episódio. */
+  readonly eligible_profile_ids?: readonly string[];
   readonly filter?: PerformanceHistoryFilter;
 }
 
@@ -144,12 +156,78 @@ export interface PerformanceHistoryQueryResult {
   readonly comparable_facts_issues: readonly ComparableFactsIssue[];
 }
 
+export interface EpisodePerformance {
+  readonly execution_episode_id: string;
+  readonly work_definition_fingerprint_sha256: string;
+  readonly initial_profile_id: string;
+  readonly initial_profile_fingerprint_sha256: string;
+  readonly trial_ids: readonly string[];
+  readonly run_ids: readonly string[];
+  readonly performance: TaskPerformanceRecord;
+}
+
+export interface RoleExecutionAggregations {
+  readonly run_ids: readonly string[];
+  readonly runs: EvidenceAggregation<number>;
+  readonly with_inference: EvidenceAggregation<number>;
+  readonly duration_ms: EvidenceAggregation<NumericDistribution>;
+  readonly tokens: SeriesAggregations['tokens'];
+  readonly quota: EvidenceAggregation<readonly QuotaWindowAggregation[]>;
+  readonly api_equivalent_usd: EvidenceAggregation<NumericDistribution>;
+  readonly qualification: QualificationAggregation;
+  readonly context_pressure: EvidenceAggregation<Readonly<Record<string, number>>>;
+}
+
+export interface ComparableProfileSeriesV2 {
+  readonly identity: ComparableRunIdentityValue;
+  readonly automatic_merge_eligible: boolean;
+  readonly initial_routing_eligible: boolean;
+  readonly episode_ids: readonly string[];
+  readonly trial_ids: readonly string[];
+  readonly run_ids: readonly string[];
+  readonly execution_by_role: {
+    readonly INITIAL: RoleExecutionAggregations;
+    readonly REPAIR: RoleExecutionAggregations;
+    readonly ESCALATION: RoleExecutionAggregations;
+    readonly UNKNOWN: RoleExecutionAggregations;
+  };
+  readonly routing_aggregations: SeriesAggregations;
+}
+
+export interface QueryExcludedEpisode {
+  readonly execution_episode_id: string;
+  readonly reason: string;
+}
+
+export interface PerformanceHistoryQueryResultV2 {
+  readonly schema_version: 2;
+  readonly minimum_sample_size: number;
+  readonly episodes: readonly EpisodePerformance[];
+  readonly series: readonly ComparableProfileSeriesV2[];
+  readonly excluded_runs: readonly QueryExcludedRun[];
+  readonly excluded_trials: readonly QueryExcludedTrial[];
+  readonly excluded_episodes: readonly QueryExcludedEpisode[];
+  readonly comparable_facts_issues: readonly ComparableFactsIssue[];
+}
+
 interface TrialObservation {
   readonly trial_id: string;
   readonly task: TaskPerformanceRecord;
   readonly runs: readonly RunReadResult[];
   readonly facts: readonly ComparableRunFactsValue[];
   readonly identity: ComparableRunIdentityValue;
+}
+
+interface EpisodeRunObservation {
+  readonly run: RunReadResult;
+  readonly facts: ComparableRunFactsValue;
+  readonly identity: ComparableRunIdentityValue;
+}
+
+interface EpisodeObservation {
+  readonly episode: EpisodePerformance;
+  readonly initialIdentity: ComparableRunIdentityValue;
+  readonly runs: readonly EpisodeRunObservation[];
 }
 
 function known<T>(value: T, provenance: string) {
@@ -263,7 +341,21 @@ function valuesOf(facts: Readonly<Record<string, { readonly value: unknown }>>):
  * Única entrada com I/O. Lê os artifacts selados, nunca cria diretório,
  * arquivo, índice, migration ou cache.
  */
-export async function queryPerformanceHistory(
+export function queryPerformanceHistory(
+  input: PerformanceHistoryQueryInput,
+): Promise<PerformanceHistoryQueryResult>;
+export function queryPerformanceHistory(
+  input: PerformanceHistoryQueryInputV2,
+): Promise<PerformanceHistoryQueryResultV2>;
+export function queryPerformanceHistory(
+  input: PerformanceHistoryQueryInput | PerformanceHistoryQueryInputV2,
+): Promise<PerformanceHistoryQueryResult | PerformanceHistoryQueryResultV2> {
+  return input.schema_version === 2
+    ? queryPerformanceHistoryV2(input)
+    : queryPerformanceHistoryV1(input);
+}
+
+async function queryPerformanceHistoryV1(
   input: PerformanceHistoryQueryInput,
 ): Promise<PerformanceHistoryQueryResult> {
   if (!Number.isInteger(input.minimum_sample_size) || input.minimum_sample_size < 1) {
@@ -315,6 +407,163 @@ export async function queryPerformanceHistory(
     excluded_trials: excludedTrials,
     comparable_facts_issues: factsIssues,
   };
+}
+
+async function queryPerformanceHistoryV2(
+  input: PerformanceHistoryQueryInputV2,
+): Promise<PerformanceHistoryQueryResultV2> {
+  validateQueryInput(input.minimum_sample_size, input.trials);
+  const excludedRuns: QueryExcludedRun[] = [];
+  const excludedTrials: QueryExcludedTrial[] = [];
+  const excludedEpisodes: QueryExcludedEpisode[] = [];
+  const factsIssues: ComparableFactsIssue[] = [];
+  const candidates = new Map<string, EpisodeRunObservation[]>();
+
+  for (const trial of input.trials) {
+    const read = await readTrialHistory(input.runs_dir, trial.trial_id, trial.selection ?? {});
+    excludedRuns.push(...read.excludedRuns.map((run) => ({ trial_id: trial.trial_id, ...run })));
+    if (read.runs.length === 0) {
+      excludedTrials.push({ trial_id: trial.trial_id, reason: 'nenhum run histórico legível' });
+      continue;
+    }
+    for (const run of read.runs) {
+      const context = run.history_context;
+      if (context === null) {
+        excludedRuns.push({
+          trial_id: trial.trial_id,
+          run_id: run.run_id,
+          reason: 'RunRecord histórico não possui RunHistoryContextV1',
+        });
+        continue;
+      }
+      if (
+        input.work_definition_fingerprint_sha256 !== undefined &&
+        context.work_definition_fingerprint_sha256 !== input.work_definition_fingerprint_sha256
+      ) {
+        continue;
+      }
+      if (
+        run.performance.identity.evaluation_id !== context.selection.evaluation_id ||
+        run.performance.identity.score_id !== context.selection.score_id
+      ) {
+        excludedRuns.push({
+          trial_id: trial.trial_id,
+          run_id: run.run_id,
+          reason: 'EvaluationSelection fornecida diverge da seleção pinada no RunHistoryContextV1',
+        });
+        continue;
+      }
+      const result = await readComparableFacts(input.runs_dir, run.run_id);
+      if (result.issue !== null) {
+        factsIssues.push({ trial_id: trial.trial_id, run_id: run.run_id, reason: result.issue });
+      }
+      const enrichedRun: RunReadResult = {
+        ...run,
+        facts: applyHistoryContextInference(
+          applyRecordedAttemptRole(run.facts, result.facts),
+          context.observed_had_inference,
+        ),
+      };
+      const identity = deriveComparableRunIdentity(enrichedRun.performance, result.facts);
+      const observation = { run: enrichedRun, facts: result.facts, identity };
+      const episodeRuns = candidates.get(context.execution_episode_id);
+      if (episodeRuns === undefined) candidates.set(context.execution_episode_id, [observation]);
+      else episodeRuns.push(observation);
+    }
+  }
+
+  const episodes: EpisodeObservation[] = [];
+  for (const [episodeId, unordered] of [...candidates.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    const ordered = [...unordered].sort(
+      (left, right) =>
+        left.run.history_context!.episode_attempt_ordinal - right.run.history_context!.episode_attempt_ordinal,
+    );
+    const contexts = ordered.map((item) => item.run.history_context!);
+    const first = contexts[0]!;
+    const ordinals = contexts.map((context) => context.episode_attempt_ordinal);
+    const coherent = contexts.every(
+      (context) =>
+        context.work_definition_fingerprint_sha256 === first.work_definition_fingerprint_sha256 &&
+        context.initial_profile_id === first.initial_profile_id &&
+        context.initial_profile_fingerprint_sha256 === first.initial_profile_fingerprint_sha256,
+    );
+    if (!coherent || new Set(ordinals).size !== ordinals.length) {
+      excludedEpisodes.push({
+        execution_episode_id: episodeId,
+        reason: coherent
+          ? 'episode_attempt_ordinal duplicado'
+          : 'RunHistoryContextV1 divergente dentro do episódio',
+      });
+      continue;
+    }
+    const initial = ordered.find(
+      (item) =>
+        item.facts.attempt_role.value === AttemptRole.INITIAL &&
+        item.identity.profile.profile_id.value === first.initial_profile_id &&
+        item.identity.profile.profile_fingerprint_sha256.value ===
+          first.initial_profile_fingerprint_sha256,
+    );
+    if (initial === undefined) {
+      excludedEpisodes.push({
+        execution_episode_id: episodeId,
+        reason: 'episódio não possui INITIAL compatível com a identidade inicial pinada',
+      });
+      continue;
+    }
+    const performance = derivePerformance({
+      task_id: initial.run.performance.identity.task_id,
+      trial_id: episodeId,
+      attempts: ordered.map((item) => item.run.facts),
+    });
+    episodes.push({
+      initialIdentity: initial.identity,
+      runs: ordered,
+      episode: {
+        execution_episode_id: episodeId,
+        work_definition_fingerprint_sha256: first.work_definition_fingerprint_sha256,
+        initial_profile_id: first.initial_profile_id,
+        initial_profile_fingerprint_sha256: first.initial_profile_fingerprint_sha256,
+        trial_ids: unique(ordered.map((item) => item.run.trial_id)),
+        run_ids: ordered.map((item) => item.run.run_id),
+        performance,
+      },
+    });
+  }
+
+  return {
+    schema_version: 2,
+    minimum_sample_size: input.minimum_sample_size,
+    episodes: episodes.map((item) => item.episode),
+    series: aggregateProfileSeriesV2(
+      episodes,
+      [...candidates.values()].flat(),
+      input.minimum_sample_size,
+      input.filter,
+      input.eligible_profile_ids,
+    ),
+    excluded_runs: excludedRuns,
+    excluded_trials: excludedTrials,
+    excluded_episodes: excludedEpisodes,
+    comparable_facts_issues: factsIssues,
+  };
+}
+
+function applyHistoryContextInference(
+  attempt: AttemptFacts,
+  observed: { readonly value: boolean; readonly provenance: string } | undefined,
+): AttemptFacts {
+  return observed === undefined ? attempt : { ...attempt, had_inference: observed };
+}
+
+function validateQueryInput(
+  minimumSampleSize: number,
+  trials: readonly TrialPerformanceQuery[],
+): void {
+  if (!Number.isInteger(minimumSampleSize) || minimumSampleSize < 1) {
+    throw new RangeError('minimum_sample_size deve ser inteiro positivo');
+  }
+  const duplicate = duplicateTrialId(trials);
+  if (duplicate !== null) throw new Error(`trial_id duplicado na consulta: ${duplicate}`);
 }
 
 function duplicateTrialId(trials: readonly TrialPerformanceQuery[]): string | null {
@@ -386,6 +635,152 @@ function matchesFilter(
     identity.profile.profile_fingerprint_sha256.value !== filter.profile_fingerprint_sha256
   ) return false;
   return true;
+}
+
+function aggregateProfileSeriesV2(
+  episodes: readonly EpisodeObservation[],
+  observations: readonly EpisodeRunObservation[],
+  minimumSampleSize: number,
+  filter: PerformanceHistoryFilter | undefined,
+  eligibleProfileIds: readonly string[] | undefined,
+): ComparableProfileSeriesV2[] {
+  const groups = new Map<string, { identity: ComparableRunIdentityValue; runs: EpisodeRunObservation[] }>();
+  for (const observation of observations) {
+    if (!matchesFilter(observation.identity, filter)) continue;
+    const profileId = observation.identity.profile.profile_id.value;
+    if (
+      eligibleProfileIds !== undefined &&
+      (profileId === COMPARABLE_FACT_UNKNOWN || !eligibleProfileIds.includes(profileId))
+    ) {
+      continue;
+    }
+    const key = observation.identity.series_key ?? `unmergeable:${observation.run.run_id}`;
+    const group = groups.get(key);
+    if (group === undefined) groups.set(key, { identity: observation.identity, runs: [observation] });
+    else group.runs.push(observation);
+  }
+
+  return [...groups.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, group]) => {
+      const initialEpisodes = episodes.filter((episode) => {
+        const initialKey = episode.initialIdentity.series_key ??
+          `unmergeable:${episode.runs.find((run) => run.identity === episode.initialIdentity)?.run.run_id ?? ''}`;
+        return initialKey === key;
+      });
+      const routingTrials: TrialObservation[] = initialEpisodes.map((episode) => {
+        const initialRuns = episode.runs.filter(
+          (run) =>
+            run.facts.attempt_role.value === AttemptRole.INITIAL &&
+            run.identity.series_key === episode.initialIdentity.series_key,
+        );
+        return {
+          trial_id: episode.episode.execution_episode_id,
+          task: episode.episode.performance,
+          runs: initialRuns.map((run) => run.run),
+          facts: initialRuns.map((run) => run.facts),
+          identity: episode.initialIdentity,
+        };
+      });
+      const roleRuns = (role: AttemptRole) =>
+        group.runs.filter((run) => run.facts.attempt_role.value === role);
+
+      return {
+        identity: group.identity,
+        automatic_merge_eligible: group.identity.comparable,
+        initial_routing_eligible: group.identity.comparable && routingTrials.length > 0,
+        episode_ids: unique(group.runs.map((run) => run.run.history_context!.execution_episode_id)),
+        trial_ids: unique(group.runs.map((run) => run.run.trial_id)),
+        run_ids: group.runs.map((run) => run.run.run_id).sort(),
+        execution_by_role: {
+          INITIAL: aggregateRoleExecution(roleRuns(AttemptRole.INITIAL)),
+          REPAIR: aggregateRoleExecution(roleRuns(AttemptRole.REPAIR)),
+          ESCALATION: aggregateRoleExecution(roleRuns(AttemptRole.ESCALATION)),
+          UNKNOWN: aggregateRoleExecution(roleRuns(AttemptRole.UNKNOWN)),
+        },
+        routing_aggregations:
+          routingTrials.length === 0
+            ? emptySeriesAggregations()
+            : aggregateSeries(routingTrials, minimumSampleSize).aggregations,
+      };
+    });
+}
+
+function aggregateRoleExecution(
+  observations: readonly EpisodeRunObservation[],
+): RoleExecutionAggregations {
+  const runs = observations.map((item) => item.run);
+  const facts = observations.map((item) => item.facts);
+  const population = runs.length;
+  const token = (pick: (run: RunPerformanceRecord) => { value: number | null; provenance: string }) =>
+    numericMetric(runs.map((run) => pick(run.performance)), population);
+  const inferenceValues = runs.flatMap((run) =>
+    run.facts.had_inference.value === null ? [] : [run.facts.had_inference.value],
+  );
+  return {
+    run_ids: runs.map((run) => run.run_id).sort(),
+    runs: population === 0
+      ? unavailable(0, ['RunHistoryContextV1.attempt_role'], 'nenhum run para o role')
+      : countMetric(population, population, ['RunHistoryContextV1.attempt_role']),
+    with_inference: inferenceValues.length === 0
+      ? unavailable(population, runs.map((run) => run.facts.had_inference.provenance), 'had_inference não registrado')
+      : countMetric(inferenceValues.filter(Boolean).length, inferenceValues.length, runs.map((run) => run.facts.had_inference.provenance)),
+    duration_ms: distributionMetric(
+      runs.map((run) => run.performance.cost.duration_ms),
+      population,
+      ['RunPerformanceRecord.cost.duration_ms'],
+    ),
+    tokens: {
+      total: token((run) => run.cost.tokens.total_tokens),
+      input: token((run) => run.cost.tokens.input_tokens),
+      cached_input: token((run) => run.cost.tokens.cached_input_tokens),
+      fresh_input: token((run) => run.cost.tokens.fresh_input_tokens),
+      output: token((run) => run.cost.tokens.output_tokens),
+      reasoning: token((run) => run.cost.tokens.reasoning_tokens),
+    },
+    quota: aggregateQuota(runs),
+    api_equivalent_usd: token((run) => run.cost.api_equivalent_usd),
+    qualification: aggregateQualification(runs, 1),
+    context_pressure: categoricalMetric(facts.map((fact) => fact.context_pressure), population),
+  };
+}
+
+function emptySeriesAggregations(): SeriesAggregations {
+  const noCount = unavailable<number>(0, ['RunHistoryContextV1.initial_profile'], 'nenhum episódio iniciado por este profile');
+  const noRate = unavailable<number>(0, ['RunHistoryContextV1.initial_profile'], 'nenhum episódio iniciado por este profile');
+  const noDistribution = unavailable<NumericDistribution>(0, ['RunHistoryContextV1.initial_profile'], 'nenhum run INITIAL para este profile');
+  return {
+    trials: noCount,
+    attempts: {
+      operational: noCount,
+      with_inference: noCount,
+      without_inference: noCount,
+      inference_unknown: noCount,
+      infra_error: noCount,
+    },
+    first_operational_pass_rate: noRate,
+    first_inference_bearing_pass_rate: noRate,
+    final_pass_rate: noRate,
+    repair_rate: noRate,
+    escalation_rate: noRate,
+    duration_ms: noDistribution,
+    tokens: {
+      total: noDistribution,
+      input: noDistribution,
+      cached_input: noDistribution,
+      fresh_input: noDistribution,
+      output: noDistribution,
+      reasoning: noDistribution,
+    },
+    quota: unavailable(0, ['RunHistoryContextV1.initial_profile'], 'nenhum run INITIAL para este profile'),
+    api_equivalent_usd: noDistribution,
+    human_intervention_rate: noRate,
+    qualification: {
+      counts: unavailable(0, ['RunHistoryContextV1.initial_profile'], 'nenhum run INITIAL para este profile'),
+      qualified_rate: noRate,
+    },
+    context_pressure: unavailable(0, ['RunHistoryContextV1.initial_profile'], 'nenhum run INITIAL para este profile'),
+  };
 }
 
 function aggregateObservations(

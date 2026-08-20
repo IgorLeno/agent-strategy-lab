@@ -11,6 +11,7 @@ import type {
   EvidenceAggregation,
   NumericDistribution,
   PerformanceHistoryQueryResult,
+  PerformanceHistoryQueryResultV2,
   PerformanceSeries,
 } from '../performance/query.js';
 import { ProfileCapability } from './capability.js';
@@ -179,11 +180,24 @@ export type HistoryInformedRoutingResult = z.infer<typeof HistoryInformedRouting
 
 export interface HistoryRoutingInput extends InitialRoutingInput {
   /** Resultado já consultado por M81; esta função não realiza I/O. */
-  readonly history: PerformanceHistoryQueryResult;
+  readonly history: PerformanceHistoryQueryResult | PerformanceHistoryQueryResultV2;
   /** Pode tornar a decisão mais conservadora que a consulta, nunca inventa amostras. */
   readonly minimum_sample_size?: number;
   /** Fingerprints autoritativos dos profiles candidatos no momento da decisão. */
   readonly profile_fingerprints_sha256?: Readonly<Record<string, string>>;
+}
+
+function routingSeries(
+  history: PerformanceHistoryQueryResult | PerformanceHistoryQueryResultV2,
+): readonly PerformanceSeries[] {
+  if (history.schema_version === 1) return history.series;
+  return history.series.map((series) => ({
+    identity: series.identity,
+    automatic_merge_eligible: series.automatic_merge_eligible && series.initial_routing_eligible,
+    trial_ids: series.trial_ids,
+    run_ids: series.run_ids,
+    aggregations: series.routing_aggregations,
+  }));
 }
 
 interface EligibleSeries {
@@ -306,8 +320,11 @@ function compatibilityReason(
   capability: z.infer<typeof ProfileCapability> | undefined,
 ): string | null {
   const identity = series.identity;
-  if (!series.automatic_merge_eligible || !identity.comparable || identity.series_key === null) {
-    return 'série não é automaticamente comparável';
+  if (!identity.comparable || identity.series_key === null) {
+    return `série possui dimensões UNKNOWN: ${identity.blocking_unknown_dimensions.join(', ')}`;
+  }
+  if (!series.automatic_merge_eligible) {
+    return 'série não possui episódios INITIAL elegíveis para routing inicial';
   }
   const profileId = identity.profile.profile_id.value;
   if (profileId === 'UNKNOWN' || candidate === undefined || capability === undefined) {
@@ -442,7 +459,7 @@ export function routeInitialProfileWithHistory(input: HistoryRoutingInput): Hist
   const considerations: HistorySeriesConsideration[] = [];
   const eligible: EligibleSeries[] = [];
 
-  for (const series of [...input.history.series].sort((left, right) =>
+  for (const series of [...routingSeries(input.history)].sort((left, right) =>
     (left.identity.series_key ?? '').localeCompare(right.identity.series_key ?? ''),
   )) {
     const profileValue = series.identity.profile.profile_id.value;

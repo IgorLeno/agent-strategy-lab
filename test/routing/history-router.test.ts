@@ -6,6 +6,7 @@ import type {
   EvidenceAggregation,
   NumericDistribution,
   PerformanceHistoryQueryResult,
+  PerformanceHistoryQueryResultV2,
   PerformanceSeries,
 } from '../../src/performance/index.js';
 import {
@@ -302,6 +303,47 @@ function history(seriesValues: readonly PerformanceSeries[], minimumSampleSize =
   };
 }
 
+function historyV2(
+  seriesValues: readonly PerformanceSeries[],
+  minimumSampleSize = 3,
+  escalationOnlyProfileIds: readonly string[] = [],
+): PerformanceHistoryQueryResultV2 {
+  return {
+    schema_version: 2,
+    minimum_sample_size: minimumSampleSize,
+    episodes: [],
+    series: seriesValues.map((item) => {
+      const role = {
+        run_ids: item.run_ids,
+        runs: item.aggregations.trials,
+        with_inference: item.aggregations.attempts.with_inference,
+        duration_ms: item.aggregations.duration_ms,
+        tokens: item.aggregations.tokens,
+        quota: item.aggregations.quota,
+        api_equivalent_usd: item.aggregations.api_equivalent_usd,
+        qualification: item.aggregations.qualification,
+        context_pressure: item.aggregations.context_pressure,
+      };
+      const profileId = item.identity.profile.profile_id.value;
+      return {
+        identity: item.identity,
+        automatic_merge_eligible: item.automatic_merge_eligible,
+        initial_routing_eligible:
+          profileId !== 'UNKNOWN' && !escalationOnlyProfileIds.includes(profileId),
+        episode_ids: item.trial_ids.map((trialId) => `episode-${trialId}`),
+        trial_ids: item.trial_ids,
+        run_ids: item.run_ids,
+        execution_by_role: { INITIAL: role, REPAIR: role, ESCALATION: role, UNKNOWN: role },
+        routing_aggregations: item.aggregations,
+      };
+    }),
+    excluded_runs: [],
+    excluded_trials: [],
+    excluded_episodes: [],
+    comparable_facts_issues: [],
+  };
+}
+
 function input(
   seriesValues: readonly PerformanceSeries[],
   options: {
@@ -310,7 +352,7 @@ function input(
     readonly capabilities?: readonly ProfileCapability[];
     readonly minimumSampleSize?: number;
   } = {},
-): HistoryRoutingInput {
+): HistoryRoutingInput & { readonly history: PerformanceHistoryQueryResult } {
   const capabilities = options.capabilities ?? [capability('profile-a')];
   const candidates = options.candidates ?? capabilities.map((entry) => candidate(entry.profile_id));
   return {
@@ -337,6 +379,90 @@ function m78Input(value: HistoryRoutingInput): InitialRoutingInput {
 }
 
 describe('routeInitialProfileWithHistory', () => {
+  it('V2 muda a decisão real de A para B e volta a M78 quando falta métrica obrigatória', () => {
+    const capabilities = [capability('profile-a'), capability('profile-b')];
+    const base = input([], { capabilities });
+    expect(routeInitialProfile(m78Input(base))).toMatchObject({ profile: { profile_id: 'profile-a' } });
+
+    const historicalA = series('profile-a', FINGERPRINT_A, SERIES_A, {
+      firstPass: 0.5,
+      finalPass: 0.5,
+      repair: 0.5,
+      escalation: 0.5,
+      durationP90: 2_000,
+      tokensP90: 2_000,
+      quotaP90: 2,
+      costP90: 2,
+      intervention: 0.5,
+      qualification: 0.5,
+    });
+    const historicalB = series('profile-b', FINGERPRINT_B, SERIES_B);
+    const withHistory: HistoryRoutingInput = {
+      ...base,
+      history: historyV2([historicalA, historicalB]),
+    };
+    const routed = routeInitialProfileWithHistory(withHistory);
+    expect(routed.source).toBe('HISTORY');
+    expect(routed.recommendation?.profile.profile_id).toBe('profile-b');
+    expect(routed.evidence.selected_series_sample_size).toBe(3);
+
+    const insufficient = routeInitialProfileWithHistory({
+      ...withHistory,
+      history: historyV2([
+        historicalA,
+        series('profile-b', FINGERPRINT_B, SERIES_B, { costUnavailable: true }),
+      ]),
+    });
+    expect(insufficient.source).toBe('M78_FALLBACK');
+    expect(insufficient.fallback).toEqual(routeInitialProfile(m78Input(base)));
+  });
+
+  it('V2 nunca usa série observada somente em ESCALATION para routing inicial', () => {
+    const capabilities = [capability('profile-a'), capability('profile-b')];
+    const value = input([], { capabilities });
+    const result = routeInitialProfileWithHistory({
+      ...value,
+      history: historyV2(
+        [
+          series('profile-a', FINGERPRINT_A, SERIES_A),
+          series('profile-b', FINGERPRINT_B, SERIES_B),
+        ],
+        3,
+        ['profile-b'],
+      ),
+    });
+    expect(result.source).toBe('M78_FALLBACK');
+    expect(result.evidence.series_considered).toContainEqual(
+      expect.objectContaining({ profile_id: 'profile-b', status: 'INCOMPATIBLE' }),
+    );
+  });
+
+  it('policy de profile único não é ampliada por recomendação histórica externa', () => {
+    const capabilities = [capability('profile-a'), capability('profile-b')];
+    const value = input([], {
+      capabilities,
+      candidates: [candidate('profile-a')],
+    });
+    const result = routeInitialProfileWithHistory({
+      ...value,
+      history: historyV2([
+        series('profile-b', FINGERPRINT_B, SERIES_B),
+      ]),
+      profile_fingerprints_sha256: {
+        'profile-a': FINGERPRINT_A,
+      },
+    });
+
+    expect(result.source).toBe('M78_FALLBACK');
+    expect(result.fallback).toMatchObject({
+      outcome: 'ROUTED',
+      profile: { profile_id: 'profile-a' },
+    });
+    expect(result.evidence.series_considered).toContainEqual(
+      expect.objectContaining({ profile_id: 'profile-b', status: 'INCOMPATIBLE' }),
+    );
+  });
+
   it('produz profile e budget p90 a partir de uma única série suficiente', () => {
     const value = input([
       series('profile-a', FINGERPRINT_A, SERIES_A, { durationP90: 4_000_000 }),

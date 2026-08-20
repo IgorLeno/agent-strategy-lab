@@ -7,12 +7,22 @@
  * Nenhum provider real e nenhum projeto real: os únicos perfis usados apontam
  * para `fixtures/fake-worker.mjs`.
  */
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { capabilityOf } from '../../src/routing/index.js';
+import {
+  CapabilityRegistry,
+  capabilityOf,
+  routeInitialProfileWithHistory,
+} from '../../src/routing/index.js';
+import { assessExecution } from '../../src/planner/assess.js';
+import { workerRuntimeBoundsOf } from '../../dev/lib/project-roles.js';
+import { EvaluationOutcome, QualificationStatus } from '../../src/core/index.js';
+import { AttemptRole, queryPerformanceHistory } from '../../src/performance/index.js';
+import { RunIndex, verifyRunIntegrity } from '../../src/storage/index.js';
+import { EvaluationRecord, InterventionType, type InterventionRecord } from '../../src/schemas/index.js';
 import { resolveHarnessInstallationRoot, resolveHarnessPaths } from '../../dev/lib/paths.js';
 import { loadProfileFromCatalog, LauncherProfile } from '../../dev/lib/profile.js';
 import {
@@ -27,6 +37,12 @@ import {
   ProjectRunAuthorizationFile,
 } from '../../dev/lib/project-authorization.js';
 import { buildWorkUnitFromPlan, capabilityInputOf } from '../../dev/lib/project-run.js';
+import {
+  materializeCanonicalProjectAttempt,
+  projectProfileFingerprint,
+  projectWorkDefinitionFingerprint,
+  queryCanonicalProjectHistory,
+} from '../../dev/lib/project-history.js';
 import type { CommandRunner } from '../../dev/lib/billing.js';
 import {
   collectProjectLaunchFacts,
@@ -36,6 +52,7 @@ import {
   type ProjectLaunchFacts,
 } from '../../dev/lib/project-preflight.js';
 import { launchRecordPath } from '../../dev/lib/records.js';
+import { CandidateReviewRecord, LaunchRecord, PlanTask } from '../../dev/lib/schemas.js';
 import {
   resolveRoutinePreflight,
   type RoutineAutonomyDriver,
@@ -738,4 +755,731 @@ describe('policies versionadas do repositório', () => {
       'CROSS_PROVIDER_WITHIN_ALLOWED_SUBSCRIPTION_PROFILES',
     );
   });
+});
+
+const HISTORY_PROFILE_A = LauncherProfile.parse({
+  id: 'fake-history-a',
+  agent: 'fake',
+  billing_mode: 'not_applicable',
+  environment_mode: 'controlled',
+  instruction_environment: 'sanitized_user_home',
+  commit_owner: 'orchestrator',
+  official_validation_owner: 'orchestrator',
+  worker_validation_policy: 'targeted',
+  argv: ['node', 'fake-worker.mjs'],
+  prompt_delivery: 'argv',
+  timeout_seconds: 60,
+  forbidden_flags: [],
+  env_allowlist: ['PATH'],
+  test_double_of: {
+    agent: 'codex',
+    model: 'gpt-5.6-sol',
+    reasoning_effort: 'medium',
+    sandbox: 'workspace-write',
+  },
+});
+
+const HISTORY_PROFILE_B = LauncherProfile.parse({
+  ...HISTORY_PROFILE_A,
+  id: 'fake-history-b',
+  test_double_of: { ...HISTORY_PROFILE_A.test_double_of!, model: 'gpt-5.6-terra' },
+});
+
+const HISTORY_TASK = PlanTask.parse({
+  id: 'T-HISTORY',
+  title: 'History fixture',
+  blocked_by: [],
+  objective: 'Implementar a mudança observável',
+  initial_files: ['src/index.ts'],
+  acceptance: ['validação oficial passa'],
+  validation: [{ argv: ['pnpm', 'typecheck'], timeout_seconds: 60 }],
+  constraints: [],
+  include_previous_handoff: false,
+});
+
+const HISTORY_CLASSIFICATION = classificationFor(
+  ProjectRunAuthorizationFile.parse(minimalAuthorizationObject()),
+  HISTORY_TASK.id,
+).classification;
+
+function historyInspection(repoRoot: string) {
+  return {
+    schema_version: 1 as const,
+    repo_root: repoRoot,
+    inspected_at: '2026-08-20T10:00:00.000Z',
+    git: { known: true as const, value: { head_sha: 'a'.repeat(40), branch: 'main', dirty: false, remotes: [] }, provenance: 'fixture.git' },
+    stack: { known: true as const, value: { primary_ecosystem: 'node', ecosystems_detected: ['node'] }, provenance: 'fixture.package' },
+    package_manager: { known: true as const, value: 'pnpm', provenance: 'fixture.lockfile' },
+    build_system: { known: true as const, value: 'typescript', provenance: 'fixture.tsconfig' },
+    directories: [],
+    tests: { known: true as const, value: { framework: 'vitest', test_directories: ['test'] }, provenance: 'fixture.tests' },
+    validation_command_candidates: [
+      { name: 'typecheck', command: 'pnpm typecheck', source: 'package.json:scripts' as const },
+    ],
+    dependencies_state: { known: true as const, value: { lockfile_path: 'pnpm-lock.yaml', installed: true }, provenance: 'fixture.dependencies' },
+    required_tools: [],
+    required_services: [],
+    filesystem_permissions: { known: true as const, value: { readable: true, writable: true }, provenance: 'fixture.fs' },
+    feedback_sources: [],
+    project_instructions: [{ path: 'CLAUDE.md', scope: 'root' as const, relevance: 'general' as const }],
+    source_anchors: [{ area: 'index', path: 'src/index.ts' }],
+    relevant_files: ['src/index.ts'],
+    risks: [],
+  };
+}
+
+function historyLaunch(options: {
+  readonly taskId: string;
+  readonly attempt: number;
+  readonly apiEquivalent?: number | null;
+  readonly durationMs?: number;
+  readonly quotaPp?: number | null;
+}) {
+  const minute = String(options.attempt).padStart(2, '0');
+  const apiEquivalent = options.apiEquivalent === undefined ? 1 : options.apiEquivalent;
+  const durationMs = options.durationMs ?? 1_000;
+  const quotaPp = options.quotaPp === undefined ? 1 : options.quotaPp;
+  const probe = {
+    available: true,
+    zero_inference_verified: false,
+    reason_code: 'OK' as const,
+    reason: null,
+    result_text_sha256: '1'.repeat(64),
+    command: 'usage',
+    exit_code: 0,
+  };
+  const window = (consumed: number) => ({
+    before_used_pct: 10,
+    after_used_pct: 10 + consumed,
+    before_reset_label: 'reset',
+    after_reset_label: 'reset',
+    same_window: true,
+    consumed_pp: consumed,
+    window_match_method: 'exact' as const,
+    reason_code: 'OK' as const,
+  });
+  return LaunchRecord.parse({
+    schema_version: 1,
+    task_id: options.taskId,
+    profile_id: HISTORY_PROFILE_A.id,
+    argv: ['node', 'fake-worker.mjs'],
+    process: { pid: options.attempt, pgid: options.attempt, started_at: `2026-08-20T10:${minute}:00.000Z`, proc_start_ticks: options.attempt, command_sha256: '1'.repeat(64) },
+    launch_id: `00000000-0000-4000-8000-${String(options.attempt).padStart(12, '0')}`,
+    survivors_killed: [],
+    survivors_remaining: [],
+    started_at: `2026-08-20T10:${minute}:00.000Z`,
+    finished_at: `2026-08-20T10:${minute}:01.000Z`,
+    duration_ms: durationMs,
+    exit_code: 0,
+    timed_out: false,
+    controlled: {},
+    billing: {
+      mode: 'not_applicable',
+      credential_source: 'not_applicable',
+      included_allowance_consumed: false,
+      provider_estimated_api_equivalent_usd: apiEquivalent,
+      actual_incremental_charge_usd: null,
+      authoritative_billing_verified: false,
+    },
+    rate_limit_observations: null,
+    subscription_usage: quotaPp === null
+      ? null
+      : {
+          source: 'claude_print_usage',
+          probe_contract: { before: probe, after: probe },
+          five_hour: window(quotaPp),
+          seven_day_all_models: window(quotaPp),
+        },
+    provider_failure: null,
+  });
+}
+
+async function historyAttempt(input: {
+  readonly target: string;
+  readonly labRoot: string;
+  readonly attempt: number;
+  readonly role: AttemptRole.INITIAL | AttemptRole.REPAIR | AttemptRole.ESCALATION;
+  readonly profile?: LauncherProfile;
+  readonly validationExit?: number;
+  readonly apiEquivalent?: number | null;
+  readonly reviewRequired?: boolean;
+  readonly reviewDecision?: 'ACCEPT' | 'REJECT';
+  readonly tokens?: 'OBSERVED' | 'UNKNOWN';
+  readonly validationArgv?: readonly string[];
+  /** Default: o lifecycle prova zero intervenções, como no control plane real. */
+  readonly interventions?: 'PROVEN_ZERO' | 'UNKNOWN' | readonly InterventionRecord[];
+  readonly episodeId?: string;
+  readonly ordinal?: number;
+  readonly initialProfile?: LauncherProfile;
+  readonly durationMs?: number;
+  readonly totalTokens?: number;
+  readonly quotaPp?: number | null;
+  readonly afterStage?: Parameters<typeof materializeCanonicalProjectAttempt>[0]['afterStage'];
+}) {
+  const profile = input.profile ?? HISTORY_PROFILE_A;
+  const paths = resolveHarnessPaths(input.target);
+  const launch = LaunchRecord.parse({
+    ...historyLaunch({
+      taskId: HISTORY_TASK.id,
+      attempt: input.attempt,
+      apiEquivalent: input.apiEquivalent === undefined ? 1 : input.apiEquivalent,
+      ...(input.durationMs === undefined ? {} : { durationMs: input.durationMs }),
+      ...(input.quotaPp === undefined ? {} : { quotaPp: input.quotaPp }),
+    }),
+    profile_id: profile.id,
+  });
+  const interventions = input.interventions ?? 'PROVEN_ZERO';
+  const interventionEvidence =
+    interventions === 'UNKNOWN'
+      ? null
+      : {
+          provenance:
+            interventions === 'PROVEN_ZERO'
+              ? 'lifecycle autônomo provou zero intervenções'
+              : 'gate humano liberado entre attempts do episódio',
+          interventions: interventions === 'PROVEN_ZERO' ? [] : interventions,
+        };
+  const initialProfile = input.initialProfile ?? HISTORY_PROFILE_A;
+  return materializeCanonicalProjectAttempt({
+    paths,
+    labRoot: input.labRoot,
+    planTask: HISTORY_TASK,
+    classification: HISTORY_CLASSIFICATION,
+    inspection: historyInspection(input.target),
+    profile,
+    capability: capabilityInputOf(profile),
+    launch,
+    attempt: input.attempt,
+    attemptRole: input.role,
+    executionEpisodeId: input.episodeId ?? 'episode-history-1',
+    episodeAttemptOrdinal: input.ordinal ?? input.attempt,
+    initialProfileId: initialProfile.id,
+    initialProfileFingerprintSha256: projectProfileFingerprint(initialProfile),
+    interventionEvidence,
+    baseSha: 'a'.repeat(40),
+    compiledPrompt: JSON.stringify(HISTORY_TASK),
+    validationResults: [{ argv: [...(input.validationArgv ?? ['pnpm', 'typecheck'])], exit_code: input.validationExit ?? 0, timed_out: false, duration_ms: 100 }],
+    reviewRequired: input.reviewRequired ?? false,
+    reviewRecord: input.reviewDecision === undefined
+      ? null
+      : CandidateReviewRecord.parse({
+          schema_version: 1,
+          task_id: HISTORY_TASK.id,
+          attempt: input.attempt,
+          candidate_sha: 'b'.repeat(40),
+          finalization_record_sha256: 'c'.repeat(64),
+          validation_results_sha256: 'd'.repeat(64),
+          reviewer_profile_id: HISTORY_PROFILE_B.id,
+          reviewer_invocation: {
+            role: 'reviewer',
+            workspace_access: 'READ_ONLY',
+            read_only_mechanism: 'fixture sem mutação',
+            argv: ['node', 'fake-reviewer.mjs'],
+            diversity_requirement: 'independent review',
+            fresh_context: true,
+          },
+          decision: input.reviewDecision,
+          reason: `fixture ${input.reviewDecision}`,
+          decided_at: '2026-08-20T10:59:00.000Z',
+        }),
+    changedFiles: ['src/index.ts'],
+    contextPressure: 'low',
+    environmentReadiness: 'READY',
+    ...(input.tokens === 'UNKNOWN'
+      ? {}
+      : {
+          observedTokens: {
+            total: input.totalTokens ?? 100,
+            input: 70,
+            cachedInput: 10,
+            output: 30,
+            reasoning: 5,
+            provenance: 'fixture observed usage',
+          },
+        }),
+    ...(input.afterStage === undefined ? {} : { afterStage: input.afterStage }),
+  });
+}
+
+describe('história canônica de project attempts', () => {
+  it('fingerprint de work definition ignora id literal, mas não mistura semântica diferente', () => {
+    const sameWorkDifferentId = PlanTask.parse({
+      ...HISTORY_TASK,
+      id: 'OUTRO-ID',
+      title: 'Outro rótulo humano',
+    });
+    const differentObjective = PlanTask.parse({
+      ...sameWorkDifferentId,
+      objective: 'Implementar outra mudança',
+    });
+    const expected = projectWorkDefinitionFingerprint({
+      planTask: HISTORY_TASK,
+      classification: HISTORY_CLASSIFICATION,
+    });
+    expect(projectWorkDefinitionFingerprint({
+      planTask: sameWorkDifferentId,
+      classification: HISTORY_CLASSIFICATION,
+    })).toBe(expected);
+    expect(projectWorkDefinitionFingerprint({
+      planTask: differentObjective,
+      classification: HISTORY_CLASSIFICATION,
+    })).not.toBe(expected);
+  });
+
+  it('materializa PASS/FAIL, REPAIR e ESCALATION em runs íntegros e episódio V2 único', async () => {
+    const target = await temporaryDir();
+    const labRoot = await temporaryDir();
+    const first = await historyAttempt({ target, labRoot, attempt: 1, role: AttemptRole.INITIAL, validationExit: 1 });
+    const repair = await historyAttempt({ target, labRoot, attempt: 2, role: AttemptRole.REPAIR, validationExit: 1 });
+    const escalation = await historyAttempt({ target, labRoot, attempt: 3, role: AttemptRole.ESCALATION, profile: HISTORY_PROFILE_B });
+    expect(first.outcome).toBe('MATERIALIZED');
+    expect(repair.outcome).toBe('MATERIALIZED');
+    expect(escalation.outcome).toBe('MATERIALIZED');
+    if (first.outcome === 'SKIPPED' || repair.outcome === 'SKIPPED' || escalation.outcome === 'SKIPPED') return;
+
+    const runsDir = path.join(labRoot, 'data', 'runs');
+    expect(await verifyRunIntegrity(path.join(runsDir, first.run_id))).toMatchObject({ ok: true });
+    expect(await verifyRunIntegrity(path.join(runsDir, repair.run_id))).toMatchObject({ ok: true });
+    expect(await verifyRunIntegrity(path.join(runsDir, escalation.run_id))).toMatchObject({ ok: true });
+    expect(repair.trial_id).toBe(first.trial_id);
+    expect(escalation.trial_id).not.toBe(first.trial_id);
+
+    const firstEvaluation = EvaluationRecord.parse(JSON.parse(await readFile(
+      path.join(runsDir, first.run_id, 'evaluations', first.evaluation_id, 'evaluation-record.json'),
+      'utf8',
+    )));
+    const escalationEvaluation = EvaluationRecord.parse(JSON.parse(await readFile(
+      path.join(runsDir, escalation.run_id, 'evaluations', escalation.evaluation_id, 'evaluation-record.json'),
+      'utf8',
+    )));
+    expect(firstEvaluation.outcome).toBe(EvaluationOutcome.FAIL);
+    expect(escalationEvaluation.outcome).toBe(EvaluationOutcome.PASS);
+    const executionManifest = JSON.parse(await readFile(
+      path.join(runsDir, first.run_id, 'execution', 'manifest.json'),
+      'utf8',
+    )) as { digest_sha256: string };
+    const evaluationEnvelope = JSON.parse(await readFile(
+      path.join(runsDir, first.run_id, 'evaluations', first.evaluation_id, 'evaluation-envelope.json'),
+      'utf8',
+    )) as { execution_manifest_sha256: string };
+    expect(evaluationEnvelope.execution_manifest_sha256).toBe(executionManifest.digest_sha256);
+    const facts = JSON.parse(await readFile(
+      path.join(runsDir, escalation.run_id, 'execution', 'comparable-run-facts.json'),
+      'utf8',
+    )) as { provider: { value: string }; attempt_role: { value: string } };
+    expect(facts).toMatchObject({
+      provider: { value: HISTORY_PROFILE_B.agent },
+      attempt_role: { value: AttemptRole.ESCALATION },
+    });
+
+    const rebuilt = await RunIndex.rebuild(path.join(labRoot, 'data', 'rebuilt.sqlite'), runsDir);
+    expect(rebuilt.report).toMatchObject({ runsScanned: 3, runsIndexed: 3 });
+    rebuilt.index.close();
+
+    const selections = Object.fromEntries(
+      [first, repair, escalation].map((item) => [item.run_id, { evaluation_id: item.evaluation_id, score_id: item.score_id }]),
+    );
+    const queried = await queryPerformanceHistory({
+      schema_version: 2,
+      runs_dir: runsDir,
+      minimum_sample_size: 1,
+      work_definition_fingerprint_sha256: projectWorkDefinitionFingerprint({ planTask: HISTORY_TASK, classification: HISTORY_CLASSIFICATION }),
+      trials: [
+        { trial_id: first.trial_id, selection: selections },
+        { trial_id: escalation.trial_id, selection: selections },
+      ],
+    });
+    expect(queried.episodes).toHaveLength(1);
+    expect(queried.episodes[0]?.performance.attempts).toMatchObject({ repair_attempts: 1, escalations: 1 });
+    expect(queried.episodes[0]?.performance.success.final_pass).toBe(true);
+    expect(queried.series).toHaveLength(2);
+
+    const discovered = await queryCanonicalProjectHistory({
+      labRoot,
+      workDefinitionFingerprintSha256: projectWorkDefinitionFingerprint({
+        planTask: HISTORY_TASK,
+        classification: HISTORY_CLASSIFICATION,
+      }),
+      eligibleProfileIds: [HISTORY_PROFILE_A.id, HISTORY_PROFILE_B.id],
+      minimumSampleSize: 1,
+      filter: { task_class: 'feature', difficulty: 'easy', stack: ['node'] },
+    });
+    expect(discovered.episodes).toHaveLength(1);
+    expect(discovered.series).toHaveLength(2);
+  });
+
+  it('não duplica no replay nem em nenhuma janela de crash/resume', async () => {
+    const stages = [
+      'RUN_CREATED',
+      'EXECUTION_WRITTEN',
+      'EXECUTION_SEALED',
+      'EVALUATION_SEALED',
+      'SCORE_SEALED',
+      'INDEXED',
+      'BOUND',
+    ] as const;
+    for (const crashStage of stages) {
+      const target = await temporaryDir();
+      const labRoot = await temporaryDir();
+      let crashed = false;
+      await expect(historyAttempt({
+        target,
+        labRoot,
+        attempt: 1,
+        role: AttemptRole.INITIAL,
+        afterStage(stage) {
+          if (stage === crashStage && !crashed) {
+            crashed = true;
+            throw new Error(`crash injetado em ${stage}`);
+          }
+        },
+      })).rejects.toThrow(`crash injetado em ${crashStage}`);
+      const resumed = await historyAttempt({ target, labRoot, attempt: 1, role: AttemptRole.INITIAL });
+      const replay = await historyAttempt({ target, labRoot, attempt: 1, role: AttemptRole.INITIAL });
+      expect(['MATERIALIZED', 'ALREADY_MATERIALIZED']).toContain(resumed.outcome);
+      expect(replay.outcome).toBe('ALREADY_MATERIALIZED');
+      expect(await readdir(path.join(labRoot, 'data', 'runs'))).toHaveLength(1);
+    }
+  });
+
+  it('operational retry sem prova positiva de inference não vira sample', async () => {
+    const target = await temporaryDir();
+    const labRoot = await temporaryDir();
+    const result = await historyAttempt({ target, labRoot, attempt: 1, role: AttemptRole.INITIAL, apiEquivalent: 0 });
+    expect(result).toMatchObject({ outcome: 'SKIPPED', reason: expect.stringContaining('zero inference') });
+    await expect(readdir(path.join(labRoot, 'data', 'runs'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('preserva PASS determinístico + review REJECT como grader independente FAIL', async () => {
+    const target = await temporaryDir();
+    const labRoot = await temporaryDir();
+    const result = await historyAttempt({
+      target,
+      labRoot,
+      attempt: 1,
+      role: AttemptRole.INITIAL,
+      reviewRequired: true,
+      reviewDecision: 'REJECT',
+    });
+    expect(result.outcome).toBe('MATERIALIZED');
+    if (result.outcome === 'SKIPPED') return;
+    const record = EvaluationRecord.parse(JSON.parse(await readFile(
+      path.join(labRoot, 'data', 'runs', result.run_id, 'evaluations', result.evaluation_id, 'evaluation-record.json'),
+      'utf8',
+    )));
+    expect(record.outcome).toBe(EvaluationOutcome.FAIL);
+    expect(record.grader_results).toMatchObject({
+      'official-validation-1': { outcome: EvaluationOutcome.PASS, required: true },
+      'independent-review': { outcome: EvaluationOutcome.FAIL, required: true },
+    });
+  });
+
+  it('review obrigatória indisponível permanece NOT_EVALUATED', async () => {
+    const target = await temporaryDir();
+    const labRoot = await temporaryDir();
+    const result = await historyAttempt({
+      target,
+      labRoot,
+      attempt: 1,
+      role: AttemptRole.INITIAL,
+      reviewRequired: true,
+    });
+    expect(result.outcome).toBe('MATERIALIZED');
+    if (result.outcome === 'SKIPPED') return;
+    const record = EvaluationRecord.parse(JSON.parse(await readFile(
+      path.join(labRoot, 'data', 'runs', result.run_id, 'evaluations', result.evaluation_id, 'evaluation-record.json'),
+      'utf8',
+    )));
+    expect(record.outcome).toBe(EvaluationOutcome.NOT_EVALUATED);
+    expect(record.grader_results['independent-review']?.outcome).toBe(EvaluationOutcome.NOT_EVALUATED);
+    const envelope = JSON.parse(await readFile(
+      path.join(labRoot, 'data', 'runs', result.run_id, 'evaluations', result.evaluation_id, 'evaluation-envelope.json'),
+      'utf8',
+    )) as { evaluation_commands: Record<string, readonly string[]> };
+    expect(envelope.evaluation_commands).not.toHaveProperty('independent-review');
+    await expect(readFile(
+      path.join(labRoot, 'data', 'runs', result.run_id, 'evaluations', result.evaluation_id, 'candidate-review-unavailable.json'),
+      'utf8',
+    )).resolves.toContain('review evidence unavailable');
+  });
+
+  it('resultado de command diferente não é atribuído ao grader oficial', async () => {
+    const target = await temporaryDir();
+    const labRoot = await temporaryDir();
+    const result = await historyAttempt({
+      target,
+      labRoot,
+      attempt: 1,
+      role: AttemptRole.INITIAL,
+      validationArgv: ['true'],
+    });
+    expect(result.outcome).toBe('MATERIALIZED');
+    if (result.outcome === 'SKIPPED') return;
+    const record = EvaluationRecord.parse(JSON.parse(await readFile(
+      path.join(labRoot, 'data', 'runs', result.run_id, 'evaluations', result.evaluation_id, 'evaluation-record.json'),
+      'utf8',
+    )));
+    expect(record.outcome).toBe(EvaluationOutcome.NOT_EVALUATED);
+    expect(record.grader_results['official-validation-1']?.outcome).toBe(EvaluationOutcome.NOT_EVALUATED);
+  });
+
+  it('tokens UNKNOWN não viram zero e tornam score UNSCORABLE', async () => {
+    const target = await temporaryDir();
+    const labRoot = await temporaryDir();
+    const result = await historyAttempt({
+      target,
+      labRoot,
+      attempt: 1,
+      role: AttemptRole.INITIAL,
+      tokens: 'UNKNOWN',
+    });
+    expect(result.outcome).toBe('MATERIALIZED');
+    if (result.outcome === 'SKIPPED') return;
+    expect(result.qualification.status).toBe(QualificationStatus.UNSCORABLE);
+    const execution = JSON.parse(await readFile(
+      path.join(labRoot, 'data', 'runs', result.run_id, 'execution', 'execution-record.json'),
+      'utf8',
+    )) as { metrics: { tokens: { value: number | null } } };
+    expect(execution.metrics.tokens.value).toBeNull();
+  });
+
+  it('reconstrói a mesma história somente de data/runs, sem .dev e sem índice', async () => {
+    const target = await temporaryDir();
+    const labRoot = await temporaryDir();
+    const first = await historyAttempt({ target, labRoot, attempt: 1, role: AttemptRole.INITIAL, validationExit: 1 });
+    const repair = await historyAttempt({ target, labRoot, attempt: 2, role: AttemptRole.REPAIR, validationExit: 1 });
+    const escalation = await historyAttempt({ target, labRoot, attempt: 3, role: AttemptRole.ESCALATION, profile: HISTORY_PROFILE_B });
+    expect([first.outcome, repair.outcome, escalation.outcome]).toEqual([
+      'MATERIALIZED',
+      'MATERIALIZED',
+      'MATERIALIZED',
+    ]);
+    if (first.outcome === 'SKIPPED' || repair.outcome === 'SKIPPED' || escalation.outcome === 'SKIPPED') return;
+
+    const query = {
+      labRoot,
+      workDefinitionFingerprintSha256: projectWorkDefinitionFingerprint({
+        planTask: HISTORY_TASK,
+        classification: HISTORY_CLASSIFICATION,
+      }),
+      eligibleProfileIds: [HISTORY_PROFILE_A.id, HISTORY_PROFILE_B.id],
+      minimumSampleSize: 1,
+    };
+    const before = await queryCanonicalProjectHistory(query);
+    expect(before.episodes).toHaveLength(1);
+    expect(before.series).toHaveLength(2);
+
+    // A fonte de verdade é `data/runs`: o binding do runtime e o índice SQLite
+    // são descartáveis e não podem ser exigidos por M81 V2.
+    const paths = resolveHarnessPaths(target);
+    const runsDir = path.join(labRoot, 'data', 'runs');
+    await rm(paths.projectHistoryBindingsDir, { recursive: true, force: true });
+    await rm(path.join(labRoot, 'data', 'index.sqlite'), { force: true });
+    await expect(readdir(paths.projectHistoryBindingsDir)).rejects.toMatchObject({ code: 'ENOENT' });
+
+    const rebuilt = await RunIndex.rebuild(path.join(labRoot, 'data', 'index.sqlite'), runsDir);
+    expect(rebuilt.report).toMatchObject({ runsScanned: 3, runsIndexed: 3 });
+    rebuilt.index.close();
+
+    const after = await queryCanonicalProjectHistory(query);
+    expect(after.episodes[0]?.performance.intervention.human_intervention).toMatchObject({
+      value: false,
+      provenance: 'zero_interventions_recorded_all_attempts',
+    });
+    expect(after.episodes).toEqual(before.episodes);
+    expect(after.series).toEqual(before.series);
+    expect(after.episodes[0]?.run_ids).toEqual([first.run_id, repair.run_id, escalation.run_id]);
+  });
+
+  it('evidência de intervenção só existe quando o lifecycle prova o conjunto observado', async () => {
+    const target = await temporaryDir();
+    const labRoot = await temporaryDir();
+    const proven = await historyAttempt({ target, labRoot, attempt: 1, role: AttemptRole.INITIAL });
+    const unknown = await historyAttempt({
+      target,
+      labRoot,
+      attempt: 2,
+      role: AttemptRole.INITIAL,
+      episodeId: 'episode-unknown',
+      interventions: 'UNKNOWN',
+    });
+    const intervened = await historyAttempt({
+      target,
+      labRoot,
+      attempt: 3,
+      role: AttemptRole.REPAIR,
+      episodeId: 'episode-history-1',
+      ordinal: 2,
+      interventions: [
+        {
+          intervention_id: 'human-release:T-HISTORY:attempt-1',
+          type: InterventionType.DESIGN_DECISION,
+          description: 'humano liberou o gate de review REJECT do attempt 1',
+          occurred_at: '2026-08-20T10:30:00.000Z',
+          affects_autonomy: true,
+        },
+      ],
+    });
+    if (proven.outcome === 'SKIPPED' || unknown.outcome === 'SKIPPED' || intervened.outcome === 'SKIPPED') {
+      throw new Error('fixture não materializou');
+    }
+    const runsDir = path.join(labRoot, 'data', 'runs');
+    const interventionsPath = (runId: string) => path.join(runsDir, runId, 'execution', 'interventions.json');
+
+    expect(JSON.parse(await readFile(interventionsPath(proven.run_id), 'utf8'))).toMatchObject({
+      schema_version: 1,
+      interventions: [],
+    });
+    await expect(readFile(interventionsPath(unknown.run_id), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(JSON.parse(await readFile(interventionsPath(intervened.run_id), 'utf8'))).toMatchObject({
+      interventions: [{ type: InterventionType.DESIGN_DECISION, affects_autonomy: true }],
+    });
+
+    const history = await queryPerformanceHistory({
+      schema_version: 2,
+      runs_dir: runsDir,
+      minimum_sample_size: 1,
+      work_definition_fingerprint_sha256: projectWorkDefinitionFingerprint({
+        planTask: HISTORY_TASK,
+        classification: HISTORY_CLASSIFICATION,
+      }),
+      trials: [proven.trial_id, unknown.trial_id]
+        .filter((trialId, index, all) => all.indexOf(trialId) === index)
+        .map((trialId) => ({
+          trial_id: trialId,
+          selection: {
+            [proven.run_id]: { evaluation_id: proven.evaluation_id, score_id: proven.score_id },
+            [unknown.run_id]: { evaluation_id: unknown.evaluation_id, score_id: unknown.score_id },
+            [intervened.run_id]: { evaluation_id: intervened.evaluation_id, score_id: intervened.score_id },
+          },
+        })),
+    });
+    const withHuman = history.episodes.find((item) => item.execution_episode_id === 'episode-history-1');
+    const unknownEpisode = history.episodes.find((item) => item.execution_episode_id === 'episode-unknown');
+    expect(withHuman?.performance.intervention.human_intervention).toMatchObject({
+      value: true,
+      provenance: 'intervention_recorded',
+    });
+    expect(unknownEpisode?.performance.intervention.human_intervention).toMatchObject({
+      value: null,
+      provenance: 'not_recorded',
+    });
+  });
+
+  it('história canônica real muda M78 (A) para M82 HISTORY (B) e volta a M78 sem métrica obrigatória', async () => {
+    const cheap = LauncherProfile.parse({
+      ...HISTORY_PROFILE_A,
+      id: 'fake-routing-cheap',
+      timeout_seconds: 600,
+      test_double_of: { ...HISTORY_PROFILE_A.test_double_of!, model: 'gpt-5.6-terra' },
+    });
+    const strong = LauncherProfile.parse({
+      ...HISTORY_PROFILE_A,
+      id: 'fake-routing-strong',
+      timeout_seconds: 600,
+      test_double_of: { ...HISTORY_PROFILE_A.test_double_of!, model: 'gpt-5.6-sol' },
+    });
+
+    async function buildHistory(options: { readonly strongTokens: 'OBSERVED' | 'UNKNOWN' }) {
+      const target = await temporaryDir();
+      const labRoot = await temporaryDir();
+      let attempt = 0;
+      for (let episode = 1; episode <= 3; episode += 1) {
+        attempt += 1;
+        await historyAttempt({
+          target, labRoot, attempt, role: AttemptRole.INITIAL, profile: cheap,
+          initialProfile: cheap, episodeId: `episode-cheap-${episode}`, ordinal: 1,
+          validationExit: 1, durationMs: 4_000, totalTokens: 400, quotaPp: 4, apiEquivalent: 4,
+        });
+        attempt += 1;
+        await historyAttempt({
+          target, labRoot, attempt, role: AttemptRole.REPAIR, profile: cheap,
+          initialProfile: cheap, episodeId: `episode-cheap-${episode}`, ordinal: 2,
+          durationMs: 4_000, totalTokens: 400, quotaPp: 4, apiEquivalent: 4,
+        });
+      }
+      for (let episode = 1; episode <= 3; episode += 1) {
+        attempt += 1;
+        await historyAttempt({
+          target, labRoot, attempt, role: AttemptRole.INITIAL, profile: strong,
+          initialProfile: strong, episodeId: `episode-strong-${episode}`, ordinal: 1,
+          durationMs: 1_000, totalTokens: 100, quotaPp: 1, apiEquivalent: 1,
+          tokens: options.strongTokens,
+        });
+      }
+      return queryCanonicalProjectHistory({
+        labRoot,
+        workDefinitionFingerprintSha256: projectWorkDefinitionFingerprint({
+          planTask: HISTORY_TASK,
+          classification: HISTORY_CLASSIFICATION,
+        }),
+        eligibleProfileIds: [cheap.id, strong.id],
+        minimumSampleSize: 3,
+        filter: { task_class: 'feature', difficulty: 'easy', stack: ['node'] },
+      });
+    }
+
+    const inspection = historyInspection(await temporaryDir());
+    const built = buildWorkUnitFromPlan({
+      planTask: HISTORY_TASK,
+      inspection,
+      classification: HISTORY_CLASSIFICATION,
+    });
+    const assessment = assessExecution(built.task, {
+      inspection,
+      expectedBaseRevisionSha: 'a'.repeat(40),
+      factsSource: 'full_inspection',
+    });
+    const routingInput = {
+      work_unit: {
+        source: 'direct_task_normalization' as const,
+        task: built.task,
+        assessment,
+        project_facts: inspection,
+      },
+      role: 'implementer' as const,
+      capability_registry: new CapabilityRegistry([
+        capabilityOf(capabilityInputOf(cheap)),
+        capabilityOf(capabilityInputOf(strong)),
+      ]),
+      candidates: [cheap, strong].map((profile) => ({
+        profile_id: profile.id,
+        availability: { value: true, provenance: 'fixture: profile carregado do catálogo' },
+        runtime_bounds: workerRuntimeBoundsOf(profile).map((bound) => ({ ...bound })),
+      })),
+      profile_fingerprints_sha256: {
+        [cheap.id]: projectProfileFingerprint(cheap),
+        [strong.id]: projectProfileFingerprint(strong),
+      },
+    };
+
+    const emptyLabRoot = await temporaryDir();
+    const empty = await queryCanonicalProjectHistory({
+      labRoot: emptyLabRoot,
+      workDefinitionFingerprintSha256: projectWorkDefinitionFingerprint({
+        planTask: HISTORY_TASK,
+        classification: HISTORY_CLASSIFICATION,
+      }),
+      eligibleProfileIds: [cheap.id, strong.id],
+      minimumSampleSize: 3,
+    });
+    const withoutHistory = routeInitialProfileWithHistory({ ...routingInput, history: empty });
+    expect(withoutHistory.source).toBe('M78_FALLBACK');
+    expect(withoutHistory.fallback).toMatchObject({ outcome: 'ROUTED', profile: { profile_id: cheap.id } });
+
+    const sufficient = await buildHistory({ strongTokens: 'OBSERVED' });
+    expect(sufficient.episodes).toHaveLength(6);
+    const routed = routeInitialProfileWithHistory({ ...routingInput, history: sufficient });
+    expect(routed.source).toBe('HISTORY');
+    expect(routed.recommendation?.profile.profile_id).toBe(strong.id);
+    expect(routed.evidence.selected_series_sample_size).toBe(3);
+
+    const degraded = await buildHistory({ strongTokens: 'UNKNOWN' });
+    const fellBack = routeInitialProfileWithHistory({ ...routingInput, history: degraded });
+    expect(fellBack.source).toBe('M78_FALLBACK');
+    expect(fellBack.fallback).toMatchObject({ outcome: 'ROUTED', profile: { profile_id: cheap.id } });
+    expect(fellBack.evidence.series_considered).toContainEqual(
+      expect.objectContaining({ profile_id: strong.id, status: 'INSUFFICIENT_EVIDENCE' }),
+    );
+  }, 60_000);
 });

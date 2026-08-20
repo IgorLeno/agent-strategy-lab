@@ -542,3 +542,26 @@ Rule: pré-visualização e execução compartilham a MESMA primitive de avalia�
 (`assessWorkUnit`); o preview é a decisão real sem efeitos, nunca uma segunda
 implementação. Um segundo assessment só para dry-run diverge do runtime
 exatamente no dia em que a diferença importa.
+
+[2026-08-20] Contexto: materialização de attempts de projeto externo como
+história canônica para M81/M82.
+Mistake: usar `trial` ao mesmo tempo como lifecycle completo da work unit e
+como série comparável obrigaria escolher entre quebrar métricas de
+repair/escalation ou misturar profiles diferentes na mesma identidade.
+Rule: execution episode e comparable profile series são dimensões ortogonais.
+O episódio agrupa INITIAL/REPAIR/ESCALATION para derivar lifecycle; cada trial
+permanece homogêneo por fingerprint completo de profile, e um vínculo
+versionado recompõe o episódio sem alterar a semântica histórica de trial.
+
+[2026-08-20] Contexto: fechamento de M81 V2 -> M82 com história canônica de
+projeto externo; todos os testes passavam, mas somente com história sintética
+injetada direto no router.
+Mistake: o leitor canônico fixava `interventions: null` para todo run lido do
+disco e nenhum writer publicava esse fato, então `human_intervention_rate`
+nascia UNAVAILABLE e M82 jamais poderia chegar a `source=HISTORY` com dados
+reais — wiring verde e inerte.
+Rule: quando uma camada consome um conjunto obrigatório de métricas, prove
+end-to-end com dados produzidos pelo writer real que a decisão MUDA; teste com
+fixture sintética do consumidor não prova que o produtor consegue satisfazê-lo.
+E cada fato obrigatório precisa de um writer explícito: ausência de artifact é
+UNKNOWN, lista vazia é prova positiva de zero, artifact inválido falha fechado.

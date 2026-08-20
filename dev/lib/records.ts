@@ -10,6 +10,7 @@ import {
   CompletionRecord,
   InfraFailedAttemptRecord,
   LaunchRecord,
+  ProjectHistoryBinding,
   MaintenanceRecord,
   OrchestratedRevalidationRecord,
   OrchestratedFinalizationRecord,
@@ -52,6 +53,19 @@ export async function ensureTaskInbox(paths: HarnessPaths, taskId: string): Prom
 
 export function launchRecordPath(paths: HarnessPaths, taskId: string): string {
   return path.join(paths.logsDir, `${taskId}.launch.json`);
+}
+
+export function projectHistoryBindingPath(
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+  launchId: string,
+): string {
+  return path.join(
+    paths.projectHistoryBindingsDir,
+    taskId,
+    `attempt-${attempt}-${launchId}.json`,
+  );
 }
 
 export function reportPath(paths: HarnessPaths, taskId: string): string {
@@ -363,6 +377,30 @@ export const readLaunchRecord = (
 
 export const writeLaunchRecord = (paths: HarnessPaths, record: LaunchRecordInput): Promise<void> =>
   writeJson(launchRecordPath(paths, record.task_id), LaunchRecord.parse(record));
+
+export const readProjectHistoryBinding = (
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+  launchId: string,
+): Promise<ProjectHistoryBinding | null> =>
+  readOptional(projectHistoryBindingPath(paths, taskId, attempt, launchId), (input) =>
+    ProjectHistoryBinding.parse(input),
+  );
+
+export const writeProjectHistoryBinding = (
+  paths: HarnessPaths,
+  binding: ProjectHistoryBinding,
+): Promise<void> =>
+  writeJsonOnce(
+    projectHistoryBindingPath(
+      paths,
+      binding.task_id,
+      binding.attempt,
+      binding.launch_id,
+    ),
+    ProjectHistoryBinding.parse(binding),
+  );
 
 export const readCompletion = (
   paths: HarnessPaths,
