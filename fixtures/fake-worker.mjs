@@ -9,6 +9,9 @@
  *   no-commit  reporta SUCCESS sem criar commit
  *   orchestrator-success  produz patch e SUCCESS com candidate null, sem tocar no Git
  *   official-fail         SUCCESS + patch que falha a validation oficial (grep repaired)
+ *   official-fail-until-escalation  falha enquanto houver menos de 2 attempts de
+ *                                   validation arquivados; a partir do terceiro
+ *                                   attempt (o escalado) escreve 'repaired'
  *   official-fail-then-repair  FIRST_PASS falha a validation; REPAIR escreve 'repaired'
  *   official-fail-then-worker-failure  FIRST_PASS falha a validation; REPAIR reporta FAILURE
  *   protocol-invalid-then-success  primeiro close tem metadata inválida; retry passa
@@ -27,6 +30,28 @@ import path from 'node:path';
 
 if (process.argv.slice(2).some((argument) => argument === '--help' || argument === '-h')) {
   console.log('fake-worker: uso interno do harness (packet -> commit -> report + handoff)');
+  process.exit(0);
+}
+
+/**
+ * Overlay READ-ONLY estrutural (dev/lib/project-roles.ts). Chega por argv, não
+ * por prompt: o fixture sai ANTES de qualquer escrita, commit ou validação, e
+ * devolve exatamente um JSON de veredito. É o que permite exercitar o role de
+ * reviewer de ponta a ponta sem nenhum provider real.
+ */
+if (process.argv.slice(2).includes('--agentlab-read-only')) {
+  const requested = process.env.AGENTLAB_FAKE_REVIEW ?? 'accept';
+  if (requested === 'invalid') {
+    console.log('sem veredito estruturado');
+    process.exit(0);
+  }
+  const decision = requested === 'reject' ? 'REJECT' : 'ACCEPT';
+  console.log(
+    JSON.stringify({
+      decision,
+      reason: `fake reviewer read-only: ${decision === 'ACCEPT' ? 'evidência consistente com o acceptance declarado' : 'evidência insuficiente para aceitar a mudança'}`,
+    }),
+  );
   process.exit(0);
 }
 
@@ -49,6 +74,15 @@ function hasArchivedAttempt(relativeRecord) {
   const taskRoot = path.join(devDir, 'failed-attempts', taskId);
   if (!existsSync(taskRoot)) return false;
   return readdirSync(taskRoot).some((attempt) => existsSync(path.join(taskRoot, attempt, relativeRecord)));
+}
+
+function archivedValidationFailures() {
+  if (!taskId) return 0;
+  const taskRoot = path.join(devDir, 'failed-attempts', taskId);
+  if (!existsSync(taskRoot)) return 0;
+  return readdirSync(taskRoot).filter((attempt) =>
+    existsSync(path.join(taskRoot, attempt, 'validation-failed-attempt.json')),
+  ).length;
 }
 
 function hasAbandonedAttempt() {
@@ -100,6 +134,7 @@ function main() {
     mode === 'no-commit' ||
     mode === 'orchestrator-success' ||
     mode === 'official-fail' ||
+    mode === 'official-fail-until-escalation' ||
     mode === 'official-fail-then-repair' ||
     mode === 'official-fail-then-worker-failure' ||
     mode === 'protocol-invalid-then-success' ||
@@ -117,7 +152,11 @@ function main() {
     const contents =
       mode === 'official-fail'
         ? 'broken\n'
-        : mode === 'official-fail-then-repair' ||
+        : mode === 'official-fail-until-escalation'
+          ? archivedValidationFailures() >= 2
+            ? 'repaired\n'
+            : 'broken\n'
+          : mode === 'official-fail-then-repair' ||
             mode === 'official-fail-then-worker-failure' ||
             mode === 'repair-incomplete-then-success'
           ? repairAttempt

@@ -1,0 +1,77 @@
+# EXECUTION AUTHORIZATION de uma run de projeto externo (`dev-run-plan
+# --authorization`). Este arquivo NÃO define trabalho: tarefas, acceptance,
+# dependências e validation continuam vindo do PlanFile, que é tratado como
+# work definition confiável. Aqui só se declara o que o control plane pode
+# exercer sozinho.
+schema_version: 1
+
+# O que o usuário pediu. Registro do escopo, nunca autorização por si só.
+requested_scope:
+  summary: implementar as tarefas declaradas no PlanFile do projeto
+
+# Objetivos do intake. Omitidos, derivam dos `objective` das tasks do PlanFile.
+# objectives:
+#   - ...
+constraints: []
+exclusions:
+  - deploy
+
+# Capabilities que o harness pode exercer sem novo gate humano por spawn.
+autonomous_execution_boundary:
+  - DISPOSABLE_LOCAL_WORKSPACE
+  - CONFIGURED_SUBSCRIPTION_WORKER
+  - DETERMINISTIC_VALIDATION
+  - BOUNDED_REPAIR
+  - CAPABILITY_ESCALATION_WITHIN_LADDER
+  # - CROSS_PROVIDER_WITHIN_ALLOWED_SUBSCRIPTION_PROFILES
+
+# Categorias que SEMPRE exigem decisão humana. Nunca são inferidas a partir do
+# escopo pedido, e `allowed_billing_modes` jamais aceita `api`.
+human_gated_capabilities:
+  - UNAUTHORIZED_API_BILLING
+  - BILLING_MODE_CHANGE
+  - DESTRUCTIVE_ACTION
+  - DEPLOYMENT_OR_PRODUCTION
+  - EXTERNAL_SIDE_EFFECT
+  - SCOPE_EXPANSION
+  - NEW_CREDENTIAL_BOUNDARY
+  - CRITICAL_OR_SECURITY_SENSITIVE_ACTION
+
+billing:
+  allowed_billing_modes:
+    - subscription_only
+
+# Profiles elegíveis. A ordem de `capability_rank` É a ladder de escalation.
+# Um único profile = modo benchmark: escalation exigida vira HUMAN_REQUIRED.
+profile_policy:
+  id: codex-sol-ladder
+  allowed_providers:
+    - codex
+  profiles:
+    - id: codex-build-worker-subscription-terra-medium-v2
+      capability_rank: 0
+      rationale: degrau baseline configurado para o projeto
+    - id: codex-build-worker-subscription-sol-medium-v2
+      capability_rank: 1
+      rationale: degrau seguinte quando a capacidade for o diagnóstico
+
+# Reviewer da policy. Omitido, o reviewer é o próprio implementer em invocação
+# NOVA e read-only; risco crítico pode exigir profile distinto.
+# review:
+#   reviewer_profile_id: codex-build-worker-subscription-sol-high-v2
+
+# O PlanFile não carrega risco, taxonomy nem envelope de recursos. Eles são
+# DECLARADOS aqui, com override por task. Ausência é erro de setup.
+work_units:
+  default:
+    task_class: feature
+    difficulty_declared: medium
+    risk: low
+    complexity: local
+    ambiguity: low
+    verification: deterministic
+    resource_envelope:
+      duration_ms: { expected: 900000, maximum: 1800000 }
+      tokens: { expected: 80000, maximum: 200000 }
+      changed_files: { expected: 4, maximum: 12 }
+  overrides: {}

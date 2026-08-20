@@ -269,12 +269,31 @@ export type RoutineResolution = {
   readonly human_required: HumanRequiredOutput | null;
 };
 
+/**
+ * Separação explícita entre HARNESS SELF-MAINTENANCE e PROJECT REMEDIATION.
+ *
+ * A recipe de AUTO_MAINTENANCE clona `paths.repoRoot` e lança um maintainer
+ * cujo contrato inteiro é o do development harness (`dev/**`, `test/dev/**`,
+ * mensagem de commit do harness). Isso só é legítimo quando o repositório
+ * conduzido É o Agent Strategy Lab. Num repositório ALVO externo, um incidente
+ * de projeto NÃO autoriza manutenção de harness dentro do alvo: sem prova de
+ * identidade, a resolução é fail-closed.
+ *
+ * O default `allowed: true` preserva o comportamento histórico de quem chama
+ * a primitive diretamente; `runOrchestrate` sempre calcula o valor real.
+ */
+export interface HarnessSelfMaintenanceScope {
+  readonly allowed: boolean;
+  readonly reason: string;
+}
+
 export interface ResolveRoutinePreflightInput {
   readonly paths: HarnessPaths;
   readonly incident: RoutineIncidentContext;
   readonly driver: RoutineAutonomyDriver;
   readonly maintainerProfile?: string;
   readonly reviewerProfile?: string;
+  readonly harnessSelfMaintenance?: HarnessSelfMaintenanceScope;
   readonly now?: () => string;
 }
 
@@ -770,6 +789,25 @@ export async function resolveRoutinePreflight(
       );
     }
     return finishRecovered(input, base, retry, null, null, retry.maintenance.authorized_head_sha);
+  }
+
+  const selfMaintenance = input.harnessSelfMaintenance ?? {
+    allowed: true,
+    reason: 'chamador não declarou identidade do repositório; comportamento histórico preservado',
+  };
+  if (!selfMaintenance.allowed) {
+    return finishHuman(
+      input,
+      base,
+      input.incident.preflight,
+      'incidente exige HARNESS SELF-MAINTENANCE, que pertence ao Agent Strategy Lab; ' +
+        `o repositório conduzido não é o harness (${selfMaintenance.reason}). ` +
+        'Remediação de projeto pertence ao alvo e nunca é feita por maintenance do harness.',
+      null,
+      null,
+      null,
+      'Aplicar a manutenção do harness no próprio Agent Strategy Lab, ou remediar o projeto no alvo.',
+    );
   }
 
   let lastCandidate: RoutineCandidate | null = null;

@@ -1,6 +1,12 @@
 import { GitError, headSha } from './git.js';
 import { initializeHarnessRuntime } from './init-runtime.js';
 import { runOrchestrate } from './orchestrate.js';
+import {
+  loadProjectRunAuthorization,
+  ProjectAuthorizationError,
+  type LoadedProjectRunAuthorization,
+} from './project-authorization.js';
+import { createProjectControlPlane, type ProjectControlPlane } from './project-run.js';
 import { exitCodeForOrchestrationStop } from './orchestration-termination.js';
 import type { HarnessPaths } from './paths.js';
 import { loadPlan, type LoadedPlan } from './plan.js';
@@ -24,7 +30,14 @@ export type RuntimeStateKind = 'NEW' | 'RESUMABLE' | 'ALL_DONE' | 'INCOMPATIBLE'
 
 export interface PlanRunInput {
   readonly paths: HarnessPaths;
-  readonly profileId: string;
+  /**
+   * Profile da invocação. Continua obrigatório sem `--authorization`; com uma
+   * profile policy autorizada ele é opcional, porque a escolha passa a ser do
+   * control plane dentro da policy.
+   */
+  readonly profileId?: string;
+  /** Caminho do `agentlab-run.yaml`; presente, liga o lifecycle universal. */
+  readonly authorizationFile?: string;
   readonly dryRun: boolean;
   readonly maxIterations: number;
   readonly autonomy?: 'routine';
@@ -106,6 +119,7 @@ async function requireProfile(catalogRoot: string, profileId: string): Promise<P
 
 function mismatchPayload(
   input: PlanRunInput,
+  profileId: string,
   loaded: LoadedPlan,
   registeredPlanSha256: string,
   head: string,
@@ -119,7 +133,7 @@ function mismatchPayload(
     plan_file: input.paths.planFile,
     plan_sha256: loaded.planSha256,
     runtime_dir: input.paths.devDir,
-    profile_id: input.profileId,
+    profile_id: profileId,
     base_sha: head,
     runtime_state: 'INCOMPATIBLE',
     next_task: null,
@@ -150,17 +164,30 @@ function inspectCompatibleRuntime(
  * seleção, repair, recovery, launch, close, evidence ou billing.
  */
 export async function runPlan(input: PlanRunInput): Promise<PlanRunResult> {
-  const { paths, profileId, dryRun } = input;
+  const { paths, dryRun } = input;
   const head = await requireGitRepo(paths.repoRoot);
   const existing = await readExistingState(paths);
   const runtimeExists = existing !== 'missing';
   const loaded = await loadRequestedPlan(paths, runtimeExists);
+
+  let authorization: LoadedProjectRunAuthorization | null = null;
+  if (input.authorizationFile !== undefined) {
+    try {
+      authorization = await loadProjectRunAuthorization(input.authorizationFile);
+    } catch (error) {
+      throw error instanceof ProjectAuthorizationError
+        ? new PlanSetupError(error.message)
+        : error;
+    }
+  }
+
+  const profileId = resolveInvocationProfileId(input, authorization);
   const profile = await requireProfile(paths.profileCatalogRoot, profileId);
 
   if (existing !== 'missing' && existing.plan_sha256 !== loaded.planSha256) {
     return {
       payload: {
-        ...mismatchPayload(input, loaded, existing.plan_sha256, existing.authorized_head_sha ?? head),
+        ...mismatchPayload(input, profileId, loaded, existing.plan_sha256, existing.authorized_head_sha ?? head),
         profile,
       },
       exitCode: 9,
@@ -180,7 +207,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanRunResult> {
     nextTask = inspected.nextTask;
   }
 
-  const context = {
+  const context: Record<string, unknown> = {
     repo: paths.repoRoot,
     plan_file: paths.planFile,
     plan_sha256: loaded.planSha256,
@@ -210,7 +237,23 @@ export async function runPlan(input: PlanRunInput): Promise<PlanRunResult> {
   if (runtimeState === 'NEW') {
     const init = await initializeHarnessRuntime(paths);
     initialized = true;
-    context.base_sha = init.baseline_sha;
+    context['base_sha'] = init.baseline_sha;
+  }
+
+  let controlPlane: ProjectControlPlane | null = null;
+  if (authorization !== null) {
+    try {
+      controlPlane = await createProjectControlPlane({
+        paths,
+        loaded,
+        authorization: authorization.file,
+        authorizationFile: authorization.source_file,
+      });
+    } catch (error) {
+      throw error instanceof ProjectAuthorizationError
+        ? new PlanSetupError(error.message)
+        : error;
+    }
   }
 
   const orchestrated = await runOrchestrate({
@@ -221,6 +264,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanRunResult> {
     ...(input.timeoutOverride === undefined ? {} : { timeoutOverride: input.timeoutOverride }),
     ...(input.autonomy === undefined ? {} : { autonomy: input.autonomy }),
     ...(input.verbose === undefined ? {} : { verbose: input.verbose }),
+    ...(controlPlane === null ? {} : { controlPlane }),
   });
 
   return {
@@ -231,7 +275,46 @@ export async function runPlan(input: PlanRunInput): Promise<PlanRunResult> {
       initialized,
       run_kind: runtimeState === 'NEW' ? 'NEW' : 'RESUMED',
       ...orchestrated.payload,
+      ...(controlPlane === null ? {} : { project_lifecycle: controlPlane.snapshot() }),
     },
     exitCode: exitCodeForOrchestrationStop(orchestrated.stop),
   };
+}
+
+/**
+ * Sem autorização, `--profile` continua obrigatório e é o único profile da
+ * invocação. Com autorização, a policy é a fonte: `--profile` vira opcional e,
+ * quando informado, precisa pertencer à policy — nunca a amplia.
+ */
+function resolveInvocationProfileId(
+  input: PlanRunInput,
+  authorization: LoadedProjectRunAuthorization | null,
+): string {
+  if (authorization === null) {
+    if (input.profileId === undefined) {
+      throw new PlanSetupError(
+        '--profile é obrigatório sem --authorization.\n' +
+          'Uso: pnpm dev-run-plan --repo <path> --plan <plan.yaml> --profile <id>',
+      );
+    }
+    return input.profileId;
+  }
+  const ranked = [...authorization.file.profile_policy.profiles].sort(
+    (left, right) => left.capability_rank - right.capability_rank,
+  );
+  const first = ranked[0];
+  if (first === undefined) {
+    throw new PlanSetupError(
+      `profile policy ${authorization.file.profile_policy.id} não declara nenhum profile elegível.`,
+    );
+  }
+  if (input.profileId === undefined) return first.id;
+  if (!ranked.some((entry) => entry.id === input.profileId)) {
+    throw new PlanSetupError(
+      `--profile ${input.profileId} não pertence à profile policy ${authorization.file.profile_policy.id} ` +
+        `(${ranked.map((entry) => entry.id).join(', ')}).\n` +
+        'A policy nunca é ampliada implicitamente. Nenhum provider foi chamado.',
+    );
+  }
+  return input.profileId;
 }

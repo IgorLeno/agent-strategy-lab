@@ -561,3 +561,153 @@ describe('dev-run-plan — catálogo do harness vs repositório alvo', () => {
     expect(await fileExists(path.join(target.root, '.dev', 'logs'))).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// `--authorization`: a entrada de projeto externo passa a atravessar o
+// lifecycle universal. Sem a flag, tudo acima permanece idêntico.
+// ---------------------------------------------------------------------------
+
+const AUTHORIZED_POLICY_PROFILE = 'fake-worker-economy-v1';
+
+function authorizationFor(profiles: readonly string[]): string {
+  return [
+    'schema_version: 1',
+    'requested_scope:',
+    '  summary: escopo declarado explicitamente pela run',
+    'autonomous_execution_boundary:',
+    '  - CONFIGURED_SUBSCRIPTION_WORKER',
+    '  - DETERMINISTIC_VALIDATION',
+    '  - BOUNDED_REPAIR',
+    'human_gated_capabilities:',
+    '  - UNAUTHORIZED_API_BILLING',
+    '  - SCOPE_EXPANSION',
+    'billing:',
+    '  allowed_billing_modes: [not_applicable]',
+    'profile_policy:',
+    '  id: fake-policy',
+    '  allowed_providers: [fake, codex]',
+    '  profiles:',
+    ...profiles.flatMap((id, index) => [
+      `    - id: ${id}`,
+      `      capability_rank: ${index}`,
+      '      rationale: degrau declarado pela policy',
+    ]),
+    'work_units:',
+    '  default:',
+    '    task_class: feature',
+    '    difficulty_declared: easy',
+    '    risk: low',
+    '    complexity: local',
+    '    ambiguity: low',
+    '    verification: deterministic',
+    '    resource_envelope:',
+    '      duration_ms: {expected: 20000, maximum: 60000}',
+    '      tokens: {expected: 30000, maximum: 90000}',
+    '      changed_files: {expected: 3, maximum: 8}',
+    '',
+  ].join('\n');
+}
+
+async function writeAuthorizationFile(contents: string): Promise<string> {
+  const dir = await mkdtemp(path.join(tmpdir(), 'agentlab-authorization-'));
+  created.push(dir);
+  const file = path.join(dir, 'agentlab-run.yaml');
+  await writeFile(file, contents, 'utf8');
+  return file;
+}
+
+describe('dev-run-plan — autorização explícita da run', () => {
+  it('--profile fora da policy é recusado antes de qualquer provider spawn', async () => {
+    const target = await makeBareTarget();
+    const authorization = await writeAuthorizationFile(
+      authorizationFor([AUTHORIZED_POLICY_PROFILE]),
+    );
+    const result = await runPlan(target, [
+      '--plan',
+      target.plan,
+      '--authorization',
+      authorization,
+      '--profile',
+      'fake-worker-v1',
+    ]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toMatch(/não pertence à profile policy/);
+    expect(result.stderr).toMatch(/nunca é ampliada implicitamente/i);
+    expect(await fileExists(path.join(target.root, '.dev', 'state.json'))).toBe(false);
+    expect(await fileExists(path.join(target.root, '.dev', 'logs'))).toBe(false);
+  });
+
+  it('autorização ilegível falha fechado, sem state, attempt ou provider', async () => {
+    const target = await makeBareTarget();
+    const result = await runPlan(target, [
+      '--plan',
+      target.plan,
+      '--authorization',
+      path.join(target.root, 'agentlab-run-inexistente.yaml'),
+    ]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toMatch(/arquivo de autorização ilegível/);
+    expect(result.stderr).toMatch(/Nenhum provider foi chamado/);
+    expect(await fileExists(path.join(target.root, '.dev', 'state.json'))).toBe(false);
+  });
+
+  it('profile da policy ausente no catálogo é recusado antes do spawn', async () => {
+    const target = await makeBareTarget();
+    const authorization = await writeAuthorizationFile(
+      authorizationFor(['perfil-de-policy-inexistente-v1']),
+    );
+    const result = await runPlan(target, [
+      '--plan',
+      target.plan,
+      '--authorization',
+      authorization,
+    ]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toMatch(/perfil-de-policy-inexistente-v1/);
+    expect(result.stderr).toMatch(/Nenhum attempt foi consumido/);
+  });
+
+  it('sem --authorization o comportamento histórico permanece: --profile obrigatório', async () => {
+    const target = await makeBareTarget();
+    const result = await runPlan(target, ['--plan', target.plan]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toMatch(/--profile é obrigatório/);
+  });
+
+  it('o profile do lifecycle vem do catálogo do lab; um homônimo no alvo não vence', async () => {
+    const target = await makeBareTarget();
+    await mkdir(path.join(target.root, 'dev', 'profiles'), { recursive: true });
+    await writeFile(
+      path.join(target.root, 'dev', 'profiles', `${AUTHORIZED_POLICY_PROFILE}.yaml`),
+      [
+        `id: ${AUTHORIZED_POLICY_PROFILE}`,
+        'agent: fake',
+        'argv: [node, malicious-catalog-must-not-win.mjs]',
+        'prompt_delivery: argv',
+        'timeout_seconds: 7',
+        'forbidden_flags: []',
+        'env_allowlist: [PATH, HOME, AGENTLAB_FAKE_MODE]',
+      ].join('\n'),
+      'utf8',
+    );
+    await commitAll(target.root, 'perfil conflitante no alvo');
+
+    const authorization = await writeAuthorizationFile(
+      authorizationFor([AUTHORIZED_POLICY_PROFILE]),
+    );
+    const dry = await runPlan(target, [
+      '--plan',
+      target.plan,
+      '--authorization',
+      authorization,
+      '--dry-run',
+    ]);
+    expect(dry.exitCode, dry.stderr).toBe(0);
+    const provenance = parseOutput(dry).profile as { catalog_root: string; source_file: string };
+    expect(provenance.catalog_root).toBe(resolveHarnessInstallationRoot());
+    expect(provenance.source_file).toBe(
+      path.join(resolveHarnessInstallationRoot(), `dev/profiles/${AUTHORIZED_POLICY_PROFILE}.yaml`),
+    );
+    expect(provenance.source_file).not.toContain(target.root);
+  });
+});

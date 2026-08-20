@@ -117,6 +117,12 @@ export interface PreflightInput {
   readonly loaded: LoadedPlan;
   readonly requestedProfileId: string;
   /**
+   * Com control plane de projeto, a escolha de profile é dele: o mismatch de
+   * profile deixa de ser blocker porque não existe `--profile` humano a
+   * contradizer. Sem control plane (todo uso histórico), nada muda.
+   */
+  readonly profileSelectionOwner?: 'invocation' | 'project_control_plane';
+  /**
    * Injetável SÓ para teste. Em produção a adoção roda os gates oficiais —
    * relaxar isso aqui seria criar uma adoção de segunda classe.
    */
@@ -415,11 +421,10 @@ async function runAutomaticRepairStage(
   if (taskId === null) return null;
 
   const pendingDecision = await decideAutomaticRepair(input.paths, taskId);
-  const profileHalt = haltFromAutomaticRepairProfile(
-    pendingDecision,
-    taskId,
-    input.requestedProfileId,
-  );
+  const profileHalt =
+    input.profileSelectionOwner === 'project_control_plane'
+      ? null
+      : haltFromAutomaticRepairProfile(pendingDecision, taskId, input.requestedProfileId);
   if (profileHalt) {
     return { blocker: AUTOMATIC_REPAIR_PROFILE_MISMATCH, reason: profileHalt.reason };
   }

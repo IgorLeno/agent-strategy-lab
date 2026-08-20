@@ -63,6 +63,26 @@ export const LauncherProfile = z
     maximum_instruction_bytes: z.number().int().positive().default(8_192),
     /** Marcadores que provam controle real, verificados contra o argv final. */
     control_markers: z.record(nonEmpty).default({}),
+    /**
+     * Capability que este perfil FALSO representa nos contratos de routing.
+     *
+     * Existe porque `capabilityOf` (M77) e o router (M78) classificam modelos,
+     * e um worker falso não tem modelo: sem isto, nenhum caminho executável do
+     * lifecycle universal pode ser exercitado de ponta a ponta sem chamar um
+     * provider real. O campo é DECLARATIVO e restrito a `agent: fake` — um
+     * perfil real nunca pode declarar uma capability diferente da que o argv
+     * versionado prova, e a cobrança continua sendo decidida pelo `agent` real
+     * (`fake` nunca fala com provider nenhum).
+     */
+    test_double_of: z
+      .object({
+        agent: z.enum(['claude', 'codex']),
+        model: nonEmpty,
+        reasoning_effort: nonEmpty,
+        sandbox: nonEmpty.default('workspace-write'),
+      })
+      .strict()
+      .optional(),
     notes: z.array(nonEmpty).default([]),
   })
   .strict()
@@ -83,6 +103,8 @@ export const LauncherProfile = z
       if (profile.billing_mode !== 'not_applicable') {
         reject('worker falso não fala com provider nenhum; billing_mode deve ser not_applicable');
       }
+    } else if (profile.test_double_of !== undefined) {
+      reject('test_double_of só existe em perfil fake: perfil real declara capability pelo argv versionado');
     } else if (profile.billing_mode === 'not_applicable') {
       reject('perfil de agente real precisa declarar billing_mode (subscription_only ou api)');
     }

@@ -19,7 +19,8 @@ function requireOption(args: ReturnType<typeof parseArgs>, name: string): string
   if (value === undefined || value.length === 0) {
     fail(
       `--${name} é obrigatório para dev-run-plan.\n` +
-        'Uso: pnpm dev-run-plan --repo <path> --plan <plan.yaml> --profile <id>',
+        'Uso: pnpm dev-run-plan --repo <path> --plan <plan.yaml> --profile <id>\n' +
+        '     pnpm dev-run-plan --repo <path> --plan <plan.yaml> --authorization <agentlab-run.yaml>',
     );
   }
   return value;
@@ -30,7 +31,13 @@ function requireOption(args: ReturnType<typeof parseArgs>, name: string): string
  * executor: resolve o setup, inicializa o runtime só quando necessário e
  * delega a `runOrchestrate` / `initializeHarnessRuntime`.
  *
- * `--profile` é obrigatório: esta CLI não escolhe um default implícito.
+ * `--profile` é obrigatório SEM `--authorization`: esta CLI não escolhe um
+ * default implícito. Com `--authorization <agentlab-run.yaml>`, a run passa
+ * pelo control plane universal (M71–M84) — intake, inspeção, assessment,
+ * routing dentro da policy autorizada, worker runtime budget adaptativo,
+ * review quando a policy exigir, diagnosis, escalation autorizada e gate
+ * humano na fronteira — e `--profile`, se informado, precisa pertencer à
+ * policy. Sem `--authorization`, o comportamento histórico é idêntico.
  * `--plan` aponta para o PlanFile autoritativo e NÃO o copia para
  * `<repo>/dev/plan.yaml`.
  * `--profile` é carregado do catálogo do Agent Strategy Lab (não do alvo).
@@ -43,7 +50,8 @@ async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2), [VERBOSE_FLAG, DRY_RUN_FLAG]);
   const repo = requireOption(args, 'repo');
   const plan = requireOption(args, 'plan');
-  const profile = requireOption(args, 'profile');
+  const authorization = args.options.get('authorization');
+  const profile = authorization === undefined ? requireOption(args, 'profile') : args.options.get('profile');
   const paths = resolveHarnessPaths(
     repo,
     harnessOverrideFromCli({
@@ -58,7 +66,8 @@ async function main(): Promise<void> {
     const autonomy = parseRoutineAutonomy(args);
     const result = await runPlan({
       paths,
-      profileId: profile,
+      ...(profile === undefined ? {} : { profileId: profile }),
+      ...(authorization === undefined ? {} : { authorizationFile: authorization }),
       dryRun: args.flags.has(DRY_RUN_FLAG),
       maxIterations: parseMaxIterations(args),
       verbose: isVerbose(args),

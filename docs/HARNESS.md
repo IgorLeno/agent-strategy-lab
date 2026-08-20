@@ -410,10 +410,60 @@ Runtime default: `<repo>/.dev` (o mesmo do harness histórico). `--runtime-dir`
   use outro `--runtime-dir` ou uma operação explícita de adoção/reset fora
   deste comando. Não há `--force` / `--yes` aqui.
 
-`--profile` é obrigatório: esta entrypoint não escolhe um default implícito.
-`--plan-file` / `--runtime-dir` nas primitives (`dev-init`, `dev-orchestrate`)
-são o mesmo override aditivo; omiti-los preserva `<repo>/dev/plan.yaml` e
-`<repo>/.dev`.
+`--profile` é obrigatório SEM `--authorization`: esta entrypoint não escolhe um
+default implícito. `--plan-file` / `--runtime-dir` nas primitives (`dev-init`,
+`dev-orchestrate`) são o mesmo override aditivo; omiti-los preserva
+`<repo>/dev/plan.yaml` e `<repo>/.dev`.
+
+### Rodar um PlanFile pelo lifecycle universal (`--authorization`)
+
+Sem `--authorization`, `dev-run-plan` é o wrapper histórico: um profile por
+invocação, budget do launcher, parada no repair esgotado. **Com**
+`--authorization <agentlab-run.yaml>`, a mesma run atravessa o control plane
+universal (M71–M84) — e continua usando exatamente as mesmas primitives de
+execução (select, packet, launch, close, validação oficial, automatic repair,
+recover, evidência). Não existe segundo executor: o control plane só DECIDE.
+
+```bash
+pnpm dev-run-plan \
+  --repo ~/Projetos/minesweeper \
+  --plan ~/Projetos/plans/minesweeper.yaml \
+  --authorization ~/Projetos/plans/minesweeper-run.yaml \
+  --autonomy routine
+```
+
+Duas coisas ficam DELIBERADAMENTE separadas:
+
+- **work definition** — tarefas, acceptance, dependências e validation vêm do
+  PlanFile e são tratadas como confiáveis. Nenhum planning worker é chamado
+  para reescrevê-las.
+- **execution authorization** — quais capabilities o harness pode exercer
+  sozinho, quais profiles são elegíveis e qual é a política de cobrança vêm do
+  `agentlab-run.yaml`. `--profile` nunca autoriza nada; quando informado junto
+  da policy, precisa pertencer a ela.
+
+O que o PlanFile histórico não carrega (risco, taxonomy, envelope de recursos)
+é DECLARADO em `work_units`, com override por task. Nada disso é inferido:
+classificação ausente é erro de setup, não default permissivo.
+
+Por work unit o output mostra caminho (`DIRECT`/`REVIEWED`), proveniência da
+inspeção, assessment, profile escolhido pelo routing, fonte do routing, worker
+runtime budget, autorização do launch, validação, exigência e resultado de
+review, repair, diagnosis, escalation e gate humano.
+
+Escalation é autorizada pela ladder da policy (`capability_rank`) e reabre a
+task pela primitive oficial (`dev-retry-failed`), sem gate humano por spawn.
+Uma policy com **um único profile** é o modo benchmark: inspection, assessment,
+budget, validação e review continuam acontecendo, mas uma escalation exigida
+vira `HUMAN_REQUIRED` — a policy nunca é ampliada em silêncio.
+
+`docs/agentlab-run.example.yaml` é o contrato comentado; a policy fixa usada em
+benchmark A/B está em `docs/agentlab-run.codex-sol-medium-only.yaml`.
+
+Harness self-maintenance (a recipe de manutenção da `--autonomy routine`)
+pertence ao Agent Strategy Lab. Num repositório alvo externo ela é
+**fail-closed**: um incidente de projeto nunca vira manutenção de harness
+dentro do alvo.
 
 `dev-recover-protocol-output` cobre somente o caso estreito em que um worker
 terminou com report `SUCCESS`, handoff `PASS` e `candidate_commit == null`, mas

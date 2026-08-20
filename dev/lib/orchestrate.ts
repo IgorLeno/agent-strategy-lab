@@ -18,7 +18,7 @@ import {
   summarizePreflight,
   type IterationInput,
 } from './orchestrate-report.js';
-import type { HarnessPaths } from './paths.js';
+import { resolveHarnessInstallationRoot, type HarnessPaths } from './paths.js';
 import type { LoadedPlan } from './plan.js';
 import { loadProfile } from './profile.js';
 import { writePacket } from './records.js';
@@ -38,6 +38,7 @@ import {
   createRoutineAutonomyRuntime,
   createRoutinePostLaunchRuntime,
 } from './routine-autonomy-runtime.js';
+import type { ProjectControlPlane } from './project-run.js';
 import { selectNextTask } from './select.js';
 import { ensureRuntimeDirs, getTaskState, readState } from './state.js';
 import { launchTask, prepareNextTask, type LaunchStepResult } from './steps.js';
@@ -448,6 +449,15 @@ export interface OrchestrateOptions {
   readonly autonomy?: 'routine';
   readonly skipPreflight?: boolean;
   readonly verbose?: boolean;
+  /**
+   * Control plane do lifecycle universal de projeto. Ausente (todo uso
+   * histórico), o loop decide exatamente como sempre decidiu: um profile por
+   * invocação, budget do launcher e parada no repair esgotado. Presente, as
+   * DECISÕES por work unit passam a vir dele — profile, worker runtime budget,
+   * review, diagnosis e escalation — sem que o loop, o estado autoritativo, o
+   * commit ou a validação oficial mudem de dono.
+   */
+  readonly controlPlane?: ProjectControlPlane;
 }
 
 export interface OrchestrateResult {
@@ -470,6 +480,7 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
     autonomy,
     skipPreflight = false,
     verbose = false,
+    controlPlane,
   } = options;
   await ensureRuntimeDirs(paths);
 
@@ -496,12 +507,29 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
         paths,
         loaded,
         requestedProfileId: profileId,
+        ...(controlPlane === undefined
+          ? {}
+          : { profileSelectionOwner: 'project_control_plane' as const }),
       });
       if (currentPreflight.status === 'BLOCKED' && autonomy === 'routine') {
         const incident = await inspectRoutineIncident(paths, currentPreflight);
+        // Harness self-maintenance só é legítima no próprio Agent Strategy Lab.
+        // Num repositório alvo externo, um incidente de projeto não autoriza
+        // manutenção de harness dentro do alvo — a resolução é fail-closed.
+        const harnessRoot = resolveHarnessInstallationRoot();
         const resolution = await resolveRoutinePreflight({
           paths,
           incident,
+          harnessSelfMaintenance:
+            paths.repoRoot === harnessRoot
+              ? {
+                  allowed: true,
+                  reason: `repositório conduzido é a própria instalação do harness (${harnessRoot})`,
+                }
+              : {
+                  allowed: false,
+                  reason: `repoRoot=${paths.repoRoot} difere da instalação do harness ${harnessRoot}`,
+                },
           driver: createRoutineAutonomyRuntime({
             paths,
             loaded,
@@ -551,15 +579,37 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
       }
     }
 
+    /**
+     * Escalation autorizada pelo control plane depois do bounded repair
+     * esgotado. Sem control plane a resposta é sempre `null` e o loop para
+     * exatamente onde parava antes — o gate humano continua sendo o
+     * `dev-retry-failed` explícito.
+     */
+    const escalateOrHalt = async (
+      taskId: string,
+      halt: { status: string; reason: string },
+    ): Promise<'CONTINUE' | 'HALT'> => {
+      if (controlPlane === undefined) return 'HALT';
+      const followUp = await controlPlane.onRepairExhausted({ taskId, reason: halt.reason });
+      if (followUp.status === 'ESCALATED') return 'CONTINUE';
+      if (followUp.status === 'HUMAN_REQUIRED') {
+        humanRequired = followUp.human_required;
+        stop = {
+          status: 'HUMAN_REQUIRED',
+          reason: followUp.human_required.why_automation_stopped,
+        };
+        return 'HALT';
+      }
+      return 'HALT';
+    };
+
     for (let index = 0; index < maxIterations; index += 1) {
       const failed = (await readState(paths)).tasks.find((task) => task.status === 'FAIL');
       if (failed) {
         const pendingDecision = await decideAutomaticRepair(paths, failed.id);
-        const profileHalt = haltFromAutomaticRepairProfile(
-          pendingDecision,
-          failed.id,
-          profileId,
-        );
+        const profileHalt = controlPlane
+          ? null
+          : haltFromAutomaticRepairProfile(pendingDecision, failed.id, profileId);
         if (profileHalt) {
           stop = profileHalt;
           break;
@@ -567,7 +617,8 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
         const rec = await reconcileAutomaticRepair({ paths, taskId: failed.id });
         const halt = haltFromAutomaticRepair(rec.decision);
         if (halt) {
-          stop = halt;
+          if ((await escalateOrHalt(failed.id, halt)) === 'CONTINUE') continue;
+          stop = stop.status === 'HUMAN_REQUIRED' ? stop : halt;
           break;
         }
         if (rec.decision.action !== 'REPAIR_ALLOWED') {
@@ -582,11 +633,9 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
       let repairMeta: { automaticRepair: boolean; repairSourceAttempt: number } | null = null;
       if (subjectId) {
         const pendingDecision = await decideAutomaticRepair(paths, subjectId);
-        const profileHalt = haltFromAutomaticRepairProfile(
-          pendingDecision,
-          subjectId,
-          profileId,
-        );
+        const profileHalt = controlPlane
+          ? null
+          : haltFromAutomaticRepairProfile(pendingDecision, subjectId, profileId);
         if (profileHalt) {
           stop = profileHalt;
           break;
@@ -606,7 +655,29 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
         }
       }
 
-      let executed = await executeReadyTask(paths, loaded, launchProfile, timeoutOverride, repairMeta);
+      // O control plane decide profile e worker runtime budget POR work unit.
+      // No bounded repair o profile é imposto pela policy existente e entra
+      // como pin: routing informa, mas não troca o profile do repair.
+      let launchTimeout = timeoutOverride;
+      if (controlPlane !== undefined && subjectId !== null) {
+        const decision = await controlPlane.beforeWorkUnit({
+          taskId: subjectId,
+          attemptKind: repairMeta === null ? 'FIRST_PASS' : 'REPAIR',
+          pinnedProfileId: repairMeta === null ? null : launchProfile,
+        });
+        if (decision.outcome === 'HUMAN_REQUIRED') {
+          humanRequired = decision.human_required;
+          stop = {
+            status: 'HUMAN_REQUIRED',
+            reason: decision.human_required.why_automation_stopped,
+          };
+          break;
+        }
+        launchProfile = decision.profile_id;
+        launchTimeout = String(decision.timeout_seconds);
+      }
+
+      let executed = await executeReadyTask(paths, loaded, launchProfile, launchTimeout, repairMeta);
       if ('empty' in executed) {
         stop = executed.stop;
         break;
@@ -617,7 +688,7 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
           loaded,
           executed,
           launchProfile,
-          timeoutOverride,
+          launchTimeout,
           repairMeta,
         );
         iterations.push(...settled.executions.map((item) => item.iteration));
@@ -633,6 +704,24 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
       } else {
         iterations.push(executed.iteration);
       }
+      if (controlPlane !== undefined) {
+        const followUp = await controlPlane.afterWorkUnit({
+          taskId: executed.iteration.taskId,
+          attempt: executed.iteration.attempt,
+          profileId: launchProfile,
+          closeKind: executed.closeKind,
+          launch: executed.iteration.launch,
+          reason: executed.iteration.reason,
+        });
+        if (followUp.status === 'HUMAN_REQUIRED') {
+          humanRequired = followUp.human_required;
+          stop = {
+            status: 'HUMAN_REQUIRED',
+            reason: followUp.human_required.why_automation_stopped,
+          };
+          break;
+        }
+      }
       if (executed.closeKind === 'PASS') {
         stop = { status: 'ALL_DONE', reason: 'nenhuma tarefa pendente' };
         exhausted = index === maxIterations - 1;
@@ -646,11 +735,9 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
       // FIRST official validation FAIL: um repair bounded na mesma invocação,
       // mesmo profile, sem consumir outro ciclo primário de max-iterations.
       const pendingDecision = await decideAutomaticRepair(paths, executed.iteration.taskId);
-      const profileHalt = haltFromAutomaticRepairProfile(
-        pendingDecision,
-        executed.iteration.taskId,
-        profileId,
-      );
+      const profileHalt = controlPlane
+        ? null
+        : haltFromAutomaticRepairProfile(pendingDecision, executed.iteration.taskId, profileId);
       if (profileHalt) {
         stop = profileHalt;
         break;
@@ -670,11 +757,28 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
         automaticRepair: true,
         repairSourceAttempt: rec.decision.source_attempt,
       } as const;
+      let repairTimeout = timeoutOverride;
+      if (controlPlane !== undefined) {
+        const decision = await controlPlane.beforeWorkUnit({
+          taskId: executed.iteration.taskId,
+          attemptKind: 'REPAIR',
+          pinnedProfileId: rec.decision.profile_id,
+        });
+        if (decision.outcome === 'HUMAN_REQUIRED') {
+          humanRequired = decision.human_required;
+          stop = {
+            status: 'HUMAN_REQUIRED',
+            reason: decision.human_required.why_automation_stopped,
+          };
+          break;
+        }
+        repairTimeout = String(decision.timeout_seconds);
+      }
       let repair = await executeReadyTask(
         paths,
         loaded,
         rec.decision.profile_id,
-        timeoutOverride,
+        repairTimeout,
         capabilityRepairMeta,
       );
       if ('empty' in repair) {
@@ -687,7 +791,7 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
           loaded,
           repair,
           rec.decision.profile_id,
-          timeoutOverride,
+          repairTimeout,
           capabilityRepairMeta,
         );
         iterations.push(...settled.executions.map((item) => item.iteration));
@@ -703,6 +807,24 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
       } else {
         iterations.push(repair.iteration);
       }
+      if (controlPlane !== undefined) {
+        const followUp = await controlPlane.afterWorkUnit({
+          taskId: repair.iteration.taskId,
+          attempt: repair.iteration.attempt,
+          profileId: rec.decision.profile_id,
+          closeKind: repair.closeKind,
+          launch: repair.iteration.launch,
+          reason: repair.iteration.reason,
+        });
+        if (followUp.status === 'HUMAN_REQUIRED') {
+          humanRequired = followUp.human_required;
+          stop = {
+            status: 'HUMAN_REQUIRED',
+            reason: followUp.human_required.why_automation_stopped,
+          };
+          break;
+        }
+      }
       if (repair.closeKind === 'PASS') {
         stop = { status: 'ALL_DONE', reason: 'nenhuma tarefa pendente' };
         exhausted = index === maxIterations - 1;
@@ -710,12 +832,17 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
       }
       if (repair.closeKind === 'FAIL') {
         const repairDecision = await decideAutomaticRepair(paths, repair.iteration.taskId);
-        stop =
+        const repairHalt =
           haltFromAutomaticRepair(repairDecision) ??
           repair.stop ?? {
             status: repair.closeKind,
             reason: repair.iteration.reason,
           };
+        // Repair esgotado: o control plane pode autorizar o degrau seguinte da
+        // ladder configurada e reabrir a task pela primitive oficial. Sem
+        // control plane, o comportamento histórico é intocado.
+        if ((await escalateOrHalt(repair.iteration.taskId, repairHalt)) === 'CONTINUE') continue;
+        stop = stop.status === 'HUMAN_REQUIRED' ? stop : repairHalt;
         break;
       }
       stop = repair.stop ?? { status: repair.closeKind ?? 'FAIL', reason: repair.iteration.reason };

@@ -41,6 +41,18 @@ export const CLAUDE_READ_ONLY_PERMISSION_MODE = 'plan';
 export const CODEX_READ_ONLY_MECHANISM =
   'argv Codex: o único --sandbox workspace-write é convertido para read-only antes do spawn';
 
+/**
+ * Mecanismo estrutural do worker FALSO. É argv, não prompt: o fixture recusa
+ * qualquer mutação quando recebe esta flag e devolve apenas o veredito. Existe
+ * porque o role de reviewer precisa ser exercitável de ponta a ponta sem
+ * chamar provider real — sem ele, nenhum teste consegue provar que a review
+ * aconteceu em contexto fresco e somente-leitura.
+ */
+export const FAKE_READ_ONLY_FLAG = '--agentlab-read-only';
+
+export const FAKE_READ_ONLY_MECHANISM =
+  `argv do worker falso: ${FAKE_READ_ONLY_FLAG} faz o fixture recusar escrita, commit e validação oficial antes de qualquer efeito`;
+
 export const CLAUDE_READ_ONLY_MECHANISM =
   `argv Claude: --settings passa a apontar para ${CLAUDE_READ_ONLY_SETTINGS_FILE} (deny de Edit/Write/NotebookEdit e de todo comando de mutação) e --permission-mode passa a ${CLAUDE_READ_ONLY_PERMISSION_MODE}, com --setting-sources project excluindo settings pessoais`;
 
@@ -82,6 +94,16 @@ function applyCodexReadOnly(role: ProjectWorkerRole, argv: string[]): void {
     );
   }
   argv[sandboxIndex + 1] = 'read-only';
+}
+
+function applyFakeReadOnly(role: ProjectWorkerRole, argv: string[]): void {
+  if (argv.includes(FAKE_READ_ONLY_FLAG)) {
+    throw new RoleOverlayError(
+      role,
+      `argv do worker falso já declara ${FAKE_READ_ONLY_FLAG}; o overlay não duplica a fronteira`,
+    );
+  }
+  argv.push(FAKE_READ_ONLY_FLAG);
 }
 
 function applyClaudeReadOnly(role: ProjectWorkerRole, argv: string[]): void {
@@ -156,6 +178,10 @@ export function buildRoleArgv(
       applyClaudeReadOnly(input.role, argv);
       mechanism = CLAUDE_READ_ONLY_MECHANISM;
       break;
+    case 'fake':
+      applyFakeReadOnly(input.role, argv);
+      mechanism = FAKE_READ_ONLY_MECHANISM;
+      break;
     default:
       throw new RoleOverlayError(
         input.role,
@@ -199,6 +225,12 @@ export function assertReadOnlyArgv(
       argv[permissionIndex + 1] !== CLAUDE_READ_ONLY_PERMISSION_MODE
     ) {
       throw new RoleOverlayError(role, 'argv lançado não prova overlay read-only Claude');
+    }
+    return;
+  }
+  if (agent === 'fake') {
+    if (argv.filter((token) => token === FAKE_READ_ONLY_FLAG).length !== 1) {
+      throw new RoleOverlayError(role, 'argv lançado não prova overlay read-only do worker falso');
     }
     return;
   }

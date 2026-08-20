@@ -1,0 +1,60 @@
+# Policy de BENCHMARK: somente `codex-build-worker-subscription-sol-medium-v2`
+# é elegível. O Agent Strategy Lab continua fazendo inspection, assessment,
+# routing, budget adaptativo, validação oficial e review conforme a policy —
+# mas não troca de modelo nem de provider, porque o experimento proibiu.
+#
+# Se o diagnóstico exigir escalation, o resultado é HUMAN_REQUIRED: a policy
+# nunca é ampliada em silêncio. É isso que mantém os dois braços do A/B
+# (Codex direto vs Agent Strategy Lab) sobre o MESMO modelo e effort.
+schema_version: 1
+
+requested_scope:
+  summary: implementar as tarefas declaradas no PlanFile do projeto
+
+constraints: []
+exclusions:
+  - deploy
+
+autonomous_execution_boundary:
+  - DISPOSABLE_LOCAL_WORKSPACE
+  - CONFIGURED_SUBSCRIPTION_WORKER
+  - DETERMINISTIC_VALIDATION
+  - BOUNDED_REPAIR
+
+human_gated_capabilities:
+  - UNAUTHORIZED_API_BILLING
+  - BILLING_MODE_CHANGE
+  - DESTRUCTIVE_ACTION
+  - DEPLOYMENT_OR_PRODUCTION
+  - EXTERNAL_SIDE_EFFECT
+  - SCOPE_EXPANSION
+  - NEW_CREDENTIAL_BOUNDARY
+  - CRITICAL_OR_SECURITY_SENSITIVE_ACTION
+  - PROFILE_OR_PROVIDER_OUTSIDE_POLICY
+
+billing:
+  allowed_billing_modes:
+    - subscription_only
+
+profile_policy:
+  id: codex-sol-medium-only
+  allowed_providers:
+    - codex
+  profiles:
+    - id: codex-build-worker-subscription-sol-medium-v2
+      capability_rank: 0
+      rationale: profile único fixado pela metodologia do experimento A/B
+
+work_units:
+  default:
+    task_class: feature
+    difficulty_declared: medium
+    risk: low
+    complexity: local
+    ambiguity: low
+    verification: deterministic
+    resource_envelope:
+      duration_ms: { expected: 900000, maximum: 1800000 }
+      tokens: { expected: 80000, maximum: 200000 }
+      changed_files: { expected: 4, maximum: 12 }
+  overrides: {}

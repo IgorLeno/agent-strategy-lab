@@ -292,6 +292,19 @@ function uniqueOptionValue(argv: readonly string[], flag: string): string {
   return values.length === 1 ? (values[0] as string) : 'unknown';
 }
 
+/**
+ * Sandbox e persistência de sessão derivados do MESMO argv versionado que o
+ * relatório do doctor usa. Exportados para que o control plane de projeto
+ * consuma a derivação existente em vez de reimplementá-la.
+ */
+export function sandboxOf(profile: LauncherProfile): string {
+  return uniqueOptionValue(profile.argv, '--sandbox');
+}
+
+export function sessionPersistenceOf(profile: LauncherProfile): string {
+  return profile.argv.includes('--ephemeral') ? 'ephemeral' : 'persistent';
+}
+
 function isCodexBuildWorker(profile: LauncherProfile): boolean {
   return profile.agent === 'codex' && profile.id.includes('build-worker');
 }
@@ -859,8 +872,8 @@ export async function diagnose(input: DoctorInput): Promise<DoctorReport> {
   const outputFormat =
     profile.agent === 'claude' ? claudeOutputFormat(profile.argv) : 'not_applicable';
   const reasoning = reasoningEffortFactsOf(profile);
-  const sandbox = uniqueOptionValue(profile.argv, '--sandbox');
-  const sessionPersistence = profile.argv.includes('--ephemeral') ? 'ephemeral' : 'persistent';
+  const sandbox = sandboxOf(profile);
+  const sessionPersistence = sessionPersistenceOf(profile);
   const userConfigIgnored = profile.argv.includes('--ignore-user-config');
   const rulesIgnored = profile.argv.includes('--ignore-rules');
   const credential = await checkCredentialSource(profile, workerEnv, input.credentialRunner);

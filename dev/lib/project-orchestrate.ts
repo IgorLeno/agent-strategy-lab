@@ -86,7 +86,7 @@ import { writeJsonOnce } from './atomic.js';
 import { assertNoApiCredentials, runBillingPreflight } from './billing.js';
 import { buildTimeoutArgv } from './exec.js';
 import type { HarnessPaths } from './paths.js';
-import { buildEnvironment, type LauncherProfile } from './profile.js';
+import { buildEnvironment, resolveProfileArgv, type LauncherProfile } from './profile.js';
 import {
   assertReadOnlyArgv,
   buildRoleArgv,
@@ -746,6 +746,22 @@ function invocationFailure(
   };
 }
 
+/**
+ * Recursos relativos do argv (fixtures, settings versionadas) pertencem ao
+ * CATÁLOGO do harness, não ao repositório alvo. Sem esta resolução, um role
+ * lançado sobre um alvo externo procuraria os arquivos do profile dentro do
+ * alvo. Quando catálogo e cwd coincidem (uso histórico), o argv não muda.
+ */
+function catalogResolvedProfile(paths: HarnessPaths, profile: LauncherProfile): LauncherProfile {
+  return {
+    ...profile,
+    argv: resolveProfileArgv(profile.argv, {
+      catalogRoot: paths.profileCatalogRoot,
+      workerCwd: paths.repoRoot,
+    }),
+  };
+}
+
 /** O packet do planner vira o prompt bounded — fatos derivados, nunca transcript. */
 export function buildPlannerPrompt(invocation: PlanningWorkerInvocation): string {
   return [
@@ -812,7 +828,7 @@ export function createLaunchedPlanningWorker(
         return invocationFailure(options, invocationId, 'BUDGET_UNSUPPORTED', budget.reason, false);
       }
 
-      const overlay = buildRoleArgv(options.profile, {
+      const overlay = buildRoleArgv(catalogResolvedProfile(options.paths, options.profile), {
         role: 'planner',
         prompt: buildPlannerPrompt(invocation),
       });
@@ -966,6 +982,161 @@ function extractJsonObject(text: string): unknown {
     }
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Invocação real do reviewer — mesmos guards do planning worker.
+// ---------------------------------------------------------------------------
+
+/** Fatos derivados que o reviewer recebe. Nunca transcript, nunca self-report. */
+export interface ProjectReviewPacket {
+  readonly task_id: string;
+  readonly objective: string;
+  readonly acceptance: readonly string[];
+  readonly validation: readonly { readonly argv: readonly string[] }[];
+  readonly changed_files: readonly string[];
+  readonly candidate_sha: string | null;
+  readonly official_validation_outcome: string;
+  readonly evidence_paths: readonly string[];
+}
+
+export function buildReviewerPrompt(packet: ProjectReviewPacket): string {
+  return [
+    'Você é o REVIEWER independente e SOMENTE LEITURA do control plane.',
+    'Não edite arquivos, não faça commit, não execute validação oficial e não chame outro agente.',
+    'Você NÃO confia no self-report do implementer: decida pela evidência abaixo e pelo repositório.',
+    '',
+    'REVIEW PACKET (JSON):',
+    JSON.stringify(packet, null, 2),
+    '',
+    'Responda SOMENTE com um único JSON {"decision":"ACCEPT|REJECT","reason":"..."}.',
+  ].join('\n');
+}
+
+export interface ProjectReviewerLaunchOptions {
+  readonly paths: HarnessPaths;
+  readonly profile: LauncherProfile;
+  readonly scope: ExecutionAuthorizationScope;
+  readonly implementerProfileId: string;
+  readonly diversityRequirement: DiversityRequirement;
+  readonly packet: ProjectReviewPacket;
+  readonly risk: TaskRisk;
+  readonly workerRuntimeBudgetMs: number;
+  readonly quotaAvailable: boolean;
+  readonly credentialProved: boolean;
+  readonly port?: ProviderRoleInvocationPort;
+}
+
+interface ProjectReviewVerdict<Outcome extends 'ACCEPT' | 'REJECT'> {
+  readonly outcome: Outcome;
+  readonly reason: string;
+  readonly policy: ReviewerInvocationPolicy;
+  readonly argv: readonly string[];
+}
+
+export type ProjectReviewResult =
+  | ProjectReviewVerdict<'ACCEPT'>
+  | ProjectReviewVerdict<'REJECT'>
+  | { readonly outcome: 'REVIEW_UNAVAILABLE'; readonly code: string; readonly reason: string };
+
+function reviewUnavailable(code: string, reason: string): ProjectReviewResult {
+  return { outcome: 'REVIEW_UNAVAILABLE', code, reason };
+}
+
+/**
+ * Invocação NOVA, contexto fresco, read-only estrutural e uma única decisão
+ * JSON. Reusa exatamente os mesmos guards do adapter de planning: escopo,
+ * billing, quota, credencial, risco e execution policy. Saída ambígua não é
+ * reparada — vira `REVIEW_UNAVAILABLE`, nunca um ACCEPT presumido.
+ */
+export async function launchProjectReviewer(
+  options: ProjectReviewerLaunchOptions,
+): Promise<ProjectReviewResult> {
+  const plan = planReviewerInvocation({
+    implementerProfileId: options.implementerProfileId,
+    reviewerProfileId: options.profile.id,
+    diversityRequirement: options.diversityRequirement,
+  });
+  if (plan.outcome === 'DIVERSITY_REQUIRED') {
+    return reviewUnavailable('REVIEW_DIVERSITY_REQUIRED', plan.reason);
+  }
+
+  const authorization = authorizeProjectLaunch({
+    scope: options.scope,
+    capability: 'CONFIGURED_SUBSCRIPTION_WORKER',
+    billing_mode: options.profile.billing_mode,
+    quota_available: options.quotaAvailable,
+    credential_proved: options.credentialProved,
+    risk: options.risk,
+    worker_owns_commit: options.profile.commit_owner !== 'orchestrator',
+    worker_owns_official_validation: options.profile.official_validation_owner !== 'orchestrator',
+  });
+  if (authorization.outcome === 'HUMAN_REQUIRED') {
+    return reviewUnavailable('REVIEW_LAUNCH_HUMAN_REQUIRED', authorization.reason);
+  }
+
+  const budget = resolveWorkerRuntimeBudget({
+    profile: options.profile,
+    budgetMs: options.workerRuntimeBudgetMs,
+  });
+  if (budget.outcome === 'BUDGET_UNSUPPORTED') {
+    return reviewUnavailable('REVIEW_BUDGET_UNSUPPORTED', budget.reason);
+  }
+
+  const prompt = buildReviewerPrompt(options.packet);
+  const overlay = buildRoleArgv(catalogResolvedProfile(options.paths, options.profile), {
+    role: 'reviewer',
+    prompt,
+  });
+  assertReadOnlyArgv('reviewer', options.profile.agent, overlay.argv);
+
+  const home = path.join(options.paths.devDir, 'project', 'homes', options.profile.id);
+  await mkdir(home, { recursive: true });
+  const env = buildEnvironment(options.profile, process.env, { sanitizedHome: home });
+  assertNoApiCredentials('ambiente do reviewer', env);
+  const billing = await runBillingPreflight({
+    agent: options.profile.agent,
+    billingMode: options.profile.billing_mode,
+    binary: options.profile.argv[0] as string,
+    env,
+    orchestratorEnv: process.env,
+  });
+  if (!billing.ok) {
+    return reviewUnavailable(
+      'REVIEW_BILLING_PREFLIGHT_REFUSED',
+      billing.refusal ?? 'motivo não informado',
+    );
+  }
+
+  const port = options.port ?? createProviderRoleInvocationPort();
+  let stdout: string;
+  try {
+    stdout = await port.run({
+      role: 'reviewer',
+      profile: options.profile,
+      argv: overlay.argv,
+      prompt,
+      cwd: options.paths.repoRoot,
+      env,
+      timeoutSeconds: budget.timeout_seconds_override,
+    });
+  } catch (error) {
+    return reviewUnavailable(
+      'REVIEW_INVOCATION_FAILED',
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+
+  const parsed = extractJsonObject(stdout) as { decision?: unknown; reason?: unknown } | null;
+  const decision = parsed?.decision;
+  const reason = parsed?.reason;
+  if ((decision !== 'ACCEPT' && decision !== 'REJECT') || typeof reason !== 'string' || reason.trim() === '') {
+    return reviewUnavailable(
+      'REVIEW_VERDICT_NOT_PARSEABLE',
+      'saída do reviewer não contém um único JSON {"decision":"ACCEPT|REJECT","reason":"..."}',
+    );
+  }
+  return { outcome: decision, reason: reason.trim(), policy: plan.policy, argv: overlay.argv };
 }
 
 // ---------------------------------------------------------------------------

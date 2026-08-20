@@ -1,0 +1,40 @@
+# Test double do harness: worker FALSO que representa, para fins de routing,
+# uma capability avançada configurada. O argv aponta para o mesmo
+# `fixtures/fake-worker.mjs` de sempre — nenhum provider real, nenhuma
+# credencial e nenhum custo são exercitados. `test_double_of` existe só porque
+# `capabilityOf` (M77) e o router (M78) classificam MODELOS, e um worker falso
+# não tem modelo: sem ele, o lifecycle universal não seria exercitável de ponta
+# a ponta sem gastar dinheiro.
+id: fake-worker-advanced-v1
+agent: fake
+commit_owner: orchestrator
+official_validation_owner: orchestrator
+worker_validation_policy: targeted
+argv:
+  - node
+  - fixtures/fake-worker.mjs
+prompt_delivery: argv
+timeout_seconds: 120
+kill_after_seconds: 2
+forbidden_flags:
+  - --resume
+  - --continue
+  - --fork-session
+  - --session-id
+env_allowlist:
+  - PATH
+  - HOME
+  - LANG
+  - LC_ALL
+  - AGENTLAB_FAKE_MODE
+  - AGENTLAB_FAKE_REVIEW
+env_extra: {}
+control_markers: {}
+test_double_of:
+  agent: codex
+  model: gpt-5.6-sol
+  reasoning_effort: high
+  sandbox: workspace-write
+notes:
+  - 'Não fala formato de provider nenhum: exercita a interface interna do harness.'
+  - 'Degrau ALTO da ladder de escalation nos testes do lifecycle universal.'
