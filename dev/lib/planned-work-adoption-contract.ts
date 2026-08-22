@@ -137,4 +137,3 @@ export async function loadAdoptedTaskEvidence(
   }
   return byTask;
 }
-
