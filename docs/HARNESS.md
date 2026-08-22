@@ -382,7 +382,76 @@ pnpm dev-recover-protocol-output --task M56 --reason '...' # SUCCESS/PASS com me
 pnpm dev-recover-incomplete-worker-output --task M71 --reason '...' # worker terminou sem report/handoff
 pnpm dev-orchestrate --profile claude-build-worker-subscription-v1
 pnpm dev-run-plan --repo <alvo> --plan <plan.yaml> --profile <id>
+pnpm dev-adopt-planned-range --tasks 'M87=<sha>,M88=<sha>' --reason '...'  # planned work feito fora do lifecycle
 ```
+
+### Adotar planned work executado fora do lifecycle
+
+Existe uma situação que nenhuma das outras adoções cobre: tarefas que ESTÃO no
+plano foram implementadas fora do harness, e os commits existem e são
+verificáveis, mas não há `CompletionRecord`, `HandoffRecord` nem
+`OrchestratedFinalizationRecord` por trás delas. Isso acontece em bootstrap e em
+migração do próprio control plane, quando o runtime fica congelado enquanto o
+trabalho continua.
+
+Os mecanismos vizinhos recusam esse caso, e devem continuar recusando:
+
+| Mecanismo | Por que não serve |
+| --- | --- |
+| `dev-adopt-plan` | exige `parent(target) == authorized_head` e `changed_files == [dev/plan.yaml]`; um commit de plano que traz documentação junto não é plan extension |
+| `dev-adopt-maintenance-range` | recusa `dev/plan.yaml` por design, e a allowlist de manutenção não cobre código de produto |
+| `dev-recover` | tarefa nova sem close bundle reconhecido é `READY`, nunca `PASS` — avançar a base sozinho não conclui tarefa nenhuma |
+
+`dev-adopt-planned-range` é o caminho explícito, e é de propósito mais pesado:
+
+```bash
+pnpm dev-adopt-planned-range \
+  --target <sha> \
+  --tasks 'M87=<sha>,M88=<sha>' \
+  --maintenance-commits '<sha>,<sha>' \
+  --reason 'reconciliar trabalho aprovado executado fora do lifecycle' \
+  --dry-run
+```
+
+O que ele exige, e que nenhum atalho substitui:
+
+- **Mapping explícito.** `--tasks` só aceita `tarefa=commit`. Mensagem de commit
+  pode sugerir a autoria; nunca decide.
+- **Toda a faixa explicada.** Cada commit entre a base autorizada e o target
+  recebe um papel — `plan_extension`, `planned_task` ou `unplanned_maintenance`.
+  Commit sem papel declarado é recusa, e os arquivos extras de cada commit ficam
+  registrados no record em vez de sumirem.
+- **Extensão de plano provada.** Exatamente um commit da faixa toca
+  `dev/plan.yaml`, e a mudança é verificada append-only contra o plano da base
+  autorizada. Cada tarefa adotada precisa estar entre as que a extensão
+  acrescentou.
+- **Revalidação independente.** Os comandos que a PRÓPRIA tarefa declara rodam
+  sobre os bytes do commit mapeado, em worktree destacado. Uma falha derruba a
+  adoção inteira: nenhum record, nenhum state parcial.
+- **Ordem transacional.** Evidence imutável primeiro, state depois. Crash entre
+  os dois é retomado: o rerun reconhece o record, não revalida nada e conclui a
+  atualização (`ALREADY_ADOPTED`).
+
+`--dry-run` mostra base anterior, target, extensão detectada, mapping,
+manutenção, comandos que rodariam e transições de state — e não escreve arquivo,
+record nem state.
+
+#### O que adoção NÃO é
+
+Uma tarefa adotada satisfaz dependência do DAG e avança o runtime, mas **não é
+uma execução do harness**. Não existe attempt (`attempts` continua `0`), não
+existe handoff — uma tarefa dependente que peça `previous_handoff` recebe `null`,
+que é o fato — e nada disso vira `ComparableRunFacts` ou amostra de performance
+histórica: aquela camada é alimentada por `LaunchRecord` de attempt real, nunca
+por `TaskState.PASS`. Provider, modelo, tokens e billing permanecem UNKNOWN, e
+UNKNOWN não vira número para destravar comparação.
+
+A pergunta "por que M87 está PASS?" tem resposta consultável: o
+`PlannedWorkAdoptionRecord` em `.dev/planned-work-adoptions/<sha>.json`, com o
+commit aceito, o fingerprint da definição revalidada e a evidence de cada
+validação. Se alguém editar a tarefa no plano depois, o fingerprint deixa de
+bater e o `recover` REVOGA aquele PASS — a adoção histórica não passa a provar
+uma definição nova.
 
 ### Rodar um PlanFile já existente
 

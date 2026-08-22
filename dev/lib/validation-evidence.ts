@@ -69,17 +69,35 @@ function relativeToDev(paths: HarnessPaths, file: string): string {
   return path.relative(paths.devDir, file).split(path.sep).join('/');
 }
 
-export async function runOfficialValidation(
-  input: RunOfficialValidationInput,
+export interface RunValidationWithEvidenceInput {
+  readonly paths: HarnessPaths;
+  /** Onde os artifacts desta execução são publicados (append-only). */
+  readonly directory: string;
+  readonly command: ValidationCommand;
+  /** Working directory do comando — pode ser um worktree, não só o repo. */
+  readonly cwd: string;
+  readonly env?: NodeJS.ProcessEnv;
+  readonly sequence?: number;
+}
+
+/**
+ * Executa UM comando de validação e publica stdout/stderr/metadata como
+ * artifacts append-only no diretório indicado. É a primitive compartilhada:
+ * a validação oficial de um attempt e a revalidação de uma adoção precisam
+ * produzir exatamente a mesma evidence, mudando só onde ela mora e de qual
+ * working directory o comando roda.
+ */
+export async function runValidationWithEvidence(
+  input: RunValidationWithEvidenceInput,
 ): Promise<OfficialValidationExecution> {
-  const directory = attemptDirectory(input.paths, input.taskId, input.attempt);
+  const { directory } = input;
   const sequence = input.sequence ?? (await nextSequence(directory));
   const stem = sequence.toString().padStart(4, '0');
   const stdoutFile = path.join(directory, `${stem}.stdout.log`);
   const stderrFile = path.join(directory, `${stem}.stderr.log`);
   const metadataFile = path.join(directory, `${stem}.json`);
   const outcome = await runValidation(input.command, {
-    cwd: input.paths.repoRoot,
+    cwd: input.cwd,
     ...(input.env === undefined ? {} : { env: input.env }),
   });
   const result = toValidationResult(outcome);
@@ -101,4 +119,17 @@ export async function runOfficialValidation(
     Buffer.from(`${JSON.stringify(evidence, null, 2)}\n`, 'utf8'),
   );
   return { result, evidence };
+}
+
+export async function runOfficialValidation(
+  input: RunOfficialValidationInput,
+): Promise<OfficialValidationExecution> {
+  return runValidationWithEvidence({
+    paths: input.paths,
+    directory: attemptDirectory(input.paths, input.taskId, input.attempt),
+    command: input.command,
+    cwd: input.paths.repoRoot,
+    ...(input.env === undefined ? {} : { env: input.env }),
+    ...(input.sequence === undefined ? {} : { sequence: input.sequence }),
+  });
 }

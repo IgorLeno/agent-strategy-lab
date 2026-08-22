@@ -13,6 +13,11 @@ import {
 } from './revalidate.js';
 import { commitExists, headSha } from './git.js';
 import { reconcileMaintenanceRecords } from './maintenance.js';
+import {
+  loadAdoptedTaskEvidence,
+  reconcilePlannedWorkAdoptions,
+  type AdoptedTaskEvidence,
+} from './planned-work-adoption-contract.js';
 import type { HarnessPaths } from './paths.js';
 import type { LoadedPlan } from './plan.js';
 import { loadPlan } from './plan.js';
@@ -37,6 +42,9 @@ import {
   readState,
 } from './state.js';
 
+/** Teto defensivo: cada passo consome ao menos um record, que é finito. */
+const MAXIMUM_ADOPTION_CHAIN_STEPS = 1_000;
+
 export interface Reconciliation {
   readonly task_id: string;
   readonly from: string;
@@ -49,6 +57,16 @@ export interface RecoveryResult {
   readonly reconciliations: readonly Reconciliation[];
   readonly planChanged: boolean;
   readonly stateWasMissing: boolean;
+  /**
+   * Tarefas cujo PASS vem de adoção out-of-band, com o record que responde por
+   * ele. Existe para que a pergunta "por que esta tarefa está PASS?" tenha
+   * resposta consultável sem abrir o runtime na mão.
+   */
+  readonly adoptedOutOfBand: readonly {
+    readonly task_id: string;
+    readonly accepted_commit: string;
+    readonly adoption_record_sha: string;
+  }[];
 }
 
 export interface RecoveryOptions {
@@ -88,9 +106,19 @@ export async function recover(
   const previous = new Map((existing?.tasks ?? []).map((task) => [task.id, task]));
   const reconciliations: Reconciliation[] = [];
   const tasks: TaskState[] = [];
+  // Segunda forma legítima de reconstruir PASS, ao lado do close bundle. Os
+  // records já vêm verificados contra o Git; o que ainda pode divergir aqui é o
+  // vínculo com a DEFINIÇÃO atual da tarefa, e isso é decidido por tarefa.
+  const adoptions = await loadAdoptedTaskEvidence(paths);
+  const adoptedOutOfBand: {
+    task_id: string;
+    accepted_commit: string;
+    adoption_record_sha: string;
+  }[] = [];
 
   for (const planTask of loaded.plan.tasks) {
-    const before = previous.get(planTask.id);
+    const adoption = adoptions.get(planTask.id);
+    const before = previous.get(planTask.id) ?? (adoption ? initialTaskState(planTask.id) : null);
     if (!before) {
       tasks.push(initialTaskState(planTask.id));
       if (existing) {
@@ -103,9 +131,25 @@ export async function recover(
       }
       continue;
     }
-    const { task, reconciliation } = await reconcileTask(paths, loaded, before, options);
+    const wasAbsent = !previous.has(planTask.id);
+    const { task, reconciliation } = await reconcileTask(
+      paths,
+      loaded,
+      before,
+      options,
+      adoption ?? null,
+    );
     tasks.push(task);
-    if (reconciliation) reconciliations.push(reconciliation);
+    if (reconciliation) {
+      reconciliations.push(wasAbsent ? { ...reconciliation, from: 'ausente' } : reconciliation);
+    }
+    if (adoption && task.status === 'PASS' && task.accepted_commit === adoption.task.accepted_commit) {
+      adoptedOutOfBand.push({
+        task_id: planTask.id,
+        accepted_commit: adoption.task.accepted_commit,
+        adoption_record_sha: adoption.record.adopted_head_sha,
+      });
+    }
   }
 
   for (const id of previous.keys()) {
@@ -124,13 +168,20 @@ export async function recover(
   // HEAD antes da primeira tarefa aceita.
   const base = existing ?? buildInitialState(loaded.plan, loaded.planSha256);
   const baselineSha = base.baseline_sha ?? (await headSha(paths.repoRoot).catch(() => null));
-  const previousTaskBase = deriveAuthorizedHead(base.tasks, baselineSha);
-  const reconciledTaskBase = deriveAuthorizedHead(tasks, baselineSha);
+  // Tarefa adotada out-of-band NÃO dita a progressão da base: quem responde
+  // pela base nesse caso é o record de adoção (que inclui a manutenção de
+  // reconciliação depois do último commit de tarefa), não o commit da tarefa.
+  // Deixar o `finished_at` dela decidir faria a base regredir para dentro da
+  // faixa adotada — e por coincidência de timestamps, não por contrato.
+  const withoutAdopted = (list: readonly TaskState[]): TaskState[] =>
+    list.filter((task) => !adoptions.has(task.id));
+  const previousTaskBase = deriveAuthorizedHead(withoutAdopted(base.tasks), baselineSha);
+  const reconciledTaskBase = deriveAuthorizedHead(withoutAdopted(tasks), baselineSha);
   let authorizedHead = base.authorized_head_sha ?? previousTaskBase;
   if (authorizedHead === previousTaskBase && reconciledTaskBase !== previousTaskBase) {
     authorizedHead = reconciledTaskBase;
   }
-  authorizedHead = await reconcileMaintenanceRecords(paths, authorizedHead);
+  authorizedHead = await reconcileAdoptionChain(paths, authorizedHead);
   const state = DevelopmentState.parse({
     ...base,
     plan_sha256: loaded.planSha256,
@@ -138,7 +189,28 @@ export async function recover(
     authorized_head_sha: authorizedHead,
     tasks,
   });
-  return { state, reconciliations, planChanged, stateWasMissing };
+  return { state, reconciliations, planChanged, stateWasMissing, adoptedOutOfBand };
+}
+
+/**
+ * Manutenção e adoção de planned work avançam a MESMA base autorizada, e podem
+ * se alternar na história (manutenção, depois uma faixa adotada, depois
+ * manutenção de novo). Por isso o avanço é um ponto fixo sobre as duas famílias,
+ * e não duas passagens independentes: cada uma só consome records que começam
+ * exatamente na base corrente, então a caminhada é determinística e termina.
+ */
+async function reconcileAdoptionChain(
+  paths: HarnessPaths,
+  authorizedHead: string | null,
+): Promise<string | null> {
+  let current = authorizedHead;
+  for (let step = 0; step < MAXIMUM_ADOPTION_CHAIN_STEPS; step += 1) {
+    const afterMaintenance = await reconcileMaintenanceRecords(paths, current);
+    const afterPlannedWork = await reconcilePlannedWorkAdoptions(paths, afterMaintenance);
+    if (afterPlannedWork === current) return current;
+    current = afterPlannedWork;
+  }
+  throw new Error('cadeia de adoções não convergiu; runtime inconsistente');
 }
 
 export type BundleStatus = 'NONE' | 'INCOMPLETE' | 'VALID';
@@ -325,6 +397,7 @@ async function reconcileTask(
   loaded: LoadedPlan,
   before: TaskState,
   options: RecoveryOptions,
+  adoption: AdoptedTaskEvidence | null,
 ): Promise<{ task: TaskState; reconciliation: Reconciliation | null }> {
   let closeBundle = await verifyCloseBundle(paths, before.id);
 
@@ -345,6 +418,68 @@ async function reconcileTask(
         from: before.status,
         to: 'PASS',
         reason: 'fechamento completo existia mas o state não refletia',
+      },
+    };
+  }
+
+  // Adoção de planned work: a SEGUNDA origem legítima de PASS. Vem depois do
+  // close bundle de propósito — execução normal, quando existe, é a evidência
+  // mais forte, e as duas nunca deveriam coexistir (a adoção recusa tarefa com
+  // fechamento aceito). O vínculo com a definição ATUAL é reconferido aqui: um
+  // plano editado depois invalida a prova, e a tarefa NÃO vira PASS.
+  if (adoption && closeBundle.status === 'NONE') {
+    const planTask = loaded.byId.get(before.id);
+    const fingerprint = planTask ? canonicalSha256(planTask) : null;
+    if (fingerprint !== adoption.task.plan_task_fingerprint_sha256) {
+      // Fail closed de verdade: o PASS desta tarefa não tinha outra sustentação
+      // além da adoção, e a adoção deixou de provar a definição vigente. Manter
+      // o PASS aqui deixaria uma tarefa nova passando por concluída só porque
+      // uma tarefa antiga de mesmo id já tinha sido adotada.
+      const diagnostics =
+        `adoção out-of-band ${adoption.record.adopted_head_sha} não prova a definição ` +
+        `atual de ${before.id} — o plano mudou depois da adoção`;
+      return {
+        task: {
+          ...before,
+          status: 'READY',
+          phase: null,
+          accepted_commit: null,
+          candidate_commit: null,
+          finished_at: null,
+          diagnostics,
+        },
+        reconciliation: {
+          task_id: before.id,
+          from: before.status,
+          to: 'READY',
+          reason: diagnostics,
+        },
+      };
+    }
+    if (before.status === 'PASS' && before.accepted_commit === adoption.task.accepted_commit) {
+      return { task: before, reconciliation: null };
+    }
+    return {
+      task: {
+        ...before,
+        status: 'PASS',
+        phase: null,
+        accepted_commit: adoption.task.accepted_commit,
+        candidate_commit: adoption.task.accepted_commit,
+        diagnostics: null,
+        // `attempts` fica como está (0 numa tarefa nunca lançada): não houve
+        // attempt do harness, e inventar um faria a adoção parecer uma execução.
+        // `started_at` continua null pela mesma razão; `finished_at` é o
+        // committer timestamp do commit adotado — fato do Git, não relógio.
+        finished_at: adoption.task.committed_at,
+      },
+      reconciliation: {
+        task_id: before.id,
+        from: before.status,
+        to: 'PASS',
+        reason:
+          `PASS adotado out-of-band por ${adoption.record.adopted_head_sha} ` +
+          `(commit ${adoption.task.accepted_commit})`,
       },
     };
   }

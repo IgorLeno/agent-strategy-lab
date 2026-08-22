@@ -565,3 +565,21 @@ end-to-end com dados produzidos pelo writer real que a decisão MUDA; teste com
 fixture sintética do consumidor não prova que o produtor consegue satisfazê-lo.
 E cada fato obrigatório precisa de um writer explícito: ausência de artifact é
 UNKNOWN, lista vazia é prova positiva de zero, artifact inválido falha fechado.
+
+[2026-08-21] Contexto: M-A/M-B (M87-M94) implementadas e aprovadas enquanto o
+runtime do harness seguia congelado em M86, com o plano já estendido por um
+commit misto (plano + documentação).
+Mistake: as três primitives existentes recusavam a faixa — `dev-adopt-plan` por
+exigir commit só de `dev/plan.yaml`, `dev-adopt-maintenance-range` por recusar
+`dev/plan.yaml` e código de produto, `dev-recover` por só derivar PASS de close
+bundle — e a saída "óbvia" era editar `.dev/state.json` ou fabricar
+completion/handoff/finalization para as oito tarefas.
+Rule: extensão de plano e execução de tarefa divergem durante bootstrap e
+migração; isso NUNCA se resolve escrevendo runtime state na mão nem forjando
+records de execução. Planned work feito fora do lifecycle exige uma primitive
+própria — mapping explícito tarefa→commit, toda a faixa com papel declarado,
+extensão provada append-only, revalidação independente dos comandos que a
+tarefa declara, evidence imutável antes do state. E adoção não é execução:
+`attempts` fica 0, handoff ausente continua `null`, e nada disso entra na
+história de performance, que se alimenta de attempt real e não de
+`TaskState.PASS`.

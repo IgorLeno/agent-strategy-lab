@@ -38,6 +38,13 @@ export interface HarnessPaths {
    */
   readonly failedAttemptsDir: string;
   readonly validationLogsDir: string;
+  /**
+   * Adoções auditadas de planned work executado fora do lifecycle. Fica fora de
+   * `maintenanceDir` porque não é manutenção: cada record aqui responde por
+   * tarefas do plano, e confundir os dois diretórios apagaria justamente a
+   * distinção entre "trabalho planejado adotado" e "manutenção adotada".
+   */
+  readonly plannedWorkAdoptionsDir: string;
   /** Binding append-only entre attempts do target e runs canônicos do control plane. */
   readonly projectHistoryBindingsDir: string;
 }
@@ -128,6 +135,7 @@ export function resolveHarnessPaths(
     reviewsDir: path.join(devDir, 'reviews'),
     failedAttemptsDir: path.join(devDir, 'failed-attempts'),
     validationLogsDir: path.join(devDir, 'validation-logs'),
+    plannedWorkAdoptionsDir: path.join(devDir, 'planned-work-adoptions'),
     projectHistoryBindingsDir: path.join(devDir, 'project', 'history-bindings'),
   };
 }

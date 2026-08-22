@@ -14,6 +14,7 @@ import {
   MaintenanceRecord,
   OrchestratedRevalidationRecord,
   OrchestratedFinalizationRecord,
+  PlannedWorkAdoptionRecord,
   PreservedChangeBundleManifest,
   ProtocolInvalidAttemptRecord,
   RevalidationCheckpoint,
@@ -92,6 +93,31 @@ export function closeManifestPath(paths: HarnessPaths, taskId: string): string {
 
 export function maintenanceRecordPath(paths: HarnessPaths, adoptedHeadSha: string): string {
   return path.join(paths.maintenanceDir, `${adoptedHeadSha}.json`);
+}
+
+/**
+ * Record de uma adoção de planned work, indexado pelo head que ela autoriza —
+ * mesma convenção do MaintenanceRecord, para que o passo de avanço da base seja
+ * uma busca por `previous_authorized_head_sha` nas duas famílias.
+ */
+export function plannedWorkAdoptionPath(
+  paths: HarnessPaths,
+  adoptedHeadSha: string,
+): string {
+  return path.join(paths.plannedWorkAdoptionsDir, `${adoptedHeadSha}.json`);
+}
+
+/**
+ * Evidence externa da revalidação de UMA tarefa adotada. Fica ao lado do record
+ * (e não em `validation-logs/<task>/attempt-N`) porque não houve attempt: o
+ * diretório de attempts descreve execuções do harness, e uma adoção não é uma.
+ */
+export function plannedWorkAdoptionEvidenceDir(
+  paths: HarnessPaths,
+  adoptedHeadSha: string,
+  taskId: string,
+): string {
+  return path.join(paths.plannedWorkAdoptionsDir, adoptedHeadSha, taskId);
 }
 
 export function attemptAbandonmentPath(
@@ -433,6 +459,38 @@ export const writeMaintenanceRecord = (
   record: MaintenanceRecord,
 ): Promise<void> =>
   writeJson(maintenanceRecordPath(paths, record.adopted_head_sha), MaintenanceRecord.parse(record));
+
+export const readPlannedWorkAdoption = (
+  paths: HarnessPaths,
+  adoptedHeadSha: string,
+): Promise<PlannedWorkAdoptionRecord | null> =>
+  readOptional(plannedWorkAdoptionPath(paths, adoptedHeadSha), (input) =>
+    PlannedWorkAdoptionRecord.parse(input),
+  );
+
+/** Append-only: uma adoção publicada nunca é reescrita com outro conteúdo. */
+export const writePlannedWorkAdoption = (
+  paths: HarnessPaths,
+  record: PlannedWorkAdoptionRecord,
+): Promise<void> =>
+  writeJsonOnce(
+    plannedWorkAdoptionPath(paths, record.adopted_head_sha),
+    PlannedWorkAdoptionRecord.parse(record),
+  );
+
+export async function listPlannedWorkAdoptionShas(
+  paths: HarnessPaths,
+): Promise<string[]> {
+  try {
+    return (await readdir(paths.plannedWorkAdoptionsDir))
+      .filter((file) => file.endsWith('.json'))
+      .map((file) => path.basename(file, '.json'))
+      .sort();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
+  }
+}
 
 export const readAttemptAbandonment = (
   paths: HarnessPaths,

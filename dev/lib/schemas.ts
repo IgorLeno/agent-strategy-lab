@@ -1348,6 +1348,261 @@ export const MaintenanceRecord = z
   });
 export type MaintenanceRecord = z.infer<typeof MaintenanceRecord>;
 
+// ---------------------------------------------------------------------------
+// Adoção de planned work executado FORA do lifecycle
+// (.dev/planned-work-adoptions/*.json) — NÃO versionado
+//
+// Por que um record próprio, e não mais um `adoption_kind` do MaintenanceRecord:
+// aquele record descreve manutenção — quatro gates globais fixos
+// (`validation_results.length(4)` com argv obrigatório), nenhuma noção de tarefa
+// e recusa explícita de `dev/plan.yaml`. Uma adoção de planned work precisa do
+// oposto em três eixos: a extensão de plano faz PARTE da faixa, cada tarefa traz
+// as SUAS validações declaradas (quantidade e argv variáveis) e cada tarefa se
+// amarra a um commit e a um fingerprint da própria definição. Espremer isso em
+// MaintenanceRecord viraria um bloco de campos opcionais cuja obrigatoriedade
+// dependeria do kind — exatamente a semântica mentirosa que o record separado
+// evita. O que os dois compartilham continua compartilhado: cadeia linear
+// verificada contra o Git, evidence imutável antes do state, e o mesmo passo de
+// avanço de `authorized_head_sha`.
+// ---------------------------------------------------------------------------
+
+/**
+ * Papel de cada commit DENTRO da faixa adotada. Todo commit entre a base
+ * autorizada e o target recebe exatamente um papel: nada na faixa fica sem
+ * responsável, e nada entra implicitamente.
+ */
+export const PlannedWorkCommitRole = z.enum([
+  'plan_extension',
+  'planned_task',
+  'unplanned_maintenance',
+]);
+export type PlannedWorkCommitRole = z.infer<typeof PlannedWorkCommitRole>;
+
+export const PlannedWorkRangeCommit = z
+  .object({
+    sha: shaHex,
+    parent_sha: shaHex,
+    changed_files: z.array(nonEmpty),
+    role: PlannedWorkCommitRole,
+    /** Presente somente em `planned_task`. */
+    task_id: identifier.optional(),
+  })
+  .strict()
+  .superRefine((commit, ctx) => {
+    if (commit.role === 'planned_task' && commit.task_id === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `commit ${commit.sha}: role planned_task exige task_id`,
+      });
+    }
+    if (commit.role !== 'planned_task' && commit.task_id !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `commit ${commit.sha}: task_id só existe em role planned_task`,
+      });
+    }
+  });
+export type PlannedWorkRangeCommit = z.infer<typeof PlannedWorkRangeCommit>;
+
+/**
+ * Uma tarefa do plano concluída fora do lifecycle. `executed_by_harness: false`
+ * e `completion_origin` são literais porque este record NUNCA descreve execução
+ * normal: não existe attempt, não existe handoff selado, não existe run
+ * canônico. O que existe é um commit revalidado independentemente.
+ */
+export const PlannedWorkAdoptionTask = z
+  .object({
+    task_id: identifier,
+    completion_origin: z.literal('out_of_band_planned_work'),
+    executed_by_harness: z.literal(false),
+    accepted_commit: shaHex,
+    /**
+     * Hash canônico da `PlanTask` que esta adoção revalidou. Se alguém editar a
+     * tarefa no plano depois, o fingerprint deixa de bater e a adoção histórica
+     * para de provar a definição nova — fail closed, sem PASS silencioso.
+     */
+    plan_task_fingerprint_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    /** Committer timestamp do `accepted_commit`, normalizado em UTC. */
+    committed_at: z.string().datetime(),
+    validation_source: z.literal('adoption_revalidation'),
+    validation_results: z.array(ValidationResult).min(1),
+    validation_evidence: z.array(ValidationEvidence).min(1),
+  })
+  .strict()
+  .superRefine((task, ctx) => {
+    if (task.validation_results.length !== task.validation_evidence.length) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `${task.task_id}: evidence não cobre todas as validações`,
+      });
+    }
+    task.validation_results.forEach((result, index) => {
+      if (result.exit_code !== 0 || result.timed_out) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `${task.task_id}: validação malsucedida em ${result.argv.join(' ')}`,
+        });
+      }
+      const evidence = task.validation_evidence[index];
+      if (evidence && JSON.stringify(evidence.argv) !== JSON.stringify(result.argv)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `${task.task_id}: evidence fora de ordem em ${result.argv.join(' ')}`,
+        });
+      }
+    });
+  });
+export type PlannedWorkAdoptionTask = z.infer<typeof PlannedWorkAdoptionTask>;
+
+export const PlannedWorkAdoptionRecord = z
+  .object({
+    schema_version: z.literal(DEV_SCHEMA_VERSION),
+    adoption_kind: z.literal('planned_work_range'),
+    previous_authorized_head_sha: shaHex,
+    adopted_head_sha: shaHex,
+    commits: z.array(PlannedWorkRangeCommit).min(1),
+    changed_files: z.array(nonEmpty),
+    /** Único commit da faixa que tocou `dev/plan.yaml`. */
+    plan_extension_commit_sha: shaHex,
+    previous_plan_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    adopted_plan_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    /** Tarefas que a extensão acrescentou — superset do que está sendo adotado. */
+    plan_added_task_ids: z.array(identifier).min(1),
+    tasks: z.array(PlannedWorkAdoptionTask).min(1),
+    /** Gates globais sobre o target, na mesma forma da manutenção. */
+    range_validation_results: z.array(ValidationResult).length(4),
+    working_tree_clean: z.literal(true),
+    reason: nonEmpty,
+    adopted_at: z.string().datetime(),
+  })
+  .strict()
+  .superRefine((record, ctx) => {
+    let expectedParent = record.previous_authorized_head_sha;
+    for (const commit of record.commits) {
+      if (commit.parent_sha !== expectedParent) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `cadeia da faixa divergente em ${commit.sha}`,
+        });
+      }
+      expectedParent = commit.sha;
+    }
+    if (record.adopted_head_sha !== expectedParent) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'adopted_head_sha não é o último commit da faixa',
+      });
+    }
+
+    const aggregate = [...new Set(record.commits.flatMap((commit) => commit.changed_files))].sort();
+    if (JSON.stringify(record.changed_files) !== JSON.stringify(aggregate)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'changed_files agregado não corresponde aos commits',
+      });
+    }
+
+    const planCommits = record.commits.filter((commit) => commit.role === 'plan_extension');
+    if (planCommits.length !== 1) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'a faixa exige exatamente um commit de plan extension',
+      });
+    }
+    const planCommitIndex = record.commits.findIndex((commit) => commit.role === 'plan_extension');
+    const planCommit = record.commits[planCommitIndex];
+    if (planCommit && planCommit.sha !== record.plan_extension_commit_sha) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'plan_extension_commit_sha não corresponde ao commit marcado',
+      });
+    }
+    if (planCommit && !planCommit.changed_files.includes('dev/plan.yaml')) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'commit de plan extension não modifica dev/plan.yaml',
+      });
+    }
+    for (const commit of record.commits) {
+      if (commit.role !== 'plan_extension' && commit.changed_files.includes('dev/plan.yaml')) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `segunda escrita de dev/plan.yaml na faixa: ${commit.sha}`,
+        });
+      }
+    }
+
+    const taskCommits = record.commits.filter((commit) => commit.role === 'planned_task');
+    const commitTaskIds = taskCommits.map((commit) => commit.task_id as string);
+    const recordTaskIds = record.tasks.map((task) => task.task_id);
+    if (new Set(recordTaskIds).size !== recordTaskIds.length) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'task_id duplicado na adoção' });
+    }
+    if (JSON.stringify(commitTaskIds) !== JSON.stringify(recordTaskIds)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'tasks adotadas não correspondem, em ordem, aos commits marcados',
+      });
+    }
+    taskCommits.forEach((commit, index) => {
+      const task = record.tasks[index];
+      if (task && task.accepted_commit !== commit.sha) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `${task.task_id}: accepted_commit diverge do commit marcado`,
+        });
+      }
+      if (planCommitIndex >= 0 && record.commits.indexOf(commit) < planCommitIndex) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `${commit.task_id}: commit anterior à extensão que declarou a tarefa`,
+        });
+      }
+    });
+
+    const added = new Set(record.plan_added_task_ids);
+    for (const task of record.tasks) {
+      if (!added.has(task.task_id)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `${task.task_id} não foi acrescentada pela extensão adotada`,
+        });
+      }
+    }
+
+    if (
+      record.range_validation_results.some((result) => result.exit_code !== 0 || result.timed_out)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'gates da faixa contêm validação malsucedida',
+      });
+    }
+    const expectedRangeValidations = [
+      ['pnpm', 'typecheck'],
+      ['pnpm', 'build'],
+      ['pnpm', 'test'],
+      [
+        'git',
+        'diff',
+        '--check',
+        `${record.previous_authorized_head_sha}..${record.adopted_head_sha}`,
+      ],
+    ];
+    if (
+      record.range_validation_results.some(
+        (result, index) =>
+          JSON.stringify(result.argv) !== JSON.stringify(expectedRangeValidations[index]),
+      )
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'gates da faixa não estão na ordem obrigatória',
+      });
+    }
+  });
+export type PlannedWorkAdoptionRecord = z.infer<typeof PlannedWorkAdoptionRecord>;
+
 export const CommitMessage = z.string().superRefine((message, ctx) => {
   if (message.trim() === '') {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'commit-message não pode ser vazio' });
