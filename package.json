@@ -32,6 +32,7 @@
     "dev-adopt-planned-range": "tsx dev/cli/dev-adopt-planned-range.ts",
     "dev-orchestrate": "tsx dev/cli/dev-orchestrate.ts",
     "dev-run-plan": "tsx dev/cli/dev-run-plan.ts",
+    "dev-run-project": "tsx dev/cli/dev-run-project.ts",
     "dev-project-orchestrate": "tsx dev/cli/dev-project-orchestrate.ts"
   },
   "devDependencies": {

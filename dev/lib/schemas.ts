@@ -107,6 +107,16 @@ export const PlanTask = z
   .strict();
 export type PlanTask = z.infer<typeof PlanTask>;
 
+export const GeneratedPlanSource = z
+  .object({
+    intake_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    inspection_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    authorization_scope_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    base_revision_sha: shaHex,
+  })
+  .strict();
+export type GeneratedPlanSource = z.infer<typeof GeneratedPlanSource>;
+
 /**
  * O plano precisa ser um DAG. Um ciclo não gera erro em lugar nenhum: o
  * seletor simplesmente nunca encontra tarefa elegível e o harness fica
@@ -147,6 +157,8 @@ function findDependencyCycle(tasks: readonly PlanTask[]): string[] | null {
 export const PlanFile = z
   .object({
     schema_version: z.literal(DEV_SCHEMA_VERSION),
+    /** Presente somente em planos gerados; planos manuais v1 permanecem idênticos. */
+    generated_from: GeneratedPlanSource.optional(),
     tasks: z.array(PlanTask).min(1),
   })
   .strict()

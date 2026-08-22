@@ -5,6 +5,19 @@ Regra, não narrativa: cada entrada termina numa restrição aplicável.
 
 ---
 
+[2026-08-22] Context: fixtures YAML para binding de identidade do plano gerado.
+Mistake: hashes formados só por dígitos foram emitidos sem aspas e o parser YAML
+os converteu em números, fazendo o teste parar no schema em vez de alcançar a
+regra de binding.
+Rule: strings de identidade em fixtures YAML (SHA/hash/id) são sempre emitidas
+entre aspas, mesmo quando o valor atual parece inequivocamente textual.
+
+[2026-08-22] Context: fixture de integração reutilizando o helper runGit.
+Mistake: o resultado estruturado CliResult foi passado como se fosse stdout,
+adiando uma falha simples até o gate de schema do intake.
+Rule: helpers de subprocesso são consumidos pelo tipo de retorno completo;
+extraia stdout/stderr/exitCode explicitamente antes de montar dados de contrato.
+
 [2026-08-05] Contexto: S04 — launcher de processo novo para o worker.
 Mistake: o plano previa `timeout --signal=TERM --kill-after=10s 30m setsid <cli>`.
 Nessa ordem o `setsid` cria uma sessão NOVA, fora do process group que o

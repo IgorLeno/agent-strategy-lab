@@ -40,13 +40,74 @@ if (process.argv.slice(2).some((argument) => argument === '--help' || argument =
   process.exit(0);
 }
 
+function promptObject(marker) {
+  const source = process.argv.slice(2).find((token) => token.includes(marker));
+  if (source === undefined) return null;
+  const start = source.indexOf('{', source.indexOf(marker));
+  if (start < 0) return null;
+  for (let end = source.lastIndexOf('}'); end > start; end = source.lastIndexOf('}', end - 1)) {
+    try {
+      return JSON.parse(source.slice(start, end + 1));
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
 /**
  * Overlay READ-ONLY estrutural (dev/lib/project-roles.ts). Chega por argv, não
  * por prompt: o fixture sai ANTES de qualquer escrita, commit ou validação, e
- * devolve exatamente um JSON de veredito. É o que permite exercitar o role de
- * reviewer de ponta a ponta sem nenhum provider real.
+ * devolve exatamente um JSON do role solicitado.
  */
 if (process.argv.slice(2).includes('--agentlab-read-only')) {
+  const plannerPacket = promptObject('PLANNER PACKET');
+  if (plannerPacket !== null) {
+    const sourceAnchor = plannerPacket.source_anchors[0] ?? { area: 'project', path: 'README.md' };
+    const validationCandidate = plannerPacket.inspection.validation_candidates[0];
+    const validationArgv =
+      validationCandidate === undefined ? ['true'] : validationCandidate.command.trim().split(/\s+/);
+    console.log(
+      JSON.stringify({
+        schema_version: 1,
+        tasks: [
+          {
+            schema_version: 1,
+            task_id: 'T1',
+            objective: plannerPacket.user_intent.request,
+            blocked_by: [],
+            taxonomy: {
+              version: 1,
+              task_class: 'feature',
+              difficulty_declared: 'easy',
+              complexity: 'local',
+              ambiguity: 'low',
+              verification: 'deterministic',
+            },
+            risk: 'low',
+            acceptance: [...plannerPacket.user_intent.objectives],
+            validation: [{ argv: validationArgv, timeout_seconds: 30 }],
+            initial_files: [sourceAnchor.path],
+            probable_files: [],
+            context_scope: { areas: [sourceAnchor.area] },
+            context_requirements: [
+              { description: 'contexto observado pelo planner fake', source_anchor: sourceAnchor.path },
+            ],
+            environment_requirements: [],
+            estimated_duration: { expected: 20_000, maximum: 60_000 },
+            validation_budget: { expected: 1_000, maximum: 30_000 },
+            resource_envelope: {
+              duration_ms: { expected: 20_000, maximum: 60_000 },
+              tokens: { expected: 30_000, maximum: 90_000 },
+              changed_files: { expected: 1, maximum: 3 },
+            },
+          },
+        ],
+      }),
+    );
+    process.exit(0);
+  }
+
   const requested = process.env.AGENTLAB_FAKE_REVIEW ?? 'accept';
   if (requested === 'invalid') {
     console.log('sem veredito estruturado');
@@ -57,20 +118,7 @@ if (process.argv.slice(2).includes('--agentlab-read-only')) {
   // é derivada dele: arquivos e validações realmente listados, e cada item de
   // implementer_gaps endereçado uma vez. O modo 'no-coverage' omite tudo isso
   // de propósito — é o ACCEPT que o schema do record precisa recusar.
-  const reviewPacket = (() => {
-    const source = process.argv.slice(2).find((token) => token.includes('REVIEW PACKET'));
-    if (source === undefined) return null;
-    const start = source.indexOf('{', source.indexOf('REVIEW PACKET'));
-    if (start < 0) return null;
-    for (let end = source.lastIndexOf('}'); end > start; end = source.lastIndexOf('}', end - 1)) {
-      try {
-        return JSON.parse(source.slice(start, end + 1));
-      } catch {
-        continue;
-      }
-    }
-    return null;
-  })();
+  const reviewPacket = promptObject('REVIEW PACKET');
   const coverage =
     requested === 'no-coverage'
       ? undefined

@@ -308,6 +308,7 @@ export async function generateImplementationPlan(
 export const ProjectedPlanFile = z
   .object({
     schema_version: z.literal(1),
+    generated_from: ImplementationPlan.shape.source,
     tasks: z
       .array(
         z
@@ -343,6 +344,7 @@ export function projectImplementationPlan(plan: ImplementationPlan): ProjectedPl
   const parsed = ImplementationPlan.parse(plan);
   return ProjectedPlanFile.parse({
     schema_version: 1,
+    generated_from: parsed.source,
     tasks: parsed.tasks.map(({ task }) => ({
       id: task.task_id,
       title: task.objective,
@@ -351,7 +353,12 @@ export function projectImplementationPlan(plan: ImplementationPlan): ProjectedPl
       initial_files: task.initial_files,
       acceptance: task.acceptance,
       validation: task.validation,
-      constraints: parsed.control.constraints,
+      constraints: [
+        ...parsed.control.constraints,
+        ...parsed.control.exclusions.map(
+          (exclusion) => `Exclusão autorizada: ${exclusion}`,
+        ),
+      ],
       include_previous_handoff: false,
     })),
   });

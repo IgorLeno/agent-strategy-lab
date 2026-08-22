@@ -159,6 +159,28 @@ function inspectCompatibleRuntime(
   };
 }
 
+function assertGeneratedPlanBase(
+  loaded: LoadedPlan,
+  existing: DevelopmentState | 'missing',
+  head: string,
+): void {
+  const source = loaded.plan.generated_from;
+  if (source === undefined) return;
+  const actualBase = existing === 'missing' ? head : existing.baseline_sha;
+  const actualLabel = existing === 'missing' ? 'HEAD' : 'runtime baseline_sha';
+  if (source.base_revision_sha !== actualBase) {
+    throw new PlanSetupError(
+      'generated_from.base_revision_sha ' +
+        source.base_revision_sha +
+        ' diverge do ' +
+        actualLabel +
+        ' ' +
+        actualBase +
+        '.\nO plano gerado não foi regenerado nem o runtime alterado. Nenhum provider foi chamado.',
+    );
+  }
+}
+
 /**
  * Coordinator ergonômico sobre init + orchestrate. Não possui loop próprio de
  * seleção, repair, recovery, launch, close, evidence ou billing.
@@ -169,6 +191,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanRunResult> {
   const existing = await readExistingState(paths);
   const runtimeExists = existing !== 'missing';
   const loaded = await loadRequestedPlan(paths, runtimeExists);
+  assertGeneratedPlanBase(loaded, existing, head);
 
   let authorization: LoadedProjectRunAuthorization | null = null;
   if (input.authorizationFile !== undefined) {

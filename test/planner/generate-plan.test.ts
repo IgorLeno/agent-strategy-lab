@@ -185,6 +185,11 @@ describe('generateImplementationPlan', () => {
     const projectionA = projectImplementationPlan(result.plan);
     const projectionB = projectImplementationPlan(result.plan);
     expect(projectionA).toEqual(projectionB);
+    expect(projectionA.generated_from).toEqual(result.plan.source);
+    expect(projectionA.tasks[0]?.constraints).toEqual([
+      'nao escrever em dev/plan.yaml',
+      'Exclusão autorizada: deploy',
+    ]);
     expect(parsePlan(stringifyYaml(projectionA)).plan).toEqual(projectionA);
     expect(await readFile(planPath, 'utf8')).toBe(before);
   });

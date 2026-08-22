@@ -265,6 +265,35 @@ describe('dev-run-plan', () => {
     expect(await fileExists(path.join(sandbox.root, '.dev', 'logs'))).toBe(false);
   });
 
+  it('G2 — plan gerado para outra base falha antes de state/attempt/provider', async () => {
+    const sandbox = await trackSandbox();
+    const generated = await writeExternalPlan(
+      taskPlan(['T1']).replace(
+        'tasks:',
+        [
+          'generated_from:',
+          "  intake_sha256: '" + '1'.repeat(64) + "'",
+          "  inspection_sha256: '" + '2'.repeat(64) + "'",
+          "  authorization_scope_sha256: '" + '3'.repeat(64) + "'",
+          "  base_revision_sha: '" + '0'.repeat(40) + "'",
+          'tasks:',
+        ].join('\n'),
+      ),
+    );
+
+    const result = await runPlan(sandbox, [
+      '--plan',
+      generated,
+      '--profile',
+      'fake-worker-v1',
+      '--dry-run',
+    ]);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toMatch(/base_revision_sha.*diverge do HEAD/);
+    expect(await fileExists(path.join(sandbox.root, '.dev', 'state.json'))).toBe(false);
+  });
+
   it('H — runtime de outro plan falha fechado sem reset nem provider', async () => {
     const sandbox = await trackSandbox();
     const planA = await writeExternalPlan(taskPlan(['T1']));
