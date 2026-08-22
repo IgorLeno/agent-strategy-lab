@@ -1,15 +1,33 @@
 # Arquitetura do `agentlab`
 
-Laboratório empírico para medir desempenho de agentes de código sob diferentes
-estratégias, modelos e stacks. O produto é a CLI `agentlab` (`src/`); o harness
-de sessões descartáveis que o constrói é outra coisa e vive em `dev/`
-([HARNESS.md](HARNESS.md)).
+Control plane autônomo, fundado em evidência, para condução de projetos por
+agentes de IA — ver [README.md](../README.md) e
+[ADR-0003](adr/ADR-0003-control-plane-identity.md), que define o vocabulário
+oficial usado neste documento:
 
-> **Estado em M86 (fim do Marco 3).** M01–M85 estão implementadas. Além do
-> laboratório experimental, o projeto possui um control plane universal para
-> planejar, rotear, executar, revisar e recuperar work units em projetos
-> externos. O primeiro projeto real continua bloqueado por HUMAN STOP. Onde
-> houver divergência futura, o código é a autoridade.
+- **Evidence Kernel** — a máquina de confiabilidade da medição (storage,
+  envelopes, manifests, integridade, redaction; sentido de
+  [ADR-0002](adr/ADR-0002-evidence-kernel.md));
+- **Orchestration Control Plane** — o lifecycle de condução de projetos
+  (intake → inspection → planning → routing → execução → validação →
+  recovery), com contratos em `src/` e runtime em `dev/lib/`;
+- **Experimental Plane** — experimentos controlados que produzem a evidência
+  que ensina o routing.
+
+O medidor empírico de agentes continua existindo — como Experimental Plane, a
+serviço do control plane, não como definição do produto.
+
+> **Estado pós-M86 (Marco 3 fechado + 6 commits).** M01–M86 implementadas.
+> Depois de M86, seis commits (`c7ec6a4`…`a24c0cb`) conectaram o lifecycle
+> universal à execução real de planos externos: entrypoint
+> `dev-run-plan --authorization`, catálogo de profiles separado do repo alvo,
+> `ProjectControlPlane` como porta única do loop, review gating durável,
+> preflight tri-state verdadeiro e materialização da história canônica de
+> projetos externos alimentando o routing. O primeiro projeto real continua
+> bloqueado por HUMAN STOP ([M3-REVIEW](reviews/M3-REVIEW.md) §5). A evolução
+> seguinte (M87–M126) está planejada em
+> [docs/superpowers/plans/2026-08-21-agentlab-control-plane-jcode-evolution.md](superpowers/plans/2026-08-21-agentlab-control-plane-jcode-evolution.md).
+> Onde houver divergência futura, o código é a autoridade.
 
 ---
 
@@ -69,10 +87,13 @@ enums estritos para `task_class`, `difficulty_declared` e, opcionalmente,
 `difficulty` originais do `TaskSpec` continuam strings livres — nenhum
 TaskSpec histórico deixa de parsear. `difficulty_declared` é a dificuldade
 que o autor da task declarou; não é a dificuldade observada. A **Capability
-Matrix** (o que cada perfil consegue em cada categoria de taxonomia) é
-**derivada** dos experimentos rodados — não existe matriz hardcoded no
-código, e nenhuma categoria nova entra na taxonomia antes de haver dados de
-experimentos que a justifiquem.
+Matrix** (o que cada perfil consegue em cada categoria de taxonomia) é, por
+desenho, **derivada** de evidência — nunca opinião hardcoded — e nenhuma
+categoria nova entra na taxonomia antes de haver dados que a justifiquem.
+Estado atual honesto: o código de derivação ainda não existe (`data/runs/`
+não tem amostra real), e o router determinístico usa um mapeamento estático
+de tier por nome de modelo como aproximação provisória — divergência
+registrada na Seção 6.2.
 
 ### 2.2 Planejamento e execução
 
@@ -266,20 +287,42 @@ fronteira.
   a 5 deste documento descreve.
 - **EXPERIMENT PLANE** — as receitas declaráveis que variam entre trials
   (`strategies/`); o que muda quando se testa uma estratégia nova, não o lab.
-- **CONTROL PLANE** — orquestração e config que amarram as outras camadas em
-  comandos (`cli`, resolução de `project`).
+- **CONTROL PLANE** — no sentido do vocabulário de
+  [ADR-0003](adr/ADR-0003-control-plane-identity.md), estas são as áreas de
+  **contratos do Orchestration Control Plane**: decisão pura, zero I/O de
+  provider (`cli`, `project`, `intake`, `inspection`, `planner`, `routing`).
 - **EXTENSIONS** — funcionalidade fora do caminho crítico de execução/
   avaliação, hoje placeholder ou em construção.
 
 Dependências apontam para baixo: `cli` → tudo; `core` não importa ninguém.
+`src/` nunca importa `dev/`; `dev/` importa `src/` livremente. A consequência
+prática: **`src/` carrega contratos e decisão; `dev/lib/` carrega o runtime
+que produz efeito** (spawn, estado, recovery, evidência de projeto).
 
-### 6.1 Control plane universal do Marco 3
+### 6.1 Orchestration Control Plane universal (Marco 3 + pós-M86)
 
 O **Agent Strategy Lab é o control plane**. Claude Code e Codex são workers
 descartáveis: recebem packet bounded, role, workspace e budget; não possuem o
 DAG, o estado autoritativo, routing/escalation, billing policy, commit oficial
 ou decisão de PASS. O lifecycle em `dev/lib/project-orchestrate.ts` reutiliza as
 primitives existentes de launch, close, recovery e evidence.
+
+O **runtime** do control plane vive hoje em `dev/lib/` — os módulos
+`project-run.ts` (a costura `ProjectControlPlane`, porta única e opcional do
+loop de orquestração: ausente, o comportamento histórico é bit-idêntico),
+`project-orchestrate.ts` (gate de launch, roles estruturais, adapters de
+provider para planner/reviewer), `project-authorization.ts` (contrato do
+`agentlab-run.yaml`), `project-preflight.ts` (fatos tri-state),
+`project-roles.ts` (overlay read-only por argv) e `project-history.ts`
+(materialização de attempts como runs canônicos). Isso excede a definição
+original de `dev/` como "harness de bootstrap descartável" — dívida de
+consolidação registrada em [ADR-0003](adr/ADR-0003-control-plane-identity.md)
+e no plano do Marco 4, não resolvida por este documento.
+
+A história canônica de projetos externos é gravada no `data/` da instalação
+do Lab (não do repo alvo), com identidade de projeto obrigatória
+(fingerprint da work definition + bindings) — decisão D4, ratificada em
+ADR-0003. O layout da Seção 3 vale também para esses runs.
 
 ```text
 ProjectIntakeRequest + ExecutionAuthorizationScope
@@ -351,6 +394,15 @@ onde ela nasceu: `src/reporting/compare.ts` (M66) compara
 `TaskPerformanceRecord`s QUALIFIED entre arms, por task antes do agregado,
 sem fabricar confidence interval, Capability Matrix ou vencedor automático.
 
+**Tier de capability por regex de nome de modelo.** A Seção 2.1 declara que
+capability é derivada de evidência; `src/routing/router.ts`
+(`MODEL_TIER_PATTERNS`/`MODEL_COST_PATTERNS`) mapeia tier e custo por padrões
+estáticos sobre o nome do modelo. É deliberadamente fail-closed (modelo que
+não casa com nenhum padrão vira `CAPABILITY_UNCLASSIFIED` e é rejeitado, nunca
+adivinhado), mas é uma aproximação hardcoded que exige edição de código a cada
+modelo novo. Permanece até a Capability Matrix derivada de experimentos
+existir; a substituição é trabalho futuro fora do Marco 4.
+
 ---
 
 ## 7. Stack
@@ -369,6 +421,11 @@ A escolha do driver de SQLite e o risco de addon nativo estão em
 
 - [BACKLOG.md](BACKLOG.md) — espelho humano de `dev/plan.yaml`
 - [LESSONS.md](LESSONS.md) — correções que viraram regra
-- [HARNESS.md](HARNESS.md) — harness de sessões descartáveis (`dev/`)
+- [HARNESS.md](HARNESS.md) — runtime de execução e sessões descartáveis (`dev/`)
 - [BILLING.md](BILLING.md) — política de cobrança dos workers
 - [adr/ADR-0001-stack.md](adr/ADR-0001-stack.md) — stack e driver de SQLite
+- [adr/ADR-0002-evidence-kernel.md](adr/ADR-0002-evidence-kernel.md) — Evidence
+  Kernel, critérios de inclusão, execution contract
+- [adr/ADR-0003-control-plane-identity.md](adr/ADR-0003-control-plane-identity.md)
+  — identidade de control plane, vocabulário oficial, reversão do non-goal de
+  adaptive routing, decisão D4

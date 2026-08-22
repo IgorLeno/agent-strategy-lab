@@ -4,8 +4,16 @@ Uma microtarefa = uma sessão nova = um processo novo. O worker que concluiu
 uma tarefa nunca inicia a seguinte. A limpeza de contexto é garantida por
 **encerramento real do processo**, não por instrução no prompt.
 
-Este harness constrói o `agentlab`; ele **não** é o runner do produto. Runner
-de verdade é M21–M24, dentro de `src/runner/`.
+**Papel dentro do produto maior** (vocabulário de
+[ADR-0003](adr/ADR-0003-control-plane-identity.md)): este documento descreve o
+**runtime de execução** — como sessões descartáveis são lançadas, observadas,
+fechadas e recuperadas. Ele serve a dois consumidores: (a) o bootstrap do
+próprio `agentlab` via `dev/plan.yaml`, e (b) o **Orchestration Control
+Plane** de projetos externos, que reutiliza estas mesmas primitives por
+`dev-run-plan --authorization` (ver seção correspondente abaixo). O harness
+não é o sistema inteiro e o sistema não é "um benchmark harness": benchmarks
+vivem no Experimental Plane (`src/experiment/`), e o produto é o control
+plane. Runner do produto experimental é M21–M24, dentro de `src/runner/`.
 
 ## Fontes de verdade
 
@@ -38,9 +46,22 @@ em `dev/` só é aceita quando pelo menos uma condição se aplica:
    avançar ou não consegue processar uma tarefa `READY` legítima.
 
 Capacidade nova — um comando, um perfil de recurso, uma funcionalidade que o
-harness ainda não tem — **nasce em `src/`**, não em `dev/`. `dev/` é
-infraestrutura de sessão descartável para construir o produto; não é o lugar
-onde o produto ganha funcionalidade.
+harness ainda não tem — **nasce como contrato em `src/`**, não em `dev/`.
+
+Estado honesto pós-M86: essa regra vale para **contratos e decisão** (que de
+fato vivem em `src/`), mas o **runtime** do Orchestration Control Plane foi
+construído em `dev/lib/project-*.ts`, consumindo os contratos de `src/`. Ou
+seja, `dev/` hoje contém duas coisas distintas — o harness de bootstrap
+(congelado pelas quatro condições acima) e o runtime do control plane (em
+evolução ativa pelo plano do Marco 4). A dívida de consolidação está
+registrada em [ADR-0003](adr/ADR-0003-control-plane-identity.md); até lá, as
+quatro condições de freeze aplicam-se ao harness de bootstrap, e o runtime do
+control plane evolui pelas work units planejadas em `dev/plan.yaml`, nunca
+ad-hoc.
+
+Nota operacional: o lifecycle universal (`--authorization`) entra **somente**
+por `dev-run-plan`; `dev-orchestrate` não aceita `--authorization` e preserva
+o comportamento histórico de profile único.
 
 ### O que a separação inbox/runtime garante — e o que não garante
 
