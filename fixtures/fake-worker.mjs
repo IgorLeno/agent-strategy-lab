@@ -15,6 +15,7 @@
  *   official-fail-then-repair  FIRST_PASS falha a validation; REPAIR escreve 'repaired'
  *   official-fail-then-worker-failure  FIRST_PASS falha a validation; REPAIR reporta FAILURE
  *   protocol-invalid-then-success  primeiro close tem metadata inválida; retry passa
+ *   handoff-v2-invalid    escreve handoff v2 SEM what_i_did_not_check (protocolo inválido)
  *   incomplete-output-then-success  primeiro close omite report/handoff; retry passa
  *   incomplete-output-always  todos os closes omitem report/handoff
  *   repair-incomplete-then-success  FIRST_PASS falha; REPAIR omite artifacts uma vez
@@ -133,6 +134,7 @@ function main() {
   const skipGit =
     mode === 'no-commit' ||
     mode === 'orchestrator-success' ||
+    mode === 'handoff-v2-invalid' ||
     mode === 'official-fail' ||
     mode === 'official-fail-until-escalation' ||
     mode === 'official-fail-then-repair' ||
@@ -219,11 +221,24 @@ function main() {
     ),
   );
 
+  // Handoff v2 é o contrato corrente do worker: what_i_did_not_check é
+  // OBRIGATÓRIO, e [] afirma positivamente que nada relevante ficou de fora.
+  // O modo handoff-v2-invalid omite o campo de propósito, para exercitar o
+  // caminho de protocolo inválido que já existe — sem recovery nova.
+  const handoffV2 = {
+    what_i_did_not_check: [],
+    evidence: changedFiles
+      .slice(0, 1)
+      .map((file) => ({ kind: 'file', path: file, claim: `patch do modo ${mode}` })),
+    confidence: failed ? 'baixa: o worker não produziu patch utilizável' : 'alta: patch determinístico do fixture',
+  };
+  if (mode === 'handoff-v2-invalid') delete handoffV2.what_i_did_not_check;
+
   writeFileSync(
     draftPath,
     JSON.stringify(
       {
-        schema_version: 1,
+        schema_version: 2,
         task_id: packet.task_id,
         result: failed ? 'FAIL' : 'PASS',
         changed_files: reportedChangedFiles,
@@ -231,6 +246,7 @@ function main() {
         decisions: [],
         lessons: [],
         next_relevant_files: changedFiles.slice(0, 5),
+        ...handoffV2,
       },
       null,
       2,

@@ -4,7 +4,10 @@ import {
   MAXIMUM_HANDOFF_BYTES,
   MAXIMUM_TASK_PACKET_BYTES,
   byteSize,
+  isHandoffRecordV2,
+  readHandoffConfidence,
 } from '../../dev/lib/schemas.js';
+import { classifyRoutinePostLaunchIncident } from '../../dev/lib/routine-autonomy.js';
 import { resolveHarnessPaths, type HarnessPaths } from '../../dev/lib/paths.js';
 import { loadPlan, type LoadedPlan } from '../../dev/lib/plan.js';
 import {
@@ -358,5 +361,96 @@ describe('protocolo — descendente vazado', () => {
     const record = await readLaunchRecord(paths, 'T1');
     expect(record!.survivors_killed).toEqual([]);
     expect(record!.survivors_remaining).toEqual([]);
+  }, 60_000);
+});
+
+describe('handoff v2 no protocolo real do worker', () => {
+  /** Profile orchestrator-owned: o fixture não commita, o orquestrador commita. */
+  async function useOrchestratorProfile(): Promise<void> {
+    await writeFile(
+      `${sandbox.root}/dev/profiles/fake-orchestrator-v2.yaml`,
+      [
+        'id: fake-orchestrator-v2',
+        'agent: fake',
+        'commit_owner: orchestrator',
+        'official_validation_owner: orchestrator',
+        'worker_validation_policy: targeted',
+        'argv: [node, fixtures/fake-worker.mjs]',
+        'prompt_delivery: argv',
+        'timeout_seconds: 60',
+        'forbidden_flags: []',
+        'env_allowlist: [PATH, HOME, AGENTLAB_FAKE_MODE]',
+      ].join('\n'),
+      'utf8',
+    );
+    const baseline = await commitAll(sandbox.root, 'fake orchestrator profile');
+    await writeState(
+      paths,
+      buildInitialState(loaded.plan, loaded.planSha256, { baselineSha: baseline }),
+    );
+  }
+
+  function orchestrateWith(mode: string) {
+    return runDevCli(
+      'dev-orchestrate.ts',
+      ['--repo', sandbox.root, '--profile', 'fake-orchestrator-v2', '--max-iterations', '1'],
+      { AGENTLAB_DEV_DIR: sandbox.devDir, AGENTLAB_FAKE_MODE: mode },
+    );
+  }
+
+  it('o fake worker produz draft v2 válido e o record selado é v2', async () => {
+    await useOrchestratorProfile();
+    const result = await orchestrateWith('orchestrator-success');
+    expect(result.exitCode, result.stderr).toBe(0);
+
+    const draft = JSON.parse(
+      await readFile(`${sandbox.root}/.dev-inbox/T1/handoff-draft.json`, 'utf8'),
+    ) as Record<string, unknown>;
+    expect(draft['schema_version']).toBe(2);
+    expect(draft['what_i_did_not_check']).toEqual([]);
+
+    const handoff = await readHandoff(paths, 'T1');
+    expect(handoff?.schema_version).toBe(2);
+    if (handoff === null || !isHandoffRecordV2(handoff)) throw new Error('record v2 esperado');
+    // [] sobrevive como afirmação positiva, e a opinião do worker fica no record.
+    expect(handoff.what_i_did_not_check).toEqual([]);
+    expect(readHandoffConfidence(handoff.confidence).level).toBe('HIGH');
+    expect(byteSize(handoff)).toBeLessThanOrEqual(MAXIMUM_HANDOFF_BYTES);
+  }, 60_000);
+
+  // Sem what_i_did_not_check o draft v2 nem chega a ser um handoff: a
+  // finalização fica PENDING e o incidente cai na recipe de protocolo que já
+  // existe. Nenhuma classe de recovery nova foi criada para este caso.
+  it('draft v2 sem what_i_did_not_check cai no caminho de protocolo existente', async () => {
+    await useOrchestratorProfile();
+    const result = await orchestrateWith('handoff-v2-invalid');
+
+    expect(JSON.parse(result.stdout).iterations[0].result).toBe('PENDING');
+    expect(result.stdout).toMatch(/what_i_did_not_check/);
+    const state = await readState(paths);
+    expect(state.tasks[0]?.status).toBe('RUNNING');
+    expect(state.tasks[0]?.phase).toBe('FINALIZING');
+    expect(await readHandoff(paths, 'T1')).toBeNull();
+    expect(await readCompletion(paths, 'T1')).toBeNull();
+
+    const triage = classifyRoutinePostLaunchIncident({
+      phase: 'POST_LAUNCH',
+      authorized_head_before: state.authorized_head_sha ?? '',
+      task_id: 'T1',
+      attempt: 1,
+      profile_id: 'fake-orchestrator-v2',
+      launch: 'FINISHED',
+      close: 'PENDING',
+      outcome: 'PENDING',
+      reason: state.tasks[0]?.diagnostics ?? '',
+      task_status: 'RUNNING',
+      task_phase: 'FINALIZING',
+      commit_owner: 'orchestrator',
+      capability_verdict: false,
+      official_validation_failure: false,
+      evidence_paths: [],
+    });
+    expect(triage.recipe_id).toBe('protocol-output-recovery');
+    expect(triage.action).toBe('RECOVER_PROTOCOL_OUTPUT');
   }, 60_000);
 });

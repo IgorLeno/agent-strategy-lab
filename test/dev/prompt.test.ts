@@ -5,6 +5,7 @@ import {
   ORCHESTRATED_EXECUTION_POLICY,
 } from '../../dev/lib/execution-policy.js';
 import type { TaskPacket } from '../../dev/lib/schemas.js';
+import { canonicalJson } from '../../dev/lib/canonical.js';
 
 const PACKET: TaskPacket = {
   schema_version: 1,
@@ -104,4 +105,60 @@ describe('prompt lean do worker', () => {
 
     expect(Buffer.byteLength(preamble, 'utf8')).toBeLessThanOrEqual(MAXIMUM_PREAMBLE_BYTES);
   });
+});
+
+describe('contrato de handoff v2 no prompt do implementer', () => {
+  for (const [name, policy] of [
+    ['worker-owned', LEGACY_EXECUTION_POLICY],
+    ['orchestrator-owned', ORCHESTRATED_EXECUTION_POLICY],
+  ] as const) {
+    it(`exige what_i_did_not_check com semântica de lista vazia (${name})`, () => {
+      const prompt = buildWorkerPrompt(PACKET, IO, policy);
+
+      expect(prompt).toMatch(/"schema_version":2/);
+      expect(prompt).toMatch(/"what_i_did_not_check":\[<≤5 itens curtos>\]/);
+      expect(prompt).toMatch(
+        /what_i_did_not_check é OBRIGATÓRIO: liste os aspectos relevantes que você\s+reconhece NÃO ter verificado/i,
+      );
+      // A diferença entre [] e campo omitido precisa estar dita, não inferida.
+      expect(prompt).toMatch(
+        /\[\] é uma afirmação positiva[\s\S]*NÃO significa campo ignorado; omitir o campo invalida/i,
+      );
+      expect(prompt).toMatch(/evidence APONTA para a evidência/i);
+      expect(prompt).toMatch(
+        /nunca conteúdo de arquivo, diff, stdout, stderr ou transcript/i,
+      );
+      expect(prompt).toMatch(/"open_questions"/);
+      expect(prompt).toMatch(/"confidence"/);
+    });
+
+    // Artifacts operacionais, não raciocínio: o protocolo NÃO pede análise,
+    // justificativa longa nem passo a passo — isso seria context bloat com
+    // outro nome.
+    it(`não pede raciocínio ao worker (${name})`, () => {
+      const prompt = buildWorkerPrompt(PACKET, IO, policy);
+      for (const forbidden of [
+        /chain of thought/i,
+        /passo a passo/i,
+        /explique seu raciocínio/i,
+        /justifique detalhadamente/i,
+        /análise completa/i,
+        /pense antes/i,
+      ]) {
+        expect(prompt).not.toMatch(forbidden);
+      }
+    });
+
+    it(`mantém o preâmbulo dentro do budget com o contrato v2 (${name})`, () => {
+      const prompt = buildWorkerPrompt(PACKET, IO, policy);
+      // O packet entra canonicalizado: medir o preâmbulo exige cortar
+      // exatamente onde ele começa, não onde um JSON qualquer começaria.
+      const packetJson = canonicalJson(PACKET);
+      const cut = prompt.indexOf(packetJson);
+      expect(cut).toBeGreaterThan(0);
+      expect(Buffer.byteLength(prompt.slice(0, cut), 'utf8')).toBeLessThanOrEqual(
+        MAXIMUM_PREAMBLE_BYTES,
+      );
+    });
+  }
 });

@@ -6,6 +6,26 @@ import type { TaskPacket } from './schemas.js';
  * Targeted precisa caber as proibições de suíte/background sem inflar o packet. */
 export const MAXIMUM_PREAMBLE_BYTES = 5_120;
 
+/**
+ * Contrato do HandoffDraft v2, uma vez só, usado pelos dois modos de execução.
+ * Curto de propósito: o worker precisa saber o que DECLARAR, não como
+ * raciocinar. Nada aqui pede análise, justificativa longa ou passo a passo —
+ * o protocolo coleta artifacts operacionais, não raciocínio interno.
+ */
+const HANDOFF_DRAFT_CONTRACT = `{"schema_version":2,"task_id":"<id do packet>","result":"PASS"|"FAIL",
+ "changed_files":[<≤50>],"validations":[<mesmo formato acima>],
+ "decisions":[<≤5>],"lessons":[<≤3>],"next_relevant_files":[<≤5>],
+ "what_i_did_not_check":[<≤5 itens curtos>],
+ "evidence":[{"kind":"file","path":"<caminho>","lines":"<N-M>","claim":"<frase>"}
+  |{"kind":"command","argv":[<comando>],"claim":"<frase>"}] (≤8, opcional),
+ "open_questions":[<≤5>] (opcional),"confidence":"<uma frase sua>" (opcional)}
+
+   what_i_did_not_check é OBRIGATÓRIO: liste os aspectos relevantes que você
+   reconhece NÃO ter verificado. [] é uma afirmação positiva — você olhou e não
+   identificou nenhum — e NÃO significa campo ignorado; omitir o campo invalida
+   o arquivo inteiro. evidence APONTA para a evidência (caminho+linhas ou
+   comando): nunca conteúdo de arquivo, diff, stdout, stderr ou transcript.`
+
 export interface PromptIo {
   readonly repoRoot: string;
   readonly packetPath: string;
@@ -69,9 +89,7 @@ ${io.reportPath}
  "decisions":[<≤5>],"lessons":[<≤3>],"relevant_files":[<≤5>]}
 
 ${io.handoffDraftPath} (máx. 4 KiB)
-{"schema_version":1,"task_id":"<id do packet>","result":"PASS"|"FAIL",
- "changed_files":[<≤50>],"validations":[<mesmo formato acima>],
- "decisions":[<≤5>],"lessons":[<≤3>],"next_relevant_files":[<≤5>]}
+${HANDOFF_DRAFT_CONTRACT}
 
    Você NÃO decide se o commit foi aceito: não escreva accepted_commit.
 9. Encerre a sessão. Não inicie a próxima tarefa.
@@ -107,9 +125,7 @@ ${io.reportPath}
    validations contém somente comandos que realmente executou.
 
 ${io.handoffDraftPath} (máx. 4 KiB)
-{"schema_version":1,"task_id":"<id do packet>","result":"PASS"|"FAIL",
- "changed_files":[<≤50>],"validations":[<mesmo formato acima>],
- "decisions":[<≤5>],"lessons":[<≤3>],"next_relevant_files":[<≤5>]}
+${HANDOFF_DRAFT_CONTRACT}
 
    No HandoffDraft, PASS significa patch pronto para validação; FAIL significa
    que o worker não conseguiu produzir patch utilizável. Não escreva accepted_commit.
