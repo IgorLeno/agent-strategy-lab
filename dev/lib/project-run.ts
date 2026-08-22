@@ -203,10 +203,12 @@ export interface ProjectRoutingReport {
   readonly selected_profile_id: string;
   readonly pinned: boolean;
   /**
-   * Estado da série histórica consultada em M82. `EMPTY` é o valor honesto do
-   * caminho de produção hoje: uma run de projeto externo ainda não materializa
-   * suas execuções como história consultável, e o routing decide pelo fallback
-   * de M78 sabendo disso.
+   * Estado da série histórica consultada em M82. Desde a24c0cb o caminho de
+   * projeto externo materializa cada attempt com inference provada como run
+   * canônico (`project-history.ts`) e consulta essa história antes de rotear;
+   * `EMPTY` continua sendo o valor honesto enquanto o work definition não tem
+   * nenhum episódio registrado, e o routing decide pelo fallback de M78
+   * sabendo disso.
    */
   readonly history_status: 'EMPTY' | 'AVAILABLE' | 'INSUFFICIENT';
   readonly history_evidence: {
