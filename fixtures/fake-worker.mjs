@@ -24,6 +24,12 @@
  *   out-of-scope  commita alterando dev/plan.yaml
  *   timeout    ignora SIGTERM e nunca termina
  *   leak       deixa um descendente vivo depois de sair
+ *
+ * Role de reviewer (argv --agentlab-read-only), por AGENTLAB_FAKE_REVIEW:
+ *   accept       (default) ACCEPT com cobertura derivada do review packet
+ *   reject       REJECT com a mesma cobertura
+ *   no-coverage  ACCEPT SEM coverage — o schema do record precisa recusar
+ *   invalid      saída sem veredito estruturado
  */
 import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
@@ -47,10 +53,42 @@ if (process.argv.slice(2).includes('--agentlab-read-only')) {
     process.exit(0);
   }
   const decision = requested === 'reject' ? 'REJECT' : 'ACCEPT';
+  // O packet do reviewer chega no prompt (prompt_delivery: argv). A cobertura
+  // é derivada dele: arquivos e validações realmente listados, e cada item de
+  // implementer_gaps endereçado uma vez. O modo 'no-coverage' omite tudo isso
+  // de propósito — é o ACCEPT que o schema do record precisa recusar.
+  const reviewPacket = (() => {
+    const source = process.argv.slice(2).find((token) => token.includes('REVIEW PACKET'));
+    if (source === undefined) return null;
+    const start = source.indexOf('{', source.indexOf('REVIEW PACKET'));
+    if (start < 0) return null;
+    for (let end = source.lastIndexOf('}'); end > start; end = source.lastIndexOf('}', end - 1)) {
+      try {
+        return JSON.parse(source.slice(start, end + 1));
+      } catch {
+        continue;
+      }
+    }
+    return null;
+  })();
+  const coverage =
+    requested === 'no-coverage'
+      ? undefined
+      : {
+          files: [...(reviewPacket?.changed_files ?? [])],
+          validations: (reviewPacket?.validation ?? []).map((command) => [...command.argv]),
+          behaviors: ['acceptance declarado confrontado com a evidência oficial'],
+          handoff_gaps: (reviewPacket?.implementer_gaps ?? []).map((gap) => ({
+            gap,
+            disposition: 'accepted_with_justification',
+            note: 'lacuna coberta pela validação oficial deste candidate',
+          })),
+        };
   console.log(
     JSON.stringify({
       decision,
       reason: `fake reviewer read-only: ${decision === 'ACCEPT' ? 'evidência consistente com o acceptance declarado' : 'evidência insuficiente para aceitar a mudança'}`,
+      ...(coverage === undefined ? {} : { coverage }),
     }),
   );
   process.exit(0);

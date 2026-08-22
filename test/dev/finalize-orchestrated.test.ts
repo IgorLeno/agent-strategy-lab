@@ -35,6 +35,7 @@ import {
 } from '../../dev/lib/records.js';
 import { recover, verifyCloseBundle } from '../../dev/lib/recover.js';
 import type {
+  CandidateReviewCoverage,
   CandidateReviewRequirement,
   OrchestratedFinalizationRecord,
 } from '../../dev/lib/schemas.js';
@@ -249,8 +250,16 @@ const REVIEW_REQUIREMENT: CandidateReviewRequirement = {
 async function publishVerdict(
   record: OrchestratedFinalizationRecord,
   decision: 'ACCEPT' | 'REJECT',
+  /** Omitida de propósito nos testes de ACCEPT sem cobertura. */
+  coverage: CandidateReviewCoverage | null = {
+    files: [...record.changed_files],
+    validations: record.validation_results.map((result) => [...result.argv]),
+    behaviors: ['acceptance declarado confrontado com a validação oficial'],
+    handoff_gaps: [],
+  },
 ): Promise<void> {
   await writeCandidateReview(paths, {
+    ...(coverage === null ? {} : { coverage }),
     schema_version: 1,
     task_id: record.task_id,
     attempt: record.attempt,

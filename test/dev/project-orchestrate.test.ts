@@ -1039,6 +1039,11 @@ describe('G — reviewer não ganha autorização mais fraca que o implementer',
       candidate_sha: 'b'.repeat(40),
       official_validation_outcome: 'PASS' as const,
       evidence_paths: [paths.validationLogsDir],
+      implementer_gaps: ['comportamento sob concorrência'],
+      implementer_confidence: {
+        statement: 'alta nos schemas, acho que cobre o resto',
+        level: 'MEDIUM' as const,
+      },
     };
   }
 

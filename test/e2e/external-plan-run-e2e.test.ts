@@ -615,6 +615,16 @@ describe('external plan run — dev-run-plan pelo lifecycle universal', () => {
     expect(review?.reviewer_invocation.fresh_context).toBe(true);
     expect(review?.reviewer_invocation.argv.join(' ')).toContain('--agentlab-read-only');
 
+    // O ACCEPT nomeia o que auditou: sem cobertura mínima o schema do record o
+    // teria recusado, e nada seria promovido.
+    expect(review?.coverage?.files.length).toBeGreaterThan(0);
+    expect(review?.coverage?.validations.length).toBeGreaterThan(0);
+    expect(review?.coverage?.behaviors.length).toBeGreaterThan(0);
+    // O implementer deste fixture declara [] lacunas — afirmação positiva, e
+    // por isso não há gap algum a endereçar.
+    expect(review?.implementer_gaps).toEqual([]);
+    expect(review?.coverage?.handoff_gaps).toEqual([]);
+
     // Só DEPOIS do ACCEPT a aceitação existe.
     expect(t1.status).toBe('PASS');
     expect(t1.accepted_commit).toBe(finalization?.candidate_commit);
@@ -625,6 +635,28 @@ describe('external plan run — dev-run-plan pelo lifecycle universal', () => {
       ['T1', 'PASS'],
       ['T2', 'PASS'],
     ]);
+  }, 120_000);
+
+  it('REVIEW — ACCEPT sem cobertura mínima não promove nada', async () => {
+    const target = await fixture(
+      planYaml({ secondValidation: "['true']" }),
+      authorizationYaml({ risk: 'high' }),
+    );
+
+    const result = await runPlan(target, 'orchestrator-success', [], {
+      AGENTLAB_FAKE_REVIEW: 'no-coverage',
+    });
+    expect(result.exitCode).not.toBe(0);
+
+    const paths = resolveHarnessPaths(target.target, { planFile: target.plan });
+    const state = await readState(paths);
+    const t1 = getTaskState(state, 'T1');
+    expect(t1.status).not.toBe('PASS');
+    expect(t1.accepted_commit).toBeNull();
+    // Veredito inválido não é publicado: o gate é do schema, e o record é
+    // append-only — nada de meia-evidência em disco.
+    expect(await readCandidateReview(paths, 'T1', t1.attempts)).toBeNull();
+    expect(result.stdout).toMatch(/REVIEW_COVERAGE_INSUFFICIENT/);
   }, 120_000);
 
   it('REVIEW — veredito REJECT para a automação com gate humano, sem PASS silencioso', async () => {

@@ -64,6 +64,10 @@ import {
 } from '../../src/planner/generate.js';
 import { PlannedTask, type TaskRisk } from '../../src/planner/task.js';
 import {
+  CandidateReviewCoverage,
+  type HandoffConfidenceLevel,
+} from './schemas.js';
+import {
   evaluatePlanWorkflow,
   normalizeDirectTask,
   type DirectTaskClassification,
@@ -1047,6 +1051,20 @@ export interface ProjectReviewPacket {
   readonly candidate_sha: string | null;
   readonly official_validation_outcome: string;
   readonly evidence_paths: readonly string[];
+  /**
+   * `what_i_did_not_check` do handoff v2 do implementer, derivado pelo
+   * orquestrador. `null` significa UNKNOWN — handoff v1, que não respondeu à
+   * pergunta — e nunca "nenhuma lacuna".
+   */
+  readonly implementer_gaps: readonly string[] | null;
+  /**
+   * Opinião do implementer e como o harness a LÊ. É sinal para o reviewer,
+   * não veredito: confiança baixa não reprova nada sozinha.
+   */
+  readonly implementer_confidence: {
+    readonly statement: string | null;
+    readonly level: HandoffConfidenceLevel;
+  } | null;
 }
 
 export function buildReviewerPrompt(packet: ProjectReviewPacket): string {
@@ -1058,7 +1076,20 @@ export function buildReviewerPrompt(packet: ProjectReviewPacket): string {
     'REVIEW PACKET (JSON):',
     JSON.stringify(packet, null, 2),
     '',
-    'Responda SOMENTE com um único JSON {"decision":"ACCEPT|REJECT","reason":"..."}.',
+    'Responda SOMENTE com um único JSON:',
+    '{"decision":"ACCEPT|REJECT","reason":"...","coverage":{',
+    ' "files":[<arquivos do candidate que você auditou>],',
+    ' "validations":[[<argv da validação oficial que você leu>]],',
+    ' "behaviors":[<aspectos comportamentais auditados, frases curtas>],',
+    ' "handoff_gaps":[{"gap":"<texto EXATO de implementer_gaps>",',
+    '   "disposition":"accepted_with_justification"|"open_question","note":"..."}]}}',
+    '',
+    'ACCEPT exige coverage: ao menos um arquivo auditado, ao menos uma validação',
+    'referenciada e CADA item de implementer_gaps endereçado exatamente uma vez —',
+    'aceito com justificativa ou registrado como pergunta aberta. "looks good",',
+    '"revisado" e "tudo coberto" não endereçam nada.',
+    'implementer_confidence é opinião, não fato: confiança baixa ou ambígua não',
+    'reprova sozinha, mas o risco correspondente precisa aparecer na coverage.',
   ].join('\n');
 }
 
@@ -1084,6 +1115,12 @@ export interface ProjectReviewerLaunchOptions {
 interface ProjectReviewVerdict<Outcome extends 'ACCEPT' | 'REJECT'> {
   readonly outcome: Outcome;
   readonly reason: string;
+  /**
+   * Cobertura DECLARADA pelo reviewer, do jeito que ele a escreveu. Não é
+   * validada aqui: quem decide se ela basta para um ACCEPT é o schema do
+   * `CandidateReviewRecord`, não este adapter.
+   */
+  readonly coverage: CandidateReviewCoverage | null;
   readonly policy: ReviewerInvocationPolicy;
   readonly argv: readonly string[];
   /**
@@ -1188,7 +1225,9 @@ export async function launchProjectReviewer(
     );
   }
 
-  const parsed = extractJsonObject(stdout) as { decision?: unknown; reason?: unknown } | null;
+  const parsed = extractJsonObject(stdout) as
+    | { decision?: unknown; reason?: unknown; coverage?: unknown }
+    | null;
   const decision = parsed?.decision;
   const reason = parsed?.reason;
   if ((decision !== 'ACCEPT' && decision !== 'REJECT') || typeof reason !== 'string' || reason.trim() === '') {
@@ -1197,9 +1236,14 @@ export async function launchProjectReviewer(
       'saída do reviewer não contém um único JSON {"decision":"ACCEPT|REJECT","reason":"..."}',
     );
   }
+  // Cobertura mal formada NÃO é reparada nem completada: ela simplesmente não
+  // existe, e um ACCEPT sem cobertura válida será recusado pelo schema do
+  // record. Inventar coverage aqui seria fabricar auditoria.
+  const coverage = CandidateReviewCoverage.safeParse(parsed?.coverage);
   return {
     outcome: decision,
     reason: reason.trim(),
+    coverage: coverage.success ? coverage.data : null,
     policy: plan.policy,
     argv: overlay.argv,
     workspace_access: overlay.workspace_access,

@@ -28,6 +28,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { ZodError } from 'zod';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
@@ -121,6 +122,7 @@ import {
   packetPath,
   readCandidateReview,
   readCompletion,
+  readHandoffDraft,
   readLaunchRecord,
   readOrchestratedFinalization,
   readPacket,
@@ -134,6 +136,7 @@ import type {
   CandidateReviewRequirement,
   OrchestratedFinalizationRecord,
 } from './schemas.js';
+import { isHandoffDraftV2, readHandoffConfidence } from './schemas.js';
 import { retryFailedAttempt } from './retry-failed.js';
 import type { HumanRequiredOutput } from './routine-autonomy.js';
 import { getTaskState, readState } from './state.js';
@@ -1607,6 +1610,20 @@ export async function createProjectControlPlane(
         evidencePaths,
       );
     }
+    // ACCEPT sem cobertura mínima chega aqui: existe arquivo de veredito, o
+    // schema o recusa, e nada é promovido. Não relançamos reviewer por cima de
+    // um veredito já publicado — o record é append-only.
+    if (lookup.status === 'INVALID') {
+      return reviewBlocked(
+        taskId,
+        'REVIEW_COVERAGE_INSUFFICIENT',
+        'REVIEW_COVERAGE_INSUFFICIENT',
+        `veredito de review não satisfaz o contrato de cobertura: ${lookup.reason}`,
+        'refazer a review com cobertura explícita antes de qualquer promoção',
+        ['inspecionar o veredito preservado', 'inspecionar o candidate preparado'],
+        evidencePaths,
+      );
+    }
 
     const requirement = lookup.requirement as CandidateReviewRequirement;
     const reviewerProfile = profiles.get(requirement.reviewer_profile_id) ?? null;
@@ -1634,6 +1651,22 @@ export async function createProjectControlPlane(
       );
     }
 
+    // Lacunas e confiança vêm do HandoffDraft do implementer, derivadas pelo
+    // orquestrador — o reviewer não as informa sobre si mesmo. Handoff v1 não
+    // respondeu à pergunta: isso é UNKNOWN (null), não "nenhuma lacuna".
+    const implementerDraft = await readHandoffDraft(paths, taskId);
+    const implementerGaps =
+      implementerDraft !== null && isHandoffDraftV2(implementerDraft)
+        ? [...implementerDraft.what_i_did_not_check]
+        : null;
+    const implementerConfidence =
+      implementerDraft !== null && isHandoffDraftV2(implementerDraft)
+        ? {
+            statement: implementerDraft.confidence ?? null,
+            level: readHandoffConfidence(implementerDraft.confidence).level,
+          }
+        : null;
+
     const reviewerFacts = await launchFactsFor(reviewerProfile);
     const verdict: ProjectReviewResult = await launchProjectReviewer({
       paths,
@@ -1660,6 +1693,8 @@ export async function createProjectControlPlane(
         candidate_sha: record.candidate_commit,
         official_validation_outcome: 'PASS',
         evidence_paths: [paths.validationLogsDir],
+        implementer_gaps: implementerGaps,
+        implementer_confidence: implementerConfidence,
       },
     });
 
@@ -1678,26 +1713,46 @@ export async function createProjectControlPlane(
       );
     }
 
-    await writeCandidateReview(paths, {
-      schema_version: 1,
-      task_id: taskId,
-      attempt: record.attempt,
-      candidate_sha: record.candidate_commit,
-      finalization_record_sha256: finalizationFingerprint(record),
-      validation_results_sha256: validationResultsFingerprint(record),
-      reviewer_profile_id: reviewerProfile.id,
-      reviewer_invocation: {
-        role: 'reviewer',
-        workspace_access: verdict.workspace_access as 'READ_ONLY',
-        read_only_mechanism: verdict.read_only_mechanism,
-        argv: [...verdict.argv],
-        diversity_requirement: requirement.diversity_requirement,
-        fresh_context: true,
-      },
-      decision: verdict.outcome,
-      reason: verdict.reason,
-      decided_at: new Date().toISOString(),
-    });
+    // O schema do record é a autoridade sobre a cobertura: um ACCEPT que não a
+    // satisfaz não é gravado, e o candidate continua não aceito. O adapter não
+    // completa nem conserta a cobertura que o reviewer deixou de declarar.
+    try {
+      await writeCandidateReview(paths, {
+        schema_version: 1,
+        task_id: taskId,
+        attempt: record.attempt,
+        candidate_sha: record.candidate_commit,
+        finalization_record_sha256: finalizationFingerprint(record),
+        validation_results_sha256: validationResultsFingerprint(record),
+        reviewer_profile_id: reviewerProfile.id,
+        reviewer_invocation: {
+          role: 'reviewer',
+          workspace_access: verdict.workspace_access as 'READ_ONLY',
+          read_only_mechanism: verdict.read_only_mechanism,
+          argv: [...verdict.argv],
+          diversity_requirement: requirement.diversity_requirement,
+          fresh_context: true,
+        },
+        ...(implementerGaps === null ? {} : { implementer_gaps: implementerGaps }),
+        ...(verdict.coverage === null ? {} : { coverage: verdict.coverage }),
+        decision: verdict.outcome,
+        reason: verdict.reason,
+        decided_at: new Date().toISOString(),
+      });
+    } catch (error) {
+      if (!(error instanceof ZodError)) throw error;
+      return reviewBlocked(
+        taskId,
+        'REVIEW_COVERAGE_INSUFFICIENT',
+        'REVIEW_COVERAGE_INSUFFICIENT',
+        `veredito de review não satisfaz o contrato de cobertura: ${error.issues
+          .map((issue) => issue.message)
+          .join('; ')}`,
+        'refazer a review com cobertura explícita antes de qualquer promoção',
+        ['inspecionar o candidate preparado', 'inspecionar a evidência de validação'],
+        evidencePaths,
+      );
+    }
 
     if (verdict.outcome === 'ACCEPT') {
       const report = reportFor(taskId);

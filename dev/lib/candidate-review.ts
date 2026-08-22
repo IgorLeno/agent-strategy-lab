@@ -22,6 +22,8 @@
  * review REJECT são todas "não aceito" — ausência de prova nunca vira aceite.
  */
 
+import { ZodError } from 'zod';
+
 import { canonicalSha256 } from './canonical.js';
 import type { HarnessPaths } from './paths.js';
 import { candidateReviewPath, readCandidateReview } from './records.js';
@@ -55,7 +57,13 @@ export type CandidateReviewStatus =
   | 'ACCEPTED'
   | 'REJECTED'
   /** Existe veredito, mas ele não descreve ESTE candidate/evidência. */
-  | 'DIVERGENT';
+  | 'DIVERGENT'
+  /**
+   * Existe arquivo de veredito, mas ele não satisfaz o contrato do record —
+   * tipicamente um ACCEPT sem a cobertura mínima. Bloqueia como qualquer
+   * outra ausência de prova: nunca promove, e nunca explode o fluxo.
+   */
+  | 'INVALID';
 
 export interface CandidateReviewLookup {
   readonly status: CandidateReviewStatus;
@@ -86,7 +94,25 @@ export async function lookupCandidateReview(
     };
   }
 
-  const review = await readCandidateReview(paths, record.task_id, record.attempt);
+  // Um veredito malformado é EVIDÊNCIA de que a review não decidiu nada
+  // válido sobre este candidate — não um crash do control plane. O caso
+  // concreto que M94 introduz é o ACCEPT sem cobertura mínima: o schema o
+  // recusa, e aqui ele vira bloqueio explícito.
+  let review: CandidateReviewRecord | null;
+  try {
+    review = await readCandidateReview(paths, record.task_id, record.attempt);
+  } catch (error) {
+    if (!(error instanceof ZodError)) throw error;
+    return {
+      status: 'INVALID',
+      reason: `veredito de review não satisfaz o contrato do record: ${error.issues
+        .map((issue) => issue.message)
+        .join('; ')}`,
+      record: null,
+      requirement,
+      evidence_path: evidencePath,
+    };
+  }
   if (review === null) {
     return {
       status: 'PENDING',

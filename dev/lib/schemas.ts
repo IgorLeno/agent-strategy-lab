@@ -1469,6 +1469,46 @@ export type ReviewerInvocationProvenance = z.infer<typeof ReviewerInvocationProv
  * precisa continuar bloqueando depois que o processo termina: rerodar o mesmo
  * comando sem intervenção humana não pode esquecer a reprovação.
  */
+/**
+ * Como o reviewer resolveu UM item de `what_i_did_not_check` do implementer.
+ * Só existem dois desfechos, e os dois exigem texto: ou o reviewer justifica
+ * por que a lacuna é aceitável, ou ela vira pergunta aberta registrada.
+ * "looks good" não é nenhum dos dois.
+ */
+export const REVIEW_GAP_DISPOSITIONS = ['accepted_with_justification', 'open_question'] as const;
+export const ReviewGapDisposition = z.enum(REVIEW_GAP_DISPOSITIONS);
+export type ReviewGapDisposition = z.infer<typeof ReviewGapDisposition>;
+
+export const ReviewedHandoffGap = z
+  .object({
+    /** Texto EXATO do item declarado pelo implementer; é a chave do pareamento. */
+    gap: nonEmpty,
+    disposition: ReviewGapDisposition,
+    /** Justificativa (accepted) ou a pergunta em aberto (open_question). */
+    note: z.string().min(1).max(240),
+  })
+  .strict();
+export type ReviewedHandoffGap = z.infer<typeof ReviewedHandoffGap>;
+
+/**
+ * O que o reviewer declara ter AUDITADO, por referência a coisas concretas.
+ * Adaptado da cobertura de gate do jcode: um veredito que não nomeia o que
+ * olhou não é auditável, e não é a mesma coisa que um veredito que olhou.
+ */
+export const CandidateReviewCoverage = z
+  .object({
+    /** Arquivos do candidate efetivamente auditados. */
+    files: z.array(nonEmpty).max(50),
+    /** Validações oficiais lidas, pelo argv exato que o orquestrador rodou. */
+    validations: z.array(z.array(nonEmpty).min(1)).max(20),
+    /** Aspectos comportamentais nomeados — curtos, não é raciocínio. */
+    behaviors: z.array(z.string().min(1).max(160)).max(10),
+    /** Endereçamento item a item das lacunas declaradas pelo implementer. */
+    handoff_gaps: z.array(ReviewedHandoffGap).max(5),
+  })
+  .strict();
+export type CandidateReviewCoverage = z.infer<typeof CandidateReviewCoverage>;
+
 export const CandidateReviewRecord = z
   .object({
     schema_version: z.literal(DEV_SCHEMA_VERSION),
@@ -1479,11 +1519,70 @@ export const CandidateReviewRecord = z
     validation_results_sha256: z.string().regex(/^[0-9a-f]{64}$/),
     reviewer_profile_id: nonEmpty,
     reviewer_invocation: ReviewerInvocationProvenance,
+    /**
+     * `what_i_did_not_check` do handoff v2 do implementer, DERIVADO pelo
+     * orquestrador — nunca fornecido pelo reviewer. É contra esta lista que a
+     * cobertura é conferida. Ausente = handoff v1 ou draft sem lacunas
+     * declaradas (UNKNOWN), e nesse caso não há o que endereçar.
+     */
+    implementer_gaps: z.array(nonEmpty).max(5).optional(),
+    /** Declarada pelo reviewer. OBRIGATÓRIA para um ACCEPT válido. */
+    coverage: CandidateReviewCoverage.optional(),
     decision: z.enum(['ACCEPT', 'REJECT']),
     reason: nonEmpty,
     decided_at: z.string().datetime(),
   })
-  .strict();
+  .strict()
+  .superRefine((record, ctx) => {
+    const declared = record.implementer_gaps ?? [];
+    const addressed = record.coverage?.handoff_gaps ?? [];
+    const addressedGaps = addressed.map((entry) => entry.gap);
+    if (new Set(addressedGaps).size !== addressedGaps.length) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'cobertura endereça a mesma lacuna mais de uma vez',
+      });
+    }
+    for (const gap of addressedGaps) {
+      if (!declared.includes(gap)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `cobertura endereça lacuna não declarada pelo implementer: ${gap}`,
+        });
+      }
+    }
+
+    // O gate é ESTRUTURAL e só vale para ACCEPT: um REJECT continua sendo um
+    // veredito legítimo sem cobertura, porque ele não promove nada.
+    if (record.decision !== 'ACCEPT') return;
+    if (record.coverage === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'ACCEPT exige coverage declarada; ausência de prova não é aceite',
+      });
+      return;
+    }
+    if (record.coverage.files.length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'ACCEPT exige ao menos um arquivo auditado na coverage',
+      });
+    }
+    if (record.coverage.validations.length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'ACCEPT exige ao menos uma validação oficial referenciada na coverage',
+      });
+    }
+    for (const gap of declared) {
+      if (!addressedGaps.includes(gap)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `ACCEPT deixa lacuna do implementer sem endereçamento: ${gap}`,
+        });
+      }
+    }
+  });
 export type CandidateReviewRecord = z.infer<typeof CandidateReviewRecord>;
 
 // ---------------------------------------------------------------------------
