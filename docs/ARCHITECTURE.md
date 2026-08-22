@@ -17,16 +17,14 @@ oficial usado neste documento:
 O medidor empírico de agentes continua existindo — como Experimental Plane, a
 serviço do control plane, não como definição do produto.
 
-> **Estado pós-M86 (Marco 3 fechado + 6 commits).** M01–M86 implementadas.
-> Depois de M86, seis commits (`c7ec6a4`…`a24c0cb`) conectaram o lifecycle
-> universal à execução real de planos externos: entrypoint
-> `dev-run-plan --authorization`, catálogo de profiles separado do repo alvo,
-> `ProjectControlPlane` como porta única do loop, review gating durável,
-> preflight tri-state verdadeiro e materialização da história canônica de
-> projetos externos alimentando o routing. O primeiro projeto real continua
-> bloqueado por HUMAN STOP ([M3-REVIEW](reviews/M3-REVIEW.md) §5). A evolução
-> seguinte (M87–M126) está planejada em
+> **Estado v0.1 operacional.** O entrypoint `dev-run-project` conecta intake,
+> inspection e o planning worker existentes à projeção mínima de `PlanFile` e
+> ao executor `runPlan`, preservando `ProjectControlPlane`, routing, review,
+> validação e recovery como caminhos únicos. A evolução seguinte está descrita
+> em
 > [docs/superpowers/plans/2026-08-21-agentlab-control-plane-jcode-evolution.md](superpowers/plans/2026-08-21-agentlab-control-plane-jcode-evolution.md).
+> Post-v0.1 capabilities M95–M126 are evidence-triggered backlog. They are not
+> blockers for real-project operation.
 > Onde houver divergência futura, o código é a autoridade.
 
 ---

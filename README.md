@@ -96,13 +96,15 @@ contrário. Ver [`docs/adr/ADR-0003-control-plane-identity.md`](docs/adr/ADR-000
 
 ## Estado atual
 
-**Implementado e testado** (139 arquivos de teste, incluindo E2E do fluxo de
-projeto externo com providers fake):
+**Implementado e testado** (incluindo E2E do fluxo de projeto externo com
+providers fake):
 
-- Ciclo completo de projeto externo via `pnpm dev-run-plan --repo <alvo>
-  --plan <plano> --authorization <agentlab-run.yaml>` — intake, inspection,
-  routing, execução, validação, review gate, repair, escalation, diagnóstico e
-  materialização de história canônica.
+- Ciclo autônomo de projeto externo via `pnpm dev-run-project --repo <alvo>
+  --request <project-request.yaml> --authorization <agentlab-run.yaml>` —
+  intake, inspection, planning, projeção do plano, routing, execução, validação,
+  review gate, repair, escalation, diagnóstico e materialização de história
+  canônica. `dev-run-plan` permanece como o executor subjacente e não exige que
+  o operador escreva o `PlanFile` nesse fluxo.
 - Evidence kernel: runs selados, redaction, integridade, índice SQLite derivado
   e reconstruível.
 - Billing/credencial: assinatura provada a cada launch; API key banida dos
@@ -112,7 +114,7 @@ projeto externo com providers fake):
 - Catálogo de perfis de execução versionados (Claude, Codex e duplos fake) com
   capabilities derivadas com provenance.
 
-**Limitações atuais** (mapeadas como work units M87–M126 em
+**Limitações atuais** (mapeadas como work units M95–M126 em
 [`dev/plan.yaml`](dev/plan.yaml); plano em
 [`docs/superpowers/plans/2026-08-21-agentlab-control-plane-jcode-evolution.md`](docs/superpowers/plans/2026-08-21-agentlab-control-plane-jcode-evolution.md)):
 
@@ -123,9 +125,9 @@ projeto externo com providers fake):
 - Não há interface unificada de eventos de execução; o stream do Codex ainda
   não é parseado pelo harness.
 - Execução estritamente serial (`concurrency = 1`).
-- O primeiro projeto real permanece bloqueado por HUMAN STOP explícito
-  ([`docs/reviews/M3-REVIEW.md`](docs/reviews/M3-REVIEW.md)); a história
-  canônica ainda não tem amostra real.
+
+Post-v0.1 capabilities M95–M126 are evidence-triggered backlog. They are not
+blockers for real-project operation.
 
 **Planejado** (mesmo plano, milestones tardios e com gates humanos próprios):
 handoff tipado v2 com `what_i_did_not_check`, task graph com nascimento

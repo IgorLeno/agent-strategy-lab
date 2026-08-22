@@ -1365,9 +1365,10 @@ Plano arquitetural aprovado:
 Milestones arquiteturais M-A…M-I mapeiam para as tasks operacionais abaixo
 (M-A=M87–M90 · M-B=M91–M94 · M-C=M95–M99 · M-D=M100–M104 · M-E=M105–M109 ·
 M-F=M110–M112 · M-G=M113–M118 · M-H=M119–M122 · M-I=M123–M126). Decisões
-humanas D1–D6 já resolvidas; gates futuros: veredito de transporte jcode
-(M113), ativação de concorrência (M121), primeiro projeto real (HUMAN STOP do
-M3-REVIEW) e início de M-I (M123).
+humanas D1–D6 já resolvidas. Post-v0.1 capabilities M95–M126 are
+evidence-triggered backlog. They are not blockers for real-project operation.
+Se retomados por evidência de uso, preservam os gates específicos já descritos
+em cada task.
 
 ### M87 — Root README — identidade de control plane
 **Depende de:** M86 · **Gate:** `pnpm build`
