@@ -49,6 +49,7 @@ import {
   RevalidationReasonCode,
   RevalidationSourceBinding,
   parseHandoffDraft,
+  sealHandoff,
   type CompletionRecord as CompletionRecordType,
   type HandoffDraft,
   type HandoffRecord,
@@ -527,18 +528,14 @@ function completionFrom(
 }
 
 function handoffFrom(source: BoundSource, record: OrchestratedRevalidationRecordType): HandoffRecord {
-  return {
-    schema_version: DEV_SCHEMA_VERSION,
+  return sealHandoff(source.handoff, {
     task_id: record.task_id,
     result: 'PASS',
     changed_files: record.changed_files,
     validations: record.revalidation_results,
-    decisions: source.handoff.decisions,
-    lessons: source.handoff.lessons,
-    next_relevant_files: source.handoff.next_relevant_files,
     accepted_commit: record.candidate_commit as string,
     sealed_at: record.revalidated_at,
-  };
+  });
 }
 
 export async function verifyOrchestratedRevalidationRecord(

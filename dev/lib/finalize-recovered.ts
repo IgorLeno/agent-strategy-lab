@@ -35,6 +35,7 @@ import {
   DEV_SCHEMA_VERSION,
   RecoveredFinalizationRecord,
   parseHandoffDraft,
+  sealHandoff,
   type CompletionRecord,
   type HandoffDraft,
   type HandoffRecord,
@@ -332,18 +333,14 @@ function deterministicHandoff(
   record: RecoveredFinalizationRecordType,
   source: HandoffDraft,
 ): HandoffRecord {
-  return {
-    schema_version: DEV_SCHEMA_VERSION,
+  return sealHandoff(source, {
     task_id: record.task_id,
     result: 'PASS',
-    changed_files: [...record.changed_files],
-    validations: [...record.validation_results],
-    decisions: [...source.decisions],
-    lessons: [...source.lessons],
-    next_relevant_files: [...source.next_relevant_files],
+    changed_files: record.changed_files,
+    validations: record.validation_results,
     accepted_commit: record.candidate_commit,
     sealed_at: record.finalized_at,
-  };
+  });
 }
 
 async function assertOrWrite<T>(

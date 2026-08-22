@@ -440,6 +440,75 @@ export function isHandoffRecordV2(record: HandoffRecord): record is HandoffRecor
   return record.schema_version === HANDOFF_SCHEMA_VERSION_V2;
 }
 
+/**
+ * Fatos que SÓ o orquestrador pode originar. Nenhum deles vem do draft: o
+ * worker não sabe o que foi commitado, o que a validação oficial devolveu nem
+ * se a mudança foi aceita. Eles chegam aqui derivados de change bundle,
+ * ValidationEvidence e do commit — nunca do self-report.
+ */
+export interface SealedHandoffFacts {
+  readonly task_id: string;
+  readonly result: 'PASS' | 'FAIL';
+  readonly changed_files: readonly string[];
+  readonly validations: readonly ValidationResult[];
+  readonly accepted_commit: string;
+  readonly sealed_at: string;
+}
+
+/**
+ * Selamento ÚNICO do handoff — a fronteira de autoria mora aqui, e não
+ * replicada em cada caminho de fechamento.
+ *
+ *   worker      → decisions, lessons, next_relevant_files, evidence,
+ *                 open_questions, what_i_did_not_check, confidence
+ *   orquestrador→ task_id, result, changed_files, validations,
+ *                 accepted_commit, sealed_at
+ *
+ * O record é montado CAMPO A CAMPO, nunca por spread do draft: um worker que
+ * escreva changed_files ou validations diferentes da evidência não desloca
+ * nada, porque esses campos não são lidos do draft em lugar nenhum.
+ *
+ * `evidence` sobrevive como o que é — CLAIM do worker com uma referência.
+ * Nada aqui a promove a evidência verificada: a evidência oficial continua
+ * sendo `validations`/ValidationEvidence, derivada pelo orquestrador.
+ *
+ * Draft v1 sela record v1; draft v2 sela record v2. Um handoff v1 não ganha
+ * campo v2 nenhum — o fluxo histórico permanece byte-compatível.
+ */
+export function sealHandoff(draft: HandoffDraft, facts: SealedHandoffFacts): HandoffRecord {
+  const derived = {
+    task_id: facts.task_id,
+    result: facts.result,
+    changed_files: [...facts.changed_files],
+    validations: [...facts.validations],
+    accepted_commit: facts.accepted_commit,
+    sealed_at: facts.sealed_at,
+  };
+  const opinion = {
+    decisions: draft.decisions,
+    lessons: draft.lessons,
+    next_relevant_files: draft.next_relevant_files,
+  };
+
+  if (!isHandoffDraftV2(draft)) {
+    return HandoffRecordV1.parse({
+      schema_version: HANDOFF_SCHEMA_VERSION_V1,
+      ...derived,
+      ...opinion,
+    });
+  }
+  return HandoffRecordV2.parse({
+    schema_version: HANDOFF_SCHEMA_VERSION_V2,
+    ...derived,
+    ...opinion,
+    // Ausente no draft continua ausente no record: UNKNOWN não vira [].
+    ...(draft.evidence === undefined ? {} : { evidence: draft.evidence }),
+    ...(draft.open_questions === undefined ? {} : { open_questions: draft.open_questions }),
+    what_i_did_not_check: draft.what_i_did_not_check,
+    ...(draft.confidence === undefined ? {} : { confidence: draft.confidence }),
+  });
+}
+
 // ---------------------------------------------------------------------------
 // TaskPacket — a ÚNICA entrada do worker. ≤ 12 KiB.
 // ---------------------------------------------------------------------------

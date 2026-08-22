@@ -51,6 +51,7 @@ import {
   DEV_SCHEMA_VERSION,
   OrchestratedFinalizationRecord,
   parseHandoffDraft,
+  sealHandoff,
   type AgentCompletionReport as AgentCompletionReportType,
   type CompletionRecord as CompletionRecordType,
   type DevelopmentState,
@@ -554,22 +555,24 @@ function deterministicCompletion(
   };
 }
 
+/**
+ * Do draft do worker sobrevive SOMENTE opinião; todo fato vem do
+ * `OrchestratedFinalizationRecord`, que por sua vez veio do change bundle, da
+ * validação oficial e do commit do orquestrador. `sealHandoff` é a única
+ * implementação dessa fronteira, e é ela que decide se o record sai v1 ou v2.
+ */
 function deterministicHandoff(
   record: OrchestratedFinalizationRecordType,
   source: SourceEvidence,
 ): HandoffRecord {
-  return {
-    schema_version: DEV_SCHEMA_VERSION,
+  return sealHandoff(source.handoff, {
     task_id: record.task_id,
     result: 'PASS',
-    changed_files: [...record.changed_files],
-    validations: [...record.validation_results],
-    decisions: [...source.handoff.decisions],
-    lessons: [...source.handoff.lessons],
-    next_relevant_files: [...source.handoff.next_relevant_files],
+    changed_files: record.changed_files,
+    validations: record.validation_results,
     accepted_commit: record.candidate_commit,
     sealed_at: record.finalized_at,
-  };
+  });
 }
 
 async function assertOrWrite<T>(

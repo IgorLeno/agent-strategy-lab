@@ -20,6 +20,7 @@ import { resolveHarnessPaths, type HarnessPaths } from '../../dev/lib/paths.js';
 import {
   ensureTaskInbox,
   handoffDraftPath,
+  handoffPath,
   orchestratedFinalizationPath,
   readCandidateReview,
   readCloseManifest,
@@ -36,6 +37,13 @@ import { recover, verifyCloseBundle } from '../../dev/lib/recover.js';
 import type {
   CandidateReviewRequirement,
   OrchestratedFinalizationRecord,
+} from '../../dev/lib/schemas.js';
+import {
+  MAXIMUM_HANDOFF_BYTES,
+  MAXIMUM_TASK_PACKET_BYTES,
+  byteSize,
+  isHandoffRecordV2,
+  parseHandoffRecord,
 } from '../../dev/lib/schemas.js';
 import {
   buildInitialState,
@@ -117,7 +125,12 @@ beforeEach(async () => {
 
 async function prepareRun(
   changedFiles = ['src/new file.ts'],
-  options: { result?: 'SUCCESS' | 'FAILURE'; reportCandidate?: string | null } = {},
+  options: {
+    result?: 'SUCCESS' | 'FAILURE';
+    reportCandidate?: string | null;
+    /** Sobrescreve o HandoffDraft escrito no inbox — usado pelos testes de v2. */
+    draft?: Record<string, unknown>;
+  } = {},
 ): Promise<void> {
   const state = buildInitialState(loaded.plan, loaded.planSha256, { baselineSha: baseSha, now: NOW });
   await writeState(
@@ -191,6 +204,7 @@ async function prepareRun(
       decisions: ['decisão'],
       lessons: ['lição'],
       next_relevant_files: changedFiles.slice(0, 5),
+      ...options.draft,
     }),
   );
   for (const file of changedFiles) {
@@ -780,5 +794,160 @@ describe('finalizeOrchestratedTask', () => {
     const result = await recover(paths, loaded, { applyRecovered: true });
     expect(getTaskState(result.state, 'T1').status).toBe('RUNNING');
     expect(result.reconciliations[0]?.reason).toMatch(/fechamento pendente/i);
+  });
+});
+
+describe('handoff v2 na finalização orquestrada', () => {
+  const V2_DRAFT = {
+    schema_version: 2,
+    evidence: [
+      { kind: 'file', path: 'src/v2.ts', lines: '1-4', claim: 'patch aplicado' },
+      { kind: 'command', argv: ['pnpm', 'typecheck'], claim: 'typecheck local executado' },
+    ],
+    open_questions: ['revisar o nome do campo?'],
+    what_i_did_not_check: ['comportamento sob concorrência'],
+    confidence: 'alta no patch, testes locais verdes',
+  };
+
+  it('preserva o fluxo v1 quando o draft não traz campos novos', async () => {
+    await prepareRun(['src/v1.ts']);
+    await finalize();
+
+    const handoff = await readHandoff(paths, 'T1');
+    expect(handoff?.schema_version).toBe(1);
+    // Bit-compatível: os bytes em disco são exatamente os que o selamento v1
+    // sempre produziu — mesma ordem de chaves, mesmo conteúdo.
+    const bytes = await readFile(handoffPath(paths, 'T1'), 'utf8');
+    expect(bytes).toBe(
+      `${JSON.stringify(
+        {
+          schema_version: 1,
+          task_id: 'T1',
+          result: 'PASS',
+          changed_files: ['src/v1.ts'],
+          validations: handoff?.validations,
+          decisions: ['decisão'],
+          lessons: ['lição'],
+          next_relevant_files: ['src/v1.ts'],
+          accepted_commit: handoff?.accepted_commit,
+          sealed_at: NOW,
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    // Nenhum campo v2 aparece por default: um handoff v1 continua v1 em disco.
+    expect(Object.keys(handoff ?? {}).sort()).toEqual([
+      'accepted_commit',
+      'changed_files',
+      'decisions',
+      'lessons',
+      'next_relevant_files',
+      'result',
+      'schema_version',
+      'sealed_at',
+      'task_id',
+      'validations',
+    ]);
+  });
+
+  it('opinião do draft v2 sobrevive ao selamento', async () => {
+    await prepareRun(['src/v2.ts'], { draft: V2_DRAFT });
+    await finalize();
+
+    const handoff = await readHandoff(paths, 'T1');
+    expect(handoff?.schema_version).toBe(2);
+    if (handoff === null || !isHandoffRecordV2(handoff)) throw new Error('record v2 esperado');
+    expect(handoff.what_i_did_not_check).toEqual(['comportamento sob concorrência']);
+    expect(handoff.open_questions).toEqual(['revisar o nome do campo?']);
+    expect(handoff.confidence).toBe('alta no patch, testes locais verdes');
+    expect(handoff.evidence?.map((reference) => reference.kind)).toEqual(['file', 'command']);
+    expect(handoff.decisions).toEqual(['decisão']);
+  });
+
+  it('what_i_did_not_check vazio sobrevive como afirmação, não some', async () => {
+    await prepareRun(['src/v2-vazio.ts'], {
+      draft: { ...V2_DRAFT, what_i_did_not_check: [] },
+    });
+    await finalize();
+
+    const handoff = await readHandoff(paths, 'T1');
+    if (handoff === null || !isHandoffRecordV2(handoff)) throw new Error('record v2 esperado');
+    expect(handoff.what_i_did_not_check).toEqual([]);
+  });
+
+  // O worker pode DIZER o que quiser sobre arquivos, validações e resultado. O
+  // record selado continua sendo derivado: a claim vira discrepância registrada,
+  // nunca substitui o fato.
+  it('claim factual do worker não desloca o fato derivado', async () => {
+    await prepareRun(['src/derivado.ts'], {
+      draft: {
+        ...V2_DRAFT,
+        changed_files: ['src/inventado.ts', 'src/outro-inventado.ts'],
+        validations: [
+          { argv: ['pnpm', 'test'], exit_code: 0, timed_out: false, duration_ms: 999 },
+        ],
+        evidence: [
+          { kind: 'command', argv: ['pnpm', 'test'], claim: 'suíte completa verde' },
+        ],
+      },
+    });
+    const outcome = await finalize();
+
+    const handoff = await readHandoff(paths, 'T1');
+    if (handoff === null || !isHandoffRecordV2(handoff)) throw new Error('record v2 esperado');
+    expect(handoff.changed_files).toEqual(['src/derivado.ts']);
+    // As validações do record são as OFICIAIS do orquestrador; a lista que o
+    // worker escreveu no draft não entra por nenhuma porta.
+    expect(handoff.validations.map((result) => result.argv.join(' '))).toEqual([
+      'true',
+      'git diff --cached --check',
+    ]);
+    expect(handoff.validations.some((result) => result.duration_ms === 999)).toBe(false);
+    expect(handoff.accepted_commit).toBe(await headSha(root));
+    // A claim continua existindo como CLAIM do worker — e a divergência factual
+    // aparece como discrepância, que é evidência, não aceite.
+    expect(handoff.evidence?.[0]?.claim).toBe('suíte completa verde');
+    expect(outcome.discrepancies).toContain('changed_files do HandoffDraft diverge dos arquivos reais');
+  });
+
+  it('previous_handoff entrega v1 e v2 à task dependente, dentro do budget', async () => {
+    await prepareRun(['src/para-t2.ts'], { draft: V2_DRAFT });
+    await finalize();
+
+    const handoff = await readHandoff(paths, 'T1');
+    const packet = buildTaskPacket({
+      task: { ...loaded.byId.get('T2')!, include_previous_handoff: true },
+      baseSha,
+      previousHandoff: handoff,
+    });
+    const carried = packet.previous_handoff;
+    if (carried === null || !isHandoffRecordV2(carried)) throw new Error('v2 esperado no packet');
+    expect(carried.what_i_did_not_check).toEqual(['comportamento sob concorrência']);
+    expect(carried.open_questions).toEqual(['revisar o nome do campo?']);
+    expect(carried.evidence).toHaveLength(2);
+    expect(byteSize(carried)).toBeLessThanOrEqual(MAXIMUM_HANDOFF_BYTES);
+    expect(byteSize(packet)).toBeLessThanOrEqual(MAXIMUM_TASK_PACKET_BYTES);
+
+    // O mesmo packet aceita um handoff histórico v1 sem migração nenhuma.
+    const legacy = parseHandoffRecord({
+      schema_version: 1,
+      task_id: 'T1',
+      result: 'PASS',
+      changed_files: ['src/legado.ts'],
+      validations: [],
+      decisions: [],
+      lessons: [],
+      next_relevant_files: [],
+      accepted_commit: SHA,
+      sealed_at: NOW,
+    });
+    const legacyPacket = buildTaskPacket({
+      task: { ...loaded.byId.get('T2')!, include_previous_handoff: true },
+      baseSha,
+      previousHandoff: legacy,
+    });
+    expect(legacyPacket.previous_handoff?.schema_version).toBe(1);
+    expect(isHandoffRecordV2(legacyPacket.previous_handoff!)).toBe(false);
   });
 });

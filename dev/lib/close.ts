@@ -10,6 +10,7 @@ import type { HarnessPaths } from './paths.js';
 import type { LoadedPlan } from './plan.js';
 import {
   DEV_SCHEMA_VERSION,
+  sealHandoff,
   type AgentCompletionReport,
   type CompletionRecord,
   type DevelopmentState,
@@ -244,20 +245,17 @@ export async function closeTask(input: CloseInput): Promise<CloseOutcome> {
   };
   // Selado campo a campo, nunca por spread do draft: tudo que o orquestrador
   // sabe de fato (task_id, resultado, commit, arquivos, validações) vem da
-  // evidência; do worker só sobrevive o que é opinião dele — decisões, lições
-  // e sugestão de próximos arquivos.
-  const handoff: HandoffRecord = {
-    schema_version: DEV_SCHEMA_VERSION,
+  // evidência; do worker só sobrevive o que é opinião dele — decisões, lições,
+  // sugestão de próximos arquivos e, num draft v2, as lacunas que ele
+  // reconhece. A fronteira inteira vive em `sealHandoff`.
+  const handoff: HandoffRecord = sealHandoff(draft, {
     task_id: taskId,
     result: 'PASS',
-    changed_files: [...changed],
+    changed_files: changed,
     validations: revalidation,
-    decisions: [...draft.decisions],
-    lessons: [...draft.lessons],
-    next_relevant_files: [...draft.next_relevant_files],
     accepted_commit: candidate,
     sealed_at: timestamp,
-  };
+  });
 
   // Ordem deliberada: os dois records primeiro, o manifesto por último. Um
   // crash antes do manifesto deixa o fechamento visivelmente incompleto, e o
