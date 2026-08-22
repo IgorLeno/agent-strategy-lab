@@ -1,5 +1,4 @@
-import { access, mkdtemp, readdir, rm, symlink } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { runValidation, toValidationResult } from './exec.js';
 import {
@@ -28,6 +27,7 @@ import {
   type ValidationResult,
 } from './schemas.js';
 import { readState, writeState } from './state.js';
+import { withCommitValidationCwd } from './worktree.js';
 
 export class MaintenanceError extends Error {
   constructor(message: string) {
@@ -218,43 +218,13 @@ async function resolveCommitSha(repoRoot: string, raw: string): Promise<string> 
   }
 }
 
-/** Executa gates sobre os bytes do target sem trocar o HEAD principal. */
-async function withTargetValidationCwd<T>(
-  repoRoot: string,
-  target: string,
-  run: (cwd: string) => Promise<T>,
-): Promise<T> {
-  const head = await headSha(repoRoot);
-  if (head === target) return run(repoRoot);
-
-  const worktreeDir = await mkdtemp(path.join(tmpdir(), 'agentlab-maint-range-'));
-  try {
-    await gitOrThrow(repoRoot, ['worktree', 'add', '--detach', worktreeDir, target]);
-    const nodeModules = path.join(repoRoot, 'node_modules');
-    try {
-      await access(nodeModules);
-      await symlink(nodeModules, path.join(worktreeDir, 'node_modules'), 'dir');
-    } catch {
-      // Sem dependências compartilhadas, os gates falham de forma auditável.
-    }
-    return await run(worktreeDir);
-  } finally {
-    try {
-      await gitOrThrow(repoRoot, ['worktree', 'remove', '--force', worktreeDir]);
-    } catch {
-      await rm(worktreeDir, { recursive: true, force: true });
-      await gitOrThrow(repoRoot, ['worktree', 'prune']).catch(() => undefined);
-    }
-  }
-}
-
 async function runTargetValidations(
   paths: HarnessPaths,
   previous: string,
   target: string,
   runner: MaintenanceValidationRunner,
 ): Promise<ValidationResult[]> {
-  return withTargetValidationCwd(paths.repoRoot, target, async (cwd) => {
+  return withCommitValidationCwd(paths.repoRoot, target, async (cwd) => {
     const validationResults: ValidationResult[] = [];
     for (const command of validationCommands(previous, target)) {
       const result = await runner(command, cwd);

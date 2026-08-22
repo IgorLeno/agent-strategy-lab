@@ -1,6 +1,3 @@
-import { access, mkdtemp, rm, symlink } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
 import { runValidation, toValidationResult } from './exec.js';
 import {
   changedFiles,
@@ -32,6 +29,7 @@ import {
   type ValidationResult,
 } from './schemas.js';
 import { readState, writeState } from './state.js';
+import { withCommitValidationCwd } from './worktree.js';
 
 export { assertAppendOnlyPlanExtension } from './plan-extension-contract.js';
 
@@ -103,39 +101,6 @@ async function assertCurrentPlanMatchesTarget(
   }
 }
 
-/**
- * Valida o TARGET sem contaminar o working tree principal: quando HEAD ≠
- * target, usa worktree detachado + symlink de node_modules.
- */
-async function withTargetValidationCwd<T>(
-  repoRoot: string,
-  target: string,
-  run: (cwd: string) => Promise<T>,
-): Promise<T> {
-  const head = await headSha(repoRoot);
-  if (head === target) return run(repoRoot);
-
-  const worktreeDir = await mkdtemp(path.join(tmpdir(), 'agentlab-plan-ext-'));
-  try {
-    await gitOrThrow(repoRoot, ['worktree', 'add', '--detach', worktreeDir, target]);
-    const nodeModules = path.join(repoRoot, 'node_modules');
-    try {
-      await access(nodeModules);
-      await symlink(nodeModules, path.join(worktreeDir, 'node_modules'), 'dir');
-    } catch {
-      // Sem node_modules compartilhado: typecheck/build/test falharão de forma auditável.
-    }
-    return await run(worktreeDir);
-  } finally {
-    try {
-      await gitOrThrow(repoRoot, ['worktree', 'remove', '--force', worktreeDir]);
-    } catch {
-      await rm(worktreeDir, { recursive: true, force: true });
-      await gitOrThrow(repoRoot, ['worktree', 'prune']).catch(() => undefined);
-    }
-  }
-}
-
 async function runTargetValidations(
   paths: HarnessPaths,
   previous: string,
@@ -143,7 +108,7 @@ async function runTargetValidations(
   runner: MaintenanceValidationRunner,
 ): Promise<ValidationResult[]> {
   const commands = adoptionValidationCommands(previous, target);
-  return withTargetValidationCwd(paths.repoRoot, target, async (cwd) => {
+  return withCommitValidationCwd(paths.repoRoot, target, async (cwd) => {
     const validationResults: ValidationResult[] = [];
     for (const command of commands) {
       // git diff --check usa o object DB do repo; rodar a partir do worktree
