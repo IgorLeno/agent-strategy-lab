@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   CompletionRecord,
+  DEV_SCHEMA_VERSION,
   LaunchRecord,
   MAXIMUM_HANDOFF_BYTES,
   MAXIMUM_TASK_PACKET_BYTES,
@@ -14,9 +15,16 @@ import {
   ValidationEvidence,
   ValidationResult,
   byteSize,
+  HANDOFF_SCHEMA_VERSION,
+  HANDOFF_SCHEMA_VERSION_V1,
+  HANDOFF_SCHEMA_VERSION_V2,
+  HandoffDraftV2,
+  isHandoffDraftV2,
+  isHandoffRecordV2,
   parseHandoffDraft,
   parseHandoffRecord,
   parseTaskPacket,
+  readHandoffConfidence,
 } from '../../dev/lib/schemas.js';
 import { BudgetExceededError } from '../../dev/lib/budget.js';
 import { canonicalJson, canonicalSha256 } from '../../dev/lib/canonical.js';
@@ -101,6 +109,23 @@ function validPacket(overrides: Record<string, unknown> = {}) {
     constraints: [],
     previous_handoff: null,
     generated_at: NOW,
+    ...overrides,
+  };
+}
+
+function validDraftV2(overrides: Record<string, unknown> = {}) {
+  const { schema_version: _v1, ...common } = validDraft();
+  return {
+    schema_version: 2,
+    ...common,
+    evidence: [
+      { kind: 'file', path: 'dev/lib/schemas.ts', lines: '182-260', claim: 'handoff v2 aditivo' },
+      { kind: 'command', argv: ['pnpm', 'test'], claim: 'testes de contrato executados' },
+      { kind: 'record', record_kind: 'validation', task_id: 'M91', attempt: 1, claim: 'validação oficial' },
+    ],
+    open_questions: ['manter o budget em 4 KiB?'],
+    what_i_did_not_check: ['comportamento sob concorrência'],
+    confidence: 'alta nos schemas, testes cobrem os dois readers',
     ...overrides,
   };
 }
@@ -381,6 +406,171 @@ describe('Handoff', () => {
   it('limita decisões a 5 e lessons a 3', () => {
     expect(() => parseHandoffDraft(validDraft({ decisions: ['a', 'b', 'c', 'd', 'e', 'f'] }))).toThrow();
     expect(() => parseHandoffDraft(validDraft({ lessons: ['a', 'b', 'c', 'd'] }))).toThrow();
+  });
+
+  it('handoff v1 persistido continua parseável sem migração', () => {
+    const historicalBytes = `${JSON.stringify(validDraft(), null, 2)}\n`;
+    const parsed = parseHandoffDraft(JSON.parse(historicalBytes));
+    expect(parsed.schema_version).toBe(HANDOFF_SCHEMA_VERSION_V1);
+    expect(canonicalJson(parsed)).toBe(canonicalJson(validDraft()));
+    expect(isHandoffDraftV2(parsed)).toBe(false);
+  });
+
+  // Ausência de campo v2 em v1 é UNKNOWN. Se algum leitor normalizasse para
+  // [] o harness estaria afirmando, em nome de um worker de agosto, que nada
+  // ficou sem verificar — conhecimento retroativo fabricado.
+  it('campo v2 ausente em v1 não vira default', () => {
+    const parsed = parseHandoffDraft(validDraft()) as Record<string, unknown>;
+    expect('what_i_did_not_check' in parsed).toBe(false);
+    expect('open_questions' in parsed).toBe(false);
+    expect('evidence' in parsed).toBe(false);
+    expect('confidence' in parsed).toBe(false);
+  });
+
+  it('o versionamento do handoff não é o dos demais records', () => {
+    expect(HANDOFF_SCHEMA_VERSION).toBe(HANDOFF_SCHEMA_VERSION_V2);
+    expect(HANDOFF_SCHEMA_VERSION_V2).not.toBe(DEV_SCHEMA_VERSION);
+    expect(HANDOFF_SCHEMA_VERSION_V1).toBe(DEV_SCHEMA_VERSION);
+    // TaskPacket e PlanFile continuam em DEV_SCHEMA_VERSION, intocados.
+    expect(parseTaskPacket(validPacket()).schema_version).toBe(DEV_SCHEMA_VERSION);
+  });
+});
+
+describe('Handoff v2', () => {
+  it('aceita draft v2 completo e reconhece a versão', () => {
+    const draft = parseHandoffDraft(validDraftV2());
+    expect(isHandoffDraftV2(draft)).toBe(true);
+    if (!isHandoffDraftV2(draft)) throw new Error('draft v2 esperado');
+    expect(draft.what_i_did_not_check).toEqual(['comportamento sob concorrência']);
+    expect(draft.open_questions).toEqual(['manter o budget em 4 KiB?']);
+  });
+
+  it('rejeita draft v2 sem what_i_did_not_check', () => {
+    const { what_i_did_not_check: _omitted, ...withoutField } = validDraftV2();
+    expect(() => parseHandoffDraft(withoutField)).toThrow();
+  });
+
+  it('aceita what_i_did_not_check vazio como afirmação positiva', () => {
+    const draft = parseHandoffDraft(validDraftV2({ what_i_did_not_check: [] }));
+    if (!isHandoffDraftV2(draft)) throw new Error('draft v2 esperado');
+    expect(draft.what_i_did_not_check).toEqual([]);
+  });
+
+  // [] e ausência são estados DIFERENTES e precisam continuar diferentes: um é
+  // cobertura afirmada, o outro é protocolo não respondido.
+  it('lista vazia e ausência não colapsam no mesmo estado', () => {
+    const empty = HandoffDraftV2.safeParse(validDraftV2({ what_i_did_not_check: [] }));
+    const { what_i_did_not_check: _omitted, ...missing } = validDraftV2();
+    expect(empty.success).toBe(true);
+    expect(HandoffDraftV2.safeParse(missing).success).toBe(false);
+  });
+
+  it('evidence é por referência, com forma distinta por tipo', () => {
+    const draft = parseHandoffDraft(validDraftV2());
+    if (!isHandoffDraftV2(draft)) throw new Error('draft v2 esperado');
+    expect(draft.evidence?.map((reference) => reference.kind)).toEqual([
+      'file',
+      'command',
+      'record',
+    ]);
+  });
+
+  it('evidence recusa campos de payload e referência mal formada', () => {
+    // conteúdo embutido: campo desconhecido em schema estrito
+    expect(() =>
+      parseHandoffDraft(
+        validDraftV2({
+          evidence: [{ kind: 'file', path: 'dev/lib/schemas.ts', claim: 'x', content: 'export const' }],
+        }),
+      ),
+    ).toThrow();
+    // string livre no lugar da referência tipada
+    expect(() =>
+      parseHandoffDraft(validDraftV2({ evidence: [{ kind: 'file', ref: 'a.ts:1-2', claim: 'x' }] })),
+    ).toThrow();
+    expect(() =>
+      parseHandoffDraft(
+        validDraftV2({ evidence: [{ kind: 'file', path: 'a.ts', lines: '148-120', claim: 'x' }] }),
+      ),
+    ).toThrow();
+    expect(() =>
+      parseHandoffDraft(validDraftV2({ evidence: [{ kind: 'transcript', claim: 'x' }] })),
+    ).toThrow();
+  });
+
+  it('record selado v2 carrega os campos novos e exige accepted_commit', () => {
+    expect(() => parseHandoffRecord({ ...validDraftV2(), sealed_at: NOW })).toThrow();
+    const sealed = parseHandoffRecord({ ...validDraftV2(), accepted_commit: SHA, sealed_at: NOW });
+    expect(isHandoffRecordV2(sealed)).toBe(true);
+    if (!isHandoffRecordV2(sealed)) throw new Error('record v2 esperado');
+    expect(sealed.what_i_did_not_check).toEqual(['comportamento sob concorrência']);
+    expect(sealed.accepted_commit).toBe(SHA);
+  });
+
+  it('draft v2 não tem accepted_commit', () => {
+    expect(() => parseHandoffDraft(validDraftV2({ accepted_commit: SHA }))).toThrow();
+  });
+
+  it('mantém o budget de 4 KiB para v2', () => {
+    const inflated = validDraftV2({
+      what_i_did_not_check: Array.from({ length: 5 }, () => 'lacuna reconhecida '.repeat(12)),
+      open_questions: Array.from({ length: 5 }, () => 'pergunta em aberto '.repeat(12)),
+      evidence: Array.from({ length: 8 }, (_, index) => ({
+        kind: 'file',
+        path: `dev/lib/modulo-com-nome-bem-longo-${index}.ts`,
+        lines: '1-999',
+        claim: 'referência com claim longa '.repeat(5),
+      })),
+    });
+    expect(byteSize(inflated)).toBeGreaterThan(MAXIMUM_HANDOFF_BYTES);
+    expect(() => parseHandoffDraft(inflated)).toThrow(BudgetExceededError);
+  });
+
+  it('respeita o budget num v2 realista', () => {
+    expect(byteSize(validDraftV2())).toBeLessThanOrEqual(MAXIMUM_HANDOFF_BYTES);
+  });
+});
+
+describe('readHandoffConfidence', () => {
+  it('é UNKNOWN sem declaração e com texto irreconhecível', () => {
+    expect(readHandoffConfidence(undefined).level).toBe('UNKNOWN');
+    expect(readHandoffConfidence('   ').level).toBe('UNKNOWN');
+    expect(readHandoffConfidence('lorem ipsum dolor').level).toBe('UNKNOWN');
+  });
+
+  it('reconhece declaração forte como HIGH', () => {
+    expect(readHandoffConfidence('alta: comportamento verificado pelos testes').level).toBe('HIGH');
+    expect(readHandoffConfidence('high confidence, fully verified').level).toBe('HIGH');
+  });
+
+  it('hedge reduz confiança', () => {
+    expect(readHandoffConfidence('provavelmente correto').level).toBe('MEDIUM');
+    expect(readHandoffConfidence('probably fine').level).toBe('MEDIUM');
+    // hedge junto de linguagem forte NÃO recupera HIGH
+    expect(readHandoffConfidence('alta confiança, acho que cobre tudo').level).toBe('MEDIUM');
+    expect(readHandoffConfidence('high confidence, I think').level).toBe('MEDIUM');
+  });
+
+  it('negação nunca é lida otimisticamente', () => {
+    expect(readHandoffConfidence('não verifiquei o caminho de erro').level).toBe('LOW');
+    expect(readHandoffConfidence('not confident in the parser').level).toBe('LOW');
+    // frase que "soa" positiva mas nega: continua pessimista
+    expect(readHandoffConfidence('alta confiança, sem dúvidas').level).toBe('LOW');
+    expect(readHandoffConfidence('totally sure, no doubts').level).toBe('LOW');
+  });
+
+  it('ambiguidade resolve para o lado conservador', () => {
+    expect(readHandoffConfidence('alta em schemas, baixa no parser').level).toBe('LOW');
+    expect(readHandoffConfidence('confident here, uncertain there').level).toBe('LOW');
+    expect(readHandoffConfidence('confiança média').level).toBe('MEDIUM');
+  });
+
+  it('é determinístico e expõe os marcadores que usou', () => {
+    const first = readHandoffConfidence('talvez cubra o caminho de erro');
+    const second = readHandoffConfidence('talvez cubra o caminho de erro');
+    expect(first).toEqual(second);
+    expect(first.markers.length).toBeGreaterThan(0);
+    expect(first.source).toBe('worker_statement');
   });
 });
 

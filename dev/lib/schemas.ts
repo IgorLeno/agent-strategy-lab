@@ -7,6 +7,12 @@ import {
 } from './budget.js';
 import { ExecutionPolicy, LEGACY_EXECUTION_POLICY } from './execution-policy.js';
 
+/**
+ * Versão dos records do harness (PlanFile, TaskPacket, completions, ...).
+ * O handoff NÃO usa este número: ele tem versionamento próprio
+ * (`HANDOFF_SCHEMA_VERSION`), para que evoluir o contrato de handoff não
+ * redefina a semântica de tudo o mais.
+ */
 export const DEV_SCHEMA_VERSION = 1;
 
 /**
@@ -180,10 +186,184 @@ export type PlanFile = z.infer<typeof PlanFile>;
 
 // ---------------------------------------------------------------------------
 // Handoff — draft do worker, record selado pelo orquestrador. Ambos ≤ 4 KiB.
+//
+// O handoff versiona SOZINHO. `DEV_SCHEMA_VERSION` continua descrevendo
+// PlanFile, TaskPacket e os demais records: subir aquele número para evoluir
+// este contrato redefiniria a semântica de tudo que nunca mudou. Por isso
+// existem V1 e V2 lado a lado, e um reader que aceita os dois — handoff v1
+// persistido continua legítimo, sem migração e sem campo fabricado.
 // ---------------------------------------------------------------------------
 
-const handoffBody = {
-  schema_version: z.literal(DEV_SCHEMA_VERSION),
+export const HANDOFF_SCHEMA_VERSION_V1 = 1;
+export const HANDOFF_SCHEMA_VERSION_V2 = 2;
+/** Versão de toda escrita NOVA. Ler v1 continua sendo obrigação permanente. */
+export const HANDOFF_SCHEMA_VERSION = HANDOFF_SCHEMA_VERSION_V2;
+
+/** Records do harness que uma referência de evidência pode apontar. */
+export const HANDOFF_EVIDENCE_RECORD_KINDS = [
+  'validation',
+  'completion',
+  'handoff',
+  'finalization',
+  'review',
+  'launch',
+  'revalidation',
+] as const;
+export const HandoffEvidenceRecordKind = z.enum(HANDOFF_EVIDENCE_RECORD_KINDS);
+export type HandoffEvidenceRecordKind = z.infer<typeof HandoffEvidenceRecordKind>;
+
+/** Afirmação do worker SOBRE a referência — curta, e nunca o conteúdo dela. */
+const evidenceClaim = z.string().min(1).max(160);
+/** "120" ou "120-148": o intervalo, jamais as linhas em si. */
+const evidenceLineRange = z
+  .string()
+  .regex(/^[1-9]\d*(-[1-9]\d*)?$/, 'lines deve ser "N" ou "N-M" com N,M ≥ 1');
+
+/**
+ * Evidência é PONTEIRO, não payload. Cada tipo de referência tem forma
+ * própria — arquivo com caminho e intervalo, comando com argv, record com
+ * task/attempt — justamente para que "evidência" não vire uma string livre
+ * que só parece tipada. Conteúdo de arquivo, diff, stdout, stderr e
+ * transcript continuam fora do handoff: quem quer os fatos abre a fonte.
+ */
+const handoffEvidenceVariants = z.discriminatedUnion('kind', [
+  z
+    .object({
+      kind: z.literal('file'),
+      path: z.string().min(1).max(200),
+      lines: evidenceLineRange.optional(),
+      claim: evidenceClaim,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal('command'),
+      argv: z.array(nonEmpty).min(1).max(8),
+      claim: evidenceClaim,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal('record'),
+      record_kind: HandoffEvidenceRecordKind,
+      task_id: identifier,
+      attempt: z.number().int().positive().optional(),
+      claim: evidenceClaim,
+    })
+    .strict(),
+]);
+
+export const HandoffEvidenceReference = handoffEvidenceVariants.superRefine((reference, ctx) => {
+  if (reference.kind !== 'file' || reference.lines === undefined) return;
+  const [start, end] = reference.lines.split('-').map(Number);
+  if (end !== undefined && end < (start as number)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `intervalo de linhas invertido: ${reference.lines}`,
+    });
+  }
+});
+export type HandoffEvidenceReference = z.infer<typeof HandoffEvidenceReference>;
+
+// ---------------------------------------------------------------------------
+// Confidence — opinião do worker, lida pessimistamente pelo harness.
+// ---------------------------------------------------------------------------
+
+export const HANDOFF_CONFIDENCE_LEVELS = ['HIGH', 'MEDIUM', 'LOW', 'UNKNOWN'] as const;
+export const HandoffConfidenceLevel = z.enum(HANDOFF_CONFIDENCE_LEVELS);
+export type HandoffConfidenceLevel = z.infer<typeof HandoffConfidenceLevel>;
+
+export interface HandoffConfidenceReading {
+  readonly level: HandoffConfidenceLevel;
+  /** Sempre o worker: nenhum nível de confiança nasce de evidência do harness. */
+  readonly source: 'worker_statement';
+  /** Marcadores reconhecidos, na ordem da tabela — a leitura é auditável. */
+  readonly markers: readonly string[];
+}
+
+interface ConfidenceMarker {
+  readonly name: string;
+  readonly pattern: RegExp;
+}
+
+/**
+ * Tabela ÚNICA e ordenada. Sem modelo, sem heurística escondida: a mesma
+ * frase produz sempre o mesmo nível, e a lista de marcadores explica por quê.
+ */
+const CONFIDENCE_NEGATION_MARKERS: readonly ConfidenceMarker[] = [
+  { name: 'negation:pt', pattern: /\b(nao|nem|nunca|sem)\b/ },
+  { name: 'negation:en', pattern: /\b(not|no|never|without|cannot|cant|couldnt|didnt|wasnt)\b/ },
+];
+
+const CONFIDENCE_LOW_MARKERS: readonly ConfidenceMarker[] = [
+  { name: 'low:pt', pattern: /\b(baixa|baixo|incerto|incerta|inseguro|insegura|duvid\w*|fragil|arriscad\w*|risco)\b/ },
+  { name: 'low:en', pattern: /\b(low|uncertain|unsure|shaky|fragile|risky|risk|doubt\w*)\b/ },
+];
+
+const CONFIDENCE_HEDGE_MARKERS: readonly ConfidenceMarker[] = [
+  { name: 'hedge:pt', pattern: /\b(talvez|acho|creio|parece|aparentemente|provavel\w*|possivel\w*|deve|deveria|presumo|suponho|em geral|na maior parte)\b/ },
+  { name: 'hedge:en', pattern: /\b(maybe|perhaps|think|believe|seems|apparently|probably|possibly|should|likely|mostly|assume|assuming|guess)\b/ },
+];
+
+const CONFIDENCE_MEDIUM_MARKERS: readonly ConfidenceMarker[] = [
+  { name: 'medium:pt', pattern: /\b(media|medio|moderad\w*|parcial\w*|razoavel)\b/ },
+  { name: 'medium:en', pattern: /\b(medium|moderate|partial\w*|reasonable)\b/ },
+];
+
+const CONFIDENCE_HIGH_MARKERS: readonly ConfidenceMarker[] = [
+  { name: 'high:pt', pattern: /\b(alta|alto|certeza|certo|confiante|confianca|verificad\w*|comprovad\w*|totalmente|plenamente)\b/ },
+  { name: 'high:en', pattern: /\b(high|certain|sure|confident|confidence|verified|proven|fully|thoroughly)\b/ },
+];
+
+function normalizeConfidenceStatement(statement: string): string {
+  return statement
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/['´`]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+function matched(text: string, markers: readonly ConfidenceMarker[]): readonly string[] {
+  return markers.filter((marker) => marker.pattern.test(text)).map((marker) => marker.name);
+}
+
+/**
+ * Leitura LENIENTE na entrada e PESSIMISTA na saída. Aceita a frase que o
+ * worker escreveu, mas nunca a lê para cima: negação, hedge e ambiguidade
+ * derrubam o nível, e texto irreconhecível é UNKNOWN — jamais HIGH por
+ * omissão. Confidence continua sendo opinião: esta função só declara como o
+ * harness a lê, nunca promove a frase a fato.
+ */
+export function readHandoffConfidence(statement: string | undefined): HandoffConfidenceReading {
+  if (statement === undefined || statement.trim() === '') {
+    return { level: 'UNKNOWN', source: 'worker_statement', markers: [] };
+  }
+  const text = normalizeConfidenceStatement(statement);
+  const negation = matched(text, CONFIDENCE_NEGATION_MARKERS);
+  const low = matched(text, CONFIDENCE_LOW_MARKERS);
+  const hedge = matched(text, CONFIDENCE_HEDGE_MARKERS);
+  const medium = matched(text, CONFIDENCE_MEDIUM_MARKERS);
+  const high = matched(text, CONFIDENCE_HIGH_MARKERS);
+  const markers = [...negation, ...low, ...hedge, ...medium, ...high];
+
+  if (negation.length > 0 || low.length > 0) {
+    return { level: 'LOW', source: 'worker_statement', markers };
+  }
+  if (hedge.length > 0 || medium.length > 0) {
+    return { level: 'MEDIUM', source: 'worker_statement', markers };
+  }
+  if (high.length > 0) {
+    return { level: 'HIGH', source: 'worker_statement', markers };
+  }
+  return { level: 'UNKNOWN', source: 'worker_statement', markers };
+}
+
+// ---------------------------------------------------------------------------
+
+/** Campos que v1 e v2 compartilham, com a MESMA semântica. */
+const handoffCommonBody = {
   task_id: identifier,
   result: z.enum(['PASS', 'FAIL']),
   changed_files: z.array(nonEmpty).max(50),
@@ -193,15 +373,72 @@ const handoffBody = {
   next_relevant_files: z.array(nonEmpty).max(5),
 };
 
+const handoffV2Body = {
+  ...handoffCommonBody,
+  /** Referências à evidência; nunca a evidência. Opcional = não declarada. */
+  evidence: z.array(HandoffEvidenceReference).max(8).optional(),
+  /** Opcional: ausente significa "não registrado", nunca "não existe". */
+  open_questions: z.array(nonEmpty).max(5).optional(),
+  /**
+   * OBRIGATÓRIO no draft v2. A distinção é o contrato inteiro:
+   *   ausente → protocolo inválido (o worker não respondeu à pergunta)
+   *   []      → o worker afirma POSITIVAMENTE não ter identificado nenhuma
+   *             verificação relevante deixada de fora
+   *   [item]  → o worker reconhece explicitamente uma lacuna
+   * Nenhum leitor pode normalizar ausência para lista vazia.
+   */
+  what_i_did_not_check: z.array(nonEmpty).max(5),
+  /** Nas palavras do worker. O nível é DERIVADO por `readHandoffConfidence`. */
+  confidence: z.string().min(1).max(200).optional(),
+};
+
+const sealedBody = { accepted_commit: shaHex, sealed_at: z.string().datetime() };
+
 /** O worker NÃO sabe se o commit foi aceito — por isso não há accepted_commit. */
-export const HandoffDraft = z.object(handoffBody).strict();
-export type HandoffDraft = z.infer<typeof HandoffDraft>;
+export const HandoffDraftV1 = z
+  .object({ schema_version: z.literal(HANDOFF_SCHEMA_VERSION_V1), ...handoffCommonBody })
+  .strict();
+export type HandoffDraftV1 = z.infer<typeof HandoffDraftV1>;
+
+export const HandoffDraftV2 = z
+  .object({ schema_version: z.literal(HANDOFF_SCHEMA_VERSION_V2), ...handoffV2Body })
+  .strict();
+export type HandoffDraftV2 = z.infer<typeof HandoffDraftV2>;
 
 /** Selado pelo orquestrador; só aqui existe accepted_commit. */
-export const HandoffRecord = z
-  .object({ ...handoffBody, accepted_commit: shaHex, sealed_at: z.string().datetime() })
+export const HandoffRecordV1 = z
+  .object({ schema_version: z.literal(HANDOFF_SCHEMA_VERSION_V1), ...handoffCommonBody, ...sealedBody })
   .strict();
-export type HandoffRecord = z.infer<typeof HandoffRecord>;
+export type HandoffRecordV1 = z.infer<typeof HandoffRecordV1>;
+
+export const HandoffRecordV2 = z
+  .object({ schema_version: z.literal(HANDOFF_SCHEMA_VERSION_V2), ...handoffV2Body, ...sealedBody })
+  .strict();
+export type HandoffRecordV2 = z.infer<typeof HandoffRecordV2>;
+
+/** Leitores: toda leitura do harness aceita as duas versões, sem migração. */
+export const HandoffDraftReader = z.discriminatedUnion('schema_version', [
+  HandoffDraftV1,
+  HandoffDraftV2,
+]);
+export const HandoffRecordReader = z.discriminatedUnion('schema_version', [
+  HandoffRecordV1,
+  HandoffRecordV2,
+]);
+
+export const HandoffDraft = HandoffDraftReader;
+export type HandoffDraft = z.infer<typeof HandoffDraftReader>;
+
+export const HandoffRecord = HandoffRecordReader;
+export type HandoffRecord = z.infer<typeof HandoffRecordReader>;
+
+export function isHandoffDraftV2(draft: HandoffDraft): draft is HandoffDraftV2 {
+  return draft.schema_version === HANDOFF_SCHEMA_VERSION_V2;
+}
+
+export function isHandoffRecordV2(record: HandoffRecord): record is HandoffRecordV2 {
+  return record.schema_version === HANDOFF_SCHEMA_VERSION_V2;
+}
 
 // ---------------------------------------------------------------------------
 // TaskPacket — a ÚNICA entrada do worker. ≤ 12 KiB.
