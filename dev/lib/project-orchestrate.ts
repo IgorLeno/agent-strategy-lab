@@ -88,6 +88,7 @@ import {
 } from '../../src/routing/diagnosis.js';
 import { writeJsonOnce } from './atomic.js';
 import { assertNoApiCredentials, runBillingPreflight } from './billing.js';
+import { claudeOutputFormat, providerTerminalFailure } from './claude-stream.js';
 import { buildTimeoutArgv } from './exec.js';
 import { evidenceOf, type LaunchFact, type LaunchFactEvidence } from './project-preflight.js';
 import type { HarnessPaths } from './paths.js';
@@ -959,23 +960,41 @@ export function createLaunchedPlanningWorker(
         );
       }
 
-      const draft = extractJsonObject(stdout);
-      if (draft === null) {
-        return invocationFailure(
-          options,
-          invocationId,
-          'DRAFT_NOT_PARSEABLE',
-          'saída do planning worker não contém um único objeto JSON legível',
-          false,
-        );
+      const extracted = extractRoleModelJson({
+        agent: options.profile.agent,
+        argv,
+        stdout,
+      });
+      switch (extracted.outcome) {
+        case 'EXTRACTED':
+          return {
+            outcome: 'DRAFT_RETURNED',
+            invocation_id: invocationId,
+            provider_id: options.profile.agent,
+            model: options.profile.id,
+            draft: extracted.value,
+          };
+        case 'PROVIDER_TERMINAL_FAILURE':
+          return invocationFailure(
+            options,
+            invocationId,
+            'PROVIDER_INVOCATION_FAILED',
+            extracted.message,
+            true,
+          );
+        case 'NOT_PARSEABLE':
+          return invocationFailure(
+            options,
+            invocationId,
+            'DRAFT_NOT_PARSEABLE',
+            extracted.message,
+            false,
+          );
+        default: {
+          const _exhaustive: never = extracted;
+          return _exhaustive;
+        }
       }
-      return {
-        outcome: 'DRAFT_RETURNED',
-        invocation_id: invocationId,
-        provider_id: options.profile.agent,
-        model: options.profile.id,
-        draft,
-      };
     },
   };
 }
@@ -1035,6 +1054,74 @@ function extractJsonObject(text: string): unknown {
     }
   }
   return null;
+}
+
+function parseExactlyOneJsonObject(text: string): Record<string, unknown> | null {
+  try {
+    const parsed: unknown = JSON.parse(text.trim());
+    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+export type RoleModelJsonExtraction =
+  | { readonly outcome: 'EXTRACTED'; readonly value: unknown }
+  | { readonly outcome: 'PROVIDER_TERMINAL_FAILURE'; readonly message: string }
+  | { readonly outcome: 'NOT_PARSEABLE'; readonly message: string };
+
+/**
+ * Separa transporte do provider do payload do modelo. Claude `--output-format json`
+ * emite um envelope; só `result` (texto) vai para extractJsonObject.
+ */
+export function extractRoleModelJson(input: {
+  readonly agent: string;
+  readonly argv: readonly string[];
+  readonly stdout: string;
+}): RoleModelJsonExtraction {
+  if (input.agent === 'claude' && claudeOutputFormat(input.argv) === 'json') {
+    const envelope = parseExactlyOneJsonObject(input.stdout);
+    if (envelope === null) {
+      return {
+        outcome: 'NOT_PARSEABLE',
+        message: 'stdout Claude --output-format json não contém exatamente um objeto JSON de transporte',
+      };
+    }
+    const failure = providerTerminalFailure(envelope);
+    if (failure !== null) {
+      return {
+        outcome: 'PROVIDER_TERMINAL_FAILURE',
+        message: failure.message ?? failure.signals.join(', '),
+      };
+    }
+    const result = envelope['result'];
+    if (typeof result !== 'string') {
+      return {
+        outcome: 'NOT_PARSEABLE',
+        message: 'envelope Claude terminou normalmente sem result textual',
+      };
+    }
+    const value = extractJsonObject(result);
+    if (value === null) {
+      return {
+        outcome: 'NOT_PARSEABLE',
+        message: 'result textual do Claude não contém um único objeto JSON legível',
+      };
+    }
+    return { outcome: 'EXTRACTED', value };
+  }
+
+  const value = extractJsonObject(input.stdout);
+  if (value === null) {
+    return {
+      outcome: 'NOT_PARSEABLE',
+      message: 'saída não contém um único objeto JSON legível',
+    };
+  }
+  return { outcome: 'EXTRACTED', value };
 }
 
 // ---------------------------------------------------------------------------
@@ -1226,7 +1313,24 @@ export async function launchProjectReviewer(
     );
   }
 
-  const parsed = extractJsonObject(stdout) as
+  const extracted = extractRoleModelJson({
+    agent: options.profile.agent,
+    argv,
+    stdout,
+  });
+  switch (extracted.outcome) {
+    case 'EXTRACTED':
+      break;
+    case 'PROVIDER_TERMINAL_FAILURE':
+      return reviewUnavailable('REVIEW_INVOCATION_FAILED', extracted.message);
+    case 'NOT_PARSEABLE':
+      return reviewUnavailable('REVIEW_VERDICT_NOT_PARSEABLE', extracted.message);
+    default: {
+      const _exhaustive: never = extracted;
+      return _exhaustive;
+    }
+  }
+  const parsed = extracted.value as
     | { decision?: unknown; reason?: unknown; coverage?: unknown }
     | null;
   const decision = parsed?.decision;

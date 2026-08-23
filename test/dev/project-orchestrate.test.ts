@@ -16,6 +16,7 @@ import {
   planReviewerInvocation,
   recordComparableRunFacts,
   resolveFailureFollowUp,
+  extractRoleModelJson,
   resolveRoleOverlayArgv,
   runDirectPath,
   runReviewedPath,
@@ -329,6 +330,70 @@ describe('roles estruturais', () => {
       expect(() => assertReadOnlyArgv(role, profile.agent, overlay.argv)).not.toThrow();
     });
   }
+});
+
+describe('transporte do provider vs payload do modelo', () => {
+  const claudeJsonArgv = ['claude', '--print', '--output-format', 'json'] as const;
+  const plannerDraft = { schema_version: 1, tasks: [{ task_id: 'T1' }] };
+  const reviewerVerdict = { decision: 'ACCEPT', reason: 'cobre o objetivo', coverage: { checked: [] } };
+
+  function envelope(result: unknown, extras: Record<string, unknown> = {}): string {
+    return JSON.stringify({
+      type: 'result',
+      is_error: false,
+      terminal_reason: 'completed',
+      session_id: 'abc',
+      result,
+      ...extras,
+    });
+  }
+
+  it('Claude planner com --output-format json extrai o draft de result, não o envelope', () => {
+    const extracted = extractRoleModelJson({
+      agent: 'claude',
+      argv: claudeJsonArgv,
+      stdout: envelope(JSON.stringify(plannerDraft)),
+    });
+    expect(extracted).toEqual({ outcome: 'EXTRACTED', value: plannerDraft });
+  });
+
+  it('Claude reviewer com --output-format json extrai o veredito de result, não o envelope', () => {
+    const extracted = extractRoleModelJson({
+      agent: 'claude',
+      argv: claudeJsonArgv,
+      stdout: envelope(JSON.stringify(reviewerVerdict)),
+    });
+    expect(extracted).toEqual({ outcome: 'EXTRACTED', value: reviewerVerdict });
+  });
+
+  it('result cercado em fence markdown continua sendo o payload do modelo', () => {
+    const extracted = extractRoleModelJson({
+      agent: 'claude',
+      argv: claudeJsonArgv,
+      stdout: envelope('```json\n' + JSON.stringify(plannerDraft) + '\n```'),
+    });
+    expect(extracted).toEqual({ outcome: 'EXTRACTED', value: plannerDraft });
+  });
+
+  it('is_error no envelope é falha terminal do provider, não draft', () => {
+    const extracted = extractRoleModelJson({
+      agent: 'claude',
+      argv: claudeJsonArgv,
+      stdout: envelope('API Error: ENOTFOUND', { is_error: true, terminal_reason: 'api_error' }),
+    });
+    expect(extracted.outcome).toBe('PROVIDER_TERMINAL_FAILURE');
+    if (extracted.outcome !== 'PROVIDER_TERMINAL_FAILURE') return;
+    expect(extracted.message).toContain('ENOTFOUND');
+  });
+
+  it('stdout direto sem envelope continua válido para Codex', () => {
+    const extracted = extractRoleModelJson({
+      agent: 'codex',
+      argv: ['codex', 'exec'],
+      stdout: JSON.stringify(plannerDraft),
+    });
+    expect(extracted).toEqual({ outcome: 'EXTRACTED', value: plannerDraft });
+  });
 });
 
 describe('worker runtime budget e timeout de validation são grandezas separadas', () => {

@@ -5,6 +5,13 @@ Regra, não narrativa: cada entrada termina numa restrição aplicável.
 
 ---
 
+[2026-08-23] Context: planner Claude com --output-format json no primeiro projeto real.
+Mistake: extractJsonObject(stdout) tratou o envelope da CLI (is_error, result,
+session_id) como o draft do modelo; SCHEMA_NORMALIZATION recusou o transporte.
+Rule: stdout de Claude --output-format json é transporte; só o campo textual
+`result` entra em extractJsonObject. Falha terminal do envelope (is_error /
+terminal_reason) não vira payload do modelo.
+
 [2026-08-23] Context: planner/reviewer Claude sobre repositório alvo externo.
 Mistake: resolveProfileArgv rodou no profile base e o overlay read-only
 reintroduziu `--settings` relativo depois; o subprocesso com cwd no alvo
