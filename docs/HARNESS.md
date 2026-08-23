@@ -76,6 +76,45 @@ tecnicamente que ele escreva em `.dev/`. A evidência é **derivada pelo
 orquestrador, não protegida contra worker malicioso**. O modelo de ameaça
 coberto é agente confuso ou desalinhado, não agente adversário.
 
+### Contrato de acesso do worker (`WorkerExecutionAccessContract`)
+
+Separar os diretórios não basta: o sandbox real do provider precisa **conceder**
+os caminhos que o Agent Lab exige. Antes de cada lançamento de implementer, o
+launcher deriva um contrato explícito — workspace (o repo alvo), roots
+graváveis auxiliares (o outbox de protocolo *da tarefa corrente* e, quando o
+profile o exige, o HOME sanitizado) e a capability de rede para
+*dependency fetch* — traduz esse contrato para o mecanismo do provider e
+**prova** o resultado lendo o argv final de volta.
+
+- **Codex**: `--sandbox workspace-write` preservado;
+  `sandbox_workspace_write.writable_roots` concede os roots auxiliares e
+  `sandbox_workspace_write.network_access` habilita a rede. Bypass perigoso
+  continua proibido.
+- **Claude**: `--add-dir` declara os mesmos roots; a permission policy
+  versionada continua governando o que pode ser executado.
+- **Worker falso**: representa o contrato sem sandbox de filesystem real.
+
+Duas regras:
+
+> **A worker launch is authorized only when every required writable/runtime
+> capability is represented in the access contract and proven by the effective
+> provider sandbox before spend.**
+
+> **Paths passed to the worker do not imply permission; effective access must be
+> proven.**
+
+Deny by default: o que não está no contrato continua não gravável — runtime
+inteiro, catálogo de profiles, `state.json`, inboxes de outras tarefas,
+completions, handoffs selados e o plano. Mismatch mecânico falha como
+`PREFLIGHT_BLOCKED`, **antes** do spawn: zero launch, zero token, e a tarefa
+não vai para `FAIL` nem para `INFRA_ERROR` por causa disso.
+
+Rede é capability de desenvolvimento, não autorização de efeito externo:
+`NETWORK CONNECTIVITY != AUTHORIZATION TO PERFORM EXTERNAL SIDE EFFECTS`.
+Deploy, publish, push, cloud, e-mail e crédito de API continuam governados
+pelos gates próprios. Planner e reviewer permanecem read-only: contrato sem
+workspace de escrita, sem outbox de protocolo e sem rede.
+
 ## Ciclo
 
 ```

@@ -611,3 +611,20 @@ tarefa declara, evidence imutável antes do state. E adoção não é execução
 `attempts` fica 0, handoff ausente continua `null`, e nada disso entra na
 história de performance, que se alimenta de attempt real e não de
 `TaskState.PASS`.
+
+[2026-08-23] Contexto: primeira task do primeiro projeto real (Augmented
+Chess, `foundation_app_scaffold`) lançada duas vezes com Codex Terra Medium.
+Mistake: o launcher entregava ao worker três caminhos de escrita fora do repo
+alvo — `report.json`, `handoff-draft.json` e o HOME sanitizado — sem nenhuma
+representação única que provasse que o sandbox real do provider os concedia.
+O worker fez o scaffold, saiu com exit 0 e não conseguiu escrever o protocolo
+(`patch rejected: writing outside of the project`); `npm install` falhou com
+`EAI_AGAIN` pela mesma razão estrutural: a rede também nunca foi declarada.
+Duas execuções pagas para descobrir um mismatch mecânico.
+Rule: todo requisito de acesso de um worker precisa estar representado num
+contrato explícito, derivado UMA vez por lançamento, traduzido pelo provider e
+PROVADO pela leitura do argv efetivo antes do spawn. Path entregue ao worker
+não implica permissão. Contrato não provado é `PREFLIGHT_BLOCKED` — zero
+launch, zero token, e nunca veredito sobre o modelo. Rede é capability de
+desenvolvimento declarada, não exceção para `npm`; e continua sem autorizar
+efeito externo, que segue nos gates próprios.

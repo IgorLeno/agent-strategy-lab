@@ -1,10 +1,11 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buildTaskPacket } from '../../dev/lib/packet.js';
 import { headSha } from '../../dev/lib/git.js';
+import { AccessContractError } from '../../dev/lib/access-contract.js';
 import { launchWorker } from '../../dev/lib/launch.js';
 import { resolveHarnessPaths, type HarnessPaths } from '../../dev/lib/paths.js';
 import { loadPlan, type LoadedPlan } from '../../dev/lib/plan.js';
@@ -14,6 +15,7 @@ import {
   buildEnvironment,
   deriveControlledFacts,
   loadProfile,
+  loadProfileFromCatalog,
   type LauncherProfile,
 } from '../../dev/lib/profile.js';
 import {
@@ -24,6 +26,7 @@ import {
   readLaunchRecord,
   readReport,
   reportPath,
+  taskInboxDir,
   writePacket,
   writeValidationFailedAttempt,
 } from '../../dev/lib/records.js';
@@ -40,7 +43,7 @@ import {
   writeState,
 } from '../../dev/lib/state.js';
 import { launchTask } from '../../dev/lib/steps.js';
-import { commitAll, makeSandboxRepo, runDevCli, runGit, type Sandbox } from './helpers.js';
+import { REPO_ROOT, commitAll, makeSandboxRepo, runDevCli, runGit, type Sandbox } from './helpers.js';
 
 
 let sandbox: Sandbox;
@@ -586,5 +589,90 @@ describe('launchTask: InboxProvenanceError é PREFLIGHT_BLOCKED', () => {
     expect(result.classification).toBe('INFRA_ERROR');
     expect(getTaskState(await readState(paths), 'T1').status).toBe('INFRA_ERROR');
     expect(getTaskState(await readState(paths), 'T1').attempts).toBe(1);
+  });
+});
+
+describe('contrato de acesso do worker antes do spawn', () => {
+  async function packetForT1() {
+    await persistPacket();
+    return buildTaskPacket({
+      task: loaded.byId.get('T1')!,
+      baseSha: await headSha(paths.repoRoot),
+      previousHandoff: null,
+    });
+  }
+
+  /**
+   * Codex cujo sandbox declarado CONTRADIZ o contrato: o implementer precisa
+   * mutar o workspace, e `read-only` nega isso. Mismatch MECÂNICO, detectável
+   * sem chamar provider nenhum.
+   */
+  async function profileComSandboxContraditorio(): Promise<LauncherProfile> {
+    const codex = await loadProfileFromCatalog(
+      REPO_ROOT,
+      'codex-build-worker-subscription-terra-medium-v2',
+    );
+    return {
+      ...codex,
+      argv: codex.argv.map((token, index) =>
+        codex.argv[index - 1] === '--sandbox' ? 'read-only' : token,
+      ),
+    };
+  }
+
+  it('prova o contrato e registra a prova no LaunchRecord do lançamento aceito', async () => {
+    const packet = await packetForT1();
+
+    const outcome = await launchWorker({ paths, profile, packet });
+
+    expect(outcome.record.controlled['access_contract_proven_before_spawn']).toBe(true);
+    expect(outcome.record.controlled['access_contract_workspace_access']).toBe('read_write');
+    expect(outcome.record.controlled['access_contract_dependency_fetch']).toBe(true);
+    // Profile falso usa HOME real: só o outbox de protocolo entra no contrato.
+    expect(outcome.record.controlled['access_contract_writable_roots']).toBe(1);
+  });
+
+  it('recusa ANTES do spawn quando o contrato não pode ser traduzido — zero provider, zero token', async () => {
+    const packet = await packetForT1();
+    let credentialProbes = 0;
+
+    await expect(
+      launchWorker({
+        paths,
+        profile: await profileComSandboxContraditorio(),
+        packet,
+        credentialRunner: async () => {
+          credentialProbes += 1;
+          return { code: 0, output: '' };
+        },
+      }),
+    ).rejects.toThrow(AccessContractError);
+
+    // Nenhuma chamada ao provider: o probe de credencial não rodou, nenhum log
+    // de processo foi aberto e nenhum LaunchRecord foi escrito.
+    expect(credentialProbes).toBe(0);
+    expect(await readLaunchRecord(paths, 'T1')).toBeNull();
+    const logs = await readdir(paths.logsDir).catch(() => [] as string[]);
+    expect(logs.filter((file) => String(file).startsWith('T1.'))).toEqual([]);
+  });
+
+  it('classifica a recusa de acesso como bloqueio de preflight, não como veredito da tarefa', async () => {
+    const packet = await packetForT1();
+    // Root do contrato existente mas NÃO gravável: path declarado nunca é
+    // prova de permissão, e é isso que o preflight precisa detectar.
+    const outbox = taskInboxDir(paths, 'T1');
+    await mkdir(outbox, { recursive: true });
+    await chmod(outbox, 0o555);
+    try {
+      const result = await launchTask(paths, packet, 'fake-worker-v1');
+
+      expect(result.classification).toBe('PREFLIGHT_BLOCKED');
+      expect(result.outcome).toBeNull();
+      expect(result.reason).toMatch(/contrato de acesso/);
+      // Bloqueio de preflight não move a tarefa: ela continua READY.
+      expect(getTaskState(await readState(paths), 'T1').status).toBe('READY');
+    } finally {
+      await chmod(outbox, 0o755);
+    }
   });
 });

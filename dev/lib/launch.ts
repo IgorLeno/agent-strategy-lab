@@ -5,6 +5,15 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { finished } from 'node:stream/promises';
 import {
+  AccessContractError,
+  accessContractFacts,
+  deriveWorkerAccessContract,
+  deriveWorkerIo,
+  ensureAccessContractRoots,
+  translateAccessContract,
+  verifyEffectiveAccess,
+} from './access-contract.js';
+import {
   assertNoApiCredentials,
   buildBillingRecord,
   extractUsageEstimate,
@@ -43,13 +52,7 @@ import {
   type LauncherProfile,
 } from './profile.js';
 import { buildWorkerPrompt } from './prompt.js';
-import {
-  ensureTaskInbox,
-  handoffDraftPath,
-  packetPath,
-  reportPath,
-  writeLaunchRecord,
-} from './records.js';
+import { ensureTaskInbox, writeLaunchRecord } from './records.js';
 import {
   DEV_SCHEMA_VERSION,
   type LaunchRecord,
@@ -144,20 +147,22 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
     throw error;
   }
 
-  const io = {
-    repoRoot: paths.repoRoot,
-    packetPath: packetPath(paths, packet.task_id),
-    reportPath: reportPath(paths, packet.task_id),
-    handoffDraftPath: handoffDraftPath(paths, packet.task_id),
-  };
+  // UMA derivação por lançamento alimenta env, prompt, sandbox do provider e
+  // preflight. Enquanto forem quatro derivações independentes, elas voltam a
+  // divergir — foi exatamente esse drift que deixou o worker com caminhos que
+  // o sandbox não concedia.
+  const io = deriveWorkerIo(paths, profile, packet.task_id);
+  const contract = deriveWorkerAccessContract({ role: 'implementer', profile, paths, io });
+  // Diretório declarado no contrato precisa EXISTIR antes de o sandbox tentar
+  // concedê-lo; inclui o inbox da tarefa, que o worker escreve.
+  await ensureAccessContractRoots(contract);
+  await ensureTaskInbox(paths, packet.task_id);
 
   // Tag única por lançamento: filhos herdam o environment, então ela permite
   // reconhecer descendente que escapou do process group via setsid.
   const launchId = randomUUID();
   const env: NodeJS.ProcessEnv = {
-    ...buildEnvironment(profile, process.env, {
-      sanitizedHome: path.join(paths.devDir, 'homes', profile.id),
-    }),
+    ...buildEnvironment(profile, process.env, { sanitizedHome: io.homeDir }),
     AGENTLAB_LAUNCH_ID: launchId,
     AGENTLAB_TASK_ID: packet.task_id,
     AGENTLAB_REPO_ROOT: paths.repoRoot,
@@ -165,6 +170,29 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
     AGENTLAB_REPORT_PATH: io.reportPath,
     AGENTLAB_HANDOFF_DRAFT_PATH: io.handoffDraftPath,
   };
+
+  const prompt = buildWorkerPrompt(packet, io, executionPolicy);
+  const resolvedArgv = resolveProfileArgv(profile.argv, {
+    catalogRoot: paths.profileCatalogRoot,
+    workerCwd: paths.repoRoot,
+  });
+
+  // TRADUÇÃO + PROVA do contrato antes de qualquer chamada ao provider. Um
+  // mismatch mecânico entre o que o Agent Lab exige e o que o sandbox concede
+  // falha AQUI, com zero launch e zero token — não depois de o worker terminar
+  // sem conseguir escrever o protocolo.
+  const translation = translateAccessContract(profile, contract, resolvedArgv);
+  const agentArgv =
+    profile.prompt_delivery === 'argv' ? [...translation.argv, prompt] : [...translation.argv];
+  assertNoForbiddenFlags(profile, agentArgv);
+  const accessProof = await verifyEffectiveAccess({
+    paths,
+    profile,
+    contract,
+    io,
+    argv: agentArgv,
+    env,
+  });
 
   // Guarda crítica de cobrança ANTES de qualquer efeito: nenhum processo nasce,
   // nenhum arquivo do inbox é criado, nenhum token é gasto se a fonte da
@@ -195,17 +223,6 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
   if (usageBefore.unsafe) {
     throw new UsageMeasurementSafetyError(usageBefore.probe.reason ?? 'motivo não informado');
   }
-
-  const prompt = buildWorkerPrompt(packet, io, executionPolicy);
-  await ensureTaskInbox(paths, packet.task_id);
-
-  const resolvedArgv = resolveProfileArgv(profile.argv, {
-    catalogRoot: paths.profileCatalogRoot,
-    workerCwd: paths.repoRoot,
-  });
-  const agentArgv =
-    profile.prompt_delivery === 'argv' ? [...resolvedArgv, prompt] : [...resolvedArgv];
-  assertNoForbiddenFlags(profile, agentArgv);
 
   const argv = [
     'timeout',
@@ -272,7 +289,10 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
     process: identity,
     launch_id: launchId,
     started_at: startedAt,
-    controlled: deriveControlledFacts(profile, agentArgv, env),
+    controlled: {
+      ...deriveControlledFacts(profile, agentArgv, env),
+      ...accessContractFacts(accessProof),
+    },
   };
 
   // Registra o lançamento antes de esperar: um crash do orquestrador aqui

@@ -1,3 +1,4 @@
+import { AccessContractError } from './access-contract.js';
 import { checkProgressionBase } from './base-guard.js';
 import { headSha } from './git.js';
 import {
@@ -81,7 +82,11 @@ function isPreSpawnRefusal(error: unknown): boolean {
   return (
     error instanceof InboxProvenanceError ||
     error instanceof BillingPreflightError ||
-    error instanceof UsageMeasurementSafetyError
+    error instanceof UsageMeasurementSafetyError ||
+    // Contrato de acesso não provado: incompatibilidade MECÂNICA entre o que o
+    // worker precisa e o que o sandbox concede. Nenhum provider foi chamado, e
+    // a tarefa não pode ir para FAIL nem para INFRA_ERROR por causa disto.
+    error instanceof AccessContractError
   );
 }
 
