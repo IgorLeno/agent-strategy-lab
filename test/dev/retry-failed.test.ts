@@ -590,7 +590,7 @@ describe('dev-retry-failed preconditions', () => {
   it('recusa changed_files divergentes da working tree', async () => {
     const fixture = await setup();
     await write(fixture.sandbox.root, 'src/runner/extra.ts', 'export const extra = 1;\n');
-    await expect(retry(fixture)).rejects.toThrow(/working tree diverge do report/i);
+    await expect(retry(fixture)).rejects.toThrow(/working tree diverge do material preservado/i);
   });
 
   it('recusa index sujo', async () => {
@@ -723,13 +723,15 @@ describe('dev-retry-failed recupera FAIL legado sem source binding', () => {
     expect(await exists(sourceBindingPath(fixture.paths, TASK, 2))).toBe(false);
   });
 
-  it('recusa changed_files divergentes entre report e orchestrator evidence', async () => {
+  // Onda 1: o material vem do `orchestrator_evidence` (derivado do Git).
+  // Adulterá-lo é adulterar evidência selada — continua fail-closed.
+  it('recusa orchestrator evidence adulterada', async () => {
     const fixture = await setup({ writeBinding: false });
     const completion = JSON.parse(await readFile(completionPath(fixture.paths, TASK), 'utf8'));
     completion.orchestrator_evidence.changed_files = [MODIFIED];
     await writeFile(completionPath(fixture.paths, TASK), `${JSON.stringify(completion, null, 2)}\n`);
 
-    await expect(retry(fixture)).rejects.toThrow(/changed_files diverge/i);
+    await expect(retry(fixture)).rejects.toThrow(/HandoffDraft diverge|changed_files diverge|working tree diverge do material preservado/i);
     expect(await exists(sourceBindingPath(fixture.paths, TASK, 2))).toBe(false);
   });
 
@@ -737,7 +739,7 @@ describe('dev-retry-failed recupera FAIL legado sem source binding', () => {
     const fixture = await setup({ writeBinding: false });
     await write(fixture.sandbox.root, 'src/runner/extra.ts', 'export const extra = 1;\n');
 
-    await expect(retry(fixture)).rejects.toThrow(/working tree diverge do report/i);
+    await expect(retry(fixture)).rejects.toThrow(/working tree diverge do material preservado/i);
     expect(await exists(sourceBindingPath(fixture.paths, TASK, 2))).toBe(false);
   });
 
@@ -1156,8 +1158,9 @@ describe('dev-retry-failed isola o output do worker por attempt', () => {
 
     expect(result.reportArchivePath).toBe(failedAttemptReportPath(fixture.paths, TASK, 2));
     expect(result.handoffArchivePath).toBe(failedAttemptHandoffDraftPath(fixture.paths, TASK, 2));
-    expect(await readFile(result.reportArchivePath)).toEqual(report);
-    expect(await readFile(result.handoffArchivePath)).toEqual(handoff);
+    // Este attempt TEM nota do worker, então os archives existem.
+    expect(await readFile(result.reportArchivePath as string)).toEqual(report);
+    expect(await readFile(result.handoffArchivePath as string)).toEqual(handoff);
     // O record do attempt é a única fonte desses hashes.
     expect(result.record.report_sha256).toBe(digest(report));
     expect(result.record.handoff_draft_sha256).toBe(digest(handoff));

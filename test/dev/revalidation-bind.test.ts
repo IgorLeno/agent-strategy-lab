@@ -206,7 +206,7 @@ describe('dev-revalidation-bind preconditions', () => {
 
   it('recusa working tree divergente do report.changed_files', async () => {
     const fixture = await setup({ extraFiles: ['src/workspace/extra.ts'] });
-    await expect(bind(fixture)).rejects.toThrow(/working tree diverge do report/i);
+    await expect(bind(fixture)).rejects.toThrow(/working tree diverge do material preservado/i);
   });
 
   it('recusa index sujo', async () => {

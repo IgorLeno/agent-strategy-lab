@@ -89,14 +89,33 @@ export interface DerivedFailedAttemptSource {
   readonly binding: RevalidationSourceBindingType;
   readonly files: readonly string[];
   readonly patchFingerprint: string;
-  readonly reportBytes: Buffer;
-  readonly handoffBytes: Buffer;
+  readonly reportBytes: Buffer | null;
+  readonly handoffBytes: Buffer | null;
 }
 
 export interface PublishedFailedAttemptSource extends DerivedFailedAttemptSource {
   readonly bindingPath: string;
   readonly originalCompletionPath: string;
   readonly alreadyBound: boolean;
+}
+
+/** Nota do worker: ausente é UNKNOWN, nunca fonte impossível de derivar. */
+async function readOptional(file: string): Promise<Buffer | null> {
+  try {
+    return await readFile(file);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+/** Nota malformada vira `null`, do mesmo jeito que nota ausente. */
+function tryParse<T>(parse: () => T): T | null {
+  try {
+    return parse();
+  } catch {
+    return null;
+  }
 }
 
 async function readRequired(file: string, label: string): Promise<Buffer> {
@@ -194,45 +213,52 @@ export async function deriveFailedAttemptSource(
 
   const packet = await readPacket(paths, taskId);
   if (!packet) throw new FailedAttemptSourceError('TaskPacket ausente');
-  const reportBytes = await readRequired(reportPath(paths, taskId), 'AgentCompletionReport');
-  const handoffBytes = await readRequired(handoffDraftPath(paths, taskId), 'HandoffDraft');
-  const report = parseJson('AgentCompletionReport', reportBytes, (value) =>
-    AgentCompletionReport.parse(value),
-  );
-  const handoff = parseJson('HandoffDraft', handoffBytes, parseHandoffDraft);
+  // A NOTA do worker entra no binding por hash quando existe. Ela NÃO é
+  // pré-condição: um FAIL oficial sobre material real precisa ficar reparável
+  // mesmo que o worker não tenha escrito a nota, ou a tenha escrito fora do
+  // contrato. O que qualifica a fonte é objetivo — houve patch entregue e o
+  // gate oficial reprovou.
+  const reportBytes = await readOptional(reportPath(paths, taskId));
+  const handoffBytes = await readOptional(handoffDraftPath(paths, taskId));
+  const report =
+    reportBytes === null
+      ? null
+      : tryParse(() => AgentCompletionReport.parse(JSON.parse(reportBytes.toString('utf8'))));
+  const handoff =
+    handoffBytes === null
+      ? null
+      : tryParse(() => parseHandoffDraft(JSON.parse(handoffBytes.toString('utf8'))));
 
-  if (packet.task_id !== taskId || report.task_id !== taskId || handoff.task_id !== taskId) {
+  if (packet.task_id !== taskId) {
     throw new FailedAttemptSourceError('evidence pertence a outra tarefa');
   }
   // Worker FAILURE tem caminho próprio (dev-retry): reusar este apagaria a
   // única distinção que importa — a de que a solução foi entregue e REPROVADA.
-  if (report.self_reported_result !== 'SUCCESS') {
+  // Nota AUSENTE não é FAILURE declarado e não sai por aqui.
+  if (report !== null && report.self_reported_result !== 'SUCCESS') {
     throw new FailedAttemptSourceError('fonte de FAIL oficial exige worker report SUCCESS');
-  }
-  if (report.candidate_commit !== null) {
-    throw new FailedAttemptSourceError('report.candidate_commit deve ser null');
-  }
-  if (completion.report === null || canonicalJson(completion.report) !== canonicalJson(report)) {
-    throw new FailedAttemptSourceError('report atual diverge do report preservado no FAIL');
   }
   if (evidence.base_sha !== packet.base_sha || evidence.base_sha !== input.stateBaseSha) {
     throw new FailedAttemptSourceError('base_sha diverge entre completion, packet e state');
   }
   assertOfficialValidationFailed(evidence.revalidation, packet.validation);
 
-  const files = [...new Set(report.changed_files)].sort();
-  if (files.length === 0) throw new FailedAttemptSourceError('report.changed_files vazio');
-  if (canonicalJson(files) !== canonicalJson([...new Set(evidence.changed_files)].sort())) {
-    throw new FailedAttemptSourceError('changed_files diverge entre report e orchestrator evidence');
+  // AUTORIDADE: o material preservado é o que o orquestrador derivou do Git no
+  // fechamento, não o que o worker declarou.
+  const files = [...new Set(evidence.changed_files)].sort();
+  if (files.length === 0) {
+    throw new FailedAttemptSourceError('orchestrator evidence sem changed_files');
   }
   const forbidden = files.find(isForbiddenRevalidationPath);
   if (forbidden) throw new FailedAttemptSourceError(`caminho proibido: ${forbidden}`);
 
   // O HandoffDraft entra no binding só por hash, então sem uma conferência ele
-  // seria o único artifact substituível sem deixar rastro. O CompletionRecord
-  // do FAIL registra se o draft batia com os arquivos reais no fechamento:
-  // quando ele diz que batia, o draft em disco ainda tem que bater.
+  // seria o único artifact substituível sem deixar rastro. Isto NÃO é a nota
+  // vetando o candidate: é integridade de evidência já selada — quando o
+  // CompletionRecord registrou que o draft batia com o material real, o draft
+  // em disco ainda tem que bater. Fail-closed permanece.
   if (
+    handoff !== null &&
     completion.report_matches_evidence &&
     canonicalJson([...new Set(handoff.changed_files)].sort()) !== canonicalJson(files)
   ) {
@@ -253,7 +279,8 @@ export async function deriveFailedAttemptSource(
   const actual = await workingTreeFiles(paths.repoRoot);
   if (canonicalJson(actual) !== canonicalJson(files)) {
     throw new FailedAttemptSourceError(
-      `working tree diverge do report: real [${actual.join(', ')}], report [${files.join(', ')}]`,
+      `working tree diverge do material preservado: real [${actual.join(', ')}], ` +
+        `preservado [${files.join(', ')}]`,
     );
   }
   const fingerprint = await patchFingerprint(paths.repoRoot);
@@ -266,8 +293,8 @@ export async function deriveFailedAttemptSource(
       source_base_sha: evidence.base_sha,
       original_completion_path: 'original-completion.fail.json',
       original_completion_sha256: sha256Hex(input.completionBytes),
-      report_sha256: sha256Hex(reportBytes),
-      handoff_draft_sha256: sha256Hex(handoffBytes),
+      ...(reportBytes === null ? {} : { report_sha256: sha256Hex(reportBytes) }),
+      ...(handoffBytes === null ? {} : { handoff_draft_sha256: sha256Hex(handoffBytes) }),
       changed_files: files,
       derived_patch_fingerprint: fingerprint,
       fingerprint_observed_at: (input.now ?? (() => new Date().toISOString()))(),

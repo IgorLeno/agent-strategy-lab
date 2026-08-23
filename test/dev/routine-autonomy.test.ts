@@ -1172,7 +1172,7 @@ describe('routine autonomy runtime', () => {
 });
 
 describe('dev-orchestrate --autonomy routine', () => {
-  it('intercepta protocol-invalid pós-launch, usa recovery oficial e repete a mesma task', async () => {
+  it('declaração errada de changed_files não vira protocol-invalid nem relaunch', async () => {
     const { sandbox, paths, loaded } = await initializedSandbox();
     const profileId = await installFakeOrchestratorProfile(sandbox, paths, loaded);
     const result = await runDevCli(
@@ -1196,11 +1196,17 @@ describe('dev-orchestrate --autonomy routine', () => {
       iteration_count: number;
       iterations: Array<{ task_id: string; result: string }>;
     };
+    // Onda 1: o worker DECLAROU paths do control plane que nunca escreveu. O
+    // material real é derivado do Git — que ignora o runtime — então a
+    // declaração errada é discrepância, não protocolo inválido, e não custa
+    // um segundo launch.
+    // LIMIT_REACHED, e não ALL_DONE: `--max-iterations 1` consumiu o ciclo
+    // com T1 já em PASS e T2 ainda pendente.
     expect(output.stopped_by, JSON.stringify(output)).toBe('LIMIT_REACHED');
-    expect(output.iteration_count).toBe(2);
-    expect(output.iterations.map((iteration) => iteration.task_id)).toEqual(['T1', 'T1']);
-    expect((await readState(paths)).tasks[0]).toMatchObject({ status: 'PASS', attempts: 2 });
-    expect(await readProtocolInvalidAttempt(paths, 'T1', 1)).not.toBeNull();
+    expect(output.iteration_count).toBe(1);
+    expect(output.iterations.map((iteration) => iteration.task_id)).toEqual(['T1']);
+    expect((await readState(paths)).tasks[0]).toMatchObject({ status: 'PASS', attempts: 1 });
+    expect(await readProtocolInvalidAttempt(paths, 'T1', 1)).toBeNull();
   }, 60_000);
 
   it('primitive protocol que recusa escala sem maintainer nem retry', async () => {
@@ -1277,7 +1283,7 @@ describe('dev-orchestrate --autonomy routine', () => {
     expect((await readState(paths)).tasks[0]?.status).toBe('PASS');
   }, 60_000);
 
-  it('sem --autonomy routine o PENDING pós-launch mantém o comportamento legado', async () => {
+  it('sem --autonomy routine o desfecho da declaração errada é o mesmo', async () => {
     const { sandbox, paths, loaded } = await initializedSandbox();
     const profileId = await installFakeOrchestratorProfile(sandbox, paths, loaded);
     const result = await runDevCli(
@@ -1286,9 +1292,14 @@ describe('dev-orchestrate --autonomy routine', () => {
       { AGENTLAB_DEV_DIR: sandbox.devDir, AGENTLAB_FAKE_MODE: 'protocol-invalid-then-success' },
     );
 
-    expect(result.exitCode).toBe(9);
-    expect(JSON.parse(result.stdout)).toMatchObject({ stopped_by: 'PENDING', iteration_count: 1 });
-    expect((await readState(paths)).tasks[0]).toMatchObject({ status: 'RUNNING', attempts: 1 });
+    // Sem `--autonomy routine` o desfecho é o MESMO: a declaração errada do
+    // worker nunca foi o que decidia o candidate.
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      stopped_by: 'LIMIT_REACHED',
+      iteration_count: 1,
+    });
+    expect((await readState(paths)).tasks[0]).toMatchObject({ status: 'PASS', attempts: 1 });
     expect(await readProtocolInvalidAttempt(paths, 'T1', 1)).toBeNull();
   }, 60_000);
 

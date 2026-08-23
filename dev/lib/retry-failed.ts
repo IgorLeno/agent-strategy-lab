@@ -123,8 +123,9 @@ export interface RetryFailedAttemptResult {
   /** Onde os bytes do CompletionRecord FAIL ficaram preservados. */
   readonly completionArchivePath: string;
   /** Onde os bytes do output do worker deste attempt ficaram preservados. */
-  readonly reportArchivePath: string;
-  readonly handoffArchivePath: string;
+  /** `null` quando o attempt não tinha nota do worker para preservar. */
+  readonly reportArchivePath: string | null;
+  readonly handoffArchivePath: string | null;
   /** `true` quando esta execução foi a que removeu o slot corrente. */
   readonly releasedCurrentCompletion: boolean;
   /** `true` quando esta execução foi a que liberou os slots do inbox. */
@@ -134,6 +135,15 @@ export interface RetryFailedAttemptResult {
    * compatibilidade com um FAIL anterior à selagem automática.
    */
   readonly bindingRecovered: boolean;
+}
+
+/** Nota do worker malformada vira `null`, do mesmo jeito que nota ausente. */
+function tryParseNote<T>(parse: () => T): T | null {
+  try {
+    return parse();
+  } catch {
+    return null;
+  }
 }
 
 async function readRequired(file: string, label: string): Promise<Buffer> {
@@ -173,9 +183,9 @@ interface FailedSource {
   readonly completionSha256: string;
   /** Record já publicado deste attempt — presente só em retomada. */
   readonly archived: ValidationFailedAttemptRecordType | null;
-  readonly inboxBytes: InboxArtifactPair;
-  readonly reportSha256: string;
-  readonly handoffSha256: string;
+  readonly inboxBytes: InboxArtifactPair | null;
+  readonly reportSha256: string | null;
+  readonly handoffSha256: string | null;
   readonly launch: LaunchRecord;
   readonly launchSha256: string;
   readonly authorizedHead: string;
@@ -225,14 +235,16 @@ async function loadInboxEvidence(
   taskId: string,
   attempt: number,
   archived: ValidationFailedAttemptRecordType | null,
-): Promise<InboxArtifactPair> {
+): Promise<InboxArtifactPair | null> {
   const current = await readCurrentInboxArtifacts(paths, taskId);
   if (current.report !== null && current.handoff !== null) {
     return { report: current.report, handoff: current.handoff };
   }
-  if (archived === null) {
-    if (current.report === null) throw new RetryFailedAttemptError('AgentCompletionReport ausente');
-    throw new RetryFailedAttemptError('HandoffDraft ausente');
+  // Nota que NUNCA existiu não tem o que preservar. Isso não impede o repair:
+  // o patch reprovado, o binding e a validação oficial continuam no disco.
+  if (archived === null) return null;
+  if (archived.report_sha256 === undefined || archived.handoff_draft_sha256 === undefined) {
+    return null;
   }
 
   const expected = {
@@ -316,25 +328,39 @@ async function loadFailedSource(input: RetryFailedAttemptInput): Promise<FailedS
     throw new RetryFailedAttemptError('orchestrator evidence candidate/accepted deve ser null');
   }
 
+  // A NOTA do worker é auxiliar aqui também. O repair existe para consertar um
+  // problema TÉCNICO num patch real e reprovado; nota ausente ou malformada não
+  // é motivo para negar reparo a um attempt que o Git e o validador oficial já
+  // descrevem por inteiro.
   const inboxBytes = await loadInboxEvidence(paths, taskId, attempt, archived);
-  const reportBytes = inboxBytes.report;
-  const report = parseJson('AgentCompletionReport', reportBytes, (value) =>
-    AgentCompletionReport.parse(value),
-  );
-  const handoffBytes = inboxBytes.handoff;
-  const handoff = parseJson('HandoffDraft', handoffBytes, parseHandoffDraft);
-  if (report.task_id !== taskId || handoff.task_id !== taskId) {
+  const reportBytes = inboxBytes?.report ?? null;
+  const handoffBytes = inboxBytes?.handoff ?? null;
+  const report =
+    reportBytes === null
+      ? null
+      : tryParseNote(() => AgentCompletionReport.parse(JSON.parse(reportBytes.toString('utf8'))));
+  const handoff =
+    handoffBytes === null
+      ? null
+      : tryParseNote(() => parseHandoffDraft(JSON.parse(handoffBytes.toString('utf8'))));
+  if (report !== null && report.task_id !== taskId) {
     throw new RetryFailedAttemptError('evidence do worker pertence a outra tarefa');
   }
-  if (report.self_reported_result !== 'SUCCESS') {
+  if (handoff !== null && handoff.task_id !== taskId) {
+    throw new RetryFailedAttemptError('evidence do worker pertence a outra tarefa');
+  }
+  // FAILURE DECLARADO continua tendo caminho próprio (dev-retry). Nota ausente
+  // não é FAILURE declarado.
+  if (report !== null && report.self_reported_result !== 'SUCCESS') {
     throw new RetryFailedAttemptError(
       'dev-retry-failed exige worker report SUCCESS — FAILURE explícito é dev-retry',
     );
   }
-  if (report.candidate_commit !== null) {
-    throw new RetryFailedAttemptError('report.candidate_commit deve ser null');
-  }
-  if (completion.report === null || canonicalJson(completion.report) !== canonicalJson(report)) {
+  if (
+    report !== null &&
+    completion.report !== null &&
+    canonicalJson(completion.report) !== canonicalJson(report)
+  ) {
     throw new RetryFailedAttemptError('report atual diverge do report preservado no FAIL');
   }
   if (!evidence.revalidation.some((result) => result.exit_code !== 0 || result.timed_out)) {
@@ -404,10 +430,16 @@ async function loadFailedSource(input: RetryFailedAttemptInput): Promise<FailedS
   if (binding.task_id !== taskId || binding.attempt !== attempt) {
     throw new RetryFailedAttemptError('source binding pertence a outra task/attempt');
   }
+  if (binding.original_completion_sha256 !== sha256Hex(completionBytes)) {
+    throw new RetryFailedAttemptError('source binding não corresponde aos bytes atuais');
+  }
+  // Hash da nota é conferido SÓ quando o binding o declara e a nota existe.
+  // Ausente dos dois lados é UNKNOWN coerente; presente nos dois tem que bater.
   if (
-    binding.original_completion_sha256 !== sha256Hex(completionBytes) ||
-    binding.report_sha256 !== sha256Hex(reportBytes) ||
-    binding.handoff_draft_sha256 !== sha256Hex(handoffBytes)
+    (binding.report_sha256 !== undefined &&
+      binding.report_sha256 !== (reportBytes === null ? undefined : sha256Hex(reportBytes))) ||
+    (binding.handoff_draft_sha256 !== undefined &&
+      binding.handoff_draft_sha256 !== (handoffBytes === null ? undefined : sha256Hex(handoffBytes)))
   ) {
     throw new RetryFailedAttemptError('source binding não corresponde aos bytes atuais');
   }
@@ -415,13 +447,14 @@ async function loadFailedSource(input: RetryFailedAttemptInput): Promise<FailedS
     throw new RetryFailedAttemptError('source_base_sha diverge entre binding, completion e state');
   }
 
-  const files = [...new Set(report.changed_files)].sort();
-  if (files.length === 0) throw new RetryFailedAttemptError('report.changed_files vazio');
-  if (
-    canonicalJson(files) !== canonicalJson(binding.changed_files) ||
-    canonicalJson(files) !== canonicalJson([...new Set(evidence.changed_files)].sort())
-  ) {
-    throw new RetryFailedAttemptError('changed_files diverge entre report, binding e evidence');
+  // AUTORIDADE: material derivado do Git pelo orquestrador no fechamento, e
+  // selado no binding. A declaração do worker não participa.
+  const files = [...new Set(evidence.changed_files)].sort();
+  if (files.length === 0) {
+    throw new RetryFailedAttemptError('orchestrator evidence sem changed_files');
+  }
+  if (canonicalJson(files) !== canonicalJson(binding.changed_files)) {
+    throw new RetryFailedAttemptError('changed_files diverge entre binding e evidence');
   }
   const forbidden = files.find(isForbiddenRevalidationPath);
   if (forbidden) throw new RetryFailedAttemptError(`caminho proibido: ${forbidden}`);
@@ -437,12 +470,36 @@ async function loadFailedSource(input: RetryFailedAttemptInput): Promise<FailedS
     completionSha256: sha256Hex(completionBytes),
     archived,
     inboxBytes,
-    reportSha256: sha256Hex(reportBytes),
-    handoffSha256: sha256Hex(handoffBytes),
+    reportSha256: reportBytes === null ? null : sha256Hex(reportBytes),
+    handoffSha256: handoffBytes === null ? null : sha256Hex(handoffBytes),
     launch,
     launchSha256: sha256Hex(launchBytes),
     authorizedHead: state.authorized_head_sha,
   };
+}
+
+/**
+ * Libera o slot corrente da nota do worker — quando existe nota a liberar.
+ * Attempt sem nota não tem slot ocupado, então não há o que liberar nem o que
+ * conferir; devolver "nada liberado" é o fato honesto.
+ */
+async function releaseCurrentInboxNote(
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+  reportSha256: string | undefined,
+  handoffDraftSha256: string | undefined,
+  hooks: RetryFailedAttemptInput['inboxReleaseHooks'],
+): Promise<{ readonly report: boolean; readonly handoff: boolean }> {
+  if (reportSha256 === undefined || handoffDraftSha256 === undefined) {
+    return { report: false, handoff: false };
+  }
+  return releaseCurrentInboxArtifacts(
+    paths,
+    taskId,
+    { attempt, hashes: { reportSha256, handoffDraftSha256 } },
+    hooks,
+  );
 }
 
 /** A working tree tem que ser EXATAMENTE o patch reprovado, byte a byte. */
@@ -453,7 +510,8 @@ async function assertPatchOnDisk(
   const actual = await workingTreeFiles(paths.repoRoot);
   if (canonicalJson(actual) !== canonicalJson(source.files)) {
     throw new RetryFailedAttemptError(
-      `working tree diverge do report: real [${actual.join(', ')}], report [${source.files.join(', ')}]`,
+      `working tree diverge do material preservado: real [${actual.join(', ')}], ` +
+        `preservado [${source.files.join(', ')}]`,
     );
   }
   const fingerprint = await patchFingerprint(paths.repoRoot);
@@ -566,7 +624,14 @@ async function archiveInboxEvidence(
   paths: HarnessPaths,
   source: FailedSource,
   record: ValidationFailedAttemptRecordType,
-): Promise<{ readonly reportPath: string; readonly handoffPath: string }> {
+): Promise<{ readonly reportPath: string; readonly handoffPath: string } | null> {
+  if (
+    source.inboxBytes === null ||
+    record.report_sha256 === undefined ||
+    record.handoff_draft_sha256 === undefined
+  ) {
+    return null;
+  }
   try {
     const archived = await archiveInboxArtifacts({
       paths,
@@ -648,13 +713,14 @@ export async function retryFailedAttempt(
     const completionArchivePath = await archiveFailedCompletion(paths, source, archived);
     const inboxArchive = await archiveInboxEvidence(paths, source, archived);
     const releasedCurrentCompletion = await releaseCurrentCompletion(paths, taskId);
-    const releasedInbox = await releaseCurrentInboxArtifacts(paths, taskId, {
-      attempt: archived.attempt,
-      hashes: {
-        reportSha256: archived.report_sha256,
-        handoffDraftSha256: archived.handoff_draft_sha256,
-      },
-    }, input.inboxReleaseHooks);
+    const releasedInbox = await releaseCurrentInboxNote(
+      paths,
+      taskId,
+      archived.attempt,
+      archived.report_sha256,
+      archived.handoff_draft_sha256,
+      input.inboxReleaseHooks,
+    );
     await reopenTask(paths, taskId, archived);
     return {
       record: archived,
@@ -664,8 +730,8 @@ export async function retryFailedAttempt(
       removed: [],
       alreadyArchived: true,
       completionArchivePath,
-      reportArchivePath: inboxArchive.reportPath,
-      handoffArchivePath: inboxArchive.handoffPath,
+      reportArchivePath: inboxArchive?.reportPath ?? null,
+      handoffArchivePath: inboxArchive?.handoffPath ?? null,
       releasedCurrentCompletion,
       releasedCurrentInbox: releasedInbox.report || releasedInbox.handoff,
       bindingRecovered: source.bindingRecovered,
@@ -696,13 +762,14 @@ export async function retryFailedAttempt(
   // Bundle, record e os três archives publicados e conferidos: agora — e só
   // agora — os slots correntes podem ser liberados para o próximo attempt.
   const releasedCurrentCompletion = await releaseCurrentCompletion(paths, taskId);
-  const releasedInbox = await releaseCurrentInboxArtifacts(paths, taskId, {
-    attempt: record.attempt,
-    hashes: {
-      reportSha256: record.report_sha256,
-      handoffDraftSha256: record.handoff_draft_sha256,
-    },
-  }, input.inboxReleaseHooks);
+  const releasedInbox = await releaseCurrentInboxNote(
+    paths,
+    taskId,
+    record.attempt,
+    record.report_sha256,
+    record.handoff_draft_sha256,
+    input.inboxReleaseHooks,
+  );
   await input.afterCompletionReleased?.(record);
 
   // Só depois de todo artifact append-only estar publicado o patch some do disco.
@@ -731,8 +798,8 @@ export async function retryFailedAttempt(
     removed: reset.removed,
     alreadyArchived: archived !== null,
     completionArchivePath,
-    reportArchivePath: inboxArchive.reportPath,
-    handoffArchivePath: inboxArchive.handoffPath,
+    reportArchivePath: inboxArchive?.reportPath ?? null,
+    handoffArchivePath: inboxArchive?.handoffPath ?? null,
     releasedCurrentCompletion,
     releasedCurrentInbox: releasedInbox.report || releasedInbox.handoff,
     bindingRecovered: source.bindingRecovered,

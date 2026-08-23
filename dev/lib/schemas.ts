@@ -1682,11 +1682,23 @@ export const OrchestratedFinalizationRecord = z
     base_sha: shaHex,
     profile_id: nonEmpty,
     execution_policy: ExecutionPolicy,
-    report_sha256: z.string().regex(/^[0-9a-f]{64}$/),
-    handoff_draft_sha256: z.string().regex(/^[0-9a-f]{64}$/),
-    report_result: z.literal('SUCCESS'),
+    /**
+     * Procedência da NOTA do worker, quando ela existe e é legível.
+     *
+     * Opcional desde a Onda 1: o worker output é informação semântica
+     * AUXILIAR, não pré-condição do candidate. Nota ausente ou malformada
+     * deixa estes campos ausentes — que significa UNKNOWN, nunca "o candidate
+     * não vale". Os fatos que importam (`changed_files`, `validation_results`,
+     * `candidate_commit`) são derivados do Git, do processo e do validador
+     * oficial, e continuam obrigatórios.
+     *
+     * Records históricos, que sempre tiveram nota, continuam parseando iguais.
+     */
+    report_sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+    handoff_draft_sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+    report_result: z.literal('SUCCESS').optional(),
     /** O candidate não pertence ao conhecimento nem ao report do worker. */
-    report_candidate_commit: z.literal(null),
+    report_candidate_commit: z.literal(null).optional(),
     commit_message: CommitMessage,
     changed_files: z.array(nonEmpty).min(1),
     validation_results: z.array(ValidationResult).min(1),
@@ -1912,8 +1924,14 @@ export const RevalidationSourceBinding = z
     source_base_sha: shaHex,
     original_completion_path: nonEmpty,
     original_completion_sha256: z.string().regex(/^[0-9a-f]{64}$/),
-    report_sha256: z.string().regex(/^[0-9a-f]{64}$/),
-    handoff_draft_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    /**
+     * Procedência da nota do worker, quando ela existia no fechamento.
+     * Opcional desde a Onda 1: um FAIL oficial sobre material real precisa
+     * ficar reparável mesmo sem nota. `changed_files` continua obrigatório e
+     * continua vindo do Git via `orchestrator_evidence`.
+     */
+    report_sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+    handoff_draft_sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
     changed_files: z.array(nonEmpty).min(1),
     derived_patch_fingerprint: z.string().regex(/^[0-9a-f]{64}$/),
     fingerprint_observed_at: z.string().datetime({ offset: true }),
@@ -2265,14 +2283,19 @@ export const ValidationFailedAttemptRecord = z
     attempt: z.number().int().positive(),
     source_base_sha: shaHex,
     profile_id: nonEmpty,
-    worker_self_reported_result: z.literal('SUCCESS'),
-    report_candidate_commit: z.literal(null),
+    /**
+     * Nota do worker no attempt arquivado. Opcional desde a Onda 1: o que
+     * qualifica o arquivamento é objetivo — houve patch entregue e o gate
+     * oficial reprovou. Ausente = UNKNOWN, e o attempt continua reparável.
+     */
+    worker_self_reported_result: z.literal('SUCCESS').optional(),
+    report_candidate_commit: z.literal(null).optional(),
     orchestrator_verdict: z.literal('REJECTED_BY_OFFICIAL_VALIDATION'),
     finalization_mode: z.literal('normal'),
     launch_record_sha256: sha256Hex,
     original_completion_sha256: sha256Hex,
-    report_sha256: sha256Hex,
-    handoff_draft_sha256: sha256Hex,
+    report_sha256: sha256Hex.optional(),
+    handoff_draft_sha256: sha256Hex.optional(),
     source_binding_sha256: sha256Hex,
     patch_fingerprint: sha256Hex,
     changed_files: z.array(nonEmpty).min(1),

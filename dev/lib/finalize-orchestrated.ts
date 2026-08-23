@@ -103,13 +103,23 @@ export interface FinalizeOrchestratedInput {
   readonly acceptance?: ValidatedCandidateAcceptancePolicy;
 }
 
+/**
+ * O que a finalização sabe do attempt.
+ *
+ * `files` é DERIVADO DO GIT — nunca da declaração do worker. `report` e
+ * `handoff` são a NOTA do worker: informação semântica auxiliar que pode estar
+ * ausente ou malformada sem invalidar um candidate que o Git já descreve.
+ * `workerNotes` registra o que a nota disse de diferente do real, para
+ * observabilidade; nada ali bloqueia.
+ */
 interface SourceEvidence {
   readonly packet: TaskPacket;
   readonly launch: LaunchRecord;
-  readonly report: AgentCompletionReportType;
-  readonly reportSha256: string;
-  readonly handoff: HandoffDraft;
-  readonly handoffSha256: string;
+  readonly report: AgentCompletionReportType | null;
+  readonly reportSha256: string | null;
+  readonly handoff: HandoffDraft | null;
+  readonly handoffSha256: string | null;
+  readonly workerNotes: readonly string[];
   readonly files: string[];
 }
 
@@ -136,23 +146,47 @@ function exactFiles(files: readonly string[], label: string): string[] {
   return sorted;
 }
 
+/**
+ * Deriva do GIT o material que o candidate pode representar.
+ *
+ * Esta é a fronteira que a Onda 1 inverteu. Antes, o conjunto vinha de
+ * `report.changed_files` e o Git só confirmava — então um arquivo que o worker
+ * escreveu mas o Git IGNORA (`src/coverage/.gitkeep` sob `.gitignore:
+ * coverage/`) travava a work unit inteira, apesar de o Git já descrever um
+ * candidate perfeitamente válido com todos os outros arquivos.
+ *
+ * Agora o candidate É o que o Git consegue representar. Arquivo ignorado
+ * simplesmente não entra — sem `git add -f`, sem tocar `.gitignore`, sem
+ * recipe especial e sem pergunta ao humano. Se ele importava para o
+ * comportamento, a validação oficial ou a aceitação detectam; se não
+ * importava, não havia motivo para bloquear nada.
+ */
+async function deriveCandidateFilesFromGit(
+  repoRoot: string,
+  baseSha: string,
+): Promise<string[]> {
+  const head = await headSha(repoRoot);
+  return head === baseSha
+    ? await workingTreeFiles(repoRoot)
+    : await changedFiles(repoRoot, head);
+}
+
+/** Deriva de GIT para GIT: detecta drift do material entre dois instantes. */
 function assertExactFiles(actual: readonly string[], expected: readonly string[]): void {
   const left = [...actual].sort();
   const right = [...expected].sort();
   if (canonicalJson(left) !== canonicalJson(right)) {
     throw new OrchestratedFinalizationError(
-      `arquivos reais divergem do report: real [${left.join(', ')}], report [${right.join(', ')}]`,
+      `material do candidate divergiu: agora [${left.join(', ')}], derivado [${right.join(', ')}]`,
     );
   }
 }
 
-async function readRequired(file: string, label: string): Promise<Buffer> {
+async function readOptional(file: string): Promise<Buffer | null> {
   try {
     return await readFile(file);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      throw new OrchestratedFinalizationError(`${label} ausente`);
-    }
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
     throw error;
   }
 }
@@ -164,6 +198,31 @@ function parseJson<T>(file: string, bytes: Buffer, parse: (value: unknown) => T)
     throw new OrchestratedFinalizationError(
       `${file} inválido: ${error instanceof Error ? error.message : String(error)}`,
     );
+  }
+}
+
+/**
+ * Lê a NOTA do worker sem poder de veto. Ausente, ilegível ou fora do contrato
+ * devolve `null` com o motivo anotado — nunca lança. É isso que impede
+ * metadata opcional malformada de impedir a derivação do candidate, a
+ * validação oficial ou o repair.
+ */
+async function readWorkerNote<T>(
+  file: string,
+  label: string,
+  parse: (value: unknown) => T,
+  notes: string[],
+): Promise<{ value: T; sha256: string } | null> {
+  const bytes = await readOptional(file);
+  if (bytes === null) {
+    notes.push(`${label} ausente`);
+    return null;
+  }
+  try {
+    return { value: parseJson(file, bytes, parse), sha256: sha256Hex(bytes) };
+  } catch (error) {
+    notes.push(`${label} malformado: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
   }
 }
 
@@ -190,40 +249,79 @@ async function loadSource(input: FinalizeOrchestratedInput): Promise<SourceEvide
     throw new OrchestratedFinalizationError('LaunchRecord não pertence ao modo orchestrator-owned');
   }
 
-  const reportFile = reportPath(input.paths, input.taskId);
-  const handoffFile = handoffDraftPath(input.paths, input.taskId);
-  const [reportBytes, handoffBytes] = await Promise.all([
-    readRequired(reportFile, 'AgentCompletionReport'),
-    readRequired(handoffFile, 'HandoffDraft'),
-  ]);
-  const report = parseJson(reportFile, reportBytes, (value) => AgentCompletionReport.parse(value));
-  const handoff = parseJson(handoffFile, handoffBytes, parseHandoffDraft);
-  for (const [label, taskId] of [
-    ['TaskPacket', packet.task_id],
-    ['AgentCompletionReport', report.task_id],
-    ['HandoffDraft', handoff.task_id],
-  ] as const) {
-    if (taskId !== input.taskId) {
-      throw new OrchestratedFinalizationError(`${label} pertence a outra tarefa: ${taskId}`);
+  if (packet.task_id !== input.taskId) {
+    throw new OrchestratedFinalizationError(`TaskPacket pertence a outra tarefa: ${packet.task_id}`);
+  }
+
+  // A NOTA do worker é lida DEPOIS das fontes autoritativas e não pode
+  // derrubar nenhuma delas.
+  const notes: string[] = [];
+  const reportRead = await readWorkerNote(
+    reportPath(input.paths, input.taskId),
+    'AgentCompletionReport',
+    (value) => AgentCompletionReport.parse(value),
+    notes,
+  );
+  const handoffRead = await readWorkerNote(
+    handoffDraftPath(input.paths, input.taskId),
+    'HandoffDraft',
+    parseHandoffDraft,
+    notes,
+  );
+
+  // Nota que pertence a outra tarefa é nota INUTILIZÁVEL, não finalização
+  // impossível: ela é descartada e o fato registrado.
+  const report =
+    reportRead !== null && reportRead.value.task_id !== input.taskId
+      ? (notes.push(`AgentCompletionReport pertence a outra tarefa: ${reportRead.value.task_id}`),
+        null)
+      : reportRead;
+  const handoff =
+    handoffRead !== null && handoffRead.value.task_id !== input.taskId
+      ? (notes.push(`HandoffDraft pertence a outra tarefa: ${handoffRead.value.task_id}`), null)
+      : handoffRead;
+
+  if (report !== null && report.value.candidate_commit !== null) {
+    // O worker não é dono do commit neste modo. Declarar um é engano de
+    // metadata, não motivo para descartar o trabalho: o Git decide.
+    notes.push('report.candidate_commit deveria ser null neste modo orchestrator-owned');
+  }
+  if (report !== null && handoff !== null) {
+    const expected = report.value.self_reported_result === 'SUCCESS' ? 'PASS' : 'FAIL';
+    if (handoff.value.result !== expected) {
+      notes.push('resultado do HandoffDraft diverge do report');
     }
   }
-  if (report.candidate_commit !== null) {
-    throw new OrchestratedFinalizationError('report.candidate_commit deve ser null');
-  }
-  const expectedDraftResult = report.self_reported_result === 'SUCCESS' ? 'PASS' : 'FAIL';
-  if (handoff.result !== expectedDraftResult) {
-    throw new OrchestratedFinalizationError('resultado do HandoffDraft diverge do report');
-  }
-  const files = exactFiles(report.changed_files, 'report.changed_files');
+
+  // AUTORIDADE: o material do candidate vem do Git.
+  const files = exactFiles(
+    await deriveCandidateFilesFromGit(input.paths.repoRoot, packet.base_sha),
+    'material derivado do Git',
+  );
+  // A fronteira de escopo continua fail-closed, agora aplicada ao material
+  // REAL: o control plane nunca aceita um candidate que toque seus próprios
+  // arquivos de controle, tenha o worker declarado o que tiver.
   const forbidden = files.find(isForbiddenOrchestratedPath);
   if (forbidden) throw new OrchestratedFinalizationError(`caminho proibido: ${forbidden}`);
+
+  if (report !== null) {
+    const declared = [...report.value.changed_files].sort();
+    if (canonicalJson(declared) !== canonicalJson(files)) {
+      notes.push(
+        `report.changed_files diverge do material real: real [${files.join(', ')}], ` +
+          `report [${declared.join(', ')}]`,
+      );
+    }
+  }
+
   return {
     packet,
     launch,
-    report,
-    reportSha256: sha256Hex(reportBytes),
-    handoff,
-    handoffSha256: sha256Hex(handoffBytes),
+    report: report?.value ?? null,
+    reportSha256: report?.sha256 ?? null,
+    handoff: handoff?.value ?? null,
+    handoffSha256: handoff?.sha256 ?? null,
+    workerNotes: notes,
     files,
   };
 }
@@ -238,6 +336,23 @@ async function loadSource(input: FinalizeOrchestratedInput): Promise<SourceEvide
  * impossível quebrar, o erro sai classificado como falha de finalização — não
  * como `ZodError` cru derrubando o run.
  */
+/**
+ * Procedência da nota do worker no OrchestratedFinalizationRecord.
+ *
+ * Presente quando a nota existe e é legível; inteiramente AUSENTE quando não
+ * é. Ausência significa UNKNOWN — o candidate, os arquivos e a validação
+ * continuam provados pelo Git, pelo processo e pelo validador oficial.
+ */
+function workerNoteProvenance(source: SourceEvidence): Record<string, unknown> {
+  if (source.reportSha256 === null && source.handoffSha256 === null) return {};
+  return {
+    ...(source.reportSha256 === null
+      ? {}
+      : { report_sha256: source.reportSha256, report_result: 'SUCCESS', report_candidate_commit: null }),
+    ...(source.handoffSha256 === null ? {} : { handoff_draft_sha256: source.handoffSha256 }),
+  };
+}
+
 function commitMessageFor(input: FinalizeOrchestratedInput): string {
   const task = input.loaded.byId.get(input.taskId);
   if (!task) throw new OrchestratedFinalizationError(`tarefa ausente no plano: ${input.taskId}`);
@@ -360,9 +475,17 @@ function evidence(
   };
 }
 
+/**
+ * Tudo que a NOTA do worker disse de diferente do real. É observabilidade:
+ * alimenta `report_matches_evidence` e `discrepancies` do CompletionRecord,
+ * e não decide nada.
+ */
 function discrepancies(source: SourceEvidence): string[] {
-  const result: string[] = [];
-  if (canonicalJson([...source.handoff.changed_files].sort()) !== canonicalJson(source.files)) {
+  const result = [...source.workerNotes];
+  if (
+    source.handoff !== null &&
+    canonicalJson([...source.handoff.changed_files].sort()) !== canonicalJson(source.files)
+  ) {
     result.push('changed_files do HandoffDraft diverge dos arquivos reais');
   }
   return result;
@@ -403,7 +526,11 @@ function failNeedsSourceBinding(
   source: SourceEvidence,
   validations: readonly ValidationResult[],
 ): boolean {
-  if (source.report.self_reported_result !== 'SUCCESS') return false;
+  // Nota AUSENTE não desqualifica: o que qualifica é ter havido solução
+  // entregue e reprovada pelo gate oficial, e isso o Git e o validador provam
+  // sozinhos. Só um FAILURE declarado pelo próprio worker sai deste caminho —
+  // ali não há patch entregue para revalidar.
+  if (source.report !== null && source.report.self_reported_result !== 'SUCCESS') return false;
   return validations.some((result) => result.exit_code !== 0 || result.timed_out);
 }
 
@@ -582,7 +709,20 @@ function deterministicHandoff(
   record: OrchestratedFinalizationRecordType,
   source: SourceEvidence,
 ): HandoffRecord {
-  return sealHandoff(source.handoff, {
+  // Draft ausente ou inutilizável NÃO impede o selo: os fatos do handoff são
+  // todos do orquestrador. O que falta é OPINIÃO do worker, e opinião ausente
+  // é registrada como ausente — nunca como "task impossível de finalizar".
+  const draft: HandoffDraft = source.handoff ?? {
+    schema_version: 1,
+    task_id: record.task_id,
+    result: 'PASS',
+    changed_files: [],
+    validations: [],
+    decisions: [],
+    lessons: [],
+    next_relevant_files: [],
+  };
+  return sealHandoff(draft, {
     task_id: record.task_id,
     result: 'PASS',
     changed_files: record.changed_files,
@@ -618,8 +758,11 @@ export async function verifyOrchestratedFinalizationRecord(
     record.base_sha !== source.packet.base_sha ||
     record.profile_id !== source.launch.profile_id ||
     canonicalJson(record.execution_policy) !== canonicalJson(source.launch.execution_policy) ||
-    record.report_sha256 !== source.reportSha256 ||
-    record.handoff_draft_sha256 !== source.handoffSha256
+    // Procedência da nota é conferida SÓ quando o record a declara. Um record
+    // sem nota (worker não escreveu, ou escreveu fora do contrato) continua
+    // verificável por tudo que importa: base, profile, policy e candidate.
+    (record.report_sha256 ?? null) !== source.reportSha256 ||
+    (record.handoff_draft_sha256 ?? null) !== source.handoffSha256
   ) {
     throw new OrchestratedFinalizationError('OrchestratedFinalizationRecord diverge das fontes');
   }
@@ -1013,10 +1156,7 @@ export async function finalizeOrchestratedTask(
         base_sha: source.packet.base_sha,
         profile_id: source.launch.profile_id,
         execution_policy: source.launch.execution_policy,
-        report_sha256: source.reportSha256,
-        handoff_draft_sha256: source.handoffSha256,
-        report_result: 'SUCCESS',
-        report_candidate_commit: null,
+        ...workerNoteProvenance(source),
         commit_message: message,
         changed_files: source.files,
         validation_results: validationResults,
@@ -1054,7 +1194,10 @@ export async function finalizeOrchestratedTask(
     );
   }
 
-  if (source.report.self_reported_result === 'FAILURE') {
+  // Um FAILURE que o worker DECLARA continua sendo sinal semântico legítimo e
+  // encerra o attempt. Nota ausente não é FAILURE declarado: nesse caso o
+  // candidate segue para a validação oficial, que é quem decide.
+  if (source.report?.self_reported_result === 'FAILURE') {
     return finishFail(input, state, source, 'worker reportou FAILURE', []);
   }
 
@@ -1182,10 +1325,7 @@ export async function finalizeOrchestratedTask(
     base_sha: source.packet.base_sha,
     profile_id: source.launch.profile_id,
     execution_policy: source.launch.execution_policy,
-    report_sha256: source.reportSha256,
-    handoff_draft_sha256: source.handoffSha256,
-    report_result: 'SUCCESS',
-    report_candidate_commit: null,
+    ...workerNoteProvenance(source),
     commit_message: message,
     changed_files: source.files,
     validation_results: validationResults,

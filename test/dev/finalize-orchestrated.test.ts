@@ -12,7 +12,7 @@ import {
   type ValidatedCandidateAcceptancePolicy,
 } from '../../dev/lib/candidate-review.js';
 import { closeTaskByLaunchPolicy } from '../../dev/lib/close-dispatch.js';
-import { headSha, parentShas, stagedFiles, workingTreeFiles } from '../../dev/lib/git.js';
+import { changedFiles, headSha, parentShas, stagedFiles, workingTreeFiles } from '../../dev/lib/git.js';
 import { readProcStartTicks } from '../../dev/lib/process-identity.js';
 import { buildTaskPacket } from '../../dev/lib/packet.js';
 import { loadPlan, type LoadedPlan } from '../../dev/lib/plan.js';
@@ -593,25 +593,44 @@ describe('finalizeOrchestratedTask', () => {
     ]);
   });
 
-  it('recusa arquivo real extra, report ausente, staging prévio e path proibido', async () => {
+  it('adota arquivo real extra no candidate e recusa staging prévio', async () => {
+    // Onda 1: o Git é a autoridade sobre o material. Um arquivo real que o
+    // report não declarou É parte do candidate — a declaração errada vira
+    // discrepância observável, não bloqueio.
     await prepareRun();
     await writeFile(path.join(root, 'src', 'extra.ts'), 'extra\n');
-    expect((await finalize()).kind).toBe('PENDING');
-    expect(await commitCount()).toBe(0);
+    const outcome = await finalize();
+    expect(outcome.kind).toBe('PASS');
+    expect(await commitCount()).toBe(1);
+    expect(await changedFiles(root, await headSha(root))).toEqual([
+      'src/extra.ts',
+      'src/new file.ts',
+    ]);
+    expect(outcome.discrepancies.join(' ')).toMatch(/report\.changed_files diverge/i);
+  });
 
-    await rm(path.join(root, 'src', 'extra.ts'));
+  it('recusa staging prévio', async () => {
+    await prepareRun();
     await runGit(root, ['add', '--', 'src/new file.ts']);
     expect((await finalize()).reason).toMatch(/index.*staged/i);
   });
 
-  it('recusa arquivo reportado ausente, candidate do worker e LaunchRecord worker-owned', async () => {
+  it('recusa material vazio e LaunchRecord worker-owned; candidate declarado pelo worker é só discrepância', async () => {
+    // Report declara um arquivo que não existe: o Git não tem material nenhum
+    // para representar, então não há candidate — e é isso que a mensagem diz.
     await prepareRun(['src/missing.ts']);
     await rm(path.join(root, 'src/missing.ts'));
-    expect((await finalize()).reason).toMatch(/arquivos reais divergem/i);
+    expect((await finalize()).reason).toMatch(/material derivado do Git está vazio/i);
 
+    // O worker não é dono do commit neste modo. Declarar um é engano de
+    // metadata: registrado, nunca bloqueante.
     await prepareRun(['src/candidate.ts'], { reportCandidate: baseSha });
-    expect((await finalize()).reason).toMatch(/candidate_commit deve ser null/i);
+    const declared = await finalize();
+    expect(declared.kind).toBe('PASS');
+    expect(declared.discrepancies.join(' ')).toMatch(/candidate_commit deveria ser null/i);
+  });
 
+  it('recusa LaunchRecord worker-owned', async () => {
     await prepareRun(['src/worker-owned.ts']);
     const launchFile = path.join(paths.logsDir, 'T1.launch.json');
     const launch = JSON.parse(await readFile(launchFile, 'utf8')) as Record<string, unknown>;
@@ -625,17 +644,34 @@ describe('finalizeOrchestratedTask', () => {
   });
 
   it.each([
-    '.dev/manual.json',
-    '.dev-inbox/T1/manual.json',
     'dev/plan.yaml',
     '.claude/settings.json',
     '.agents/rules.md',
     '.codex/config.toml',
   ])('recusa path proibido: %s', async (file) => {
     await prepareRun([file]);
+    // A guarda roda sobre o material REAL derivado do Git, então o arquivo
+    // precisa existir de fato para ser recusado.
+    await mkdir(path.dirname(path.join(root, file)), { recursive: true });
+    await writeFile(path.join(root, file), 'proibido\n');
     expect((await finalize()).reason).toMatch(/caminho proibido/i);
     expect(await commitCount()).toBe(0);
   });
+
+  it.each(['.dev/manual.json', '.dev-inbox/T1/manual.json'])(
+    'runtime dir nunca entra no candidate: %s',
+    async (file) => {
+      // Segunda barreira, estrutural: o runtime do harness é ignorado pelo
+      // Git, então um arquivo ali não é sequer representável como candidate.
+      // Não há material, não há commit, e nenhum gate humano é acionado.
+      await prepareRun([file]);
+      await mkdir(path.dirname(path.join(root, file)), { recursive: true });
+      await writeFile(path.join(root, file), 'runtime\n');
+      expect(await workingTreeFiles(root)).not.toContain(file);
+      expect((await finalize()).reason).toMatch(/material derivado do Git está vazio/i);
+      expect(await commitCount()).toBe(0);
+    },
+  );
 
   it('recusa task fora de RUNNING/FINALIZING e outra task RUNNING', async () => {
     await prepareRun();
@@ -678,13 +714,29 @@ describe('finalizeOrchestratedTask', () => {
     await writeFile(launchFile, JSON.stringify(launch));
     expect((await finalize()).reason).toMatch(/ainda está vivo/i);
 
+  });
+
+  /**
+   * Onda 1: a NOTA do worker é informação semântica AUXILIAR. Ausente ou
+   * malformada, o candidate real continua sendo derivado do Git, validado
+   * oficialmente e aceito — a lacuna vira discrepância observável.
+   */
+  it('aceita candidate real com AgentCompletionReport ausente', async () => {
     await prepareRun();
     await rm(reportPath(paths, 'T1'));
-    expect((await finalize()).reason).toMatch(/AgentCompletionReport ausente/i);
+    const outcome = await finalize();
+    expect(outcome.kind).toBe('PASS');
+    expect(await commitCount()).toBe(1);
+    expect(outcome.discrepancies.join(' ')).toMatch(/AgentCompletionReport ausente/i);
+  });
 
+  it('aceita candidate real com HandoffDraft malformado', async () => {
     await prepareRun();
     await writeFile(handoffDraftPath(paths, 'T1'), '{}');
-    expect((await finalize()).reason).toMatch(/handoff-draft.*inválido/i);
+    const outcome = await finalize();
+    expect(outcome.kind).toBe('PASS');
+    expect(await commitCount()).toBe(1);
+    expect(outcome.discrepancies.join(' ')).toMatch(/HandoffDraft malformado/i);
   });
 
   it('FAILURE do worker não commita nem sela handoff e preserva o patch', async () => {

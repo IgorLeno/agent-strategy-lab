@@ -421,36 +421,27 @@ describe('handoff v2 no protocolo real do worker', () => {
   // Sem what_i_did_not_check o draft v2 nem chega a ser um handoff: a
   // finalização fica PENDING e o incidente cai na recipe de protocolo que já
   // existe. Nenhuma classe de recovery nova foi criada para este caso.
-  it('draft v2 sem what_i_did_not_check cai no caminho de protocolo existente', async () => {
+  /**
+   * Onda 1: um draft v2 fora do contrato é NOTA malformada, não trabalho
+   * perdido. O candidate real é derivado do Git, validado oficialmente e
+   * aceito; a lacuna do worker fica registrada como discrepância.
+   */
+  it('draft v2 sem what_i_did_not_check não impede o candidate real', async () => {
     await useOrchestratorProfile();
     const result = await orchestrateWith('handoff-v2-invalid');
 
-    expect(JSON.parse(result.stdout).iterations[0].result).toBe('PENDING');
-    expect(result.stdout).toMatch(/what_i_did_not_check/);
+    expect(JSON.parse(result.stdout).iterations[0].result).toBe('PASS');
     const state = await readState(paths);
-    expect(state.tasks[0]?.status).toBe('RUNNING');
-    expect(state.tasks[0]?.phase).toBe('FINALIZING');
-    expect(await readHandoff(paths, 'T1')).toBeNull();
-    expect(await readCompletion(paths, 'T1')).toBeNull();
+    expect(state.tasks[0]?.status).toBe('PASS');
 
-    const triage = classifyRoutinePostLaunchIncident({
-      phase: 'POST_LAUNCH',
-      authorized_head_before: state.authorized_head_sha ?? '',
-      task_id: 'T1',
-      attempt: 1,
-      profile_id: 'fake-orchestrator-v2',
-      launch: 'FINISHED',
-      close: 'PENDING',
-      outcome: 'PENDING',
-      reason: state.tasks[0]?.diagnostics ?? '',
-      task_status: 'RUNNING',
-      task_phase: 'FINALIZING',
-      commit_owner: 'orchestrator',
-      capability_verdict: false,
-      official_validation_failure: false,
-      evidence_paths: [],
-    });
-    expect(triage.recipe_id).toBe('protocol-output-recovery');
-    expect(triage.action).toBe('RECOVER_PROTOCOL_OUTPUT');
+    const completion = await readCompletion(paths, 'T1');
+    expect(completion?.status).toBe('PASS');
+    expect(completion?.report_matches_evidence).toBe(false);
+    expect(completion?.discrepancies.join(' ')).toMatch(/HandoffDraft malformado/i);
+
+    // O handoff selado existe e continua com os fatos do ORQUESTRADOR; o que
+    // falta é opinião do worker, não fato.
+    const handoff = await readHandoff(paths, 'T1');
+    expect(handoff?.accepted_commit).toBe(state.authorized_head_sha);
   }, 60_000);
 });
