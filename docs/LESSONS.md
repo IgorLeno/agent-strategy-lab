@@ -628,3 +628,20 @@ não implica permissão. Contrato não provado é `PREFLIGHT_BLOCKED` — zero
 launch, zero token, e nunca veredito sobre o modelo. Rede é capability de
 desenvolvimento declarada, não exceção para `npm`; e continua sem autorizar
 efeito externo, que segue nos gates próprios.
+
+[2026-08-23] Contexto: attempt 3 de `foundation_app_scaffold` terminou com
+exit 0, report e handoff presentes, e o finalizer do control plane crashou
+ANTES da validação oficial com `ZodError: commit-message excede 200 bytes`.
+Mistake: o harness reusava `PlanTask.title` — campo SEMÂNTICO, deliberadamente
+ilimitado para explicar a work unit — diretamente como subject de commit, que
+é bounded em 200 bytes. Os 13 titles do plano gerado, todos aprovados nos
+gates do planner, estouravam o limite. Nada tinha falhado no worker: um plano
+válido era, por construção, impossível de finalizar.
+Rule: campo semântico NUNCA vira artefato operacional por reuso direto; vira
+por derivação determinística e TOTAL, com o budget do lado de quem tem budget.
+Toda representação bounded derivada de um contrato ilimitado precisa de uma
+primitive própria — byte-aware em UTF-8, com scope e summary limitados
+independentemente e fallback que a torne total — e de fonte ÚNICA para o
+limite, lida tanto pelo validador quanto pelo gerador. Se um consumidor pode
+recusar o que um produtor válido produz, a incompatibilidade é do consumidor,
+não do plano: não se encurta o campo semântico nem se afrouxa o budget.
