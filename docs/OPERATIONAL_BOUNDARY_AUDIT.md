@@ -271,6 +271,49 @@ Regra: **a technical problem is not a human decision.**
 
 ---
 
+## Acceptance test real da Onda 1
+
+`foundation_app_scaffold`, do piloto Augmented Chess, **chegou a PASS** — pelo
+entrypoint de topo, sobre o repositório externo real, com Git real, sandbox
+real, instalação de dependência real e validação oficial real.
+
+O attempt 3 preservado (o mesmo que estava travado) foi **retomado** pelo novo
+caminho de finalização: `pnpm dev-run-project` reencontrou a task em
+`RUNNING/FINALIZING`, concluiu o fechamento antes de selecionar tarefa nova, e
+não exigiu `dev-close`, `dev-recover-*` nem qualquer primitive interna.
+
+| Fato | Valor |
+|---|---|
+| accepted_commit | `9b04c439e64268c7e3cf7889aa82803348639b02` |
+| base | `d44d2e74a598c362450bee395652250fa8d2787c` |
+| arquivos no candidate | 15, todos derivados do Git |
+| `npm install` | exit 0 |
+| `npm run typecheck` | exit 0 |
+| `npm run build` | exit 0 |
+| `npx vitest run` | exit 0 |
+| `git diff --cached --check` | exit 0 |
+| intervenções humanas | **0** |
+| launches de provider consumidos na retomada | **0** |
+
+O desfecho do artifact ignorado é exatamente o previsto por 2E:
+`src/coverage/.gitkeep` **não entra** no commit, **continua intacto no disco**,
+e o `.gitignore` do alvo não foi tocado. A validação oficial — que nunca
+dependeu dele — passa inteira. O bloqueio era cerimônia, não requisito.
+
+`report_matches_evidence: false` e a discrepância correspondente ficam
+registradas no CompletionRecord: a declaração errada do worker é observável,
+e não decide nada.
+
+### Limitação conhecida
+
+O caminho de RETOMADA conclui a finalização fora do laço de iteração e, por
+isso, não passa pelos hooks de observação — não grava
+`OperationalAttemptRecord` nem materialização canônica para o attempt
+retomado. Nenhuma evidência é perdida (CompletionRecord, HandoffRecord e
+OrchestratedFinalizationRecord são gravados normalmente), mas o registro leve
+de aprendizado fica ausente nesse caminho. Não foi corrigido nesta onda por
+disciplina de escopo; é candidato direto da Onda 2.
+
 ## WAVE 2 CANDIDATES
 
 - planner contract simplification;

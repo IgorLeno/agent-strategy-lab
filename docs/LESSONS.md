@@ -645,3 +645,50 @@ independentemente e fallback que a torne total — e de fonte ÚNICA para o
 limite, lida tanto pelo validador quanto pelo gerador. Se um consumidor pode
 recusar o que um produtor válido produz, a incompatibilidade é do consumidor,
 não do plano: não se encurta o campo semântico nem se afrouxa o budget.
+
+[2026-08-23] Contexto: attempt 3 de `foundation_app_scaffold` entregou um
+scaffold Vite + React + TypeScript completo e correto — `npm install`,
+`typecheck`, `build` e `vitest` todos verdes. O control plane travou a work
+unit em `RUNNING/FINALIZING` indefinidamente porque o worker declarou
+`src/coverage/.gitkeep` em `changed_files`, o arquivo existia no filesystem, e
+o `.gitignore` do alvo (`coverage/`) fazia o Git não representá-lo. Nenhuma
+validação oficial chegou a rodar, nenhum candidate foi derivado, nenhum repair
+era possível — e o único caminho de saída passava por primitives internas
+(`dev-close`, `dev-recover-*`) que o operador tinha que conhecer.
+Mistake: o harness tratava o SELF-REPORT do worker como AUTORIDADE sobre um
+fato que ele mesmo consegue derivar. `report.changed_files` definia o conjunto
+do candidate e o Git apenas confirmava; qualquer divergência — arquivo
+ignorado, arquivo extra, declaração errada, nota ausente ou malformada — virava
+bloqueio terminal. A mesma inversão estava em `failed-attempt-source` e
+`retry-failed`, então o FAIL também nascia irreparável.
+Rule: no caminho operacional, cada fato pertence a quem consegue PROVÁ-LO —
+Git sobre material alterado, process runner sobre exit/duração/timeout,
+validador oficial sobre validação, orquestrador sobre PASS/FAIL e
+`accepted_commit`. O worker contribui SEMÂNTICA (summary, decisions, lessons,
+open questions, confidence), e semântica ausente ou errada vira discrepância
+observável, nunca veto. Artifact que o Git ignora não é categoria especial:
+ele simplesmente não entra no candidate — sem `git add -f`, sem editar
+`.gitignore` pelo control plane, sem recipe nova e sem gate humano. Se ele
+importava, a validação oficial ou a aceitação reprovam e o repair decide; se
+não importava, nunca houve motivo para bloquear. Corolário operacional: uma
+primitive interna que o operador precisa conhecer para destravar trabalho
+legítimo é cerimônia vazando para a interface — quem orquestra primitives é o
+runner de topo, e rerodar o mesmo comando é a interface de resume.
+
+[2026-08-23] Contexto: ao desacoplar a materialização benchmark-style do
+caminho operacional, ficou visível que `afterWorkUnit` chamava
+`materializeObservedAttempt` sem guarda — e essa função monta envelope,
+execution record, comparable facts, evaluation, score, qualification,
+manifests, index e binding.
+Mistake: uma work unit JÁ validada e JÁ aceita perdia a run inteira se
+qualquer parte do registro secundário de aprendizado falhasse. Observabilidade
+auxiliar tinha poder de veto sobre o produto do usuário.
+Rule: separar OPERATIONAL PROGRESS de EXPERIMENTAL/CANONICAL MATERIALIZATION.
+Falha de score, qualification, index ou seal vira `OBSERVABILITY_DEGRADED` e o
+progresso segue; o Experimental Plane continua existindo e continua produzindo
+evidência comparável, mas perde o poder de reverter trabalho válido. A exceção
+permanece fail-closed e explícita: evidência necessária a segurança, billing,
+autorização, integridade da base e identidade do candidate. Pela mesma razão,
+histórico canônico ilegível no ROUTING degrada para o router determinístico —
+que é estritamente mais conservador, porque história só consegue override sob
+dominância de Pareto.
