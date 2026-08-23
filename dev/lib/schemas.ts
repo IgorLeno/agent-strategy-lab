@@ -6,6 +6,7 @@ import {
   byteSize,
 } from './budget.js';
 import { ExecutionPolicy, LEGACY_EXECUTION_POLICY } from './execution-policy.js';
+import { PlannerTaskMetadata } from '../../src/planner/task.js';
 
 /**
  * Versão dos records do harness (PlanFile, TaskPacket, completions, ...).
@@ -100,6 +101,16 @@ export const PlanTask = z
     objective: nonEmpty,
     initial_files: z.array(nonEmpty).default([]),
     acceptance: z.array(nonEmpty).min(1),
+    /**
+     * Classificação e envelope que o PLANNER já produziu, presentes somente em
+     * planos gerados. Existe para que o routing use a inteligência do
+     * planejamento em vez de recriar tudo a partir do default global do
+     * `agentlab-run.yaml`. Opcional: PlanFiles manuais permanecem idênticos e
+     * continuam caindo no fallback de autorização. O contrato de forma vive em
+     * `src/planner/task.ts` (`PlannerTaskMetadata`), reusado verbatim — nenhum
+     * contrato paralelo nasce aqui.
+     */
+    planner_metadata: PlannerTaskMetadata.optional(),
     validation: z.array(ValidationCommand).min(1),
     constraints: z.array(nonEmpty).default([]),
     include_previous_handoff: z.boolean().default(false),

@@ -7,12 +7,11 @@
  *
  * 1. `validatePlan` — validação estrutural PURA do plano inteiro (sem I/O):
  *    ciclo de dependências, dependência inexistente/auto-dependência, id
- *    duplicado, task malformada, acceptance/validation ausentes (via
- *    `PlannedTask`) e objetivos múltiplos não relacionados (componentes
- *    desconexos do grafo de dependências). Plano inválido é FAIL CLOSED:
- *    `evaluatePlan` nunca produz veredito de workflow para um plano que não
- *    passou aqui — não executável, não projetável. Nenhuma correção
- *    automática é aplicada.
+ *    duplicado, task malformada e acceptance/validation ausentes (via
+ *    `PlannedTask`). Um DAG com múltiplas raízes ou ramos independentes é
+ *    VÁLIDO — é a forma normal de um plano de projeto. Plano inválido é FAIL
+ *    CLOSED: `evaluatePlan` nunca produz veredito de workflow para um plano
+ *    que não passou aqui. Nenhuma correção automática é aplicada.
  *
  * 2. `evaluatePlanWorkflow` — dado um plano JÁ VÁLIDO, decide o veredito de
  *    workflow por task. `DECOMPOSITION_REQUIRED` é sempre derivado de
@@ -20,8 +19,10 @@
  *    reimplementado aqui. `DIRECT_ALLOWED` só é emitido quando TODOS os
  *    critérios objetivos declarados em `DirectAllowanceCriterion` estão
  *    satisfeitos E o minimal factual preflight está completo; qualquer
- *    critério não satisfeito OU desconhecido (campo opcional ausente) leva a
- *    `REVIEWED_REQUIRED` — fail safe, nunca otimista.
+ *    critério não satisfeito OU desconhecido leva a `REVIEWED_REQUIRED`.
+ *    `REVIEWED_REQUIRED` classifica o CAMINHO da work unit, e por si só não
+ *    exige lançar um reviewer independente — quem decide isso é o
+ *    `review_requirement` de M76, proporcional a risco/evidência.
  *
  * Detecção de ciclo é reimplementada aqui (não em `dev/`) porque
  * `findDependencyCycle` do harness não é exportado e `src/` não pode
@@ -61,6 +62,13 @@ const identifier = z
 // Camada 1 — validação estrutural do plano inteiro.
 // ---------------------------------------------------------------------------
 
+/**
+ * `multiple_objectives` permanece no vocabulário por compatibilidade com
+ * records históricos, mas NÃO é mais emitido: um DAG de projeto pode ter
+ * legitimamente várias raízes e ramos independentes (fundação, engine de
+ * domínio, assets, infraestrutura). Componentes desconexos são estrutura de
+ * projeto, não produtos diferentes empacotados no mesmo plano.
+ */
 export const PlanValidationIssueCode = z.enum([
   'malformed_task',
   'duplicate_task_id',
@@ -137,47 +145,6 @@ function findPlanDependencyCycle(identities: readonly TaskIdentity[]): string[] 
     if (cycle) return cycle;
   }
   return null;
-}
-
-/**
- * Componentes conexos do grafo de dependências, tratado como não-dirigido.
- * Mais de um componente entre duas ou mais tasks é o proxy estrutural para
- * "objetivos múltiplos não relacionados" empacotados no mesmo plano — nunca
- * inferido por leitura semântica de texto.
- */
-function findDisconnectedGroups(identities: readonly TaskIdentity[]): string[][] {
-  const knownIds = new Set(identities.map((identity) => identity.task_id));
-  const adjacency = new Map<string, string[]>();
-  for (const identity of identities) {
-    if (!adjacency.has(identity.task_id)) adjacency.set(identity.task_id, []);
-    for (const dependency of identity.blocked_by) {
-      if (!knownIds.has(dependency)) continue;
-      adjacency.get(identity.task_id)?.push(dependency);
-      if (!adjacency.has(dependency)) adjacency.set(dependency, []);
-      adjacency.get(dependency)?.push(identity.task_id);
-    }
-  }
-
-  const visited = new Set<string>();
-  const groups: string[][] = [];
-  for (const identity of identities) {
-    if (visited.has(identity.task_id)) continue;
-    const group: string[] = [];
-    const stack = [identity.task_id];
-    visited.add(identity.task_id);
-    while (stack.length > 0) {
-      const current = stack.pop() as string;
-      group.push(current);
-      for (const neighbor of adjacency.get(current) ?? []) {
-        if (!visited.has(neighbor)) {
-          visited.add(neighbor);
-          stack.push(neighbor);
-        }
-      }
-    }
-    groups.push(group);
-  }
-  return groups;
 }
 
 /**
@@ -264,19 +231,6 @@ export function validatePlan(input: unknown): PlanValidationResult {
       task_id: cycle[0] ?? null,
       path: ['tasks'],
     });
-  }
-
-  if (identities.length > 1) {
-    const groups = findDisconnectedGroups(identities);
-    if (groups.length > 1) {
-      const description = groups.map((group) => `[${group.join(', ')}]`).join(' ; ');
-      issues.push({
-        code: 'multiple_objectives',
-        message: `plano contém ${groups.length} grupos de tasks sem relação de dependência entre si — possíveis objetivos múltiplos não relacionados: ${description}`,
-        task_id: null,
-        path: ['tasks'],
-      });
-    }
   }
 
   const parsedTasks: PlannedTask[] = [];

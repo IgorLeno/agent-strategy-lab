@@ -8,6 +8,7 @@ export {
   ContextScope,
   EnvironmentRequirement,
   PlannedTask,
+  PlannerTaskMetadata,
   TaskRisk,
   ValidationCommand,
 } from './task.js';
@@ -20,6 +21,7 @@ export {
 export {
   DecompositionSignalId,
   DecompositionVerdict,
+  EMITTED_DECOMPOSITION_SIGNALS,
   evaluateDecomposition,
   SignalProvenance,
   TriggeredSignal,

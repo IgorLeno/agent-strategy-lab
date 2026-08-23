@@ -153,6 +153,25 @@ describe('normalizeUntrustedPlanDraft', () => {
     expect(result.issues.some((issue) => issue.message.includes(protectedField))).toBe(true);
   });
 
+  it('recusa a forma "intuitiva" que um modelo produziria: nenhum mapeamento heurístico existe', () => {
+    const result = normalizeUntrustedPlanDraft({
+      schema_version: 1,
+      tasks: [
+        {
+          id: 'T1',
+          title: 'Inicializar aplicação React/TypeScript',
+          depends_on: [],
+          intent: 'bootstrap do projeto',
+        },
+      ],
+    });
+    expect(result.outcome).toBe('INVALID_DRAFT');
+    if (result.outcome !== 'INVALID_DRAFT') throw new Error('unreachable');
+    const messages = result.issues.map((issue) => `${issue.path.join('.')} ${issue.message}`).join(' ');
+    expect(messages).toContain('task_id');
+    expect(messages).toContain('objective');
+  });
+
   it('recusa task incompleta sem inserir defaults silenciosos', () => {
     const raw = { schema_version: 1, tasks: [{ schema_version: 1, task_id: 'T1' }] };
     const snapshot = structuredClone(raw);

@@ -142,17 +142,23 @@ describe('validatePlan — validação estrutural pura e determinística', () =>
     expect(issueCodes(result.issues)).toContain('malformed_task');
   });
 
-  it('recusa grupos de tasks desconexos como possíveis objetivos múltiplos', () => {
+  it('aceita DAG com múltiplas raízes e ramos independentes', () => {
+    const foundation = coherentTask({ task_id: 'foundation', blocked_by: [] });
+    const engine = coherentTask({ task_id: 'engine', blocked_by: ['foundation'] });
+    const assets = coherentTask({ task_id: 'assets', blocked_by: ['foundation'] });
+    const infra = coherentTask({ task_id: 'infra', blocked_by: [] });
+    const result = validatePlan(plan([foundation, engine, assets, infra]));
+    expect(result.valid).toBe(true);
+  });
+
+  it('componentes desconexos nunca emitem multiple_objectives', () => {
     const a = coherentTask({ task_id: 'A', blocked_by: [] });
     const b = coherentTask({ task_id: 'B', blocked_by: ['A'] });
     const c = coherentTask({ task_id: 'C', blocked_by: [] });
     const result = validatePlan(plan([a, b, c]));
-    expect(result.valid).toBe(false);
-    if (result.valid) throw new Error('unreachable');
-    const issue = result.issues.find((i) => i.code === 'multiple_objectives');
-    expect(issue).toBeDefined();
-    expect(issue?.message).toContain('A');
-    expect(issue?.message).toContain('C');
+    expect(result.valid).toBe(true);
+    if (!result.valid) throw new Error('unreachable');
+    expect(result.tasks.map((task) => task.task_id)).toEqual(['A', 'B', 'C']);
   });
 
   it('aceita plano conexo com múltiplas tasks encadeadas (não é objetivo múltiplo)', () => {
@@ -190,11 +196,24 @@ describe('evaluatePlan — fail closed', () => {
 
 describe('evaluatePlanWorkflow — DECOMPOSITION_REQUIRED', () => {
   it('deriva DECOMPOSITION_REQUIRED da engine de M74, com os sinais dela', () => {
-    const wide = coherentTask({ context_scope: { areas: ['a', 'b', 'c', 'd'] } });
-    const [verdict] = evaluatePlanWorkflow([wide]);
+    const unbounded = coherentTask({
+      risk: 'high',
+      resource_envelope: {
+        duration_ms: { expected: 600_000, maximum: 1_800_000 },
+        tokens: { expected: 50_000, maximum: 200_000 },
+        changed_files: { expected: 5, maximum: 60 },
+      },
+    });
+    const [verdict] = evaluatePlanWorkflow([unbounded]);
     expect(verdict?.outcome).toBe('DECOMPOSITION_REQUIRED');
     if (verdict?.outcome !== 'DECOMPOSITION_REQUIRED') throw new Error('unreachable');
-    expect(verdict.signals.some((s) => s.signal === 'context_scope_too_broad')).toBe(true);
+    expect(verdict.signals.some((s) => s.signal === 'unbounded_rollback_boundary')).toBe(true);
+  });
+
+  it('complexidade ordinária de engenharia não vira DECOMPOSITION_REQUIRED', () => {
+    const wide = coherentTask({ context_scope: { areas: ['a', 'b', 'c', 'd'] } });
+    const [verdict] = evaluatePlanWorkflow([wide]);
+    expect(verdict?.outcome).not.toBe('DECOMPOSITION_REQUIRED');
   });
 });
 

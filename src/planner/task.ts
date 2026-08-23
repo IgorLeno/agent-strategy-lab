@@ -138,3 +138,29 @@ export const PlannedTask = z
     }
   });
 export type PlannedTask = z.infer<typeof PlannedTask>;
+
+/**
+ * Subconjunto do contrato de planejamento que precisa SOBREVIVER à projeção
+ * do plano para o PlanFile executável. Sem ele, a classificação por task que
+ * o planner produziu (taxonomy, risco, envelope, pressão de contexto) é
+ * descartada e a execução recria tudo a partir de um default global — o
+ * routing econômico se perde e uma task easy/local passa a custar o mesmo que
+ * uma hard/subsystem.
+ *
+ * É deliberadamente uma PROJEÇÃO de `PlannedTask`, não um contrato paralelo:
+ * cada campo reusa o schema já declarado acima.
+ */
+export const PlannerTaskMetadata = z
+  .object({
+    taxonomy: TaskTaxonomy,
+    risk: TaskRisk,
+    probable_files: z.array(nonEmpty),
+    context_scope: ContextScope,
+    context_requirements: z.array(ContextRequirement),
+    environment_requirements: z.array(EnvironmentRequirement),
+    estimated_duration: TaskBudget,
+    validation_budget: TaskBudget,
+    resource_envelope: TaskBudgets,
+  })
+  .strict();
+export type PlannerTaskMetadata = z.infer<typeof PlannerTaskMetadata>;

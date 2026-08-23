@@ -291,16 +291,29 @@ export interface ProjectWorkflowDecision {
 }
 
 /**
- * Os dois vereditos são independentes e nenhum relaxa o outro: o caminho só é
- * DIRECT quando M75 diz `DIRECT_ALLOWED`, e a review passa a ser exigida se
- * QUALQUER um dos dois a exigir. Combinação pelo critério mais restritivo.
+ * Os dois vereditos continuam independentes, mas respondem a perguntas
+ * diferentes e não são somados:
+ *
+ * - `workflow` (M75) classifica o CAMINHO da work unit. `REVIEWED_REQUIRED`
+ *   significa "esta task não satisfaz todos os critérios históricos de
+ *   DIRECT_ALLOWED" — o que é o caso normal de qualquer feature não trivial.
+ *   Por si só isso NÃO justifica lançar um segundo LLM por work unit.
+ * - `review_requirement` (M76) responde se há razão CONCRETA de risco para um
+ *   reviewer independente: risco alto/crítico, evidência de verificação
+ *   fraca, confiança baixa. É essa dimensão que decide a exigência.
+ *
+ * `escalatedReview` é a única entrada adicional: repair significativo e
+ * escalation são fatos do lifecycle (não do plano nem do assessment) que
+ * tornam o candidate concretamente mais arriscado.
  */
 export function combineWorkflowAndReview(
   workflow: TaskWorkflowVerdict,
   reviewRequirement: ReviewRequirementAssessment,
+  escalatedReview?: { readonly required: boolean; readonly reason: string },
 ): ProjectWorkflowDecision {
   const directAllowed = workflow.outcome === 'DIRECT_ALLOWED';
-  const reviewRequired = !directAllowed || reviewRequirement.independent_review_required;
+  const lifecycleReview = escalatedReview?.required === true;
+  const reviewRequired = reviewRequirement.independent_review_required || lifecycleReview;
   return {
     path: directAllowed ? 'DIRECT' : 'REVIEWED',
     review_required: reviewRequired,
@@ -311,7 +324,8 @@ export function combineWorkflowAndReview(
       `workflow=${workflow.outcome}`,
       `independent_review_required=${reviewRequirement.independent_review_required}`,
       `diversity_requirement=${reviewRequirement.diversity_requirement}`,
-      'critério mais restritivo entre verdict de plano e review requirement',
+      ...(lifecycleReview ? [`lifecycle_review=${escalatedReview?.reason ?? 'exigida pelo lifecycle'}`] : []),
+      'review independente é proporcional ao risco concreto; o caminho REVIEWED por si só não a exige',
     ],
   };
 }
@@ -815,6 +829,58 @@ export function resolveRoleOverlayArgv(
   });
 }
 
+/**
+ * Contrato de saída do planner, exposto COMPACTAMENTE no prompt.
+ *
+ * O gate de normalização é `PlannedTask.strict()` e continua estrito: nenhum
+ * campo a mais, nenhum a menos, nenhum mapeamento heurístico entre a forma
+ * "intuitiva" que um modelo produziria (`id`, `intent`, `depends_on`, ...) e a
+ * forma real. A correção certa é o planner CONHECER o contrato que precisa
+ * produzir — não o control plane adivinhar o que ele quis dizer.
+ */
+const PLANNED_TASK_OUTPUT_CONTRACT = `Cada item de "tasks" é uma PlannedTask ESTRITA — exatamente estes campos,
+com estes nomes, nem mais nem menos:
+
+{"schema_version":1,
+ "task_id":"<alfanumérico, - e _>",
+ "objective":"<um único objetivo desta work unit>",
+ "blocked_by":["<task_id>"],
+ "taxonomy":{"version":1,
+   "task_class":"bugfix"|"feature"|"refactor"|"test"|"docs"|"chore",
+   "difficulty_declared":"trivial"|"easy"|"medium"|"hard",
+   "complexity":"local"|"multi_file"|"subsystem"|"cross_cutting" (opcional),
+   "ambiguity":"low"|"medium"|"high" (opcional),
+   "verification":"deterministic"|"partially_deterministic"|"subjective" (opcional)},
+ "risk":"low"|"medium"|"high"|"critical",
+ "acceptance":["<critério>", ...] (≥1),
+ "validation":[{"argv":["<comando>","<arg>"],"timeout_seconds":<int>}] (≥1),
+ "initial_files":["<caminho>"],
+ "probable_files":["<caminho>"],
+ "context_scope":{"areas":["<área do repositório>"]} (≥1 área),
+ "context_requirements":[{"description":"<o que é necessário>","source_anchor":"<caminho real>"}],
+ "environment_requirements":[{"kind":"tool"|"service","name":"<nome>","reason":"<motivo>"}],
+ "estimated_duration":{"expected":<ms>,"maximum":<ms>},
+ "validation_budget":{"expected":<ms>,"maximum":<ms>},
+ "resource_envelope":{"duration_ms":{"expected":<ms>,"maximum":<ms>},
+   "tokens":{"expected":<tokens>,"maximum":<tokens>},
+   "changed_files":{"expected":<n>,"maximum":<n>}}}
+
+UNIDADES: estimated_duration, validation_budget e resource_envelope.duration_ms
+são MILISSEGUNDOS; validation[].timeout_seconds é em SEGUNDOS; tokens são
+tokens; changed_files é número de arquivos. "expected" nunca excede "maximum".
+"argv" é vetor de argumentos, nunca uma linha de shell.
+
+acceptance: todo objetivo do acceptance_contract precisa aparecer VERBATIM em
+alguma task. Você PODE acrescentar critérios técnicos adicionais que a work
+unit precise satisfazer; não pode reescrever nem substituir os do usuário.
+
+DECOMPOSIÇÃO: decomponha em work units coesas, executáveis e validáveis.
+Atomicidade não significa a menor alteração possível. Não crie uma task por
+arquivo, função, componente ou teste quando um coding agent puder realizar
+essas mudanças com segurança como uma única unidade. Não há quantidade
+esperada de tasks. blocked_by forma um DAG; múltiplas raízes e ramos
+independentes são válidos.`;
+
 /** O packet do planner vira o prompt bounded — fatos derivados, nunca transcript. */
 export function buildPlannerPrompt(invocation: PlanningWorkerInvocation): string {
   return [
@@ -827,6 +893,8 @@ export function buildPlannerPrompt(invocation: PlanningWorkerInvocation): string
     JSON.stringify(invocation.packet, null, 2),
     '',
     'Responda SOMENTE com um único JSON {"schema_version":1,"tasks":[...]}.',
+    '',
+    PLANNED_TASK_OUTPUT_CONTRACT,
   ].join('\n');
 }
 

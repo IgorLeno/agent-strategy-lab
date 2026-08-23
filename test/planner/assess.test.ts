@@ -133,7 +133,7 @@ describe('assessExecution — risk', () => {
 
   it('ambiente NOT_READY não eleva risco', () => {
     const inspection = readyInspection({
-      dependencies_state: { known: true, value: { lockfile_path: 'pnpm-lock.yaml', installed: false }, provenance: 'fs' },
+      filesystem_permissions: { known: true, value: { readable: true, writable: false }, provenance: 'fs' },
     });
     const result = assessExecution(coherentTask({ risk: 'low' }), { inspection, expectedBaseRevisionSha: HEAD_SHA });
     expect(result.environment_readiness.status).toBe('NOT_READY');
@@ -199,12 +199,34 @@ describe('assessExecution — environment readiness', () => {
     expect(baseRevisionCheck?.status).toBe('not_satisfied');
   });
 
-  it('NOT_READY quando nenhum candidato de validation foi observado', () => {
-    const inspection = readyInspection({ validation_command_candidates: [] });
+  it('greenfield (sem validation/build/testes/deps/instruções observados) continua READY: ausência não é blocker', () => {
+    const inspection = readyInspection({
+      validation_command_candidates: [],
+      build_system: { known: false, value: null, reason: 'sem manifesto', provenance: 'fs' },
+      tests: { known: false, value: null, reason: 'sem testes', provenance: 'fs' },
+      dependencies_state: { known: false, value: null, reason: 'sem lockfile', provenance: 'fs' },
+      project_instructions: [],
+    });
+    const result = assessExecution(coherentTask(), { inspection, expectedBaseRevisionSha: HEAD_SHA });
+    expect(result.environment_readiness.status).toBe('READY');
+  });
+
+  it('dependências declaradas e não instaladas não bloqueiam: instalar é trabalho do worker', () => {
+    const inspection = readyInspection({
+      dependencies_state: { known: true, value: { lockfile_path: 'pnpm-lock.yaml', installed: false }, provenance: 'fs' },
+    });
+    const result = assessExecution(coherentTask(), { inspection, expectedBaseRevisionSha: HEAD_SHA });
+    expect(result.environment_readiness.status).toBe('READY');
+  });
+
+  it('NOT_READY quando o filesystem observado não é gravável', () => {
+    const inspection = readyInspection({
+      filesystem_permissions: { known: true, value: { readable: true, writable: false }, provenance: 'fs' },
+    });
     const result = assessExecution(coherentTask(), { inspection, expectedBaseRevisionSha: HEAD_SHA });
     expect(result.environment_readiness.status).toBe('NOT_READY');
-    const validationCheck = result.environment_readiness.checks.find((c) => c.requirement === 'validation_available');
-    expect(validationCheck?.status).toBe('not_satisfied');
+    const check = result.environment_readiness.checks.find((c) => c.requirement === 'filesystem_permissions_adequate');
+    expect(check?.status).toBe('not_satisfied');
   });
 
   it('UNKNOWN (nunca READY) quando fato de git não é conhecido', () => {
@@ -269,7 +291,9 @@ describe('assessExecution — confidence', () => {
   });
 
   it('fato ausente nunca aumenta confiança: ambiente NOT_READY reduz confiança, nunca eleva', () => {
-    const inspection = readyInspection({ validation_command_candidates: [] });
+    const inspection = readyInspection({
+      filesystem_permissions: { known: true, value: { readable: true, writable: false }, provenance: 'fs' },
+    });
     const complete = assessExecution(
       coherentTask({ taxonomy: validTaxonomy({ complexity: 'local', ambiguity: 'low', verification: 'deterministic' }) }),
       { inspection, expectedBaseRevisionSha: HEAD_SHA },
@@ -323,6 +347,44 @@ describe('assessExecution — review requirement', () => {
     expect(result.verification_strength.value).toBe('strong');
     expect(result.confidence.value).not.toBe('low');
     expect(result.review_requirement.independent_review_required).toBe(false);
+  });
+
+  it('feature normal de risco médio com validação adequada não exige reviewer independente', () => {
+    const result = assessExecution(
+      coherentTask({
+        risk: 'medium',
+        taxonomy: validTaxonomy({
+          task_class: 'feature',
+          complexity: 'subsystem',
+          ambiguity: 'medium',
+          verification: 'deterministic',
+        }),
+        context_scope: { areas: ['planner', 'harness'] },
+      }),
+      { inspection: readyInspection(), expectedBaseRevisionSha: HEAD_SHA },
+    );
+    expect(result.review_requirement.independent_review_required).toBe(false);
+  });
+
+  it('evidência de verificação fraca exige reviewer mesmo em risco baixo', () => {
+    const result = assessExecution(
+      coherentTask({ risk: 'low', taxonomy: validTaxonomy({ verification: 'subjective' }) }),
+      { inspection: readyInspection(), expectedBaseRevisionSha: HEAD_SHA },
+    );
+    expect(result.verification_strength.value).toBe('weak');
+    expect(result.review_requirement.independent_review_required).toBe(true);
+  });
+
+  it('risco alto exige reviewer mesmo com evidência forte', () => {
+    const result = assessExecution(
+      coherentTask({
+        risk: 'high',
+        taxonomy: validTaxonomy({ complexity: 'local', ambiguity: 'low', verification: 'deterministic' }),
+      }),
+      { inspection: readyInspection(), expectedBaseRevisionSha: HEAD_SHA },
+    );
+    expect(result.verification_strength.value).toBe('strong');
+    expect(result.review_requirement.independent_review_required).toBe(true);
   });
 
   it('review independente exigido em risco crítico mesmo com evidência forte', () => {

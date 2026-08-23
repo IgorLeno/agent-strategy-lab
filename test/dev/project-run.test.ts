@@ -604,14 +604,61 @@ describe('work unit a partir do PlanFile confiável', () => {
     expect(built.task.validation_budget).toEqual({ expected: 45_000, maximum: 45_000 });
   });
 
-  it('sem source anchor observado, a fronteira não é inventada', () => {
-    expect(() =>
-      buildWorkUnitFromPlan({
-        planTask,
-        inspection: { ...inspection, source_anchors: [] },
-        classification,
-      }),
-    ).toThrow(ProjectAuthorizationError);
+  it('repositório greenfield (sem source anchors) usa a fronteira declarada pela própria task', () => {
+    const built = buildWorkUnitFromPlan({
+      planTask,
+      inspection: { ...inspection, source_anchors: [] },
+      classification,
+    });
+    expect(built.task.context_scope.areas).toEqual(['src']);
+    expect(built.provenance.join(' ')).toContain('plan.initial_files');
+  });
+
+  it('plano manual sem planner_metadata continua usando a classificação da autorização', () => {
+    const built = buildWorkUnitFromPlan({ planTask, inspection, classification });
+    expect(built.task.risk).toBe(classification.risk);
+    expect(built.task.taxonomy.task_class).toBe(classification.task_class);
+    expect(built.task.resource_envelope).toEqual(classification.resource_envelope);
+    expect(built.provenance.join(' ')).toContain('taxonomy/risk/resource_envelope=authorization.work_units');
+  });
+
+  it('plano gerado com planner_metadata usa a classificação do planner, não o default da autorização', () => {
+    const plannerMetadata = {
+      taxonomy: {
+        version: 1 as const,
+        task_class: 'chore' as const,
+        difficulty_declared: 'easy' as const,
+        complexity: 'local' as const,
+        ambiguity: 'low' as const,
+        verification: 'deterministic' as const,
+      },
+      risk: 'medium' as const,
+      probable_files: ['src/greet.ts'],
+      context_scope: { areas: ['bootstrap'] },
+      context_requirements: [{ description: 'README do projeto', source_anchor: 'README.md' }],
+      environment_requirements: [{ kind: 'tool' as const, name: 'pnpm', reason: 'toolchain' }],
+      estimated_duration: { expected: 120_000, maximum: 300_000 },
+      validation_budget: { expected: 30_000, maximum: 60_000 },
+      resource_envelope: {
+        duration_ms: { expected: 120_000, maximum: 300_000 },
+        tokens: { expected: 10_000, maximum: 25_000 },
+        changed_files: { expected: 2, maximum: 5 },
+      },
+    };
+    const built = buildWorkUnitFromPlan({
+      planTask: { ...planTask, planner_metadata: plannerMetadata },
+      inspection,
+      classification,
+    });
+    expect(built.task.risk).toBe('medium');
+    expect(built.task.taxonomy).toEqual(plannerMetadata.taxonomy);
+    expect(built.task.resource_envelope).toEqual(plannerMetadata.resource_envelope);
+    expect(built.task.estimated_duration).toEqual(plannerMetadata.estimated_duration);
+    expect(built.task.validation_budget).toEqual(plannerMetadata.validation_budget);
+    expect(built.task.context_scope.areas).toEqual(['bootstrap']);
+    expect(built.task.probable_files).toEqual(['src/greet.ts']);
+    expect(built.provenance.join(' ')).toContain('taxonomy/risk/resource_envelope=plan.planner_metadata');
+    expect(built.task.risk).not.toBe(classification.risk);
   });
 });
 

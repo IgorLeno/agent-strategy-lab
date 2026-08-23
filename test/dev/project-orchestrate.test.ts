@@ -515,8 +515,8 @@ describe('caminho DIRECT', () => {
   });
 });
 
-describe('verdict de plano e review requirement combinados pelo critério mais restritivo', () => {
-  it('review exigida por qualquer um dos dois vereditos prevalece', () => {
+describe('review independente proporcional ao risco concreto', () => {
+  it('review requirement de M76 decide a exigência; o caminho REVIEWED sozinho não a impõe', () => {
     const direct = combineWorkflowAndReview(
       {
         outcome: 'DIRECT_ALLOWED',
@@ -545,7 +545,22 @@ describe('verdict de plano e review requirement combinados pelo critério mais r
       },
     );
     expect(reviewed.path).toBe('REVIEWED');
-    expect(reviewed.review_required).toBe(true);
+    expect(reviewed.review_required).toBe(false);
+  });
+
+  it('repair e escalation do lifecycle exigem review mesmo sem razão concreta no assessment', () => {
+    const repaired = combineWorkflowAndReview(
+      { outcome: 'REVIEWED_REQUIRED', task_id: 'T1', unmet_criteria: [], reason: 'faltam fatos' },
+      {
+        independent_review_required: false,
+        diversity_requirement: 'not_required',
+        rationale: 'evidência forte',
+        provenance: 'test',
+      },
+      { required: true, reason: 'candidate produzido por BOUNDED_REPAIR' },
+    );
+    expect(repaired.review_required).toBe(true);
+    expect(repaired.rationale.join(' ')).toContain('BOUNDED_REPAIR');
   });
 });
 
@@ -990,6 +1005,46 @@ describe('adapter real da PlanningWorkerPort', () => {
     expect(prompt).toContain('UNTRUSTED DRAFT');
     expect(prompt).toContain('"packet_id"');
     expect(Buffer.byteLength(prompt, 'utf8')).toBeLessThan(32 * 1024);
+  });
+
+  it('o prompt expõe o contrato REAL de PlannedTask: todo campo obrigatório é nomeado', () => {
+    const prompt = buildPlannerPrompt(invocation());
+    for (const field of [
+      'schema_version',
+      'task_id',
+      'objective',
+      'blocked_by',
+      'taxonomy',
+      'risk',
+      'acceptance',
+      'validation',
+      'initial_files',
+      'probable_files',
+      'context_scope',
+      'context_requirements',
+      'environment_requirements',
+      'estimated_duration',
+      'validation_budget',
+      'resource_envelope',
+    ]) {
+      expect(prompt).toContain(`"${field}"`);
+    }
+  });
+
+  it('o prompt declara os enums válidos, as unidades e a política de work units coesas', () => {
+    const prompt = buildPlannerPrompt(invocation());
+    expect(prompt).toContain('"bugfix"|"feature"|"refactor"|"test"|"docs"|"chore"');
+    expect(prompt).toContain('"trivial"|"easy"|"medium"|"hard"');
+    expect(prompt).toContain('"local"|"multi_file"|"subsystem"|"cross_cutting"');
+    expect(prompt).toContain('"low"|"medium"|"high"');
+    expect(prompt).toContain('"deterministic"|"partially_deterministic"|"subjective"');
+    expect(prompt).toContain('"low"|"medium"|"high"|"critical"');
+    expect(prompt).toMatch(/MILISSEGUNDOS/);
+    expect(prompt).toMatch(/timeout_seconds é em SEGUNDOS/);
+    expect(prompt).toMatch(/changed_files é número de arquivos/);
+    expect(prompt).toMatch(/Atomicidade não significa a menor alteração possível/);
+    expect(prompt).toMatch(/Não crie uma task por\s*\n?arquivo, função, componente ou teste/);
+    expect(prompt).toMatch(/múltiplas raízes e ramos\s*\n?independentes são válidos/);
   });
 });
 

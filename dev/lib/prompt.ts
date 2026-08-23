@@ -2,8 +2,7 @@ import { canonicalJson } from './canonical.js';
 import type { ExecutionPolicy } from './execution-policy.js';
 import type { TaskPacket } from './schemas.js';
 
-/** Limite do preâmbulo fixo: o prompt não pode reintroduzir contexto pela porta dos fundos.
- * Targeted precisa caber as proibições de suíte/background sem inflar o packet. */
+/** Limite do preâmbulo fixo: o prompt não pode reintroduzir contexto pela porta dos fundos. */
 export const MAXIMUM_PREAMBLE_BYTES = 5_120;
 
 /**
@@ -36,6 +35,12 @@ export interface PromptIo {
 /**
  * O prompt é gerado, determinístico e curto. Contém o packet e as regras de
  * encerramento — nada de transcript, conversa anterior ou raciocínio herdado.
+ *
+ * CONTROL THE BOUNDARIES, NOT THE IMPLEMENTATION: o prompt declara escopo,
+ * ownership de commit/validação oficial, o que não pode ser tocado e o
+ * protocolo de saída. Ele NÃO diz quais arquivos procurar, quantos ler,
+ * quantas operações exploratórias fazer nem qual estratégia de implementação
+ * usar — isso é decisão do coding agent.
  */
 export function buildWorkerPrompt(
   packet: TaskPacket,
@@ -47,18 +52,16 @@ export function buildWorkerPrompt(
       ? `Rode as validações do packet você mesmo antes de commitar. Um comando por
    chamada: comando composto (;, &&, |, redirecionamento) é negado pela
    política de permissões.`
-      : `Execute SOMENTE checks pequenos necessários para desenvolver o patch.
-   Pode executar typecheck, o teste direcionado da tarefa e testes adicionais pequenos e diretamente
-   relacionados. NÃO execute o \`pnpm test\` completo. NÃO execute o \`pnpm build\` global.
-   NÃO execute novamente toda a lista \`packet.validation\`.
-   NÃO use \`run_in_background\`. NÃO crie background jobs para validação.
-   NÃO use Monitor/ScheduleWakeup para aguardar validação.
-   Checks direcionados + typecheck/testes locais suficientes → escreva IMEDIATAMENTE
-   AgentCompletionReport e HandoffDraft; depois encerre a sessão.
-   As validações oficiais completas pertencem exclusivamente ao orquestrador
-   e serão executadas fora do sandbox do provider.
-   Uma falha ambiental de uma validação global que o worker não deveria executar
-   não deve ser investigada pelo worker.`;
+      : `Prefira checks direcionados enquanto desenvolve. Pode rodar build ou uma
+   suíte mais ampla quando isso for proporcional e útil para chegar a um
+   candidate correto; não repita suítes globais sem necessidade.
+   A validação oficial que decide PASS/FAIL pertence exclusivamente ao
+   orquestrador e roda fora do sandbox do provider — você não decide o
+   resultado, e não precisa reexecutar \`packet.validation\` inteiro para provar
+   nada. Quando o patch estiver pronto, escreva AgentCompletionReport e
+   HandoffDraft e encerre a sessão.
+   Se iniciar um processo auxiliar (dev server, watcher), encerre-o antes de
+   finalizar: nenhum processo pode sobreviver à sessão.`;
   const preamble =
     executionPolicy.commit_owner === 'worker'
       ? `Você é um worker de sessão descartável do agent-strategy-lab.
@@ -66,11 +69,12 @@ export function buildWorkerPrompt(
 Regras:
 1. Execute SOMENTE a tarefa deste packet. Nada além do escopo.
 2. Repositório: ${io.repoRoot}. Trabalhe a partir do base SHA do packet.
-3. Comece pelo packet e pelos initial_files. Não carregue skills nem subagentes
-   salvo pedido explícito do packet. Use rg e intervalos direcionados; não leia
-   LESSONS.md ou ARCHITECTURE.md inteiros sem necessidade.
-4. Em tarefa localizada, busque a primeira edição após no máximo 8 operações
-   exploratórias. Não faça revisão geral do repositório para uma tarefa objetiva.
+3. Você tem autonomia para investigar e implementar esta work unit do jeito que
+   considerar mais eficiente: explore o repositório, escolha o que ler, decida a
+   abordagem, refatore e use as ferramentas auxiliares que o provider oferecer
+   (incluindo skills e subagentes) quando isso ajudar. Fique dentro do budget e
+   do escopo do packet.
+4. Não faça trabalho fora do escopo desta work unit.
 5. Não altere o runtime do orquestrador nem dev/plan.yaml. Fora do repositório,
    escreva SOMENTE nos dois caminhos de inbox indicados na regra 8.
 6. Ao terminar, crie EXATAMENTE UM commit local com todo o trabalho. Sem push.
@@ -101,8 +105,11 @@ Packet (também em ${io.packetPath}):
 Regras:
 1. Execute SOMENTE a tarefa deste packet. Nada além do escopo.
 2. Repositório: ${io.repoRoot}. Trabalhe a partir do base SHA do packet.
-3. Comece pelo packet e pelos initial_files. Não carregue skills nem subagentes
-   salvo pedido explícito do packet. Use buscas e leituras direcionadas.
+3. Você tem autonomia para investigar e implementar esta work unit do jeito que
+   considerar mais eficiente: explore o repositório, escolha o que ler, decida a
+   abordagem, refatore e use as ferramentas auxiliares que o provider oferecer
+   (incluindo skills e subagentes) quando isso ajudar. Fique dentro do budget e
+   do escopo do packet, e não faça trabalho fora dele.
 4. NÃO rode git add, git commit, git stash, git reset nem checkout de arquivos.
    Não altere HEAD nem index por qualquer outro comando.
 5. Edite somente o patch da tarefa. Não altere o runtime do orquestrador,

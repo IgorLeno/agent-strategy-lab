@@ -12,20 +12,26 @@
  *
  * `PlannedTask` de entrada nunca é mutado: `assessExecution` só lê.
  *
- * Environment readiness é a dimensão mais sensível: fato ausente
- * (`Fact.known === false`, ou nenhum `ProjectInspection` fornecido) nunca vira
- * `'satisfied'` por omissão — vira `'unknown'`, que nunca é `READY`. Só um
- * fato OBSERVADO e concretamente desfavorável (ex.: `head_sha` divergente da
- * base revision esperada, dependências declaradas mas não instaladas, nenhum
- * candidato de validation observado) produz `'not_satisfied'`. Um ambiente
- * `NOT_READY` ou `UNKNOWN` é sempre classificado como problema de ambiente —
- * nunca eleva `difficulty`, `risk` nem qualquer outra dimensão desta
- * avaliação; ele só reduz `confidence` e é reportado em
- * `environment_readiness` para quem decide effort/model (fora deste módulo).
+ * Environment readiness separa ABSENCE/TO-BE-CREATED de CONCRETE BLOCKER. Um
+ * projeto greenfield — sem package.json, sem lockfile, sem build, sem testes,
+ * sem dependências instaladas, sem instruções de projeto — é executável: a
+ * primeira work unit existe justamente para criar isso, e bloquear ali
+ * impediria o bootstrap. Essas ausências são `'satisfied'`, com a razão
+ * registrada.
+ *
+ * Continuam impedindo: repositório inacessível ou estado de git desconhecido,
+ * `head_sha` divergente da base revision esperada, e filesystem sem permissão
+ * adequada ou não observado. Fato ausente NESSAS dimensões continua sendo
+ * `'unknown'`, que nunca é `READY` — nunca `'satisfied'` por omissão. Um
+ * ambiente `NOT_READY` ou `UNKNOWN` é sempre classificado como problema de
+ * ambiente — nunca eleva `difficulty`, `risk` nem qualquer outra dimensão;
+ * ele só reduz `confidence` e é reportado em `environment_readiness` para
+ * quem decide effort/model (fora deste módulo).
  *
  * Review requirement expressa DUAS dimensões independentes:
- * `independent_review_required` (revisão com contexto fresco, quando
- * aplicável) e `diversity_requirement` (diversidade de profile/model/provider
+ * `independent_review_required` — PROPORCIONAL: exigido só quando há razão
+ * concreta (risco alto/crítico, evidência de verificação fraca ou confiança
+ * baixa), nunca por default — e `diversity_requirement` (diversidade de profile/model/provider
  * — PROPORCIONAL ao risco: `not_required` em risco baixo/médio, `preferred`
  * em risco alto, `required` em risco crítico). Diversidade nunca é condição
  * universal de independência — risco baixo/médio pode ter revisão
@@ -281,25 +287,47 @@ function assessEnvironmentReadinessChecks(
   );
 
   if (!inspection.dependencies_state.known) {
-    checks.push(check('dependencies_state_known', 'unknown', 'nenhum lockfile nem diretório de dependências instaladas observado', 'inspection.dependencies_state'));
+    checks.push(
+      check(
+        'dependencies_state_known',
+        'satisfied',
+        'nenhum lockfile observado — projeto greenfield ou pré-bootstrap; a própria work unit pode declarar as dependências',
+        'inspection.dependencies_state',
+      ),
+    );
   } else if (inspection.dependencies_state.value.installed) {
     checks.push(check('dependencies_state_known', 'satisfied', 'dependências declaradas e instaladas', 'inspection.dependencies_state.value.installed'));
   } else {
     checks.push(
-      check('dependencies_state_known', 'not_satisfied', 'dependências declaradas (lockfile presente) mas não instaladas', 'inspection.dependencies_state.value.installed'),
+      check(
+        'dependencies_state_known',
+        'satisfied',
+        'dependências declaradas e ainda não instaladas — instalação autorizada é trabalho do worker, não blocker de ambiente',
+        'inspection.dependencies_state.value.installed',
+      ),
     );
   }
 
   checks.push(
     inspection.build_system.known
       ? check('build_command_known', 'satisfied', `build system observado: ${inspection.build_system.value}`, 'inspection.build_system')
-      : check('build_command_known', 'unknown', 'nenhum indicador de build system observado', 'inspection.build_system'),
+      : check(
+          'build_command_known',
+          'satisfied',
+          'nenhum build system observado — ausência a ser criada pelo bootstrap, não impedimento concreto de execução',
+          'inspection.build_system',
+        ),
   );
 
   checks.push(
     inspection.tests.known
       ? check('tests_known', 'satisfied', 'diretórios ou framework de teste observados', 'inspection.tests')
-      : check('tests_known', 'unknown', 'nenhum diretório ou framework de teste observado', 'inspection.tests'),
+      : check(
+          'tests_known',
+          'satisfied',
+          'nenhum teste observado — ausência a ser criada pela work unit, não impedimento concreto de execução',
+          'inspection.tests',
+        ),
   );
 
   checks.push(
@@ -310,7 +338,12 @@ function assessEnvironmentReadinessChecks(
           `${inspection.validation_command_candidates.length} candidato(s) de validation observado(s)`,
           'inspection.validation_command_candidates',
         )
-      : check('validation_available', 'not_satisfied', 'nenhum candidato de validation observado em package.json:scripts', 'inspection.validation_command_candidates'),
+      : check(
+          'validation_available',
+          'satisfied',
+          'nenhum candidato de validation observado ainda — a validation declarada pela task pode passar a existir depois do bootstrap; a validação oficial continua sendo executada pelo orquestrador',
+          'inspection.validation_command_candidates',
+        ),
   );
 
   checks.push(
@@ -325,7 +358,12 @@ function assessEnvironmentReadinessChecks(
   checks.push(
     inspection.project_instructions.length > 0
       ? check('instructions_discoverable', 'satisfied', `${inspection.project_instructions.length} instrução(ões) de projeto descobertas`, 'inspection.project_instructions')
-      : check('instructions_discoverable', 'not_satisfied', 'nenhuma instrução de projeto descoberta (AGENTS.md/CLAUDE.md/README.md/CONTRIBUTING.md ausentes)', 'inspection.project_instructions'),
+      : check(
+          'instructions_discoverable',
+          'satisfied',
+          'nenhuma instrução de projeto descoberta (AGENTS.md/CLAUDE.md/README.md/CONTRIBUTING.md ausentes) — ausência, não impedimento',
+          'inspection.project_instructions',
+        ),
   );
 
   checks.push(
@@ -402,9 +440,16 @@ function assessEnvironmentReadiness(
 export const VerificationStrengthLevel = z.enum(['weak', 'partial', 'strong']);
 export type VerificationStrengthLevel = z.infer<typeof VerificationStrengthLevel>;
 
+/**
+ * `validationCandidatesObserved` é o fato CRU da inspeção, não o status do
+ * check de readiness: readiness deixou de tratar a ausência de candidatos
+ * como impedimento (greenfield), mas a força da evidência continua sendo
+ * medida pelo que foi realmente observado — liberalizar o gate não pode
+ * inflar a evidência.
+ */
 function assessVerificationStrength(
   task: PlannedTask,
-  validationAvailable: EnvironmentReadinessCheck,
+  validationCandidatesObserved: boolean,
 ): Assessed<VerificationStrengthLevel> {
   if (task.taxonomy.verification === 'subjective') {
     return assessed('weak', 'taxonomy.verification=subjective: PASS/FAIL não é objetivamente determinável', 'taxonomy.verification');
@@ -412,7 +457,7 @@ function assessVerificationStrength(
   if (task.validation.length === 0) {
     return assessed('weak', 'PlannedTask.validation está vazio: nenhum comando de validação declarado', 'task.validation');
   }
-  if (task.taxonomy.verification === 'deterministic' && validationAvailable.status === 'satisfied') {
+  if (task.taxonomy.verification === 'deterministic' && validationCandidatesObserved) {
     return assessed(
       'strong',
       'taxonomy.verification=deterministic, validation declarado e candidatos de validation observados no ambiente',
@@ -424,8 +469,8 @@ function assessVerificationStrength(
   }
   return assessed(
     'partial',
-    `taxonomy.verification=${task.taxonomy.verification} ou validation não confirmado no ambiente (${validationAvailable.status})`,
-    'taxonomy.verification,environment_readiness.validation_available',
+    `taxonomy.verification=${task.taxonomy.verification} ou nenhum candidato de validation observado no ambiente (observed=${validationCandidatesObserved})`,
+    'taxonomy.verification,inspection.validation_command_candidates',
   );
 }
 
@@ -494,20 +539,40 @@ export const ReviewRequirementAssessment = z
   .strict();
 export type ReviewRequirementAssessment = z.infer<typeof ReviewRequirementAssessment>;
 
+/**
+ * Review independente é PROPORCIONAL, não default. Um segundo LLM por work
+ * unit custa tempo e dinheiro reais: ele precisa ser justificado por um risco
+ * concreto, não pelo fato de a task não ser trivial.
+ *
+ * Exige reviewer quando, e somente quando, houver uma razão concreta:
+ * - `risk` high ou critical (inclui o que é security-sensitive, já declarado
+ *   como risco alto pelo planejamento);
+ * - `verification_strength` weak — validação ausente ou subjetiva, isto é,
+ *   PASS/FAIL não é objetivamente determinável;
+ * - `confidence` low — os fatos que sustentam a avaliação estão faltando.
+ *
+ * Risco baixo/médio com validação oficial forte ou razoável (partial) e
+ * confiança não-baixa NÃO exige reviewer: a validação oficial do orquestrador
+ * já é a evidência. Repair significativo, escalation e evidência inconsistente
+ * são conhecidos só pelo lifecycle e entram lá, sobre este resultado.
+ */
 function assessReviewRequirement(
   risk: TaskRisk,
   verificationStrength: VerificationStrengthLevel,
   confidence: ConfidenceLevel,
 ): ReviewRequirementAssessment {
-  const strongEvidence = verificationStrength === 'strong' && confidence !== 'low';
-  const independentReviewRequired = !(risk === 'low' && strongEvidence);
+  const concreteReasons: string[] = [];
+  if (risk === 'high' || risk === 'critical') concreteReasons.push(`risk=${risk}`);
+  if (verificationStrength === 'weak') concreteReasons.push('verification_strength=weak');
+  if (confidence === 'low') concreteReasons.push('confidence=low');
+  const independentReviewRequired = concreteReasons.length > 0;
 
   const diversityRequirement: DiversityRequirement =
     risk === 'critical' ? 'required' : risk === 'high' ? 'preferred' : 'not_required';
 
   const rationale = independentReviewRequired
-    ? `revisão independente com contexto fresco exigida — risco=${risk}, verification_strength=${verificationStrength}, confidence=${confidence}`
-    : `risco baixo e evidência forte (verification_strength=strong, confidence≠low) — revisão independente ainda recomendada por policy, mas não estritamente exigida por esta avaliação`;
+    ? `revisão independente com contexto fresco exigida por razão concreta de risco: ${concreteReasons.join(', ')}`
+    : `nenhuma razão concreta de risco (risk=${risk}, verification_strength=${verificationStrength}, confidence=${confidence}) — a validação oficial do orquestrador é a evidência; reviewer independente não é exigido`;
 
   return {
     independent_review_required: independentReviewRequired,
@@ -560,14 +625,13 @@ export function assessExecution(task: PlannedTask, context: ExecutionAssessmentC
     context.inspection === undefined ? 'none' : (context.factsSource ?? 'full_inspection');
 
   const environmentReadiness = assessEnvironmentReadiness(context.inspection, context.expectedBaseRevisionSha, factsSource);
-  const validationAvailableCheck = environmentReadiness.checks.find(
-    (entry) => entry.requirement === 'validation_available',
-  ) as EnvironmentReadinessCheck;
+  const validationCandidatesObserved =
+    (context.inspection?.validation_command_candidates.length ?? 0) > 0;
 
   const difficulty = assessDifficulty(task);
   const risk = assessRisk(task);
   const contextPressure = assessContextPressure(task);
-  const verificationStrength = assessVerificationStrength(task, validationAvailableCheck);
+  const verificationStrength = assessVerificationStrength(task, validationCandidatesObserved);
   const confidence = assessConfidence(task, environmentReadiness);
   const reviewRequirement = assessReviewRequirement(risk.value, verificationStrength.value, confidence.value);
 

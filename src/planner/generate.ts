@@ -19,7 +19,7 @@ import {
 } from './draft.js';
 import type { PlanningWorkerPort } from './draft.js';
 import { evaluateDecomposition } from './decomposition.js';
-import { PlannedTask } from './task.js';
+import { PlannedTask, PlannerTaskMetadata } from './task.js';
 import { TaskWorkflowVerdict, evaluatePlanWorkflow, validatePlan } from './validate.js';
 
 const nonEmpty = z.string().trim().min(1);
@@ -113,15 +113,20 @@ function zodIssues(error: z.ZodError): string[] {
   return error.issues.map((issue) => `${issue.path.join('.') || '<root>'}: ${issue.message}`);
 }
 
-function sameOrderedStrings(left: readonly string[], right: readonly string[]): boolean {
-  return left.length === right.length && left.every((value, index) => value === right[index]);
-}
-
+/**
+ * Os objetivos do usuario sao o PISO do plano, nao o teto:
+ * USER OBJECTIVES ⊆ PLAN ACCEPTANCE. Todo objetivo original precisa aparecer
+ * VERBATIM em alguma `tasks[].acceptance` — o planner nao pode reescrever,
+ * resumir nem substituir silenciosamente o que o usuario pediu. Criterios
+ * tecnicos adicionais que a work unit precise satisfazer (por exemplo
+ * "pnpm build termina com exit 0") sao legitimos e nao rejeitam o plano.
+ */
 function validateProtectedAcceptance(tasks: readonly PlannedTask[], acceptance: readonly string[]): string | null {
-  const drafted = tasks.flatMap((task) => task.acceptance);
-  return sameOrderedStrings(drafted, acceptance)
+  const drafted = new Set(tasks.flatMap((task) => task.acceptance));
+  const missing = acceptance.filter((objective) => !drafted.has(objective));
+  return missing.length === 0
     ? null
-    : 'draft alterou acceptance_contract: a concatenacao de tasks[].acceptance deve ser identica ao contrato confiavel';
+    : `draft nao cobre objetivos do acceptance_contract (cada objetivo precisa aparecer verbatim em tasks[].acceptance): ${missing.join(' | ')}`;
 }
 
 function validateProjectionCommands(tasks: readonly PlannedTask[]): string[] {
@@ -319,6 +324,7 @@ export const ProjectedPlanFile = z
             objective: nonEmpty,
             initial_files: z.array(nonEmpty),
             acceptance: z.array(nonEmpty).min(1),
+            planner_metadata: PlannerTaskMetadata,
             validation: z
               .array(
                 z
@@ -352,6 +358,17 @@ export function projectImplementationPlan(plan: ImplementationPlan): ProjectedPl
       objective: task.objective,
       initial_files: task.initial_files,
       acceptance: task.acceptance,
+      planner_metadata: {
+        taxonomy: task.taxonomy,
+        risk: task.risk,
+        probable_files: task.probable_files,
+        context_scope: task.context_scope,
+        context_requirements: task.context_requirements,
+        environment_requirements: task.environment_requirements,
+        estimated_duration: task.estimated_duration,
+        validation_budget: task.validation_budget,
+        resource_envelope: task.resource_envelope,
+      },
       validation: task.validation,
       constraints: [
         ...parsed.control.constraints,

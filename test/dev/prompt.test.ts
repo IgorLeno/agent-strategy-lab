@@ -29,15 +29,24 @@ const IO = {
 };
 
 describe('prompt lean do worker', () => {
-  it('limita descoberta global antes da primeira edição', () => {
+  it('declara autonomia de exploração e implementação, sem microgerenciar o coding agent', () => {
     const prompt = buildWorkerPrompt(PACKET, IO, LEGACY_EXECUTION_POLICY);
 
-    expect(prompt).toMatch(/comece pelo packet e pelos initial_files/i);
-    expect(prompt).toMatch(/não carregue skills nem subagentes\s+salvo pedido explícito/i);
-    expect(prompt).toMatch(/use rg e intervalos direcionados/i);
-    expect(prompt).toMatch(/não leia\s+LESSONS\.md ou ARCHITECTURE\.md inteiros sem necessidade/i);
-    expect(prompt).toMatch(/primeira edição após no máximo 8 operações\s+exploratórias/i);
-    expect(prompt).toMatch(/não faça revisão geral do repositório/i);
+    expect(prompt).toMatch(/autonomia para investigar e implementar/i);
+    expect(prompt).toMatch(/explore o repositório, escolha o que ler, decida a\s+abordagem/i);
+    expect(prompt).toMatch(/ferramentas auxiliares que o provider oferecer\s+\(incluindo skills e subagentes\)/i);
+    expect(prompt).toMatch(/não faça trabalho fora do escopo/i);
+  });
+
+  it('não impõe limite fixo de operações exploratórias nem proibição absoluta de ferramentas', () => {
+    for (const policy of [LEGACY_EXECUTION_POLICY, ORCHESTRATED_EXECUTION_POLICY]) {
+      const prompt = buildWorkerPrompt(PACKET, IO, policy);
+      expect(prompt).not.toMatch(/8 operações/i);
+      expect(prompt).not.toMatch(/não carregue skills nem subagentes/i);
+      expect(prompt).not.toMatch(/NÃO execute o `pnpm build` global/i);
+      expect(prompt).not.toMatch(/NÃO execute o `pnpm test` completo/i);
+      expect(prompt).not.toMatch(/NÃO use `run_in_background`/i);
+    }
   });
 
   it('mantém o preâmbulo dentro do budget', () => {
@@ -59,31 +68,23 @@ describe('prompt lean do worker', () => {
     const prompt = buildWorkerPrompt(PACKET, IO, ORCHESTRATED_EXECUTION_POLICY);
 
     expect(prompt).toMatch(/execute SOMENTE a tarefa deste packet/i);
-    expect(prompt).toMatch(/comece pelo packet e pelos initial_files/i);
-    expect(prompt).toMatch(/não carregue skills nem subagentes\s+salvo pedido explícito/i);
+    expect(prompt).toMatch(/autonomia para investigar e implementar/i);
     for (const command of ['git add', 'git commit', 'git stash', 'git reset']) {
       expect(prompt).toMatch(new RegExp(`NÃO rode[\\s\\S]*${command}`, 'i'));
     }
     expect(prompt).toMatch(/checkout de arquivos/i);
     expect(prompt).toMatch(/não altere HEAD nem index/i);
-    expect(prompt).toMatch(/execute somente checks pequenos necessários para desenvolver o patch/i);
+    expect(prompt).toMatch(/prefira checks direcionados enquanto desenvolve/i);
     expect(prompt).toMatch(
-      /pode executar\s+typecheck, o teste direcionado da tarefa e testes adicionais pequenos e diretamente\s+relacionados/i,
+      /pode rodar build ou uma\s+suíte mais ampla quando isso for proporcional e útil/i,
     );
-    expect(prompt).toMatch(/NÃO execute o `pnpm test` completo/i);
-    expect(prompt).toMatch(/NÃO execute o `pnpm build` global/i);
-    expect(prompt).toMatch(/NÃO execute novamente toda a lista `packet\.validation`/i);
-    expect(prompt).toMatch(/NÃO use `run_in_background`/i);
-    expect(prompt).toMatch(/NÃO crie background jobs para validação/i);
-    expect(prompt).toMatch(/NÃO use Monitor\/ScheduleWakeup para aguardar validação/i);
+    expect(prompt).toMatch(/não repita suítes globais sem necessidade/i);
     expect(prompt).toMatch(
-      /escreva IMEDIATAMENTE\s+AgentCompletionReport e HandoffDraft;\s+depois encerre a sessão/i,
+      /validação oficial que decide PASS\/FAIL pertence exclusivamente ao\s+orquestrador/i,
     );
+    expect(prompt).toMatch(/você não decide o\s+resultado/i);
     expect(prompt).toMatch(
-      /validações oficiais completas\s+pertencem exclusivamente ao orquestrador\s+e serão executadas fora do sandbox do provider/i,
-    );
-    expect(prompt).toMatch(
-      /falha ambiental de uma validação global que o worker não deveria executar\s+não deve ser investigada pelo worker/i,
+      /se iniciar um processo auxiliar[\s\S]*encerre-o antes de\s+finalizar/i,
     );
     expect(prompt).toMatch(/SUCCESS significa "patch pronto para validação oficial"/i);
     expect(prompt).toMatch(/candidate_commit deve ser null/i);

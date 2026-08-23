@@ -471,10 +471,16 @@ function targetRepoUrlOf(inspection: ProjectInspection, repoRoot: string): strin
  * Áreas de contexto derivadas dos `source_anchors` OBSERVADOS que cobrem os
  * `initial_files` declarados pela task. Sem correspondência, cai para todas as
  * áreas observadas — nunca inventa uma fronteira que a inspeção não viu.
+ *
+ * Um repositório greenfield ainda não tem source anchor nenhum: a fronteira
+ * declarada pela própria work unit (`initial_files`) e, em último caso, a raiz
+ * do repositório são fatos igualmente reais, e usá-los evita bloquear
+ * justamente a task que vai CRIAR a estrutura.
  */
 function contextAreasOf(
   inspection: ProjectInspection,
   initialFiles: readonly string[],
+  repoRoot: string,
 ): { readonly areas: readonly string[]; readonly provenance: string } {
   const matched = [
     ...new Set(
@@ -487,7 +493,23 @@ function contextAreasOf(
     return { areas: matched, provenance: 'inspection.source_anchors ∩ plan.initial_files' };
   }
   const all = [...new Set(inspection.source_anchors.map((anchor) => anchor.area))];
-  return { areas: all, provenance: 'inspection.source_anchors (nenhum initial_file ancorado)' };
+  if (all.length > 0) {
+    return { areas: all, provenance: 'inspection.source_anchors (nenhum initial_file ancorado)' };
+  }
+  const declared = [
+    ...new Set(
+      initialFiles
+        .map((file) => file.split('/')[0])
+        .filter((segment): segment is string => segment !== undefined && segment !== ''),
+    ),
+  ];
+  if (declared.length > 0) {
+    return { areas: declared, provenance: 'plan.initial_files (repositório sem source anchors observados)' };
+  }
+  return {
+    areas: [path.basename(path.resolve(repoRoot))],
+    provenance: 'repo_root (repositório greenfield: nenhum source anchor nem initial_file declarado)',
+  };
 }
 
 async function fingerprintProjectInstructions(
@@ -525,22 +547,28 @@ export interface WorkUnitBuild {
  * Compõe a `PlannedTask` de M73 a partir do PlanFile (objetivo, acceptance,
  * validation, dependências, arquivos iniciais), dos fatos observados pela
  * inspeção (áreas, instruções de projeto, ferramentas/serviços) e da
- * classificação DECLARADA na autorização da run. Nenhum campo é preenchido
- * por default do harness: o que falta vira erro estruturado.
+ * classificação do planejamento. Nenhum campo é preenchido por default do
+ * harness: o que falta vira erro estruturado.
+ *
+ * Precedência da classificação: quando o PlanFile é GERADO e traz
+ * `planner_metadata`, a classificação que o planner produziu para AQUELA task
+ * é a autoritativa — foi ela que examinou o trabalho. Sem `planner_metadata`
+ * (PlanFile manual/histórico), o fallback continua sendo `classificationFor`
+ * sobre o `agentlab-run.yaml`. O default global nunca sobrescreve a
+ * classificação do planner.
  */
 export function buildWorkUnitFromPlan(input: {
   readonly planTask: LoadedPlan['plan']['tasks'][number];
   readonly inspection: ProjectInspection;
   readonly classification: WorkUnitClassification;
+  readonly repoRoot?: string;
 }): WorkUnitBuild {
   const { planTask, inspection, classification } = input;
-  const context = contextAreasOf(inspection, planTask.initial_files);
-  if (context.areas.length === 0) {
-    throw new ProjectAuthorizationError(
-      `nenhum source anchor observado no repositório alvo: context_scope de ${planTask.id} não pode ser determinado sem inventar fronteira.\n` +
-        'Nenhum provider foi chamado. Ação segura: rodar sobre um repositório com código-fonte reconhecível.',
-    );
-  }
+  const planner = planTask.planner_metadata;
+  const context =
+    planner === undefined
+      ? contextAreasOf(inspection, planTask.initial_files, input.repoRoot ?? inspection.repo_root)
+      : { areas: planner.context_scope.areas, provenance: 'plan.planner_metadata.context_scope' };
 
   const validationBudgetMs = planTask.validation.reduce(
     (total, command) => total + command.timeout_seconds * 1_000,
@@ -552,30 +580,33 @@ export function buildWorkUnitFromPlan(input: {
     task_id: planTask.id,
     objective: planTask.objective,
     blocked_by: [...planTask.blocked_by],
-    taxonomy: {
-      version: 1 as const,
-      task_class: classification.task_class,
-      difficulty_declared: classification.difficulty_declared,
-      ...(classification.complexity === undefined ? {} : { complexity: classification.complexity }),
-      ...(classification.ambiguity === undefined ? {} : { ambiguity: classification.ambiguity }),
-      ...(classification.verification === undefined
-        ? {}
-        : { verification: classification.verification }),
-    },
-    risk: classification.risk,
+    taxonomy:
+      planner?.taxonomy ?? {
+        version: 1 as const,
+        task_class: classification.task_class,
+        difficulty_declared: classification.difficulty_declared,
+        ...(classification.complexity === undefined ? {} : { complexity: classification.complexity }),
+        ...(classification.ambiguity === undefined ? {} : { ambiguity: classification.ambiguity }),
+        ...(classification.verification === undefined
+          ? {}
+          : { verification: classification.verification }),
+      },
+    risk: planner?.risk ?? classification.risk,
     acceptance: [...planTask.acceptance],
     validation: planTask.validation.map((command) => ({
       argv: [...command.argv],
       timeout_seconds: command.timeout_seconds,
     })),
     initial_files: [...planTask.initial_files],
-    probable_files: [],
+    probable_files: [...(planner?.probable_files ?? [])],
     context_scope: { areas: [...context.areas] },
-    context_requirements: inspection.project_instructions.map((ref) => ({
-      description: `instrução de projeto (${ref.relevance}) em ${ref.path}`,
-      source_anchor: ref.path,
-    })),
-    environment_requirements: [
+    context_requirements:
+      planner?.context_requirements ??
+      inspection.project_instructions.map((ref) => ({
+        description: `instrução de projeto (${ref.relevance}) em ${ref.path}`,
+        source_anchor: ref.path,
+      })),
+    environment_requirements: planner?.environment_requirements ?? [
       ...inspection.required_tools.map((tool) => ({
         kind: 'tool' as const,
         name: tool.name,
@@ -587,9 +618,12 @@ export function buildWorkUnitFromPlan(input: {
         reason: service.reason,
       })),
     ],
-    estimated_duration: classification.resource_envelope.duration_ms,
-    validation_budget: { expected: validationBudgetMs, maximum: validationBudgetMs },
-    resource_envelope: classification.resource_envelope,
+    estimated_duration: planner?.estimated_duration ?? classification.resource_envelope.duration_ms,
+    validation_budget: planner?.validation_budget ?? {
+      expected: validationBudgetMs,
+      maximum: validationBudgetMs,
+    },
+    resource_envelope: planner?.resource_envelope ?? classification.resource_envelope,
   };
 
   const parsed = PlannedTask.safeParse(candidate);
@@ -603,14 +637,24 @@ export function buildWorkUnitFromPlan(input: {
   }
   return {
     task: parsed.data,
-    provenance: [
-      'work_definition=plan_file',
-      `context_scope=${context.provenance}`,
-      'context_requirements=inspection.project_instructions',
-      'environment_requirements=inspection.required_tools+required_services',
-      'validation_budget=sum(plan.validation[].timeout_seconds)',
-      'taxonomy/risk/resource_envelope=authorization.work_units',
-    ],
+    provenance:
+      planner === undefined
+        ? [
+            'work_definition=plan_file',
+            `context_scope=${context.provenance}`,
+            'context_requirements=inspection.project_instructions',
+            'environment_requirements=inspection.required_tools+required_services',
+            'validation_budget=sum(plan.validation[].timeout_seconds)',
+            'taxonomy/risk/resource_envelope=authorization.work_units',
+          ]
+        : [
+            'work_definition=plan_file',
+            `context_scope=${context.provenance}`,
+            'context_requirements=plan.planner_metadata.context_requirements',
+            'environment_requirements=plan.planner_metadata.environment_requirements',
+            'validation_budget=plan.planner_metadata.validation_budget',
+            'taxonomy/risk/resource_envelope=plan.planner_metadata',
+          ],
   };
 }
 
@@ -942,7 +986,7 @@ export async function createProjectControlPlane(
       authorization,
       request.taskId,
     );
-    const built = buildWorkUnitFromPlan({ planTask, inspection, classification });
+    const built = buildWorkUnitFromPlan({ planTask, inspection, classification, repoRoot: paths.repoRoot });
     const assessment = assessExecution(built.task, {
       inspection,
       expectedBaseRevisionSha: intake.base_revision.sha,
@@ -962,7 +1006,20 @@ export async function createProjectControlPlane(
         evidencePaths: [paths.planFile],
       });
     }
-    const decision = combineWorkflowAndReview(workflow, assessment.review_requirement);
+    // Repair e escalation são fatos do lifecycle: um candidate produzido depois
+    // de a validação oficial ter reprovado o attempt anterior, ou por um degrau
+    // de escalation, é concretamente mais arriscado que um first pass.
+    const escalatedAttempt =
+      request.attemptKind === 'REPAIR'
+        ? { required: true, reason: 'candidate produzido por BOUNDED_REPAIR' }
+        : escalatedProfileByTask.has(request.taskId)
+          ? { required: true, reason: 'candidate produzido por degrau de escalation' }
+          : { required: false, reason: 'first pass' };
+    const decision = combineWorkflowAndReview(
+      workflow,
+      assessment.review_requirement,
+      escalatedAttempt,
+    );
     const environment = evaluateEnvironmentReadiness(assessment.environment_readiness);
 
     const pinned = request.pinnedProfileId ?? escalatedProfileByTask.get(request.taskId) ?? null;

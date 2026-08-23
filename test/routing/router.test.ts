@@ -368,18 +368,37 @@ describe('routeInitialProfile — fatos e compatibilidade bloqueiam defaults sil
     expect(result.outcome).toBe('ROUTED');
   });
 
-  it('stack ausente impede a decisão em vez de virar default', () => {
+  it('stack ausente (greenfield) não impede a decisão: multiplicador neutro, nenhum default inventado', () => {
     const facts = inspection({
       stack: { known: false, value: null, reason: 'manifesto ausente', provenance: 'fs:markers' },
     });
     const result = routeInitialProfile(input(workUnit(task(), facts)));
-    expect(result).toMatchObject({ outcome: 'HUMAN_REQUIRED' });
-    if (result.outcome !== 'HUMAN_REQUIRED') throw new Error('unreachable');
-    expect(result.reason).toContain('stack desconhecida');
+    expect(result.outcome).toBe('ROUTED');
+    if (result.outcome !== 'ROUTED') throw new Error('unreachable');
+    expect(result.worker_runtime_budget.components.stack_multiplier).toBe(1);
+  });
+
+  it('repositório greenfield inteiro (sem manifesto, build, testes, deps, validation ou instruções) é roteável: a bootstrap task pode lançar', () => {
+    const greenfield = inspection({
+      stack: { known: false, value: null, reason: 'manifesto ausente', provenance: 'fs:markers' },
+      package_manager: { known: false, value: null, reason: 'sem lockfile', provenance: 'fs' },
+      build_system: { known: false, value: null, reason: 'sem manifesto', provenance: 'fs' },
+      tests: { known: false, value: null, reason: 'sem testes', provenance: 'fs' },
+      validation_command_candidates: [],
+      dependencies_state: { known: false, value: null, reason: 'sem lockfile', provenance: 'fs' },
+      project_instructions: [],
+      source_anchors: [],
+    });
+    const bootstrap = task();
+    const unit = workUnit(bootstrap, greenfield);
+    expect(unit.assessment.environment_readiness.status).toBe('READY');
+    expect(routeInitialProfile(input(unit)).outcome).toBe('ROUTED');
   });
 
   it('environment readiness inválido impede routing', () => {
-    const facts = inspection({ validation_command_candidates: [] });
+    const facts = inspection({
+      filesystem_permissions: { known: true, value: { readable: true, writable: false }, provenance: 'fs' },
+    });
     const result = routeInitialProfile(input(workUnit(task(), facts)));
     expect(result).toMatchObject({ outcome: 'HUMAN_REQUIRED' });
     if (result.outcome !== 'HUMAN_REQUIRED') throw new Error('unreachable');

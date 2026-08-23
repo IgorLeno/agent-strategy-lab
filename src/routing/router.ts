@@ -279,6 +279,13 @@ function capabilityMultiplier(tier: CapabilityTier): number {
   return tier === 'economy' ? 1.2 : tier === 'intermediate' ? 1 : 0.9;
 }
 
+/**
+ * Stack desconhecida não bloqueia: um repositório greenfield ainda não tem
+ * manifesto de ecossistema, e é exatamente a primeira work unit que vai criá-lo.
+ * O multiplicador de stack só cresce com ecossistemas ADICIONAIS observados,
+ * então a ausência de fato cai no multiplicador neutro (1) — nenhum default é
+ * inventado sobre qual stack é.
+ */
 function budgetFor(
   unit: StructuredWorkUnit,
   capability: ProfileCapability,
@@ -286,9 +293,9 @@ function budgetFor(
   runtimeBounds: readonly WorkerRuntimeBound[],
 ): WorkerRuntimeBudget | null {
   const stack = unit.project_facts.stack;
-  if (!stack.known) return null;
-
-  const stackMultiplier = 1 + Math.max(0, stack.value.ecosystems_detected.length - 1) * 0.1;
+  const stackMultiplier = stack.known
+    ? 1 + Math.max(0, stack.value.ecosystems_detected.length - 1) * 0.1
+    : 1;
   const environmentMultiplier =
     1 +
     unit.project_facts.required_services.length * 0.05 +
@@ -379,12 +386,6 @@ export function routeInitialProfile(input: InitialRoutingInput): InitialRoutingR
     return block(
       `environment_readiness=${unit.assessment.environment_readiness.status}: fato ausente ou inválido impede routing`,
       'assessment.environment_readiness',
-    );
-  }
-  if (!unit.project_facts.stack.known) {
-    return block(
-      `stack desconhecida: ${unit.project_facts.stack.reason}; router não aplica default`,
-      'project_facts.stack',
     );
   }
 

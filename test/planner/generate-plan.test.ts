@@ -194,7 +194,7 @@ describe('generateImplementationPlan', () => {
     expect(await readFile(planPath, 'utf8')).toBe(before);
   });
 
-  it('recusa alteracao da acceptance em vez de corrigi-la', async () => {
+  it('recusa plano que perde um objetivo do usuario, em vez de corrigi-lo', async () => {
     const { result } = await generate({
       schema_version: 1,
       tasks: [task({ acceptance: ['criterio inventado pelo worker'] })],
@@ -202,14 +202,61 @@ describe('generateImplementationPlan', () => {
     expect(result).toMatchObject({ outcome: 'REJECTED', stage: 'SCHEMA_NORMALIZATION' });
     if (result.outcome !== 'REJECTED') throw new Error('unreachable');
     expect(result.issues.join(' ')).toContain('acceptance_contract');
+    expect(result.issues.join(' ')).toContain('Plano gerado e validado');
   });
 
-  it('falha fechado quando AVC exige decomposicao', async () => {
+  it('acceptance tecnico adicional e permitido enquanto todo objetivo do usuario for coberto', async () => {
+    const { result } = await generate({
+      schema_version: 1,
+      tasks: [
+        task({
+          acceptance: ['Plano gerado e validado', 'pnpm build termina com exit 0'],
+        }),
+      ],
+    });
+    expect(result.outcome).toBe('AUTHORIZED');
+    if (result.outcome !== 'AUTHORIZED') throw new Error('unreachable');
+    expect(result.plan.control.acceptance_contract).toEqual(['Plano gerado e validado']);
+    expect(result.plan.tasks[0]?.task.acceptance).toEqual([
+      'Plano gerado e validado',
+      'pnpm build termina com exit 0',
+    ]);
+  });
+
+  it('objetivo do usuario pode ser coberto por qualquer task do plano, em qualquer ordem', async () => {
+    const { result } = await generate({
+      schema_version: 1,
+      tasks: [
+        task({ task_id: 'bootstrap', acceptance: ['toolchain instalada'] }),
+        task({ task_id: 'feature', blocked_by: ['bootstrap'], acceptance: ['Plano gerado e validado'] }),
+      ],
+    });
+    expect(result.outcome).toBe('AUTHORIZED');
+  });
+
+  it('falha fechado quando AVC exige decomposicao (fronteira de rollback não delimitada)', async () => {
+    const { result } = await generate({
+      schema_version: 1,
+      tasks: [
+        task({
+          risk: 'high',
+          resource_envelope: {
+            duration_ms: { expected: 600_000, maximum: 1_800_000 },
+            tokens: { expected: 50_000, maximum: 200_000 },
+            changed_files: { expected: 5, maximum: 60 },
+          },
+        }),
+      ],
+    });
+    expect(result).toMatchObject({ outcome: 'REJECTED', stage: 'AVC_DECOMPOSITION' });
+  });
+
+  it('escopo amplo de contexto sozinho nao recusa o plano', async () => {
     const { result } = await generate({
       schema_version: 1,
       tasks: [task({ context_scope: { areas: ['a', 'b', 'c', 'd'] } })],
     });
-    expect(result).toMatchObject({ outcome: 'REJECTED', stage: 'AVC_DECOMPOSITION' });
+    expect(result.outcome).toBe('AUTHORIZED');
   });
 
   it('executa policy antes de recusar dependencias invalidas', async () => {

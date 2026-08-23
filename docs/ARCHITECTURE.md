@@ -332,11 +332,53 @@ ProjectIntakeRequest + ExecutionAuthorizationScope
   → PASS | repair/replan | CAPABILITY escalation | HUMAN_REQUIRED
 ```
 
+O princípio que ordena todas as fronteiras abaixo:
+
+> **CONTROL THE BOUNDARIES, NOT THE IMPLEMENTATION.**
+> O control plane é dono de escopo, autorização, Git safety, credenciais,
+> billing, routing, budgets, validação oficial, retries, escalation, ações
+> destrutivas/externas e decisões genuinamente humanas. Como o coding agent
+> explora o repositório, o que lê, qual abordagem escolhe, o que refatora e
+> quais ferramentas auxiliares usa é decisão dele.
+
+> **UNCERTAINTY SHOULD ROUTE OR ESCALATE CAPABILITY BEFORE IT BLOCKS WORK.**
+> Complexidade, ambiguidade, escopo amplo e estimativas altas são insumo de
+> assessment, routing, effort e budget — escolhem um modelo mais capaz, não
+> recusam o plano. Bloqueio exige um risco concreto: uma fronteira de
+> execução/rollback objetivamente excedida, ou uma das proteções acima.
+
 As fronteiras principais são:
 
 - **AVC não é um relógio.** Decomposição responde à coerência e validação
   independente da mudança. Task longa pode permanecer una; task curta pode
-  precisar de split.
+  precisar de split. `DECOMPOSITION_REQUIRED` fica reservado à fronteira de
+  execução/rollback objetivamente excedida — não a "isto é difícil".
+- **O planner conhece o contrato que precisa produzir.** O prompt do planning
+  worker expõe `PlannedTask` compactamente (campos, enums, unidades). O gate de
+  normalização continua estrito e sem mapeamento heurístico: a saída do modelo
+  não é adivinhada, ela é especificada.
+- **Objetivos do usuário são piso, não teto.** `USER OBJECTIVES ⊆ PLAN
+  ACCEPTANCE`: todo objetivo original precisa aparecer verbatim em alguma task;
+  critérios técnicos adicionais da work unit são legítimos.
+- **DAG de projeto tem múltiplas raízes.** Componentes independentes
+  (fundação, domínio, assets, infraestrutura) são estrutura normal de plano.
+  Ciclo, dependência inexistente, auto-dependência e id duplicado continuam
+  recusados.
+- **Ausência não é impedimento.** Um repositório greenfield — sem
+  `package.json`, lockfile, build, testes ou instruções — é executável: a
+  primeira work unit existe para criar isso. Continuam bloqueando repositório
+  inacessível, estado de git desconhecido, base SHA divergente, filesystem não
+  gravável, credencial obrigatória ausente e ação externa/destrutiva não
+  autorizada.
+- **Review independente é proporcional.** Exigida por razão concreta — risco
+  alto/crítico, evidência de verificação fraca, confiança baixa, repair
+  significativo ou escalation —, não por default. O caminho `REVIEWED` classifica
+  a work unit; por si só ele não lança um segundo LLM. Quando exigida, a regra
+  não muda: validation PASS + review ACCEPT = PASS.
+- **A inteligência do planejamento chega ao routing.** Planos gerados carregam
+  `planner_metadata` por task (taxonomy, risco, envelope, escopo de contexto);
+  o executor usa essa classificação. PlanFiles manuais seguem no fallback de
+  `agentlab-run.yaml`, e o default global nunca sobrescreve o planner.
 - **Tempos não se cruzam.** `estimated_duration` estima a task;
   `worker_runtime_budget` limita o processo contra o bound do launcher/profile;
   `validation[].timeout_seconds` limita um comando contra o contrato de

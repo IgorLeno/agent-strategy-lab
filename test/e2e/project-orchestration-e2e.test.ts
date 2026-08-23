@@ -803,11 +803,13 @@ describe('M85 — External Project Fake E2E', () => {
   // -------------------------------------------------------------------------
   it('ENVIRONMENT — ambiente NOT_READY é aplicado antes de culpar capacidade', () => {
     const task = plannedTask();
+    // Blocker CONCRETO (filesystem não gravável), não mera ausência: um
+    // repositório greenfield sem deps instaladas é executável por policy.
     const notReadyInspection = inspection({
-      dependencies_state: {
+      filesystem_permissions: {
         known: true,
-        value: { lockfile_path: 'pnpm-lock.yaml', installed: false },
-        provenance: 'node_modules ausente',
+        value: { readable: true, writable: false },
+        provenance: 'fs',
       },
     });
     const assessment = assessExecution(task, {
@@ -840,9 +842,14 @@ describe('M85 — External Project Fake E2E', () => {
   // -------------------------------------------------------------------------
   // 6. TASK/CONTEXT
   // -------------------------------------------------------------------------
-  it('TASK/CONTEXT — task ampla demais decompõe em vez de escalar às cegas', async () => {
+  it('TASK/CONTEXT — work unit sem fronteira de rollback decompõe em vez de escalar às cegas', async () => {
     const tooBroad = plannedTask({
-      context_scope: { areas: ['greet', 'auth', 'billing', 'reporting', 'infra'] },
+      risk: 'high',
+      resource_envelope: {
+        duration_ms: { expected: 600_000, maximum: 1_800_000 },
+        tokens: { expected: 50_000, maximum: 200_000 },
+        changed_files: { expected: 5, maximum: 60 },
+      },
     });
     const planner = new RecordingPlanner({
       outcome: 'DRAFT_RETURNED',
