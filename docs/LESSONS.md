@@ -5,6 +5,14 @@ Regra, não narrativa: cada entrada termina numa restrição aplicável.
 
 ---
 
+[2026-08-23] Context: planner/reviewer Claude sobre repositório alvo externo.
+Mistake: resolveProfileArgv rodou no profile base e o overlay read-only
+reintroduziu `--settings` relativo depois; o subprocesso com cwd no alvo
+procurou o arquivo lá e falhou antes do PlanFile.
+Rule: recurso relativo introduzido pelo role overlay resolve contra
+profileCatalogRoot DEPOIS do overlay e ANTES do spawn. Overlay depois de
+catalog resolution reintroduz path relativo.
+
 [2026-08-22] Context: fixtures YAML para binding de identidade do plano gerado.
 Mistake: hashes formados só por dígitos foram emitidos sem aspas e o parser YAML
 os converteu em números, fazendo o teste parar no schema em vez de alcançar a

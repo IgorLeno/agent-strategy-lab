@@ -800,19 +800,18 @@ function invocationFailure(
 }
 
 /**
- * Recursos relativos do argv (fixtures, settings versionadas) pertencem ao
- * CATÁLOGO do harness, não ao repositório alvo. Sem esta resolução, um role
- * lançado sobre um alvo externo procuraria os arquivos do profile dentro do
- * alvo. Quando catálogo e cwd coincidem (uso histórico), o argv não muda.
+ * Overlay de role pode reintroduzir tokens relativos (settings read-only).
+ * Resolve DEPOIS do overlay: recursos do catálogo não são procurados no alvo.
+ * Quando catálogo e cwd coincidem (uso histórico), o argv não muda.
  */
-function catalogResolvedProfile(paths: HarnessPaths, profile: LauncherProfile): LauncherProfile {
-  return {
-    ...profile,
-    argv: resolveProfileArgv(profile.argv, {
-      catalogRoot: paths.profileCatalogRoot,
-      workerCwd: paths.repoRoot,
-    }),
-  };
+export function resolveRoleOverlayArgv(
+  paths: HarnessPaths,
+  overlayArgv: readonly string[],
+): string[] {
+  return resolveProfileArgv(overlayArgv, {
+    catalogRoot: paths.profileCatalogRoot,
+    workerCwd: paths.repoRoot,
+  });
 }
 
 /** O packet do planner vira o prompt bounded — fatos derivados, nunca transcript. */
@@ -881,11 +880,12 @@ export function createLaunchedPlanningWorker(
         return invocationFailure(options, invocationId, 'BUDGET_UNSUPPORTED', budget.reason, false);
       }
 
-      const overlay = buildRoleArgv(catalogResolvedProfile(options.paths, options.profile), {
+      const overlay = buildRoleArgv(options.profile, {
         role: 'planner',
         prompt: buildPlannerPrompt(invocation),
       });
       assertReadOnlyArgv('planner', options.profile.agent, overlay.argv);
+      const argv = resolveRoleOverlayArgv(options.paths, overlay.argv);
 
       if (!(options.providerEnabled ?? PROVIDER_PATH_ENABLED_BY_DEFAULT)) {
         return invocationFailure(
@@ -943,7 +943,7 @@ export function createLaunchedPlanningWorker(
         stdout = await port.run({
           role: 'planner',
           profile: options.profile,
-          argv: overlay.argv,
+          argv,
           prompt: buildPlannerPrompt(invocation),
           cwd: options.paths.repoRoot,
           env,
@@ -1182,11 +1182,12 @@ export async function launchProjectReviewer(
   }
 
   const prompt = buildReviewerPrompt(options.packet);
-  const overlay = buildRoleArgv(catalogResolvedProfile(options.paths, options.profile), {
+  const overlay = buildRoleArgv(options.profile, {
     role: 'reviewer',
     prompt,
   });
   assertReadOnlyArgv('reviewer', options.profile.agent, overlay.argv);
+  const argv = resolveRoleOverlayArgv(options.paths, overlay.argv);
 
   const home = path.join(options.paths.devDir, 'project', 'homes', options.profile.id);
   await mkdir(home, { recursive: true });
@@ -1212,7 +1213,7 @@ export async function launchProjectReviewer(
     stdout = await port.run({
       role: 'reviewer',
       profile: options.profile,
-      argv: overlay.argv,
+      argv,
       prompt,
       cwd: options.paths.repoRoot,
       env,
@@ -1245,7 +1246,7 @@ export async function launchProjectReviewer(
     reason: reason.trim(),
     coverage: coverage.success ? coverage.data : null,
     policy: plan.policy,
-    argv: overlay.argv,
+    argv,
     workspace_access: overlay.workspace_access,
     read_only_mechanism: overlay.mechanism,
   };

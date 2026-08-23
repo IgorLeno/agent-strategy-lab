@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -15,6 +16,7 @@ import {
   planReviewerInvocation,
   recordComparableRunFacts,
   resolveFailureFollowUp,
+  resolveRoleOverlayArgv,
   runDirectPath,
   runReviewedPath,
   toHumanRequiredOutput,
@@ -307,6 +309,26 @@ describe('roles estruturais', () => {
       RoleOverlayError,
     );
   });
+
+  for (const role of ['planner', 'reviewer'] as const) {
+    it(`Claude ${role} em repo alvo externo lança settings absoluto do catálogo`, async () => {
+      const catalog = REPO_ROOT;
+      const target = await makeTemporaryDir();
+      const paths = resolveHarnessPaths(target, { profileCatalogRoot: catalog });
+      const profile = await loadProfile(catalog, CLAUDE_PROFILE_ID);
+      const overlay = buildRoleArgv(profile, { role, prompt: 'packet' });
+      const argv = resolveRoleOverlayArgv(paths, overlay.argv);
+
+      const settings = argv[argv.indexOf('--settings') + 1];
+      const catalogSettings = path.join(catalog, CLAUDE_READ_ONLY_SETTINGS_FILE);
+      expect(existsSync(path.join(target, 'dev', 'profiles'))).toBe(false);
+      expect(settings).toBe(catalogSettings);
+      expect(settings).not.toBe(path.join(target, CLAUDE_READ_ONLY_SETTINGS_FILE));
+      expect(path.isAbsolute(settings ?? '')).toBe(true);
+      expect(argv[argv.indexOf('--permission-mode') + 1]).toBe('plan');
+      expect(() => assertReadOnlyArgv(role, profile.agent, overlay.argv)).not.toThrow();
+    });
+  }
 });
 
 describe('worker runtime budget e timeout de validation são grandezas separadas', () => {
