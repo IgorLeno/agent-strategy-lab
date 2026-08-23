@@ -40,8 +40,10 @@ import type {
   OrchestratedFinalizationRecord,
 } from '../../dev/lib/schemas.js';
 import {
+  CommitMessage,
   MAXIMUM_HANDOFF_BYTES,
   MAXIMUM_TASK_PACKET_BYTES,
+  MAX_COMMIT_MESSAGE_BYTES,
   byteSize,
   isHandoffRecordV2,
   parseHandoffRecord,
@@ -498,6 +500,38 @@ describe('finalizeOrchestratedTask', () => {
     expect((await readState(paths)).authorized_head_sha).toBe(candidate);
     expect(await workingTreeFiles(root)).toEqual([]);
     expect(await stagedFiles(root)).toEqual([]);
+  });
+
+  /**
+   * O incidente real: o plano gerado passou por todos os gates do planner e a
+   * finalização estourou DEPOIS de o worker já ter feito o trabalho, porque o
+   * `title` semântico era reusado direto como subject de commit. Título longo
+   * é entrada LEGÍTIMA; a finalização precisa derivar um subject bounded.
+   */
+  it('title semântico acima do budget de commit não quebra a finalização', async () => {
+    const longTitle =
+      'Inicializar aplicação React 19 com TypeScript, Vite e a estrutura de ' +
+      'diretórios do projeto, incluindo configuração de build, tipagem estrita ' +
+      'e o esqueleto de componentes que as próximas work units vão estender';
+    expect(Buffer.byteLength(longTitle, 'utf8')).toBeGreaterThan(200);
+    await writeFile(
+      paths.planFile,
+      PLAN.replace('title: tarefa orquestrada', `title: ${longTitle}`),
+      'utf8',
+    );
+    await commitAll(root, 'plano com title longo');
+    loaded = await loadPlan(paths.planFile);
+    baseSha = await headSha(root);
+
+    await prepareRun();
+    const outcome = await finalize();
+
+    expect(outcome.kind).toBe('PASS');
+    const candidate = await headSha(root);
+    const subject = (await runGit(root, ['show', '-s', '--format=%s', candidate])).stdout.trim();
+    expect(CommitMessage.safeParse(subject).success).toBe(true);
+    expect(Buffer.byteLength(subject, 'utf8')).toBeLessThanOrEqual(MAX_COMMIT_MESSAGE_BYTES);
+    expect(subject.startsWith('feat(T1): Inicializar aplicação React 19')).toBe(true);
   });
 
   it('default runner preserva validation logs com hashes em nova finalização', async () => {

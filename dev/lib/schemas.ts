@@ -1626,6 +1626,15 @@ export const PlannedWorkAdoptionRecord = z
   });
 export type PlannedWorkAdoptionRecord = z.infer<typeof PlannedWorkAdoptionRecord>;
 
+/**
+ * Budget OPERACIONAL do subject de commit, em bytes UTF-8. Fonte ÚNICA: quem
+ * VALIDA (`CommitMessage`) e quem DERIVA uma mensagem a partir de um
+ * `PlanTask` (`dev/lib/commit-message.ts`) leem o mesmo número. Duplicar o
+ * literal em dois módulos é exatamente como um gerador passa a produzir
+ * mensagens que o validador recusa.
+ */
+export const MAX_COMMIT_MESSAGE_BYTES = 200;
+
 export const CommitMessage = z.string().superRefine((message, ctx) => {
   if (message.trim() === '') {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'commit-message não pode ser vazio' });
@@ -1633,8 +1642,11 @@ export const CommitMessage = z.string().superRefine((message, ctx) => {
   if (/\r|\n/.test(message)) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'commit-message deve ter uma linha' });
   }
-  if (Buffer.byteLength(message, 'utf8') > 200) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'commit-message excede 200 bytes' });
+  if (Buffer.byteLength(message, 'utf8') > MAX_COMMIT_MESSAGE_BYTES) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `commit-message excede ${MAX_COMMIT_MESSAGE_BYTES} bytes`,
+    });
   }
 });
 

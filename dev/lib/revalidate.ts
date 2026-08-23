@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { canonicalJson, canonicalSha256, sha256Hex } from './canonical.js';
+import { deriveCommitMessage } from './commit-message.js';
 import {
   changedFiles,
   commitExists,
@@ -349,10 +350,22 @@ async function assertHarnessDefectLineage(
   }
 }
 
+/**
+ * MESMA derivação bounded que a finalização normal usa. Reconstruir a mensagem
+ * aqui com outra regra reintroduziria drift entre o subject gravado e o
+ * subject esperado, e `assertCandidate` passaria a acusar divergência sem que
+ * nada tenha mudado na work unit.
+ */
 function commitMessage(input: RevalidateOrchestratedInput): string {
   const task = input.loaded.byId.get(input.taskId);
   if (!task) throw new OrchestratedRevalidationError(`tarefa ausente no plano: ${input.taskId}`);
-  return CommitMessage.parse(`feat(${task.id}): ${task.title}`);
+  try {
+    return CommitMessage.parse(deriveCommitMessage(task));
+  } catch (error) {
+    throw new OrchestratedRevalidationError(
+      `commit-message derivado inválido para ${task.id}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 }
 
 async function assertCandidate(

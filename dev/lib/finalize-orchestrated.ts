@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { jsonBytes, writeFileAtomic } from './atomic.js';
 import { canonicalJson, canonicalSha256, sha256Hex } from './canonical.js';
+import { deriveCommitMessage } from './commit-message.js';
 import {
   lookupCandidateReview,
   type CandidateReviewLookup,
@@ -227,10 +228,26 @@ async function loadSource(input: FinalizeOrchestratedInput): Promise<SourceEvide
   };
 }
 
+/**
+ * `title` é campo SEMÂNTICO e não cabe no budget do commit por contrato
+ * nenhum; a mensagem vem da derivação bounded, compartilhada com a
+ * revalidação, para que o mesmo PlanTask produza sempre o mesmo subject.
+ *
+ * O `parse` continua aqui como guarda fail-closed: `deriveCommitMessage` é
+ * total e o caminho normal nunca depende deste catch, mas se uma invariante
+ * impossível quebrar, o erro sai classificado como falha de finalização — não
+ * como `ZodError` cru derrubando o run.
+ */
 function commitMessageFor(input: FinalizeOrchestratedInput): string {
   const task = input.loaded.byId.get(input.taskId);
   if (!task) throw new OrchestratedFinalizationError(`tarefa ausente no plano: ${input.taskId}`);
-  return CommitMessage.parse(`feat(${task.id}): ${task.title}`);
+  try {
+    return CommitMessage.parse(deriveCommitMessage(task));
+  } catch (error) {
+    throw new OrchestratedFinalizationError(
+      `commit-message derivado inválido para ${task.id}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 }
 
 async function runOfficialValidations(
