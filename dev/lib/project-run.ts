@@ -110,6 +110,11 @@ import {
   workerRuntimeBoundsOf,
 } from './project-roles.js';
 import {
+  OPERATIONAL_ATTEMPT_SCHEMA_VERSION,
+  operationalAttemptPath,
+  writeOperationalAttempt,
+} from './operational-attempt.js';
+import {
   materializeCanonicalProjectAttempt,
   projectProfileFingerprint,
   projectWorkDefinitionFingerprint,
@@ -221,6 +226,13 @@ export interface ProjectRoutingReport {
     readonly series_considered: HistoryInformedRoutingResult['evidence']['series_considered'];
   };
   readonly rationale: readonly string[];
+  /**
+   * Preenchido quando o data root canônico existia mas era ILEGÍVEL. O routing
+   * seguiu pelo fallback determinístico; isto registra que a série histórica
+   * não pôde ser consultada, em vez de deixar a ausência parecer "sem
+   * episódios".
+   */
+  readonly history_unreadable_reason?: string;
 }
 
 /** Fato de launch como ele aparece no relatório: valor, qualidade e origem. */
@@ -292,6 +304,10 @@ export interface ProjectWorkUnitReport {
   review: ProjectReviewReport;
   validation_outcome: string | null;
   comparable_run_facts_path: string | null;
+  /** `OK` ou `OBSERVABILITY_DEGRADED`; nunca decide se a work unit avança. */
+  telemetry_status: 'OK' | 'OBSERVABILITY_DEGRADED';
+  telemetry_reason: string | null;
+  operational_attempt_path: string | null;
   repair: string | null;
   diagnosis: string | null;
   escalation: string | null;
@@ -1034,8 +1050,7 @@ export async function createProjectControlPlane(
       });
     }
     const workDefinitionFingerprint = projectWorkDefinitionFingerprint({ planTask, classification });
-    const history = historySnapshotByTask.get(request.taskId) ?? await queryCanonicalProjectHistory({
-      labRoot: historyLabRoot,
+    const historyQuery = {
       workDefinitionFingerprintSha256: workDefinitionFingerprint,
       eligibleProfileIds: eligible,
       minimumSampleSize: HISTORY_MINIMUM_SAMPLE_SIZE,
@@ -1044,7 +1059,24 @@ export async function createProjectControlPlane(
         difficulty: classification.difficulty_declared,
         ...(inspection.stack.known ? { stack: inspection.stack.value.ecosystems_detected } : {}),
       },
-    });
+    } as const;
+    // O histórico canônico é OTIMIZAÇÃO de routing, nunca pré-condição: ele só
+    // consegue OVERRIDE quando uma série comparável domina por Pareto. Um data
+    // root ilegível é UNKNOWN — e UNKNOWN cai no router determinístico, que é
+    // estritamente mais conservador. Deixar a leitura derrubar a run faria
+    // telemetria auxiliar decidir se o projeto do usuário anda.
+    let historyDegraded: string | null = null;
+    const history =
+      historySnapshotByTask.get(request.taskId) ??
+      (await queryCanonicalProjectHistory({ labRoot: historyLabRoot, ...historyQuery }).catch(
+        async (error: unknown) => {
+          historyDegraded = error instanceof Error ? error.message : String(error);
+          return queryCanonicalProjectHistory({
+            labRoot: path.join(historyLabRoot, 'unreadable-history-absent'),
+            ...historyQuery,
+          });
+        },
+      ));
     const routed = routeInitialProfileWithHistory({
       work_unit: {
         source: 'direct_task_normalization',
@@ -1176,6 +1208,7 @@ export async function createProjectControlPlane(
           ...routed.rationale,
           ...(routed.fallback?.outcome === 'ROUTED' ? routed.fallback.rationale : []),
         ],
+        ...(historyDegraded === null ? {} : { history_unreadable_reason: historyDegraded }),
       },
       worker_runtime_budget: {
         requested_ms: budget.requested_budget_ms,
@@ -1197,6 +1230,9 @@ export async function createProjectControlPlane(
       },
       validation_outcome: null,
       comparable_run_facts_path: null,
+      telemetry_status: 'OK',
+      telemetry_reason: null,
+      operational_attempt_path: null,
       repair: request.attemptKind === 'REPAIR' ? 'BOUNDED_REPAIR' : null,
       diagnosis: null,
       escalation: escalatedProfileByTask.get(request.taskId) ?? null,
@@ -1843,11 +1879,85 @@ export async function createProjectControlPlane(
     },
   };
 
+  /**
+   * OPERATIONAL PLANE: fatos que o control plane já tem em mãos, gravados
+   * ANTES e INDEPENDENTEMENTE da materialização canônica. Nenhum deles é
+   * pedido ao worker, nenhum depende de score, qualification ou index.
+   */
+  async function recordOperationalAttempt(
+    observation: WorkUnitObservation,
+    report: ProjectWorkUnitReport,
+    telemetry: { status: 'OK' | 'OBSERVABILITY_DEGRADED'; reason: string | null },
+  ): Promise<void> {
+    const profile = profiles.get(observation.profileId);
+    const launch = await readLaunchRecord(paths, observation.taskId).catch(() => null);
+    const capability = profile === undefined ? null : capabilityInputOf(profile);
+    const [completion, finalization] = await Promise.all([
+      readCompletion(paths, observation.taskId).catch(() => null),
+      readOrchestratedFinalization(paths, observation.taskId, observation.attempt).catch(() => null),
+    ]);
+    const written = await writeOperationalAttempt(paths, {
+      schema_version: OPERATIONAL_ATTEMPT_SCHEMA_VERSION,
+      task_id: observation.taskId,
+      attempt: observation.attempt,
+      attempt_role: report.attempt_role,
+      profile_id: observation.profileId,
+      provider: capability?.agent ?? 'unknown',
+      model: capability?.model ?? null,
+      effort: capability?.reasoning_effort ?? null,
+      started_at: launch?.started_at ?? null,
+      finished_at: launch?.finished_at ?? null,
+      duration_ms: launch?.duration_ms ?? null,
+      exit_code: launch?.exit_code ?? null,
+      timed_out: launch?.timed_out ?? null,
+      // Equivalência estimada pela CLI é o único número disponível sem fonte
+      // autoritativa; ausência continua UNKNOWN, nunca zero.
+      usage_tokens: null,
+      candidate_commit: finalization?.candidate_commit ?? null,
+      changed_files:
+        finalization?.changed_files ?? completion?.orchestrator_evidence.changed_files ?? null,
+      validation_outcome: report.validation_outcome,
+      repair_source_attempt: null,
+      escalated_from_profile_id: escalatedProfileByTask.get(observation.taskId) ?? null,
+      human_intervention: humanGate?.why_automation_stopped ?? null,
+      telemetry_status: telemetry.status,
+      telemetry_reason: telemetry.reason,
+      observed_at: (input.now?.() ?? new Date()).toISOString(),
+    });
+    report.telemetry_status = telemetry.status;
+    report.telemetry_reason = telemetry.reason;
+    report.operational_attempt_path = written
+      ? operationalAttemptPath(paths, observation.taskId, observation.attempt)
+      : null;
+  }
+
   async function afterWorkUnit(observation: WorkUnitObservation): Promise<WorkUnitFollowUp> {
     const report = active ?? workUnits.at(-1);
     if (report === undefined) return { status: 'CONTINUE' };
     report.validation_outcome = observation.closeKind ?? observation.launch;
-    await materializeObservedAttempt(observation, report);
+
+    // FRONTEIRA 2I/2K: a materialização canônica é BENCHMARK-STYLE — envelope,
+    // record, comparable facts, evaluation, score, qualification, manifests,
+    // index e binding. Ela é valiosa e continua acontecendo, mas deixou de ser
+    // pré-condição do progresso: uma work unit já validada e já aceita não
+    // pode perder a run porque um registro secundário de aprendizado falhou.
+    //
+    // A exceção que continua fail-closed está fora daqui: evidência de
+    // segurança, billing, autorização, integridade da base e identidade do
+    // candidate nunca passou por este caminho.
+    let telemetry: { status: 'OK' | 'OBSERVABILITY_DEGRADED'; reason: string | null } = {
+      status: 'OK',
+      reason: null,
+    };
+    try {
+      await materializeObservedAttempt(observation, report);
+    } catch (error) {
+      telemetry = {
+        status: 'OBSERVABILITY_DEGRADED',
+        reason: error instanceof Error ? error.message : String(error),
+      };
+    }
+    await recordOperationalAttempt(observation, report, telemetry);
 
     // A review já aconteceu — na FRONTEIRA DE ACEITAÇÃO, antes de o candidate
     // virar PASS. Aqui só resta propagar o gate humano que ela produziu.

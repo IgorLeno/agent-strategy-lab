@@ -387,7 +387,10 @@ async function listRunDirectories(runsDir: string): Promise<string[]> {
   try {
     entries = await readdir(runsDir, { withFileTypes: true });
   } catch (error) {
-    if (isNodeError(error) && error.code === 'ENOENT') return [];
+    // ENOENT e ENOTDIR descrevem o MESMO fato observável: não há diretório de
+    // runs, logo não há run registrada. Nenhum dos dois é "zero runs medidas" —
+    // é ausência de medição, e quem consome trata como tal.
+    if (isNodeError(error) && (error.code === 'ENOENT' || error.code === 'ENOTDIR')) return [];
     throw error;
   }
 

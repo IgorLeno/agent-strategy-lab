@@ -21,6 +21,7 @@ import {
   type IterationInput,
 } from './orchestrate-report.js';
 import { resolveHarnessInstallationRoot, type HarnessPaths } from './paths.js';
+import { isSameProcessAlive } from './process-identity.js';
 import type { LoadedPlan } from './plan.js';
 import { loadProfile } from './profile.js';
 import { writePacket } from './records.js';
@@ -551,6 +552,65 @@ async function summarizeProfilesUsed(
  * Loop canônico do orquestrador. `dev-orchestrate` e `dev-run-plan` consomem
  * esta função; nenhum wrapper reimplementa selection, repair, recovery ou launch.
  */
+/**
+ * Retomada da FINALIZAÇÃO entre processos — a interface de resume é rerodar o
+ * mesmo comando.
+ *
+ * Um attempt cujo worker já terminou mas cujo fechamento não chegou ao state é
+ * trabalho legítimo em curso, não incidente do repositório. Antes desta função,
+ * `recover` reconciliava esse estado para ELE MESMO ("fechamento pendente —
+ * repita dev-close"), o preflight lia a reconciliação como `RECOVERY_ATTENTION`
+ * e o runner parava em `PREFLIGHT_BLOCKED`. Destravar exigia que o operador
+ * conhecesse `dev-close` / `dev-recover-*` — primitives INTERNAS vazando para a
+ * interface.
+ *
+ * As primitives continuam existindo e continuam sendo as mesmas; o que muda é
+ * quem as orquestra. Idempotente por construção: `closeTaskByLaunchPolicy`
+ * converge para os mesmos bytes e aceita uma tarefa já fechada.
+ *
+ * Fail-closed onde importa: worker ainda VIVO não é fechamento pendente, e mais
+ * de uma tarefa RUNNING é inconsistência que pertence ao preflight, não a uma
+ * retomada silenciosa.
+ */
+async function resumePendingFinalization(input: {
+  readonly paths: HarnessPaths;
+  readonly loaded: LoadedPlan;
+  readonly acceptance?: ValidatedCandidateAcceptancePolicy;
+}): Promise<{ readonly status: 'NONE' | 'RESUMED'; readonly taskId: string | null; readonly reason: string }> {
+  let state;
+  try {
+    state = await readState(input.paths);
+  } catch {
+    return { status: 'NONE', taskId: null, reason: 'runtime ainda não tem state autoritativo' };
+  }
+  const running = state.tasks.filter((task) => task.status === 'RUNNING');
+  if (running.length !== 1) {
+    return { status: 'NONE', taskId: null, reason: 'nenhuma finalização pendente isolada' };
+  }
+  const pending = running[0];
+  if (pending === undefined || pending.phase !== 'FINALIZING' || pending.attempts < 1) {
+    return { status: 'NONE', taskId: null, reason: 'tarefa RUNNING não está em FINALIZING' };
+  }
+  if (!input.loaded.byId.has(pending.id)) {
+    return { status: 'NONE', taskId: null, reason: `${pending.id} não existe no plano carregado` };
+  }
+  if (pending.process !== null && (await isSameProcessAlive(pending.process))) {
+    return { status: 'NONE', taskId: pending.id, reason: 'worker do attempt ainda está vivo' };
+  }
+
+  const outcome = await closeTaskByLaunchPolicy({
+    paths: input.paths,
+    loaded: input.loaded,
+    taskId: pending.id,
+    ...(input.acceptance === undefined ? {} : { acceptance: input.acceptance }),
+  });
+  return {
+    status: outcome.kind === 'PENDING' ? 'NONE' : 'RESUMED',
+    taskId: pending.id,
+    reason: outcome.reason,
+  };
+}
+
 export async function runOrchestrate(options: OrchestrateOptions): Promise<OrchestrateResult> {
   const {
     paths,
@@ -605,6 +665,16 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
         return;
       }
     }
+
+    // FINALIZAÇÃO pendente retomada antes de selecionar qualquer tarefa nova.
+    // Vale com e sem control plane: `dev-orchestrate`, `dev-run-plan` e
+    // `dev-run-project` compartilham este caminho, então rerodar o MESMO
+    // comando é a interface de resume em todos eles.
+    await resumePendingFinalization({
+      paths,
+      loaded,
+      ...(acceptance === undefined ? {} : { acceptance }),
+    });
 
     if (!skipPreflight) {
       let currentPreflight = await runOrchestrationPreflight({
