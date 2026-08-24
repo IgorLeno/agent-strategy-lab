@@ -568,6 +568,7 @@ describe('routine autonomy state machine', () => {
 type PostIncident = {
   readonly phase: 'POST_LAUNCH';
   readonly authorized_head_before: string;
+  readonly head_matches_authorized: boolean;
   readonly task_id: string;
   readonly attempt: number;
   readonly profile_id: string;
@@ -587,6 +588,7 @@ function postIncident(overrides: Partial<PostIncident> = {}): PostIncident {
   return {
     phase: 'POST_LAUNCH',
     authorized_head_before: BASE,
+    head_matches_authorized: true,
     task_id: 'M56',
     attempt: 1,
     profile_id: 'fake-worker-v1',
@@ -652,6 +654,18 @@ describe('post-launch known incident autonomy', () => {
         postIncident({ reason: 'parece simples', commit_owner: 'worker' }),
       ),
     ).toMatchObject({ classification: 'HUMAN_REQUIRED', recipe_id: null });
+    expect(
+      module.classifyRoutinePostLaunchIncident(
+        postIncident({
+          reason: 'candidate reprovado pela review independente',
+          head_matches_authorized: false,
+        }),
+      ),
+    ).toMatchObject({
+      classification: 'HUMAN_REQUIRED',
+      recipe_id: null,
+      reason: 'candidate reprovado pela review independente',
+    });
   });
 
   it('protocol output usa primitive oficial e volta à mesma task sem maintainer', async () => {

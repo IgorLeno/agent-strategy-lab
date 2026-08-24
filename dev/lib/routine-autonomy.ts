@@ -120,6 +120,7 @@ export interface RoutineIncidentContext {
 export interface RoutinePostLaunchIncident {
   readonly phase: 'POST_LAUNCH';
   readonly authorized_head_before: string;
+  readonly head_matches_authorized: boolean;
   readonly task_id: string;
   readonly attempt: number;
   readonly profile_id: string;
@@ -391,6 +392,7 @@ export function classifyRoutinePostLaunchIncident(
     incident.task_status === 'RUNNING' &&
     incident.task_phase === 'FINALIZING' &&
     incident.commit_owner === 'orchestrator' &&
+    incident.head_matches_authorized &&
     !incident.capability_verdict
   ) {
     return triageFromRecipe(

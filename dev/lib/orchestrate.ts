@@ -11,6 +11,7 @@ import type { ValidatedCandidateAcceptancePolicy } from './candidate-review.js';
 import { closeTaskByLaunchPolicy } from './close-dispatch.js';
 import { experimentFactsOf } from './doctor.js';
 import { resumePendingAcceptance } from './finalize-orchestrated.js';
+import { headSha } from './git.js';
 import { withHarnessLock } from './lock.js';
 import { runOrchestrationPreflight, type PreflightResult } from './orchestrate-preflight.js';
 import {
@@ -225,9 +226,15 @@ async function postLaunchIncidentOf(
 ): Promise<RoutinePostLaunchIncident> {
   const state = await readState(paths);
   const task = getTaskState(state, execution.iteration.taskId);
+  const head = await headSha(paths.repoRoot);
   return {
     phase: 'POST_LAUNCH',
     authorized_head_before: state.authorized_head_sha ?? '',
+    head_matches_authorized:
+      task.base_sha !== null &&
+      state.authorized_head_sha !== null &&
+      head === task.base_sha &&
+      head === state.authorized_head_sha,
     task_id: execution.iteration.taskId,
     attempt: execution.iteration.attempt,
     profile_id: profileId,

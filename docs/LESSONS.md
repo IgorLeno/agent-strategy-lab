@@ -772,3 +772,16 @@ issues determinísticos, exigir replacement completo sem patch/merge e executar
 todos os gates novamente. Nunca revisar automaticamente packet construction,
 provider/transport, autorizacao, billing, credencial, safety ou decisao humana;
 duas invocacoes totais sao o limite absoluto.
+
+[2026-08-24] Context: uma self-run real finalizou um candidate, passou os gates
+oficiais e recebeu `REVIEW_REJECTED`; o task state ainda era
+`RUNNING/FINALIZING`, mas o worktree HEAD já apontava para o commit candidato.
+Mistake: classificar `PENDING + FINALIZING + commit_owner=orchestrator` como
+protocol-output recovery sem provar que o HEAD ainda era a base autorizada. A
+primitive recusou corretamente o candidate já commitado e mascarou o motivo
+original da parada.
+Rule: antes de despachar uma recipe pós-launch, prove no classificador todas as
+pré-condições estruturais que distinguem seu estado conhecido; para
+protocol-output recovery isso inclui `HEAD == task.base_sha ==
+authorized_head_sha`. Se qualquer precondição falhar, preserve a razão original
+e retorne `HUMAN_REQUIRED` sem invocar a primitive.
