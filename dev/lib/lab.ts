@@ -5,8 +5,9 @@ import { stringify as stringifyYaml } from 'yaml';
 import { inspectRepository, type ProjectInspection } from '../../src/inspection/index.js';
 import {
   authorizeExecutionAction,
-  classifyImpliedHumanGated,
+  classifyImpliedHumanGatedMatches,
   createHumanInstruction,
+  HUMAN_GATE_GRANT_PATH,
   DETERMINISTIC_INTAKE_COMPILER_PROFILE,
   deterministicIntakeCompiler,
   humanInstructionBody,
@@ -66,6 +67,7 @@ import {
   resolvePolicyPresetName,
 } from './policy-preset.js';
 import { writeFileAtomic } from './atomic.js';
+import type { LabProgressListener } from './lab-progress.js';
 
 export class LabRunError extends Error {
   constructor(message: string) {
@@ -103,6 +105,7 @@ export function formatRunSummary(summary: LabRunSummary): string {
 }
 
 interface SharedLabInput {
+  readonly on_progress?: LabProgressListener;
   readonly planner_profile_id?: string;
   readonly max_iterations?: number;
   readonly timeout_override?: string;
@@ -156,24 +159,69 @@ function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * Payload HUMAN_REQUIRED com opções VERDADEIRAS: a sugestão de conceder pelo
+ * header só aparece quando `HUMAN_GATE_GRANT_PATH` (fonte única da política de
+ * grantability) declara um caminho de grant para a categoria. Categoria
+ * never-grantable jamais recebe uma opção impossível.
+ */
 function humanRequiredPayload(
-  capability: string,
+  capability: keyof typeof HUMAN_GATE_GRANT_PATH,
   runtimeDir: string,
   why: string,
 ): Record<string, unknown> {
+  const grantPath = HUMAN_GATE_GRANT_PATH[capability];
+  const grantOption =
+    grantPath.kind === 'publish'
+      ? [
+          'se a intenção é publicar no remoto autorizado, conceder authorization.publish (allowed/remote/ref) no header estruturado da Run Directive',
+        ]
+      : [
+          `a categoria ${capability} nunca é concedível por Run Directive; execute a ação manualmente fora do Agent Lab se ela for realmente desejada`,
+        ];
   return {
     status: 'HUMAN_REQUIRED',
     incident_id: `lab-gate-${capability.toLowerCase()}`,
     decision_needed: capability,
     why_automation_stopped: why,
     options: [
-      'conceder a categoria no header estruturado da Run Directive, se a política do produto permitir',
-      'remover o pedido gated do corpo e rerodar',
+      ...grantOption,
+      'remover ou reformular o pedido gated do corpo e rerodar',
       `inspecionar o runtime em ${runtimeDir}`,
     ],
     evidence_paths: [runtimeDir],
     runtime_dir: runtimeDir,
   };
+}
+
+/**
+ * Traduz o desfecho do executor em UM evento de progresso terminal do run.
+ * `stopped_by` é o mesmo campo que `maybeIntegrateSelf` já consome.
+ */
+function emitExecutionOutcome(
+  onProgress: LabProgressListener | undefined,
+  executed: PlanRunResult,
+): void {
+  if (onProgress === undefined) return;
+  const stoppedBy = executed.payload['stopped_by'];
+  const status = executed.payload['status'];
+  if (stoppedBy === 'ALL_DONE' || status === 'ALL_DONE') {
+    onProgress({ stage: 'ALL_DONE' });
+    return;
+  }
+  if (stoppedBy === 'HUMAN_REQUIRED' || status === 'HUMAN_REQUIRED') {
+    const reason = executed.payload['reason'];
+    onProgress(
+      typeof reason === 'string' && reason.length > 0
+        ? { stage: 'HUMAN_REQUIRED', detail: reason }
+        : { stage: 'HUMAN_REQUIRED' },
+    );
+    return;
+  }
+  onProgress({
+    stage: 'FAILURE',
+    detail: String(stoppedBy ?? status ?? 'desconhecido'),
+  });
 }
 
 async function requireCleanRepo(repoRoot: string, label: string): Promise<void> {
@@ -220,6 +268,7 @@ async function executeProject(input: {
   readonly timeoutOverride?: string;
   readonly verbose?: boolean;
   readonly autonomy?: 'routine';
+  readonly onProgress?: LabProgressListener;
   readonly runProjectImpl: typeof runProject;
 }): Promise<PlanRunResult> {
   const paths = labHarnessPaths({ repoRoot: input.repoRoot, runtimeDir: input.runtimeDir });
@@ -228,6 +277,7 @@ async function executeProject(input: {
     intake: input.intake,
     authorizationFile: input.authorizationFile,
     maxIterations: input.maxIterations,
+    ...(input.onProgress === undefined ? {} : { onProgress: input.onProgress }),
     ...(input.plannerProfileId === undefined ? {} : { plannerProfileId: input.plannerProfileId }),
     ...(input.timeoutOverride === undefined ? {} : { timeoutOverride: input.timeoutOverride }),
     ...(input.verbose === undefined ? {} : { verbose: input.verbose }),
@@ -241,6 +291,7 @@ async function maybeIntegrateSelf(input: {
   readonly controlRoot: string;
   readonly identity: SelfTargetIdentity | null;
   readonly executed: PlanRunResult;
+  readonly onProgress?: LabProgressListener;
 }): Promise<Record<string, unknown>> {
   if (!input.self || input.identity === null) return {};
   const stoppedBy = input.executed.payload['stopped_by'];
@@ -254,6 +305,7 @@ async function maybeIntegrateSelf(input: {
     };
   }
   try {
+    input.onProgress?.({ stage: 'INTEGRATING', detail: input.identity.self_maintenance_branch });
     const integrated = await integrateSelfMaintenance({
       controlRoot: input.controlRoot,
       identity: input.identity,
@@ -279,6 +331,7 @@ async function maybeIntegrateSelf(input: {
       ref: input.identity.original_ref,
       remote: input.publish.remote,
     });
+    input.onProgress?.({ stage: 'PUBLISHED', detail: `${pushed.remote}/${input.identity.original_ref}` });
     return {
       self_maintenance: {
         isolated_worktree: input.identity.target_worktree_path,
@@ -373,6 +426,7 @@ function sharedResumeInput(
 ): ResumeHumanInstructionInput {
   return {
     runtime_dir: runtimeDir,
+    ...(input.on_progress === undefined ? {} : { on_progress: input.on_progress }),
     ...(input.publish === undefined ? {} : { publish: input.publish }),
     ...(input.planner_profile_id === undefined ? {} : { planner_profile_id: input.planner_profile_id }),
     ...(input.max_iterations === undefined ? {} : { max_iterations: input.max_iterations }),
@@ -450,6 +504,7 @@ export async function submitRunDirective(input: SubmitRunDirectiveInput): Promis
     ...(input.run_project === undefined ? {} : { run_project: input.run_project }),
     ...(input.on_runtime === undefined ? {} : { on_runtime: input.on_runtime }),
     ...(input.on_summary === undefined ? {} : { on_summary: input.on_summary }),
+    ...(input.on_progress === undefined ? {} : { on_progress: input.on_progress }),
     directive: parsed,
   });
 }
@@ -467,6 +522,8 @@ export async function submitHumanInstruction(
   const raw = input.raw_instruction.trim();
   if (raw.length === 0) throw new LabRunError('a instrução humana está vazia.');
 
+  const onProgress = input.on_progress;
+  onProgress?.({ stage: 'PREFLIGHT' });
   const controlRoot = await resolveControlRepo(input.control_root ?? resolveHarnessInstallationRoot());
   const env = input.env ?? process.env;
   const selfRequested = input.self === true;
@@ -542,6 +599,7 @@ export async function submitHumanInstruction(
     });
     repoRoot = selfIdentity.target_worktree_path;
   }
+  onProgress?.({ stage: 'TARGET_READY', detail: targetType === 'self' ? 'self' : repoRoot });
 
   const inspect = input.inspect ?? ((root: string) => inspectRepository({ repoRoot: root }));
   const inspection = await inspect(repoRoot);
@@ -575,6 +633,7 @@ export async function submitHumanInstruction(
     await writeFileAtomic(authorizationFile, authorizationYaml(snapshot));
   }
   const authorization = await loadAuthorizationSnapshot(authorizationFile);
+  onProgress?.({ stage: 'AUTHORIZED', detail: presetName });
 
   const observability: LabObservability = {
     schema_version: 1,
@@ -603,8 +662,13 @@ export async function submitHumanInstruction(
     runtime: runtimeDir,
   });
 
-  const implied = classifyImpliedHumanGated(humanInstructionBody(instruction));
-  for (const capability of implied) {
+  const implied = classifyImpliedHumanGatedMatches(humanInstructionBody(instruction));
+  for (const match of implied) {
+    // INTENT != AUTHORIZATION: a única satisfação possível vem do header
+    // estruturado. Intenção de publicar no remoto/ref já concedido por
+    // authorization.publish não é um gate novo — é exatamente o que o grant
+    // autoriza. Toda outra categoria continua HUMAN_REQUIRED.
+    if (match.satisfiable_by === 'publish' && publishGrant.allowed) continue;
     const decision = authorizeExecutionAction(
       {
         schema_version: 1,
@@ -612,15 +676,17 @@ export async function submitHumanInstruction(
         autonomous_execution_boundary: authorization.file.autonomous_execution_boundary,
         human_gated_capabilities: authorization.file.human_gated_capabilities,
       },
-      { kind: 'human_gated', capability },
+      { kind: 'human_gated', capability: match.capability },
     );
     if (decision === 'HUMAN_REQUIRED') {
+      onProgress?.({ stage: 'HUMAN_REQUIRED', detail: match.capability });
       return {
         payload: {
           ...humanRequiredPayload(
-            capability,
+            match.capability,
             runtimeDir,
-            `a instrução implica ${capability}; texto livre não autoriza esta categoria e o header estruturado também não a concedeu.`,
+            `a instrução implica ${match.capability} (evidência: ${JSON.stringify(match.evidence)}); ` +
+              'texto livre não autoriza esta categoria e o header estruturado também não a concedeu.',
           ),
           human_instruction: artifacts.humanInstruction,
           intake_file: artifacts.intake,
@@ -644,11 +710,13 @@ export async function submitHumanInstruction(
     authorizationFile,
     maxIterations: input.max_iterations ?? 100,
     runProjectImpl: input.run_project ?? runProject,
+    ...(onProgress === undefined ? {} : { onProgress }),
     ...(input.planner_profile_id === undefined ? {} : { plannerProfileId: input.planner_profile_id }),
     ...(input.timeout_override === undefined ? {} : { timeoutOverride: input.timeout_override }),
     ...(input.verbose === undefined ? {} : { verbose: input.verbose }),
     ...(input.autonomy === undefined ? {} : { autonomy: input.autonomy }),
   });
+  emitExecutionOutcome(onProgress, executed);
 
   const selfReport = await maybeIntegrateSelf({
     self: targetType === 'self',
@@ -656,6 +724,7 @@ export async function submitHumanInstruction(
     controlRoot,
     identity: selfIdentity,
     executed,
+    ...(onProgress === undefined ? {} : { onProgress }),
   });
   const diverged = selfReport['status'] === 'EXTERNAL_STATE_DIVERGENCE';
   return {
@@ -676,6 +745,8 @@ export async function submitHumanInstruction(
 export async function resumeHumanInstruction(
   input: ResumeHumanInstructionInput,
 ): Promise<LabRunResult> {
+  const onProgress = input.on_progress;
+  onProgress?.({ stage: 'PREFLIGHT', detail: 'resume' });
   const runtimeDir = path.resolve(input.runtime_dir);
   input.on_runtime?.(runtimeDir);
   const artifacts = labArtifactPaths(runtimeDir);
@@ -719,6 +790,10 @@ export async function resumeHumanInstruction(
     repoRoot = selfIdentity.target_worktree_path;
     await assertControllerUnchanged(selfIdentity, controlRoot);
   }
+  onProgress?.({
+    stage: 'TARGET_READY',
+    detail: instruction.target.type === 'self' ? 'self' : repoRoot,
+  });
 
   input.on_summary?.({
     target: instruction.target.type === 'self' ? 'self' : repoRoot,
@@ -740,11 +815,13 @@ export async function resumeHumanInstruction(
     authorizationFile: artifacts.authorization,
     maxIterations: input.max_iterations ?? 100,
     runProjectImpl: input.run_project ?? runProject,
+    ...(onProgress === undefined ? {} : { onProgress }),
     ...(input.planner_profile_id === undefined ? {} : { plannerProfileId: input.planner_profile_id }),
     ...(input.timeout_override === undefined ? {} : { timeoutOverride: input.timeout_override }),
     ...(input.verbose === undefined ? {} : { verbose: input.verbose }),
     ...(input.autonomy === undefined ? {} : { autonomy: input.autonomy }),
   });
+  emitExecutionOutcome(onProgress, executed);
   const effectivePublish =
     persistedGrant ??
     (input.publish === true ? { allowed: true, remote: 'origin', ref: 'main' } : publishGrant);
@@ -754,6 +831,7 @@ export async function resumeHumanInstruction(
     controlRoot,
     identity: selfIdentity,
     executed,
+    ...(onProgress === undefined ? {} : { onProgress }),
   });
   const diverged = selfReport['status'] === 'EXTERNAL_STATE_DIVERGENCE';
   return {

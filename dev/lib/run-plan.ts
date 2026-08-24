@@ -9,6 +9,7 @@ import {
 import { createProjectControlPlane, type ProjectControlPlane } from './project-run.js';
 import { exitCodeForOrchestrationStop } from './orchestration-termination.js';
 import type { HarnessPaths } from './paths.js';
+import type { LabProgressListener } from './lab-progress.js';
 import { loadPlan, type LoadedPlan } from './plan.js';
 import { loadProfileFromCatalog, profileProvenance, type ProfileProvenance } from './profile.js';
 import type { DevelopmentState } from './schemas.js';
@@ -43,6 +44,7 @@ export interface PlanRunInput {
   readonly autonomy?: 'routine';
   readonly timeoutOverride?: string;
   readonly verbose?: boolean;
+  readonly onProgress?: LabProgressListener;
 }
 
 export interface PlanRunResult {
@@ -322,6 +324,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanRunResult> {
     loaded,
     profileId,
     maxIterations: input.maxIterations,
+    ...(input.onProgress === undefined ? {} : { onProgress: input.onProgress }),
     ...(input.timeoutOverride === undefined ? {} : { timeoutOverride: input.timeoutOverride }),
     ...(input.autonomy === undefined ? {} : { autonomy: input.autonomy }),
     ...(input.verbose === undefined ? {} : { verbose: input.verbose }),

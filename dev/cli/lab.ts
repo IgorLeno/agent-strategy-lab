@@ -18,6 +18,7 @@ import {
   resumeHumanInstruction,
   submitRunDirective,
 } from '../lib/lab.js';
+import { createProgressRenderer } from '../lib/lab-progress.js';
 import { PlanSetupError } from '../lib/run-plan.js';
 import { ProjectAuthorizationError } from '../lib/project-authorization.js';
 import { SelfMaintenanceError } from '../lib/lab-self.js';
@@ -35,8 +36,9 @@ const PRODUCT_PROMPT = [
   '> ',
 ].join('\n');
 
-async function readStdin(interactive: boolean): Promise<string> {
+async function readStdin(interactive: boolean, onWaiting?: () => void): Promise<string> {
   if (interactive && stdinStream.isTTY === true) {
+    onWaiting?.();
     process.stderr.write(PRODUCT_PROMPT);
   }
   const chunks: Buffer[] = [];
@@ -76,6 +78,9 @@ async function main(): Promise<void> {
   const announceRuntime = (dir: string): void => {
     process.stderr.write(`runtime: ${dir}\n`);
   };
+  const progress = createProgressRenderer((line) => {
+    process.stderr.write(line);
+  });
   const announceSummary = (summary: Parameters<typeof formatRunSummary>[0]): void => {
     process.stderr.write(`${formatRunSummary(summary)}\n`);
   };
@@ -99,6 +104,7 @@ async function main(): Promise<void> {
         runtime_dir: resumeRuntime,
         on_runtime: announceRuntime,
         on_summary: announceSummary,
+        on_progress: progress,
         ...sharedFlags(args),
       });
       emit(result.payload);
@@ -114,7 +120,7 @@ async function main(): Promise<void> {
       source = 'file';
       sourcePath = promptFile;
     } else {
-      raw = await readStdin(true);
+      raw = await readStdin(true, () => progress({ stage: 'WAITING_FOR_INPUT' }));
       source = 'stdin';
     }
 
@@ -129,6 +135,7 @@ async function main(): Promise<void> {
       self: args.flags.has('self'),
       on_runtime: announceRuntime,
       on_summary: announceSummary,
+      on_progress: progress,
       ...(runtimeDir === undefined ? {} : { runtime_dir: runtimeDir }),
       ...(authorization === undefined ? {} : { authorization_file: authorization }),
       ...(policy === undefined ? {} : { policy_preset: policy }),

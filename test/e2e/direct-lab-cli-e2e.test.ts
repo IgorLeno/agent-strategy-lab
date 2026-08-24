@@ -343,3 +343,101 @@ describe('pnpm lab run — Run Directive', () => {
     expect(JSON.parse(first.stdout).stopped_by).toBe('ALL_DONE');
   }, 60_000);
 });
+
+/**
+ * ACCEPTANCE — uma Run Directive REALISTA e GRANDE atravessa o product path
+ * inteiro pelo CLI real (parser real, autorização real, packet real,
+ * normalização real de plano; só o PROVIDER é o worker falso determinístico).
+ */
+describe('pnpm lab run — Run Directive realista e grande', () => {
+  function realisticDirective(target: string): { readonly raw: string; readonly body: string } {
+    const section = [
+      '## Contexto operacional',
+      'O Agent Lab é control plane: orquestra, observa e valida — não micromanageia o worker.',
+      'Evidence runtime anterior: data/project-runs/self/380e105e4468e4d5-facd91ca9a66.',
+      'A validação oficial pertence ao orquestrador; o worker faz validação targeted.',
+      '',
+      '### Salvaguardas (proibições, não pedidos)',
+      '- no force push;',
+      '- não fazer ações destrutivas;',
+      '- never use an API key;',
+      '- do not deploy to production;',
+      '- nunca apagar runtimes de evidência.',
+      '',
+      '```',
+      'observed: worker_runtime_budget 1996000ms > profile bound 1800000ms',
+      '```',
+    ].join('\n');
+    const lines = ['# Objective', '', 'Create a small README note documenting the control plane boundary.', ''];
+    while (lines.join('\n').length < 12_000) lines.push(section, '');
+    const body = lines.join('\n').trim();
+    return {
+      body,
+      // Sem authorization.preset: o preset determinístico (fake) do ambiente de
+      // teste continua valendo, então o E2E não gasta provider real.
+      raw: runDirective({
+        header: `target:\n  type: repository\n  path: ${target}\nexecution:\n  mode: new\n  autonomy: routine\n`,
+        body: `${body}\n`,
+      }),
+    };
+  }
+
+  it('ACCEPTANCE — persiste, autoriza, planeja e persiste plano sem false gate, 4k rejection ou parse failure', async () => {
+    const fixture = await externalProject();
+    const { raw, body } = realisticDirective(fixture.target);
+    expect(body.length).toBeGreaterThan(10_000);
+
+    const result = await runLab(['run', '--max-iterations', '4'], labEnv(fixture.runs), raw);
+    expect(result.exitCode, result.stderr).toBe(0);
+
+    const output = JSON.parse(result.stdout) as {
+      stopped_by: string;
+      status?: string;
+      decision_needed?: string;
+      runtime_dir: string;
+      human_instruction: string;
+      generated_plan: { origin: string; file: string };
+      observability: { directive_format: string; run_directive_sha256: string };
+    };
+
+    // Sem false human gate e sem rejeição de packet.
+    expect(output.status).not.toBe('HUMAN_REQUIRED');
+    expect(output.decision_needed).toBeUndefined();
+    expect(result.stdout).not.toMatch(/PACKET_CONSTRUCTION/);
+    expect(result.stdout).not.toMatch(/at most 4000 character/);
+    expect(result.stdout).not.toMatch(/DRAFT_NOT_PARSEABLE/);
+
+    // Plano gerado e persistido; ciclo completo.
+    expect(output.stopped_by).toBe('ALL_DONE');
+    expect(output.generated_plan.origin).toBe('GENERATED');
+    expect((await loadPlan(output.generated_plan.file)).plan.tasks.length).toBeGreaterThan(0);
+
+    // Autoridade humana persistida íntegra (byte equality do corpo).
+    const persisted = await loadHumanInstruction(output.human_instruction);
+    expect(
+      Buffer.from(persisted.instruction_body as string, 'utf8').equals(Buffer.from(body, 'utf8')),
+    ).toBe(true);
+    const rawOnDisk = await readFile(path.join(output.runtime_dir, 'lab/run-directive.txt'), 'utf8');
+    expect(rawOnDisk).toBe(raw.replace(/\r\n/g, '\n'));
+
+    // Progresso de lifecycle observável em stderr, na ordem semântica.
+    const stages = ['PREFLIGHT', 'TARGET_READY', 'AUTHORIZED', 'PLANNING', 'PLANNER_RUNNING', 'PLAN_READY', 'WORKER_RUNNING', 'VALIDATING', 'TASK_ACCEPTED', 'ALL_DONE'];
+    const positions = stages.map((stage) => result.stderr.indexOf(stage));
+    expect(positions.every((index) => index >= 0), result.stderr).toBe(true);
+    expect([...positions]).toEqual([...positions].sort((left, right) => left - right));
+    expect(result.stderr).toMatch(/\[\d{2}:\d{2}\] PREFLIGHT/);
+  }, 90_000);
+
+  it('guard de tamanho: Run Directive absurda falha antes de persistir e sem truncar', async () => {
+    const fixture = await externalProject();
+    const raw = runDirective({
+      header: `target:\n  type: repository\n  path: ${fixture.target}\n`,
+      body: `# Objective\n\n${'x'.repeat(300_000)}\n`,
+    });
+    const result = await runLab(['run'], labEnv(fixture.runs), raw);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toMatch(/excede o limite de produto/);
+    expect(result.stderr).toMatch(/Nada foi truncado/);
+    expect(result.stdout).not.toMatch(/generated_plan/);
+  }, 60_000);
+});

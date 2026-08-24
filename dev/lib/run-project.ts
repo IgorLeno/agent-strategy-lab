@@ -19,6 +19,7 @@ import { loadProfileFromCatalog, type LauncherProfile } from './profile.js';
 import { loadPlan } from './plan.js';
 import { PlanSetupError, runPlan, type PlanRunResult } from './run-plan.js';
 import { inspectRepository, type ProjectInspection } from '../../src/inspection/index.js';
+import type { LabProgressListener } from './lab-progress.js';
 import {
   ExecutionAuthorizationScope,
   ProjectIntakeRequest,
@@ -34,11 +35,15 @@ export interface EnsureGeneratedProjectPlanInput {
   readonly authorizationScope: ExecutionAuthorizationScope;
   readonly inspect?: (repoRoot: string) => Promise<ProjectInspection>;
   readonly planningWorker: () => Promise<PlanningWorkerPort>;
+  readonly onProgress?: LabProgressListener;
+  /** Só para evidência de falha: qual profile o planner usaria. */
+  readonly plannerProfileId?: string;
 }
 
 export interface EnsuredGeneratedProjectPlan {
   readonly origin: 'GENERATED' | 'REUSED';
   readonly planFile: string;
+  readonly taskCount: number;
 }
 
 function describe(error: unknown): string {
@@ -92,7 +97,11 @@ export async function ensureGeneratedProjectPlan(
   try {
     const loaded = await loadPlan(input.paths.planFile);
     assertReusableSource(input.paths, input.intake, input.authorizationScope, loaded.plan.generated_from);
-    return { origin: 'REUSED', planFile: input.paths.planFile };
+    input.onProgress?.({
+      stage: 'PLAN_READY',
+      detail: `origin=REUSED tasks=${loaded.plan.tasks.length}`,
+    });
+    return { origin: 'REUSED', planFile: input.paths.planFile, taskCount: loaded.plan.tasks.length };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
       if (error instanceof PlanSetupError) throw error;
@@ -110,6 +119,7 @@ export async function ensureGeneratedProjectPlan(
     );
   }
 
+  input.onProgress?.({ stage: 'PLANNING' });
   const inspect = input.inspect ?? ((repoRoot: string) => inspectRepository({ repoRoot }));
   const inspection = await inspect(input.paths.repoRoot);
   const planned = await runReviewedPath({
@@ -123,16 +133,28 @@ export async function ensureGeneratedProjectPlan(
       planned.outcome === 'REJECTED' || planned.outcome === 'DECOMPOSITION_REQUIRED'
         ? planned.stage + ': ' + planned.issues.join('; ')
         : 'planning recusado';
+    // Evidência operacional da falha: stage, profile e runtime, para que o
+    // usuário saiba ONDE parou e onde inspecionar sem abrir o código.
     throw new PlanSetupError(
       'planning worker/gates recusaram o projeto: ' +
         details +
+        '\nstage=' +
+        (planned.outcome === 'REJECTED' || planned.outcome === 'DECOMPOSITION_REQUIRED'
+          ? planned.stage
+          : 'PLANNING_WORKER') +
+        (input.plannerProfileId === undefined ? '' : ' planner_profile=' + input.plannerProfileId) +
+        '\nevidence: ' + input.paths.devDir +
         '\nNenhum PlanFile foi persistido e o executor não foi chamado.',
     );
   }
 
   const projection = projectImplementationPlan(planned.plan);
   await writeFileAtomic(input.paths.planFile, stringifyYaml(projection));
-  return { origin: 'GENERATED', planFile: input.paths.planFile };
+  input.onProgress?.({
+    stage: 'PLAN_READY',
+    detail: `origin=GENERATED tasks=${projection.tasks.length}`,
+  });
+  return { origin: 'GENERATED', planFile: input.paths.planFile, taskCount: projection.tasks.length };
 }
 
 function executionScopeOf(authorization: ProjectRunAuthorizationFile): ExecutionAuthorizationScope {
@@ -207,6 +229,7 @@ export interface ProjectRunInput {
   readonly autonomy?: 'routine';
   readonly timeoutOverride?: string;
   readonly verbose?: boolean;
+  readonly onProgress?: LabProgressListener;
 }
 
 /** Glue de release: planeja/persiste uma vez e delega ao executor existente. */
@@ -227,6 +250,8 @@ export async function runProject(input: ProjectRunInput): Promise<PlanRunResult>
     paths: input.paths,
     intake: ProjectIntakeRequest.parse(input.intake),
     authorizationScope,
+    plannerProfileId,
+    ...(input.onProgress === undefined ? {} : { onProgress: input.onProgress }),
     planningWorker: async () => {
       const profile = await loadPlannerProfile(input.paths, authorization, plannerProfileId);
       const facts = await collectProjectLaunchFacts({
@@ -234,6 +259,7 @@ export async function runProject(input: ProjectRunInput): Promise<PlanRunResult>
         profile,
         homeNamespace: 'planner-homes',
       });
+      input.onProgress?.({ stage: 'PLANNER_RUNNING', detail: profile.id });
       return createLaunchedPlanningWorker({
         paths: input.paths,
         profile,
@@ -254,6 +280,7 @@ export async function runProject(input: ProjectRunInput): Promise<PlanRunResult>
     authorizationFile: loadedAuthorization.source_file,
     dryRun: false,
     maxIterations: input.maxIterations,
+    ...(input.onProgress === undefined ? {} : { onProgress: input.onProgress }),
     ...(input.autonomy === undefined ? {} : { autonomy: input.autonomy }),
     ...(input.timeoutOverride === undefined ? {} : { timeoutOverride: input.timeoutOverride }),
     ...(input.verbose === undefined ? {} : { verbose: input.verbose }),

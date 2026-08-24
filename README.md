@@ -375,6 +375,39 @@ Intent ≠ authorization: o corpo não concede permissão. Só o header
 estruturado (sobre o preset) autoriza. Self-maintenance usa
 `target.type: self`. Publicar origin/main exige um grant estreito no header.
 
+Proibição ≠ pedido: escrever `no force push` ou `não fazer deploy em produção`
+no corpo é uma salvaguarda, não um pedido da ação — o preflight de intenção é
+determinístico, sem inferência paga, e classifica por cláusula (PT e EN).
+Pedido afirmativo de categoria human-gated continua parando antes do provider,
+e a resposta `HUMAN_REQUIRED` só oferece o que a política realmente concede:
+categoria never-grantable nunca sugere "conceda no header".
+
+A instrução humana COMPLETA é a autoridade e chega íntegra ao planner — sem
+limite de 4000 caracteres e sem truncation silenciosa. O `PlannerPacket`
+continua bounded (fatos derivados + contrato de saída) e carrega só o
+`instruction_sha256` que amarra as duas partes. O guard de tamanho de input é
+de produto e explícito: 256 KiB por Run Directive, recusado antes de qualquer
+persistência ou provider.
+
+Enquanto roda, `pnpm lab run` imprime o progresso do lifecycle em stderr, uma
+linha por transição:
+
+```text
+[00:00] PREFLIGHT
+[00:00] TARGET_READY /path/to/project
+[00:01] AUTHORIZED local-autonomous-development
+[00:01] PLANNING
+[00:01] PLANNER_RUNNING codex-build-worker-subscription-terra-medium-v2
+[00:19] PLAN_READY origin=GENERATED tasks=2
+[00:19] WORKER_RUNNING task=T1 profile=...
+[04:42] VALIDATING task=T1
+[05:03] TASK_ACCEPTED task=T1
+[18:30] ALL_DONE
+```
+
+Falha nomeia o stage, o planner profile e o runtime de evidência; stdout
+continua reservado ao payload JSON.
+
 ### Advanced / Compatibility Interface
 
 Flags continuam válidas, mas não são o fluxo principal:

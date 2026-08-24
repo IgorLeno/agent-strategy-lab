@@ -707,3 +707,28 @@ autorização, integridade da base e identidade do candidate. Pela mesma razão,
 histórico canônico ilegível no ROUTING degrada para o router determinístico —
 que é estritamente mais conservador, porque história só consegue override sob
 dominância de Pareto.
+
+[2026-08-24] Contexto: a interface direta `pnpm lab run` nasceu com suíte
+verde, mas os quatro primeiros usos reais falharam em fronteiras distintas —
+gate humano falso por frase de PROIBIÇÃO, `user_intent.request` limitado a
+4000 caracteres, e `DRAFT_NOT_PARSEABLE` porque o stdout JSONL do Codex era
+tratado como um único JSON.
+Mistake: os testes exercitavam cada módulo dentro do contrato que ele mesmo
+declarava, e o caminho real do produto — Run Directive grande, colada por um
+humano, com salvaguardas negativas, indo até um provider com transporte
+próprio — nunca era percorrido de ponta a ponta. Teste verde provou os
+módulos, não o produto.
+Rule: toda fronteira de contrato do PRODUCT ENTRY PATH precisa de prova no
+formato real do produto, não no formato conveniente do módulo: (a) input do
+tamanho e da forma que o humano realmente cola, com byte equality na entrega
+ao provider — substring esconde truncation; (b) transporte de provider provado
+contra fixture capturada da CLI instalada, com os quatro diagnósticos
+separados (transporte malformado, falha terminal do provider, payload de
+modelo inválido, draft válido); (c) classificação lexical de intenção testada
+nos dois sentidos e nos dois idiomas — negada não gera gate, afirmativa gera;
+(d) um E2E que atravesse parser, autorização, packet e normalização reais com
+apenas o provider substituído. Corolário de contrato: limite incidental de um
+artefato interno nunca vira política de input do produto — se existe máximo
+global, ele é declarado, justificado e falha explícito antes do provider.
+Corolário de UX: resposta de gate humano só pode oferecer opções que a
+política realmente concede, derivadas de uma fonte única de grantability.

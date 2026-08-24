@@ -43,6 +43,7 @@ import {
 } from './routine-autonomy-runtime.js';
 import type { ProjectControlPlane } from './project-run.js';
 import { selectNextTask } from './select.js';
+import type { LabProgressListener } from './lab-progress.js';
 import { ensureRuntimeDirs, getTaskState, readState } from './state.js';
 import { launchTask, prepareNextTask, type LaunchStepResult } from './steps.js';
 
@@ -102,6 +103,7 @@ async function executeReadyTask(
   repair: { automaticRepair: boolean; repairSourceAttempt: number } | null,
   expectedTaskId?: string,
   acceptance?: ValidatedCandidateAcceptancePolicy,
+  onProgress?: LabProgressListener,
 ): Promise<ReadyTaskExecution> {
   let prepared;
   try {
@@ -162,6 +164,7 @@ async function executeReadyTask(
     await writePacket(paths, packet);
   }
 
+  onProgress?.({ stage: 'WORKER_RUNNING', detail: `task=${packet.task_id} profile=${profileId}` });
   const launch = await launchTask(
     paths,
     packet,
@@ -191,6 +194,7 @@ async function executeReadyTask(
     };
   }
 
+  onProgress?.({ stage: 'VALIDATING', detail: `task=${packet.task_id}` });
   const close = await closeTaskByLaunchPolicy({
     paths,
     loaded,
@@ -203,8 +207,10 @@ async function executeReadyTask(
     reason: close.reason,
   };
   if (close.kind === 'PASS') {
+    onProgress?.({ stage: 'TASK_ACCEPTED', detail: `task=${packet.task_id}` });
     return { iteration, closeKind: close.kind, stop: null };
   }
+  onProgress?.({ stage: 'TASK_FAILED', detail: `task=${packet.task_id} close=${close.kind}` });
   return {
     iteration,
     closeKind: close.kind,
@@ -470,6 +476,8 @@ export interface OrchestrateOptions {
   readonly autonomy?: 'routine';
   readonly skipPreflight?: boolean;
   readonly verbose?: boolean;
+  /** Progresso de lifecycle (uma linha por transição); ausente = silencioso. */
+  readonly onProgress?: LabProgressListener;
   /**
    * Control plane do lifecycle universal de projeto. Ausente (todo uso
    * histórico), o loop decide exatamente como sempre decidiu: um profile por
@@ -621,6 +629,7 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
     autonomy,
     skipPreflight = false,
     verbose = false,
+    onProgress,
     controlPlane,
   } = options;
   await ensureRuntimeDirs(paths);
@@ -848,6 +857,7 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
             automaticRepair: true,
             repairSourceAttempt: rec.decision.source_attempt,
           };
+          onProgress?.({ stage: 'REPAIR', detail: `task=${subjectId} profile=${launchProfile}` });
         }
       }
 
@@ -881,6 +891,7 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
         repairMeta,
         undefined,
         acceptance,
+        onProgress,
       );
       if ('empty' in executed) {
         stop = executed.stop;

@@ -364,9 +364,35 @@ As fronteiras principais são:
   worker expõe `PlannedTask` compactamente (campos, enums, unidades). O gate de
   normalização continua estrito e sem mapeamento heurístico: a saída do modelo
   não é adivinhada, ela é especificada.
+- **Autoridade e packet são coisas diferentes.** A instrução humana COMPLETA é
+  a autoridade da intenção e viaja íntegra em
+  `PlanningWorkerInvocation.human_instruction`; o `PlannerPacket` fica bounded
+  (fatos derivados, contrato de saída, safety boundaries) e carrega apenas
+  `user_intent.instruction_sha256`, que amarra as duas metades. Nenhum bound de
+  packet é usado como política de tamanho de input: esta é
+  `MAX_RUN_DIRECTIVE_BYTES` (256 KiB), aplicada no parser da Run Directive,
+  antes de persistência e de qualquer provider, e sem truncation.
 - **Objetivos do usuário são piso, não teto.** `USER OBJECTIVES ⊆ PLAN
   ACCEPTANCE`: todo objetivo original precisa aparecer verbatim em alguma task;
-  critérios técnicos adicionais da work unit são legítimos.
+  critérios técnicos adicionais da work unit são legítimos. Por isso o
+  acceptance contract é uma linha citável derivada da instrução — pedir a
+  reprodução verbatim do corpo inteiro transformaria o gate num gerador de
+  rejeição; o corpo íntegro continua chegando pelo canal de autoridade.
+- **Transporte não é payload do modelo.** Cada CLI de provider tem envelope
+  próprio: Claude `--output-format json` (objeto único), Claude `stream-json`
+  (JSONL com uma mensagem `type=result`) e Codex `--json` (JSONL de eventos,
+  payload no texto da última `agent_message`, falha terminal em
+  `turn.failed`/`error`). O control plane decodifica o transporte de forma
+  provider-aware e distingue quatro diagnósticos: `TRANSPORT_MALFORMED`,
+  `PROVIDER_TERMINAL_FAILURE`, payload de modelo inválido (`NOT_PARSEABLE`) e
+  draft válido. Nenhuma regex gulosa sobre o stream, e o schema de
+  `PlannedTask` nunca é relaxado para compensar parsing.
+- **Proibição não é pedido.** O preflight de intenção classifica por cláusula,
+  determinístico e sem inferência paga: uma cláusula negada (PT ou EN) é
+  salvaguarda, nunca requisição. Pedido afirmativo de categoria human-gated
+  continua parando antes do provider, e `HUMAN_REQUIRED` só oferece caminhos
+  reais — `HUMAN_GATE_GRANT_PATH` é a fonte única de grantability, e categoria
+  never-grantable nunca sugere concessão pelo header.
 - **DAG de projeto tem múltiplas raízes.** Componentes independentes
   (fundação, domínio, assets, infraestrutura) são estrutura normal de plano.
   Ciclo, dependência inexistente, auto-dependência e id duplicado continuam

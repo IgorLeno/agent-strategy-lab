@@ -230,3 +230,108 @@ describe('submitRunDirective', () => {
     ).rejects.toBeInstanceOf(LabRunError);
   });
 });
+
+describe('preflight de intenção — PROHIBITION != REQUEST e opções verdadeiras', () => {
+  async function selfLikeExternal(bodyLines: readonly string[], header = 'target:\n  type: repository\n  path: TARGET\n') {
+    const target = await gitRepo('agentlab-rd-gate-');
+    const runs = await mkdtemp(path.join(os.tmpdir(), 'agentlab-rd-runs-'));
+    created.push(runs);
+    const raw = directive({
+      header: header.replace('TARGET', target),
+      body: `${bodyLines.join('\n')}\n`,
+    });
+    return submitRunDirective({
+      raw_directive: raw,
+      instruction_source: 'stdin',
+      env: { AGENTLAB_FAKE_MODE: '1', AGENTLAB_RUNS_DIR: runs },
+      run_project: fakeProject,
+    });
+  }
+
+  it('salvaguardas NEGATIVAS no corpo (PT+EN) não geram gate humano', async () => {
+    const result = await selfLikeExternal([
+      '# Objective',
+      'Fix the budget defect.',
+      '# Safety',
+      '- no force push.',
+      '- não fazer ações destrutivas;',
+      '- never use an API key;',
+      '- do not deploy to production.',
+    ]);
+    expect(result.exitCode).toBe(0);
+    expect(result.payload['stopped_by']).toBe('ALL_DONE');
+  });
+
+  it('pedido AFIRMATIVO destrutivo continua gated e as opções não oferecem grant impossível', async () => {
+    const result = await selfLikeExternal([
+      '# Objective',
+      'Clean the repository history: do a force push of the rewritten branch.',
+    ]);
+    expect(result.exitCode).toBe(9);
+    expect(result.payload['status']).toBe('HUMAN_REQUIRED');
+    expect(result.payload['decision_needed']).toBe('DESTRUCTIVE_ACTION');
+    const options = result.payload['options'] as string[];
+    expect(options.join('\n')).not.toMatch(/conceder a categoria no header/);
+    expect(options.join('\n')).toMatch(/nunca é concedível por Run Directive/);
+  });
+
+  it('intenção de push coberta por authorization.publish concedido não gera gate', async () => {
+    const result = await selfLikeExternal(
+      ['# Objective', 'Implement the fix and, at the end, git push to origin/main.'],
+      'target:\n  type: repository\n  path: TARGET\nauthorization:\n  publish:\n    allowed: true\n    remote: origin\n    ref: main\n',
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.payload['stopped_by']).toBe('ALL_DONE');
+  });
+
+  it('intenção de push SEM grant vira HUMAN_REQUIRED com a opção verdadeira de publish', async () => {
+    const result = await selfLikeExternal([
+      '# Objective',
+      'Implement the fix and, at the end, git push to origin/main.',
+    ]);
+    expect(result.exitCode).toBe(9);
+    expect(result.payload['decision_needed']).toBe('EXTERNAL_SIDE_EFFECT');
+    const options = (result.payload['options'] as string[]).join('\n');
+    expect(options).toMatch(/authorization\.publish/);
+  });
+});
+
+describe('instrução longa e progresso de lifecycle', () => {
+  it('directive com corpo >10k atravessa o product path com corpo íntegro e eventos de progresso', async () => {
+    const target = await gitRepo('agentlab-rd-long-');
+    const runs = await mkdtemp(path.join(os.tmpdir(), 'agentlab-rd-runs-'));
+    created.push(runs);
+    const section = [
+      '## Contexto',
+      'O control plane orquestra; o worker implementa. Não fazer force push.',
+      'Do not deploy to production. Nunca usar API key.',
+    ].join('\n');
+    const bodyLines = ['# Objective', 'Corrigir a fronteira de contrato do planner.'];
+    while (bodyLines.join('\n').length < 12_000) bodyLines.push(section);
+    const body = bodyLines.join('\n');
+    const raw = directive({
+      header: `target:\n  type: repository\n  path: ${target}\n`,
+      body: `${body}\n`,
+    });
+
+    const stages: string[] = [];
+    const result = await submitRunDirective({
+      raw_directive: raw,
+      instruction_source: 'stdin',
+      env: { AGENTLAB_FAKE_MODE: '1', AGENTLAB_RUNS_DIR: runs },
+      run_project: fakeProject,
+      on_progress: (event) => stages.push(event.stage),
+    });
+
+    expect(result.exitCode).toBe(0);
+    const intake = await loadPersistedIntake(result.payload['intake_file'] as string);
+    // Byte equality: truncation silenciosa reprovaria aqui.
+    expect(Buffer.from(intake.user_request, 'utf8').equals(Buffer.from(body, 'utf8'))).toBe(true);
+
+    // Eventos semânticos, na ordem do lifecycle (subset ordenado, sem snapshot).
+    const expected = ['PREFLIGHT', 'TARGET_READY', 'AUTHORIZED', 'ALL_DONE'];
+    const positions = expected.map((stage) => stages.indexOf(stage));
+    expect(positions.every((index) => index >= 0)).toBe(true);
+    expect([...positions]).toEqual([...positions].sort((a, b) => a - b));
+  });
+});
