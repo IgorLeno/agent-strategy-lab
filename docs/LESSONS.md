@@ -5,6 +5,15 @@ Regra, não narrativa: cada entrada termina numa restrição aplicável.
 
 ---
 
+[2026-08-24] Context: review independente de candidate já aprovado nos gates
+oficiais do self-run real.
+Mistake: tratar um único `ACCEPT` sem `coverage` como bloqueio terminal, embora
+o prompt já exigisse o campo e nenhum record append-only tivesse sido gravado.
+Rule: quando uma saída probabilística omite evidência estrutural obrigatória,
+permita no máximo uma nova invocação com os erros exatos do schema; nunca
+complete a evidência no adapter, nunca repita `REJECT` e, após a segunda
+omissão, preserve `null` e falhe fechado.
+
 [2026-08-23] Context: interface canônica `pnpm lab run`.
 Mistake: tratar flags CLI (`--repo`, `--self`, `--publish`) e frases do
 prompt como se carregassem a mesma autoridade.

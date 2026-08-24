@@ -1201,6 +1201,31 @@ describe('dev-project-orchestrate', () => {
 describe('G — reviewer não ganha autorização mais fraca que o implementer', () => {
   const paths = resolveHarnessPaths(REPO_ROOT);
 
+  function codexStream(payload: unknown): string {
+    return [
+      '{"type":"thread.started","thread_id":"t"}',
+      '{"type":"turn.started"}',
+      JSON.stringify({
+        type: 'item.completed',
+        item: { id: 'item_0', type: 'agent_message', text: JSON.stringify(payload) },
+      }),
+      '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}',
+    ].join('\n');
+  }
+
+  const validCoverage = {
+    files: ['src/greet.ts'],
+    validations: [['true']],
+    behaviors: ['aceitação e regressão auditadas'],
+    handoff_gaps: [
+      {
+        gap: 'comportamento sob concorrência',
+        disposition: 'accepted_with_justification' as const,
+        note: 'o teste oficial cobre a fronteira relevante',
+      },
+    ],
+  };
+
   function reviewerPacket() {
     return {
       task_id: 'T1',
@@ -1276,6 +1301,90 @@ describe('G — reviewer não ganha autorização mais fraca que o implementer',
 
     expect(result.outcome).toBe('REVIEW_UNAVAILABLE');
     expect(invoked).toBe(false);
+  });
+
+  it('repete uma vez um ACCEPT sem coverage e entrega ao reviewer a correção explícita', async () => {
+    const profile = await loadProfile(REPO_ROOT, CODEX_PROFILE_ID);
+    const prompts: string[] = [];
+    const outputs = [
+      { decision: 'ACCEPT', reason: 'mudança correta' },
+      { decision: 'ACCEPT', reason: 'mudança correta', coverage: validCoverage },
+    ];
+
+    const result = await launchProjectReviewer({
+      paths,
+      profile,
+      scope: authorizationScope(),
+      implementerProfileId: CLAUDE_PROFILE_ID,
+      diversityRequirement: 'required',
+      risk: 'low',
+      workerRuntimeBudgetMs: 600_000,
+      credential: { availability: true, provenance: 'probe local provou a assinatura' },
+      quota: { availability: null, provenance: 'quota não probada antes do launch' },
+      packet: reviewerPacket(),
+      port: {
+        run: async ({ prompt }) => {
+          prompts.push(prompt);
+          return codexStream(outputs[prompts.length - 1]);
+        },
+      },
+    });
+
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toMatch(/ACCEPT anterior[^]*coverage ausente ou malformada/);
+    expect(result).toMatchObject({ outcome: 'ACCEPT', coverage: validCoverage });
+  });
+
+  it('limita a correção de coverage a uma repetição e não inventa evidência', async () => {
+    const profile = await loadProfile(REPO_ROOT, CODEX_PROFILE_ID);
+    let invocations = 0;
+    const result = await launchProjectReviewer({
+      paths,
+      profile,
+      scope: authorizationScope(),
+      implementerProfileId: CLAUDE_PROFILE_ID,
+      diversityRequirement: 'required',
+      risk: 'low',
+      workerRuntimeBudgetMs: 600_000,
+      credential: { availability: true, provenance: 'probe local provou a assinatura' },
+      quota: { availability: null, provenance: 'quota não probada antes do launch' },
+      packet: reviewerPacket(),
+      port: {
+        run: async () => {
+          invocations += 1;
+          return codexStream({ decision: 'ACCEPT', reason: 'sem prova' });
+        },
+      },
+    });
+
+    expect(invocations).toBe(2);
+    expect(result).toMatchObject({ outcome: 'ACCEPT', coverage: null });
+  });
+
+  it('REJECT sem coverage é definitivo e não consome repetição', async () => {
+    const profile = await loadProfile(REPO_ROOT, CODEX_PROFILE_ID);
+    let invocations = 0;
+    const result = await launchProjectReviewer({
+      paths,
+      profile,
+      scope: authorizationScope(),
+      implementerProfileId: CLAUDE_PROFILE_ID,
+      diversityRequirement: 'required',
+      risk: 'low',
+      workerRuntimeBudgetMs: 600_000,
+      credential: { availability: true, provenance: 'probe local provou a assinatura' },
+      quota: { availability: null, provenance: 'quota não probada antes do launch' },
+      packet: reviewerPacket(),
+      port: {
+        run: async () => {
+          invocations += 1;
+          return codexStream({ decision: 'REJECT', reason: 'lacuna real' });
+        },
+      },
+    });
+
+    expect(invocations).toBe(1);
+    expect(result).toMatchObject({ outcome: 'REJECT', coverage: null });
   });
 });
 

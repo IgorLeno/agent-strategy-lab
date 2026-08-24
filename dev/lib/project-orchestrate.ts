@@ -1345,6 +1345,20 @@ export function buildReviewerPrompt(packet: ProjectReviewPacket): string {
   ].join('\n');
 }
 
+function buildReviewerCoverageCorrectionPrompt(
+  packet: ProjectReviewPacket,
+  issues: readonly string[],
+): string {
+  return [
+    buildReviewerPrompt(packet),
+    '',
+    'CORREÇÃO PROTOCOLAR — ÚNICA REPETIÇÃO PERMITIDA:',
+    `Seu ACCEPT anterior tinha coverage ausente ou malformada: ${issues.join('; ')}`,
+    'Não resuma nem remeta à resposta anterior. Responda novamente com o JSON',
+    'completo, incluindo todos os campos de coverage exigidos acima.',
+  ].join('\n');
+}
+
 export interface ProjectReviewerLaunchOptions {
   readonly paths: HarnessPaths;
   readonly profile: LauncherProfile;
@@ -1369,8 +1383,8 @@ interface ProjectReviewVerdict<Outcome extends 'ACCEPT' | 'REJECT'> {
   readonly reason: string;
   /**
    * Cobertura DECLARADA pelo reviewer, do jeito que ele a escreveu. Não é
-   * validada aqui: quem decide se ela basta para um ACCEPT é o schema do
-   * `CandidateReviewRecord`, não este adapter.
+   * completada aqui: o adapter valida somente a forma; quem decide se ela
+   * basta para um ACCEPT é o schema do `CandidateReviewRecord`.
    */
   readonly coverage: CandidateReviewCoverage | null;
   readonly policy: ReviewerInvocationPolicy;
@@ -1396,8 +1410,9 @@ function reviewUnavailable(code: string, reason: string): ProjectReviewResult {
 /**
  * Invocação NOVA, contexto fresco, read-only estrutural e uma única decisão
  * JSON. Reusa exatamente os mesmos guards do adapter de planning: escopo,
- * billing, quota, credencial, risco e execution policy. Saída ambígua não é
- * reparada — vira `REVIEW_UNAVAILABLE`, nunca um ACCEPT presumido.
+ * billing, quota, credencial, risco e execution policy. Um ACCEPT com coverage
+ * ausente ou malformada recebe uma única repetição corretiva em contexto novo;
+ * a segunda omissão continua sem evidência e nunca vira um ACCEPT presumido.
  */
 export async function launchProjectReviewer(
   options: ProjectReviewerLaunchOptions,
@@ -1433,14 +1448,6 @@ export async function launchProjectReviewer(
     return reviewUnavailable('REVIEW_BUDGET_UNSUPPORTED', budget.reason);
   }
 
-  const prompt = buildReviewerPrompt(options.packet);
-  const overlay = buildRoleArgv(options.profile, {
-    role: 'reviewer',
-    prompt,
-  });
-  assertReadOnlyArgv('reviewer', options.profile.agent, overlay.argv);
-  const argv = resolveRoleOverlayArgv(options.paths, overlay.argv);
-
   const home = path.join(options.paths.devDir, 'project', 'homes', options.profile.id);
   await mkdir(home, { recursive: true });
   const env = buildEnvironment(options.profile, process.env, { sanitizedHome: home });
@@ -1460,67 +1467,86 @@ export async function launchProjectReviewer(
   }
 
   const port = options.port ?? createProviderRoleInvocationPort();
-  let stdout: string;
-  try {
-    stdout = await port.run({
+  let prompt = buildReviewerPrompt(options.packet);
+  for (let invocation = 1; invocation <= 2; invocation += 1) {
+    const overlay = buildRoleArgv(options.profile, {
       role: 'reviewer',
-      profile: options.profile,
-      argv,
       prompt,
-      cwd: options.paths.repoRoot,
-      env,
-      timeoutSeconds: budget.timeout_seconds_override,
     });
-  } catch (error) {
-    return reviewUnavailable(
-      'REVIEW_INVOCATION_FAILED',
-      error instanceof Error ? error.message : String(error),
-    );
+    assertReadOnlyArgv('reviewer', options.profile.agent, overlay.argv);
+    const argv = resolveRoleOverlayArgv(options.paths, overlay.argv);
+
+    let stdout: string;
+    try {
+      stdout = await port.run({
+        role: 'reviewer',
+        profile: options.profile,
+        argv,
+        prompt,
+        cwd: options.paths.repoRoot,
+        env,
+        timeoutSeconds: budget.timeout_seconds_override,
+      });
+    } catch (error) {
+      return reviewUnavailable(
+        'REVIEW_INVOCATION_FAILED',
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+
+    const extracted = extractRoleModelJson({
+      agent: options.profile.agent,
+      argv,
+      stdout,
+    });
+    switch (extracted.outcome) {
+      case 'EXTRACTED':
+        break;
+      case 'PROVIDER_TERMINAL_FAILURE':
+        return reviewUnavailable('REVIEW_INVOCATION_FAILED', extracted.message);
+      case 'TRANSPORT_MALFORMED':
+        return reviewUnavailable('REVIEW_INVOCATION_FAILED', extracted.message);
+      case 'NOT_PARSEABLE':
+        return reviewUnavailable('REVIEW_VERDICT_NOT_PARSEABLE', extracted.message);
+      default: {
+        const _exhaustive: never = extracted;
+        return _exhaustive;
+      }
+    }
+    const parsed = extracted.value as
+      | { decision?: unknown; reason?: unknown; coverage?: unknown }
+      | null;
+    const decision = parsed?.decision;
+    const reason = parsed?.reason;
+    if ((decision !== 'ACCEPT' && decision !== 'REJECT') || typeof reason !== 'string' || reason.trim() === '') {
+      return reviewUnavailable(
+        'REVIEW_VERDICT_NOT_PARSEABLE',
+        'saída do reviewer não contém um único JSON {"decision":"ACCEPT|REJECT","reason":"..."}',
+      );
+    }
+
+    const coverage = CandidateReviewCoverage.safeParse(parsed?.coverage);
+    if (decision === 'ACCEPT' && !coverage.success && invocation === 1) {
+      prompt = buildReviewerCoverageCorrectionPrompt(
+        options.packet,
+        coverage.error.issues.map((issue) => issue.message),
+      );
+      continue;
+    }
+    return {
+      outcome: decision,
+      reason: reason.trim(),
+      // Evidência malformada não é completada pelo adapter. Depois da única
+      // repetição, null continua chegando ao schema append-only e falha fechado.
+      coverage: coverage.success ? coverage.data : null,
+      policy: plan.policy,
+      argv,
+      workspace_access: overlay.workspace_access,
+      read_only_mechanism: overlay.mechanism,
+    };
   }
 
-  const extracted = extractRoleModelJson({
-    agent: options.profile.agent,
-    argv,
-    stdout,
-  });
-  switch (extracted.outcome) {
-    case 'EXTRACTED':
-      break;
-    case 'PROVIDER_TERMINAL_FAILURE':
-      return reviewUnavailable('REVIEW_INVOCATION_FAILED', extracted.message);
-    case 'TRANSPORT_MALFORMED':
-      return reviewUnavailable('REVIEW_INVOCATION_FAILED', extracted.message);
-    case 'NOT_PARSEABLE':
-      return reviewUnavailable('REVIEW_VERDICT_NOT_PARSEABLE', extracted.message);
-    default: {
-      const _exhaustive: never = extracted;
-      return _exhaustive;
-    }
-  }
-  const parsed = extracted.value as
-    | { decision?: unknown; reason?: unknown; coverage?: unknown }
-    | null;
-  const decision = parsed?.decision;
-  const reason = parsed?.reason;
-  if ((decision !== 'ACCEPT' && decision !== 'REJECT') || typeof reason !== 'string' || reason.trim() === '') {
-    return reviewUnavailable(
-      'REVIEW_VERDICT_NOT_PARSEABLE',
-      'saída do reviewer não contém um único JSON {"decision":"ACCEPT|REJECT","reason":"..."}',
-    );
-  }
-  // Cobertura mal formada NÃO é reparada nem completada: ela simplesmente não
-  // existe, e um ACCEPT sem cobertura válida será recusado pelo schema do
-  // record. Inventar coverage aqui seria fabricar auditoria.
-  const coverage = CandidateReviewCoverage.safeParse(parsed?.coverage);
-  return {
-    outcome: decision,
-    reason: reason.trim(),
-    coverage: coverage.success ? coverage.data : null,
-    policy: plan.policy,
-    argv,
-    workspace_access: overlay.workspace_access,
-    read_only_mechanism: overlay.mechanism,
-  };
+  throw new Error('unreachable: reviewer coverage correction exceeded its bound');
 }
 
 // ---------------------------------------------------------------------------
