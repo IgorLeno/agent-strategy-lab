@@ -26,7 +26,9 @@ projeto real — não um pedido para reescrever a arquitetura agora.
 O fluxo desejado é:
 
 ```text
-HUMAN INTENT
+HUMAN INSTRUCTION
+      ↓
+INTAKE
       ↓
 PLAN
       ↓
@@ -334,6 +336,30 @@ arquiteturalmente elegante. Melhoria do Lab é *evidence-triggered*.
 
 ---
 
+## Quick Start
+
+A porta de produto é `pnpm lab`. O usuário cola a instrução; o Lab persiste o
+texto raw, deriva o intake e aplica o preset local. Intent ≠ authorization:
+pedir deploy no prompt não autoriza deploy.
+
+```text
+pnpm lab --repo /path/to/project
+# paste instruction, Ctrl+D
+
+pnpm lab --resume /path/to/runtime
+
+pnpm lab --self
+# safe isolated self-maintenance
+```
+
+`stdin` e `--prompt-file` são equivalentes. `--self` executa contra um
+worktree isolado; o control repo só integra no fim, em fast-forward.
+`--publish` é o único caminho que empurra para o remote.
+
+Os CLIs `dev-*` continuam como primitives internas.
+
+---
+
 ## Como funciona hoje
 
 O control plane atual recebe uma intenção de projeto e a transforma em
@@ -344,9 +370,9 @@ possuindo, a liberdade de implementação **dentro** das fronteiras
 autorizadas.
 
 ```text
-USER INTENT + agentlab-run.yaml
+HUMAN INSTRUCTION (raw) + preset local-autonomous-development
         │
-   INTAKE ─ escopo de autorização explícito (autônomo vs human-gated)
+   INTAKE ─ compile estrutural; o raw permanece a autoridade humana
         │
    INSPECTION ─ leitura do repositório alvo (stack, validações, âncoras)
         │
@@ -364,9 +390,12 @@ USER INTENT + agentlab-run.yaml
    CANONICAL EVIDENCE ─ runs selados alimentam o routing futuro
 ```
 
-- **Intake e autorização.** `agentlab-run.yaml` separa definição do trabalho
-  da autorização de execução. O que não foi autorizado explicitamente não
-  acontece. Ver [`docs/agentlab-run.example.yaml`](docs/agentlab-run.example.yaml).
+- **Intake e autorização.** A instrução humana raw é persistida antes de
+  qualquer provider. O Lab deriva `ProjectIntakeRequest`; o preset
+  `local-autonomous-development` autoriza execução local subscription-only.
+  `--authorization` / `--policy` são overrides avançados. O que não foi
+  autorizado explicitamente não acontece. Ver
+  [`docs/agentlab-run.example.yaml`](docs/agentlab-run.example.yaml).
 - **Inspection, planejamento e routing.** Fatos do repositório alvo alimentam
   work units (`PlannedTask`) com acceptance, validações, dependências e
   envelope de recursos. Routing em três camadas: capabilities com provenance,
@@ -381,10 +410,9 @@ USER INTENT + agentlab-run.yaml
   medido permanece `UNKNOWN`.
 
 **Implementado e testado** (incluindo E2E do fluxo de projeto externo com
-providers fake): ciclo autônomo via
-`pnpm dev-run-project --repo <alvo> --request <project-request.yaml>
---authorization <agentlab-run.yaml>`; evidence kernel; billing/credencial
-com fatos tri-state; catálogo de perfis versionados.
+providers fake): ciclo autônomo via `pnpm lab --repo <alvo>`; evidence
+kernel; billing/credencial com fatos tri-state; catálogo de perfis
+versionados. `pnpm dev-run-project` permanece como primitive interna.
 
 **Limitações atuais** (mapeadas como work units M95–M126 em
 [`dev/plan.yaml`](dev/plan.yaml); plano em

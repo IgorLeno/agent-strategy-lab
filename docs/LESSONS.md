@@ -5,6 +5,14 @@ Regra, não narrativa: cada entrada termina numa restrição aplicável.
 
 ---
 
+[2026-08-23] Context: porta de produto `pnpm lab` e self-maintenance.
+Mistake: exigir que o humano escreva ProjectIntakeRequest/agentlab-run.yaml
+— ou editar o control repo no mesmo working tree que carrega as primitives —
+reintroduz um orquestrador humano entre a instrução e o Lab.
+Rule: o texto raw é a autoridade humana e é persistido antes de qualquer
+provider; autorização vem de preset versionado, nunca do prompt; self-run
+usa worktree isolado e só integra por fast-forward se main não divergiu.
+
 [2026-08-23] Context: planner Claude com --output-format json no primeiro projeto real.
 Mistake: extractJsonObject(stdout) tratou o envelope da CLI (is_error, result,
 session_id) como o draft do modelo; SCHEMA_NORMALIZATION recusou o transporte.

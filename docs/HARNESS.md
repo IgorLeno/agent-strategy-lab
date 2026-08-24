@@ -132,7 +132,13 @@ dev-close      confirma commit e escopo, re-executa as validações do packet,
 dev-orchestrate  roda o loop acima; o worker nunca roda o loop
 dev-run-plan     resolve repo/plan/profile, inicializa se preciso, delega ao loop
 dev-recover      reconcilia plano + commits + completions + runtime
+lab              porta de produto: HumanInstruction → intake → runProject.
+                 --self usa worktree isolado; --resume relê o runtime.
 ```
+
+A porta `lab` não é outro orquestrador: lê a instrução humana, persiste
+`HumanInstruction`, deriva o intake e chama `runProject`. Self-maintenance
+nunca edita o working tree do control repo durante a run.
 
 ## Estados
 
