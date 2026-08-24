@@ -100,7 +100,7 @@ async function executeReadyTask(
   paths: HarnessPaths,
   loaded: LoadedPlan,
   profileId: string,
-  timeoutOverride: string | undefined,
+  machineSafetyCeilingOverride: string | undefined,
   repair: { automaticRepair: boolean; repairSourceAttempt: number } | null,
   expectedTaskId?: string,
   acceptance?: ValidatedCandidateAcceptancePolicy,
@@ -170,7 +170,7 @@ async function executeReadyTask(
     paths,
     packet,
     profileId,
-    timeoutOverride === undefined ? undefined : Number(timeoutOverride),
+    machineSafetyCeilingOverride === undefined ? undefined : Number(machineSafetyCeilingOverride),
   );
   if (launch.classification === 'PREFLIGHT_BLOCKED') {
     return { empty: true, stop: { status: 'PREFLIGHT_BLOCKED', reason: launch.reason } };
@@ -320,7 +320,7 @@ async function handleRoutinePostLaunch(
   loaded: LoadedPlan,
   execution: ExecutionResult,
   profileId: string,
-  timeoutOverride: string | undefined,
+  machineSafetyCeilingOverride: string | undefined,
   repair: { automaticRepair: boolean; repairSourceAttempt: number } | null,
   acceptance: ValidatedCandidateAcceptancePolicy | undefined,
   operationalRetryAllowed = true,
@@ -336,7 +336,7 @@ async function handleRoutinePostLaunch(
         paths,
         loaded,
         original.profile_id,
-        timeoutOverride,
+        machineSafetyCeilingOverride,
         repair,
         original.task_id,
         acceptance,
@@ -386,7 +386,7 @@ async function settleRoutinePostLaunch(
   loaded: LoadedPlan,
   initial: ExecutionResult,
   profileId: string,
-  timeoutOverride: string | undefined,
+  machineSafetyCeilingOverride: string | undefined,
   repair: { automaticRepair: boolean; repairSourceAttempt: number } | null,
   acceptance: ValidatedCandidateAcceptancePolicy | undefined,
 ): Promise<RoutinePostLaunchSettlement> {
@@ -402,7 +402,7 @@ async function settleRoutinePostLaunch(
       loaded,
       execution,
       profileId,
-      timeoutOverride,
+      machineSafetyCeilingOverride,
       repair,
       acceptance,
       operationalRetriesRemaining !== 0,
@@ -445,7 +445,7 @@ async function settleRoutinePostLaunch(
           paths,
           loaded,
           handled.incident.profile_id,
-          timeoutOverride,
+          machineSafetyCeilingOverride,
           repair,
           handled.incident.task_id,
           acceptance,
@@ -478,7 +478,7 @@ export interface OrchestrateOptions {
   readonly paths: HarnessPaths;
   readonly loaded: LoadedPlan;
   readonly profileId: string;
-  readonly timeoutOverride?: string;
+  readonly machineSafetyCeilingOverride?: string;
   readonly maxIterations: number;
   readonly autonomy?: 'routine';
   readonly skipPreflight?: boolean;
@@ -489,7 +489,7 @@ export interface OrchestrateOptions {
    * Control plane do lifecycle universal de projeto. Ausente (todo uso
    * histórico), o loop decide exatamente como sempre decidiu: um profile por
    * invocação, budget do launcher e parada no repair esgotado. Presente, as
-   * DECISÕES por work unit passam a vir dele — profile, worker runtime budget,
+   * DECISÕES por work unit passam a vir dele — profile, previsão de runtime,
    * review, diagnosis e escalation — sem que o loop, o estado autoritativo, o
    * commit ou a validação oficial mudem de dono.
    */
@@ -631,7 +631,7 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
     paths,
     loaded,
     profileId,
-    timeoutOverride,
+    machineSafetyCeilingOverride,
     maxIterations,
     autonomy,
     skipPreflight = false,
@@ -868,10 +868,10 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
         }
       }
 
-      // O control plane decide profile e worker runtime budget POR work unit.
+      // O control plane decide o profile POR work unit; a previsão de runtime
+      // acompanha a decisão como evidência, sem limitar nada.
       // No bounded repair o profile é imposto pela policy existente e entra
       // como pin: routing informa, mas não troca o profile do repair.
-      let launchTimeout = timeoutOverride;
       if (controlPlane !== undefined && subjectId !== null) {
         const decision = await controlPlane.beforeWorkUnit({
           taskId: subjectId,
@@ -887,14 +887,13 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
           break;
         }
         launchProfile = decision.profile_id;
-        launchTimeout = String(decision.timeout_seconds);
       }
 
       let executed = await executeReadyTask(
         paths,
         loaded,
         launchProfile,
-        launchTimeout,
+        machineSafetyCeilingOverride,
         repairMeta,
         undefined,
         acceptance,
@@ -910,7 +909,7 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
           loaded,
           executed,
           launchProfile,
-          launchTimeout,
+          machineSafetyCeilingOverride,
           repairMeta,
           acceptance,
         );
@@ -980,7 +979,6 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
         automaticRepair: true,
         repairSourceAttempt: rec.decision.source_attempt,
       } as const;
-      let repairTimeout = timeoutOverride;
       if (controlPlane !== undefined) {
         const decision = await controlPlane.beforeWorkUnit({
           taskId: executed.iteration.taskId,
@@ -995,13 +993,12 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
           };
           break;
         }
-        repairTimeout = String(decision.timeout_seconds);
       }
       let repair = await executeReadyTask(
         paths,
         loaded,
         rec.decision.profile_id,
-        repairTimeout,
+        machineSafetyCeilingOverride,
         capabilityRepairMeta,
         undefined,
         acceptance,
@@ -1016,7 +1013,7 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
           loaded,
           repair,
           rec.decision.profile_id,
-          repairTimeout,
+          machineSafetyCeilingOverride,
           capabilityRepairMeta,
           acceptance,
         );

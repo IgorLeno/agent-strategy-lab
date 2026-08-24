@@ -38,8 +38,13 @@ import {
   type ClaudeUsageProbeOutcome,
   type UsageCommandRunner,
 } from './claude-usage.js';
-import { TIMEOUT_EXIT_CODE } from './exec.js';
+import {
+  ActivityObserver,
+  type ActivityObserverOptions,
+  type WorkerActivityTelemetry,
+} from './activity-observer.js';
 import { executionPolicyOf } from './execution-policy.js';
+import { machineSafetyCeiling } from './machine-safety.js';
 import { InboxArtifactError, releaseInboxForLaunch } from './inbox-artifacts.js';
 import type { HarnessPaths } from './paths.js';
 import { killSurvivors } from './process-audit.js';
@@ -53,6 +58,7 @@ import {
 } from './profile.js';
 import { buildWorkerPrompt } from './prompt.js';
 import { ensureTaskInbox, writeLaunchRecord } from './records.js';
+import { WorkerSupervisor, type TerminationCause } from './termination.js';
 import {
   DEV_SCHEMA_VERSION,
   type LaunchRecord,
@@ -64,10 +70,23 @@ export interface LaunchInput {
   readonly paths: HarnessPaths;
   readonly profile: LauncherProfile;
   readonly packet: TaskPacket;
-  /** Sobrescreve o timeout do perfil — usado só por testes. */
-  readonly timeoutSecondsOverride?: number;
+  /**
+   * Encolhe o TETO DE SEGURANÇA DE MÁQUINA — usado só por testes, para que o
+   * failsafe possa ser exercitado em segundos em vez de em horas. Não é budget
+   * de task e não deriva de nada que o planner tenha estimado.
+   */
+  readonly machineSafetyCeilingSecondsOverride?: number;
+  /** Thresholds OBSERVACIONAIS de atividade; testes os encolhem. */
+  readonly activityObserverOptions?: ActivityObserverOptions;
   /** Chamado assim que a identidade do processo é conhecida, antes da espera. */
   readonly onStarted?: (identity: ProcessIdentity) => Promise<void>;
+  /**
+   * Entrega o supervisor do worker VIVO ao chamador: é por aqui que passa o
+   * cancelamento explícito, que `killSurvivors` (pós-término) nunca ofereceu.
+   */
+  readonly onSupervisor?: (supervisor: WorkerSupervisor) => void;
+  /** Observação de stall — persistir/telemetrar. NUNCA encerra o worker. */
+  readonly onStallSuspected?: (telemetry: WorkerActivityTelemetry) => void;
   /** Injetado pelos testes para provar a credencial sem chamar CLI de verdade. */
   readonly credentialRunner?: CommandRunner;
   /** Injetado pelos testes para medir a quota sem chamar CLI de verdade. */
@@ -127,13 +146,19 @@ export class UsageMeasurementSafetyError extends LaunchError {
  * Um processo NOVO por microtarefa. `detached: true` cria sessão própria
  * (setsid), então o pgid é conhecido e a árvore inteira pode ser encerrada.
  *
- * A ordem importa: `timeout` DENTRO da sessão nova, nunca `timeout setsid ...`
- * — setsid ali criaria uma sessão fora do grupo que o timeout sinaliza, e o
- * worker sobreviveria ao próprio limite.
+ * O worker NÃO recebe deadline derivado da task. A duração prevista de uma
+ * tarefa deixou de ter autoridade operacional: ela é hipótese, não permissão,
+ * e um coding worker que ultrapassa a própria previsão continua trabalhando.
+ *
+ * O que existe no lugar é de outra grandeza: um MACHINE_SAFETY_CEILING de
+ * infraestrutura, que não conhece planner, estimativa nem profile, e cuja
+ * única função é garantir que nenhum processo deste harness seja imortal.
  */
 export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
   const { paths, profile, packet } = input;
-  const timeoutSeconds = input.timeoutSecondsOverride ?? profile.timeout_seconds;
+  const ceiling = machineSafetyCeiling({
+    overrideSeconds: input.machineSafetyCeilingSecondsOverride,
+  });
   const executionPolicy = executionPolicyOf(profile);
 
   // ANTES de qualquer efeito — inclusive antes do preflight de cobrança: o
@@ -224,13 +249,10 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
     throw new UsageMeasurementSafetyError(usageBefore.probe.reason ?? 'motivo não informado');
   }
 
-  const argv = [
-    'timeout',
-    '--signal=TERM',
-    `--kill-after=${profile.kill_after_seconds}s`,
-    `${timeoutSeconds}s`,
-    ...agentArgv,
-  ];
+  // O argv é o do AGENTE, sem wrapper de deadline. Enquanto `timeout <N>s ...`
+  // estava aqui, o número que encerrava o worker vinha da previsão da task —
+  // era o task deadline, apenas escondido numa camada de processo.
+  const argv = [...agentArgv];
 
   const stdoutLog = createWriteStream(path.join(paths.logsDir, `${packet.task_id}.stdout.log`));
   const stderrLog = createWriteStream(path.join(paths.logsDir, `${packet.task_id}.stderr.log`));
@@ -262,8 +284,35 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
   }
 
   const identity = await captureProcessIdentity(child.pid, child.pid, argv, startedAt);
+
+  // OBSERVAÇÃO AO VIVO. O listener 'data' convive com o `pipe` para o arquivo:
+  // ambos recebem o MESMO chunk, então nenhum byte do log é consumido, movido
+  // ou truncado, e os parsers post-hoc continuam lendo exatamente o que liam.
+  // O que é observado é o TIMESTAMP do chunk, nunca o seu conteúdo.
+  const activity = new ActivityObserver({
+    startedAtMs,
+    ...(input.activityObserverOptions ?? {}),
+    ...(input.onStallSuspected ? { onStallSuspected: input.onStallSuspected } : {}),
+  });
+  child.stdout?.on('data', (chunk: Buffer) => activity.record('stdout', chunk.length));
+  child.stderr?.on('data', (chunk: Buffer) => activity.record('stderr', chunk.length));
   child.stdout?.pipe(stdoutLog);
   child.stderr?.pipe(stderrLog);
+  activity.start();
+
+  // SUPERVISÃO do worker VIVO. `killSurvivors` roda depois do término e varre
+  // descendentes; ele nunca teve como pedir o fim de um worker em execução.
+  const supervisor = new WorkerSupervisor({
+    pid: child.pid,
+    pgid: identity.pgid,
+    // `kill_after_seconds` continua sendo a GRAÇA ENTRE O PEDIDO E O SIGKILL —
+    // nunca a duração máxima da task.
+    gracePeriodMs: profile.kill_after_seconds * 1_000,
+    exited: termination,
+  });
+  supervisor.armMachineSafetyCeiling(ceiling.seconds * 1_000, ceiling.provenance);
+  input.onSupervisor?.(supervisor);
+
   if (profile.prompt_delivery === 'stdin' && child.stdin) {
     child.stdin.end(prompt, 'utf8');
   }
@@ -280,6 +329,10 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
     | 'rate_limit_observations'
     | 'subscription_usage'
     | 'provider_failure'
+    | 'machine_safety_ceiling'
+    | 'termination_cause'
+    | 'termination_request'
+    | 'activity'
   > = {
     schema_version: DEV_SCHEMA_VERSION,
     task_id: packet.task_id,
@@ -312,10 +365,17 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
     subscription_usage: measuresUsage
       ? buildSubscriptionUsage(usageBefore, NOT_RUN_OUTCOME)
       : null,
+    machine_safety_ceiling: { ...ceiling },
+    termination_cause: null,
+    termination_request: null,
+    activity: null,
   });
   await input.onStarted?.(identity);
 
   const { exitCode, signal } = await termination;
+  supervisor.disarm();
+  const activityTelemetry = activity.stop();
+  const terminationRequest = await supervisor.settled();
   stdoutLog.end();
   stderrLog.end();
   // Sem esperar o flush, o stdout lido logo abaixo pode terminar numa linha
@@ -341,7 +401,11 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
       })
     : NOT_RUN_OUTCOME;
 
-  const timedOut = classifyTimeout(exitCode, durationMs, timeoutSeconds);
+  // `timed_out` deixou de significar "a task estourou o tempo previsto": não
+  // existe mais tempo previsto com autoridade. Ele agora significa "uma
+  // AUTORIDADE EXTERNA encerrou este processo antes do término espontâneo", e
+  // qual autoridade foi fica em `termination_cause`.
+  const timedOut = terminationRequest !== null;
 
   // O pai ter morrido não prova sessão encerrada: filho vivo continua mexendo
   // no repositório enquanto a próxima tarefa roda.
@@ -382,12 +446,19 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
     subscription_usage: measuresUsage ? buildSubscriptionUsage(usageBefore, usageAfter) : null,
     provider_failure:
       providerFailure === null ? null : { ...providerFailure, signals: [...providerFailure.signals] },
+    machine_safety_ceiling: { ...ceiling },
+    termination_cause: terminationRequest?.cause ?? null,
+    termination_request:
+      terminationRequest === null
+        ? null
+        : { ...terminationRequest, signals_sent: [...terminationRequest.signals_sent] },
+    activity: { ...activityTelemetry, provenance: [...activityTelemetry.provenance] },
   };
   await writeLaunchRecord(paths, record);
 
   const { classification, reason } = classifyTermination({
-    timedOut,
-    timeoutSeconds,
+    terminationCause: terminationRequest?.cause ?? null,
+    terminationDetail: terminationRequest?.detail ?? null,
     exitCode,
     signal,
     survivorsRemaining: cleanup.remaining,
@@ -398,8 +469,9 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
 }
 
 export interface TerminationFacts {
-  readonly timedOut: boolean;
-  readonly timeoutSeconds: number;
+  /** `null` quando o worker terminou sozinho; nenhuma autoridade pediu o fim. */
+  readonly terminationCause: TerminationCause | null;
+  readonly terminationDetail: string | null;
   readonly exitCode: number | null;
   readonly signal: NodeJS.Signals | null;
   readonly survivorsRemaining: readonly { readonly pid: number; readonly command: string }[];
@@ -412,7 +484,8 @@ export interface TerminationFacts {
  * PRECEDÊNCIA dos diagnósticos, do mais objetivo ao mais interpretado:
  *
  * 1. sobrevivente ao SIGKILL — a sessão contaminou a máquina;
- * 2. timeout — o limite externo encerrou o grupo;
+ * 2. término pedido por uma autoridade externa (hoje: o failsafe de máquina ou
+ *    um cancelamento explícito) — nunca mais um deadline derivado da task;
  * 3. exit code do próprio launcher (125/126/127) e término por sinal;
  * 4. contrato do transporte violado — o stdout não é legível;
  * 5. falha terminal declarada pelo provider.
@@ -437,8 +510,15 @@ export function classifyTermination(facts: TerminationFacts): {
       reason: `descendente do worker sobreviveu ao SIGKILL: ${detail.join(', ')}`,
     };
   }
-  if (facts.timedOut) {
-    return { classification: 'TIMED_OUT', reason: `worker excedeu ${facts.timeoutSeconds}s` };
+  // TIMED_OUT é PRESERVADO como classificação: records e state históricos
+  // continuam legíveis, e o control plane continua parando o fluxo. O que
+  // mudou é a causa — nomeada explicitamente em vez de implícita num limite
+  // de duração de task.
+  if (facts.terminationCause !== null) {
+    return {
+      classification: 'TIMED_OUT',
+      reason: `worker encerrado por ${facts.terminationCause}: ${facts.terminationDetail ?? 'sem detalhe'}`,
+    };
   }
   if (facts.exitCode !== null && LAUNCH_FAILURE_EXIT_CODES.has(facts.exitCode)) {
     return {
@@ -539,24 +619,8 @@ function billingOf(
 }
 
 /**
- * Exit codes que o próprio `timeout` reserva para falha de invocação:
- * 125 o timeout falhou, 126 comando não executável, 127 comando inexistente.
- * Nenhum deles é veredito sobre o agente — é o launcher que não conseguiu rodar.
+ * Exit codes convencionais de falha de INVOCAÇÃO — 125 falha do wrapper de
+ * execução, 126 comando não executável, 127 comando inexistente. Nenhum deles
+ * é veredito sobre o agente: é o lançamento que não conseguiu acontecer.
  */
 const LAUNCH_FAILURE_EXIT_CODES = new Set([125, 126, 127]);
-
-/**
- * Sem `--foreground`, o `timeout` sinaliza o próprio process group — e como
- * SIGKILL não pode ser ignorado, ele morre junto. Nesse caminho não existe
- * exit 124 para ler: chega exit null com SIGKILL, ou 137. Por isso a duração
- * decorrida entra na decisão, em vez de confiar só no exit code.
- */
-export function classifyTimeout(
-  exitCode: number | null,
-  durationMs: number,
-  timeoutSeconds: number,
-): boolean {
-  if (exitCode === TIMEOUT_EXIT_CODE) return true;
-  const exceeded = durationMs >= timeoutSeconds * 1000;
-  return exceeded && (exitCode === null || exitCode === 128 + 9);
-}

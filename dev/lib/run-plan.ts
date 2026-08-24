@@ -42,7 +42,7 @@ export interface PlanRunInput {
   readonly dryRun: boolean;
   readonly maxIterations: number;
   readonly autonomy?: 'routine';
-  readonly timeoutOverride?: string;
+  readonly machineSafetyCeilingOverride?: string;
   readonly verbose?: boolean;
   readonly onProgress?: LabProgressListener;
 }
@@ -325,7 +325,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanRunResult> {
     profileId,
     maxIterations: input.maxIterations,
     ...(input.onProgress === undefined ? {} : { onProgress: input.onProgress }),
-    ...(input.timeoutOverride === undefined ? {} : { timeoutOverride: input.timeoutOverride }),
+    ...(input.machineSafetyCeilingOverride === undefined ? {} : { machineSafetyCeilingOverride: input.machineSafetyCeilingOverride }),
     ...(input.autonomy === undefined ? {} : { autonomy: input.autonomy }),
     ...(input.verbose === undefined ? {} : { verbose: input.verbose }),
     ...(controlPlane === null ? {} : { controlPlane }),

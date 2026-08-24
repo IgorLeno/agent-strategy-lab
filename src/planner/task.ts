@@ -86,7 +86,7 @@ export type EnvironmentRequirement = z.infer<typeof EnvironmentRequirement>;
  *    planejada (específica desta task; não existe teto universal).
  * 2. `resource_envelope.duration_ms` — o envelope de recursos do runtime do
  *    worker, do qual M78 deriva depois o limite concreto do processo. É
- *    matéria-prima para o worker runtime budget, não o budget em si.
+ *    matéria-prima para a previsão de runtime, não a previsão em si.
  * 3. `validation[].timeout_seconds` — o limite de UM comando de validação
  *    individual, em segundos, no formato do harness.
  *

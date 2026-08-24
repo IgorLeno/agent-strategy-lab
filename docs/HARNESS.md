@@ -120,7 +120,8 @@ workspace de escrita, sem outbox de protocolo e sem rede.
 ```
 dev-next       (somente leitura) seleciona a próxima READY e imprime o packet
                                  -> o orquestrador é quem persiste
-dev-launch     processo NOVO (detached + timeout), só o task packet
+dev-launch     processo NOVO (detached, sessão própria, supervisionado), só o
+               task packet — SEM deadline derivado da task
                                  -> RUNNING / EXECUTING
    worker      valida SÓ a tarefa atual, cria EXATAMENTE UM candidate commit,
                escreve AgentCompletionReport + HandoffDraft, ENCERRA
@@ -147,14 +148,86 @@ nunca edita o working tree do control repo durante a run.
 
 - **FAIL** — worker concluiu explicitamente com falha, OU validação obrigatória
   re-executada pelo orquestrador falhou.
-- **TIMED_OUT** — timeout externo encerrou o process group. Não avança.
-  `MISSCOPED` é reclassificação humana posterior, nunca decisão do timeout.
+- **TIMED_OUT** — uma AUTORIDADE EXTERNA encerrou o process group antes do
+  término espontâneo. Não avança. Qual autoridade fica em
+  `LaunchRecord.termination_cause`:
+  - `MACHINE_SAFETY_CEILING` — failsafe de infraestrutura (ver "Runtime");
+  - `EXPLICIT_CANCELLATION` — cancelamento pedido pelo operador/control plane;
+  - `LEGACY_TASK_DEADLINE` — records ANTIGOS, quando a duração prevista da task
+    ainda encerrava processo. Nunca é produzido em runs novas;
+  - `STALL_GUARD` — reservado; não é produzido na fase observacional atual.
+  Record histórico sem o campo e com `timed_out: true` significa
+  `LEGACY_TASK_DEADLINE`; `terminationCauseOf` faz essa leitura sem reescrever
+  arquivo nenhum. `MISSCOPED` é reclassificação humana posterior, nunca decisão
+  do término.
 - **INFRA_ERROR** — launcher falhou (exit 125/126/127, término por sinal),
   `RUNNING/EXECUTING` com processo inexistente, ou o `result` do provider
   declarou término por falha (ver abaixo).
 - **Guarda operacional incompleta ≠ FAIL** — draft/report ausente, tree suja,
   commit não localizado ou fora do escopo deixam a tarefa em
   `RUNNING/FINALIZING` com diagnóstico. Retry é legítimo.
+
+## Runtime
+
+A duração PREVISTA de uma task **não tem autoridade operacional**. Ela é
+hipótese, não autorização.
+
+**Não existe task deadline.** O coding worker é lançado com o argv do próprio
+agente, sem wrapper de tempo. Um worker que ultrapassa a previsão continua
+trabalhando; ultrapassar previsão nunca produz `TIMED_OUT`.
+
+**A previsão continua sendo calculada** — `ExecutionRuntimeForecast`, com
+`authority: 'ADVISORY'`. Ela preserva os componentes úteis (envelope base,
+custo de validação quando o stage é do worker, multiplicadores de capability,
+task class, stack e ambiente) e sua proveniência, porque é ela que vai ser
+comparada com o tempo OBSERVADO. Erro de previsão é telemetria: nunca muda
+PASS/FAIL, nunca rejeita profile, nunca encerra processo.
+
+**Routing decide por capacidade, não por relógio.**
+
+```
+task characteristics + capability/history  →  model / reasoning effort
+predicted time                             →  (nada)
+```
+
+**`MACHINE_SAFETY_CEILING` é a única terminação automática ativa.** Ele é
+failsafe de INFRAESTRUTURA, não budget de task: independe de
+`estimated_duration`, `resource_envelope`, dificuldade e planner; não entra em
+routing; não rejeita profile. Default deliberadamente conservador (12h,
+`dev/lib/machine-safety.ts`) — escolhido como POLICY OPERACIONAL, não como
+duração ótima de tarefa: alto o bastante para nunca cortar execução saudável,
+baixo o bastante para que uma máquina sequestrada seja detectável no mesmo dia.
+Configurável por `AGENTLAB_MACHINE_SAFETY_CEILING_SECONDS`, com override
+explícito para que testes exercitem o failsafe em segundos.
+
+**Supervisão de processo.** Sessão própria (`detached`), pgid conhecido,
+`AGENTLAB_LAUNCH_ID` no environment, caminho de cancelamento explícito, escada
+SIGTERM → graça (`kill_after_seconds`) → SIGKILL no GRUPO, auditoria e limpeza
+de sobreviventes depois do término. `kill_after_seconds` é a graça APÓS o
+pedido de término — nunca a duração máxima da task.
+
+**Observação de atividade (v1, observacional).** `dev/lib/activity-observer.ts`
+registra ao vivo timestamp de chunk em stdout/stderr, `last_activity_at`,
+intervalo corrente e maior intervalo de silêncio, e marca `STALL_SUSPECTED`
+quando o silêncio cruza uma janela. O listener convive com o `pipe` do log:
+nenhum byte é consumido ou truncado, e os parsers post-hoc
+(`readClaudeStream`, `decodeCodexEventStream`) não mudaram de contrato.
+
+> `raw I/O activity != semantic progress`. Byte em stdout prova que o processo
+> está vivo e falando — não que ele avança, nem que o que ele escreve faz
+> sentido. E silêncio não prova travamento.
+
+**Stall NÃO encerra nada nesta fase.** `STALL_SUSPECTED` persiste telemetria e
+evento; a janela é parâmetro OBSERVACIONAL, sem autoridade de termination. A
+hipótese de trabalho é que **thresholds de stall precisam ser calibrados por
+observação antes de receber autoridade de encerrar processo** — a distribuição
+real de silêncio por provider, model, reasoning effort, task class, dificuldade
+e outcome ainda não foi coletada. Só depois dela faz sentido discutir sob quais
+múltiplos sinais um `STALL_CONFIRMED` poderia encerrar um worker.
+
+**Validation timeouts são outra grandeza.** `ValidationCommand.timeout_seconds`
+e `VALIDATION_COMMAND_TIMEOUT_BOUND` limitam um COMANDO de validação e não se
+cruzam com nada acima.
 
 `FAIL`, `TIMED_OUT`, `MISSCOPED` e `INFRA_ERROR` **param o fluxo**, com uma
 exceção bounded do harness: a **primeira** falha capability-bearing causada

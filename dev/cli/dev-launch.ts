@@ -15,8 +15,12 @@ const DEFAULT_PROFILE = DEFAULT_WORKER_PROFILE_ID;
  * tarefa e não inicia a próxima — quem fecha é o dev-close, quem encadeia é o
  * dev-orchestrate.
  *
- * Exit codes: 0 processo terminou (aguarda fechamento) | 7 TIMED_OUT |
- * 8 INFRA_ERROR | 9 PREFLIGHT_BLOCKED (nada foi lançado).
+ * O worker NÃO recebe deadline derivado da task. O único limite é o
+ * MACHINE_SAFETY_CEILING de infraestrutura, que garante que nenhum processo
+ * seja imortal e nunca reflete a duração prevista da tarefa.
+ *
+ * Exit codes: 0 processo terminou (aguarda fechamento) | 7 encerrado por
+ * autoridade externa (TIMED_OUT) | 8 INFRA_ERROR | 9 PREFLIGHT_BLOCKED.
  */
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
@@ -28,7 +32,9 @@ async function main(): Promise<void> {
   const packet = await readPacket(paths, taskId);
   if (!packet) fail(`task packet ausente para ${taskId} — o orquestrador precisa persisti-lo antes`);
 
-  const timeoutOverride = args.options.get('timeout-seconds');
+  // Escape hatch OPERACIONAL/de teste do failsafe de infraestrutura. Não é
+  // deadline de task: a duração prevista de uma tarefa não chega aqui.
+  const ceilingOverride = args.options.get('machine-safety-ceiling-seconds');
   // O lock cobre a transição READY -> RUNNING e a espera pelo worker: nenhum
   // outro comando do harness pode mexer no state enquanto a sessão roda.
   const result = await withHarnessLock(paths, 'dev-launch', () =>
@@ -36,7 +42,7 @@ async function main(): Promise<void> {
       paths,
       packet,
       args.options.get('profile') ?? DEFAULT_PROFILE,
-      timeoutOverride === undefined ? undefined : Number(timeoutOverride),
+      ceilingOverride === undefined ? undefined : Number(ceilingOverride),
     ),
   );
 

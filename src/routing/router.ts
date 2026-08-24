@@ -5,18 +5,28 @@
  * planner completo ou pela Direct Task Normalization. O router não lê request
  * bruto, histórico, filesystem, provider ou relógio.
  *
- * Tempos permanecem deliberadamente separados:
- * - `estimated_duration` é apenas uma estimativa da task e não entra na conta;
- * - `validation[].timeout_seconds` limita cada comando e não entra na conta;
- * - `validation_budget` é o custo agregado esperado da validação OFICIAL, e só
- *   entra no runtime do worker quando é o worker que executa esse stage;
- * - o resultado abaixo é o WORKER RUNTIME BUDGET e só é comparado com bounds
- *   de runtime do launcher/profile fornecidos pelo control plane.
+ * TEMPO NÃO É AUTORIDADE AQUI.
  *
- * Um budget de tempo pertence ao lifecycle stage que o consome. Com
+ * O router produz um `ExecutionRuntimeForecast`: uma HIPÓTESE sobre quanto a
+ * execução deve demorar. Hipótese não é autorização. O forecast não impede
+ * routing, não rejeita profile, não define deadline e não encerra worker —
+ * nenhum profile é recusado porque a previsão ficou alta. O que decide qual
+ * modelo e qual reasoning effort a work unit merece são as CARACTERÍSTICAS da
+ * task (classe, dificuldade, complexidade, ambiguidade, risco, pressão de
+ * contexto, força de verificação, stack) contra a capability disponível.
+ *
+ * Tempos permanecem deliberadamente separados:
+ * - `estimated_duration` é estimativa ADVISORY da task;
+ * - `validation[].timeout_seconds` limita cada comando de validação e é
+ *   grandeza SEPARADA, com bound próprio, intocada por este módulo;
+ * - `validation_budget` é o custo agregado esperado da validação OFICIAL, e só
+ *   entra na previsão do worker quando é o worker que executa esse stage.
+ *
+ * Uma previsão pertence ao lifecycle stage que consome o tempo. Com
  * `official_validation_owner=orchestrator`, o processo do coding worker termina
- * no candidate e nunca roda a validação oficial: cobrar dele esse custo apenas
- * porque ambos são milissegundos inventa trabalho que ele não faz.
+ * no candidate e nunca roda a validação oficial: somar esse custo à previsão
+ * dele apenas porque ambos são milissegundos descreveria trabalho que ele não
+ * faz.
  */
 
 import { z } from 'zod';
@@ -59,20 +69,6 @@ export const StructuredWorkUnit = z
   });
 export type StructuredWorkUnit = z.infer<typeof StructuredWorkUnit>;
 
-export const RuntimeBoundSource = z.enum(['launcher', 'profile_runtime']);
-export type RuntimeBoundSource = z.infer<typeof RuntimeBoundSource>;
-
-/** Um bound de WORKER runtime; nunca representa timeout de ValidationCommand. */
-export const WorkerRuntimeBound = z
-  .object({
-    kind: z.literal('WORKER_RUNTIME_BOUND'),
-    source: RuntimeBoundSource,
-    maximum_ms: z.number().int().positive(),
-    provenance: nonEmpty,
-  })
-  .strict();
-export type WorkerRuntimeBound = z.infer<typeof WorkerRuntimeBound>;
-
 const Availability = z
   .object({
     value: z.boolean(),
@@ -81,16 +77,19 @@ const Availability = z
   .strict();
 
 /**
- * Facts operacionais que não pertencem a `ProfileCapability`: disponibilidade
- * atual e bounds de runtime. Os bounds são todos da mesma grandeza; é válido
- * usar o mais restritivo entre launcher/profile, mas nunca um bound de
- * validation.
+ * Fact operacional que não pertence a `ProfileCapability`: a disponibilidade
+ * atual do profile.
+ *
+ * NÃO existe mais `runtime_bounds` aqui. Ele só existia para que a previsão de
+ * duração pudesse rejeitar um profile — o gate que foi removido. Manter o
+ * campo depois disso seria manter a entrada de uma decisão que não é mais
+ * tomada, e o teto de segurança de máquina que sobrou é de outra grandeza:
+ * ele é de infraestrutura, não entra em routing e não conhece profile.
  */
 export const RoutingCandidate = z
   .object({
     profile_id: identifier,
     availability: Availability,
-    runtime_bounds: z.array(WorkerRuntimeBound).min(1),
   })
   .strict();
 export type RoutingCandidate = z.infer<typeof RoutingCandidate>;
@@ -104,7 +103,6 @@ export const CandidateRejectionCode = z.enum([
   'ROLE_INCOMPATIBLE',
   'CAPABILITY_UNCLASSIFIED',
   'CAPABILITY_INSUFFICIENT',
-  'BUDGET_UNSUPPORTED',
 ]);
 export type CandidateRejectionCode = z.infer<typeof CandidateRejectionCode>;
 
@@ -112,7 +110,8 @@ export const CandidateConsideration = z
   .object({
     profile_id: identifier,
     capability_tier: CapabilityTier.nullable(),
-    requested_worker_runtime_budget_ms: z.number().int().nonnegative().nullable(),
+    /** Previsão ADVISORY registrada para auditoria; nunca motivou rejeição. */
+    predicted_runtime_ms: z.number().int().nonnegative().nullable(),
     outcome: z.enum(['SELECTED', 'REJECTED', 'NOT_SELECTED']),
     rejection_code: CandidateRejectionCode.nullable(),
     reason: nonEmpty,
@@ -127,7 +126,7 @@ export type CandidateConsideration = z.infer<typeof CandidateConsideration>;
  * deste worker — zero quando o stage é do orchestrator. Os dois campos juntos
  * tornam a inclusão ou exclusão legível sem consultar o código.
  */
-const BudgetComponents = z
+const ForecastComponents = z
   .object({
     envelope_duration_expected_ms: z.number().int().nonnegative(),
     aggregate_validation_cost_ms: z.number().int().nonnegative(),
@@ -139,55 +138,34 @@ const BudgetComponents = z
   })
   .strict();
 
-export const WorkerRuntimeBudget = z
+/**
+ * PREVISÃO de runtime da execução. `authority: 'ADVISORY'` está no contrato, e
+ * não só no comentário, porque é a propriedade que mais importa: quem lê este
+ * objeto não pode usá-lo para negar nada. Ele existe para ser comparado depois
+ * com o tempo OBSERVADO — erro de previsão é aprendizado, nunca veredito.
+ */
+export const ExecutionRuntimeForecast = z
   .object({
-    kind: z.literal('WORKER_RUNTIME_BUDGET'),
-    milliseconds: z.number().int().nonnegative(),
-    components: BudgetComponents,
-    checked_runtime_bounds: z.array(WorkerRuntimeBound).min(1),
+    kind: z.literal('EXECUTION_RUNTIME_FORECAST'),
+    authority: z.literal('ADVISORY'),
+    predicted_runtime_ms: z.number().int().nonnegative(),
+    components: ForecastComponents,
     provenance: z.array(nonEmpty).min(1),
   })
   .strict();
-export type WorkerRuntimeBudget = z.infer<typeof WorkerRuntimeBudget>;
+export type ExecutionRuntimeForecast = z.infer<typeof ExecutionRuntimeForecast>;
 
 export const RoutingDecision = z
   .object({
     outcome: z.literal('ROUTED'),
     profile: ProfileCapability,
-    worker_runtime_budget: WorkerRuntimeBudget,
+    execution_runtime_forecast: ExecutionRuntimeForecast,
     rationale: z.array(nonEmpty).min(1),
     provenance: z.array(nonEmpty).min(1),
     candidates_considered: z.array(CandidateConsideration).min(1),
   })
   .strict();
 export type RoutingDecision = z.infer<typeof RoutingDecision>;
-
-const BudgetViolation = z
-  .object({
-    profile_id: identifier,
-    requested_budget_ms: z.number().int().nonnegative(),
-    violated_bound: WorkerRuntimeBound,
-    provenance: z.array(nonEmpty).min(1),
-  })
-  .strict();
-export type BudgetViolation = z.infer<typeof BudgetViolation>;
-
-export const BudgetUnsupported = z
-  .object({
-    outcome: z.literal('BUDGET_UNSUPPORTED'),
-    violations: z.array(BudgetViolation).min(1),
-    candidates_considered: z.array(CandidateConsideration).min(1),
-    allowed_next_steps: z.tuple([
-      z.literal('TRY_ANOTHER_PROFILE'),
-      z.literal('RECONFIGURE_RUNTIME'),
-      z.literal('REPLAN'),
-      z.literal('HUMAN_REQUIRED'),
-    ]),
-    rationale: z.array(nonEmpty).min(1),
-    provenance: z.array(nonEmpty).min(1),
-  })
-  .strict();
-export type BudgetUnsupported = z.infer<typeof BudgetUnsupported>;
 
 export const RoutingBlocked = z
   .object({
@@ -202,7 +180,6 @@ export type RoutingBlocked = z.infer<typeof RoutingBlocked>;
 
 export const InitialRoutingResult = z.discriminatedUnion('outcome', [
   RoutingDecision,
-  BudgetUnsupported,
   RoutingBlocked,
 ]);
 export type InitialRoutingResult = z.infer<typeof InitialRoutingResult>;
@@ -317,12 +294,11 @@ function workerOwnsOfficialValidation(ownership: ProfileCapability['ownership'])
  * então a ausência de fato cai no multiplicador neutro (1) — nenhum default é
  * inventado sobre qual stack é.
  */
-function budgetFor(
+function forecastFor(
   unit: StructuredWorkUnit,
   capability: ProfileCapability,
   tier: CapabilityTier,
-  runtimeBounds: readonly WorkerRuntimeBound[],
-): WorkerRuntimeBudget | null {
+): ExecutionRuntimeForecast | null {
   const stack = unit.project_facts.stack;
   const stackMultiplier = stack.known
     ? 1 + Math.max(0, stack.value.ecosystems_detected.length - 1) * 0.1
@@ -349,23 +325,24 @@ function budgetFor(
     components.task_class_multiplier *
     components.stack_multiplier *
     components.environment_multiplier;
-  const milliseconds = Math.ceil(unrounded / 1_000) * 1_000;
-  if (!Number.isSafeInteger(milliseconds)) return null;
+  const predicted = Math.ceil(unrounded / 1_000) * 1_000;
+  if (!Number.isSafeInteger(predicted)) return null;
 
-  return WorkerRuntimeBudget.parse({
-    kind: 'WORKER_RUNTIME_BUDGET',
-    milliseconds,
+  return ExecutionRuntimeForecast.parse({
+    kind: 'EXECUTION_RUNTIME_FORECAST',
+    authority: 'ADVISORY',
+    predicted_runtime_ms: predicted,
     components,
-    checked_runtime_bounds: runtimeBounds,
     provenance: [
       'task.resource_envelope.duration_ms.expected',
       validationOwnedByWorker
-        ? `task.validation_budget.expected INCLUÍDO no runtime do worker: ProfileCapability.ownership.official_validation_owner=${capability.ownership.official_validation_owner} e worker_validation_policy=${capability.ownership.worker_validation_policy} — o próprio worker executa a validação oficial`
-        : `task.validation_budget.expected OBSERVADO mas EXCLUÍDO do runtime do worker: ProfileCapability.ownership.official_validation_owner=${capability.ownership.official_validation_owner} e worker_validation_policy=${capability.ownership.worker_validation_policy} — a validação oficial é de outro lifecycle stage`,
+        ? `task.validation_budget.expected INCLUÍDO na previsão do worker: ProfileCapability.ownership.official_validation_owner=${capability.ownership.official_validation_owner} e worker_validation_policy=${capability.ownership.worker_validation_policy} — o próprio worker executa a validação oficial`
+        : `task.validation_budget.expected OBSERVADO mas EXCLUÍDO da previsão do worker: ProfileCapability.ownership.official_validation_owner=${capability.ownership.official_validation_owner} e worker_validation_policy=${capability.ownership.worker_validation_policy} — a validação oficial é de outro lifecycle stage`,
       'selected ProfileCapability model/reasoning tier',
       'task.taxonomy.task_class',
       'project_facts.stack',
       'project_facts.required_tools,project_facts.required_services,profile.environment_mode',
+      'ADVISORY: hipótese de duração; não autoriza, não rejeita e não encerra nada',
     ],
   });
 }
@@ -375,12 +352,12 @@ function rejected(
   tier: CapabilityTier | null,
   code: CandidateRejectionCode,
   reason: string,
-  requestedBudget: number | null = null,
+  predictedRuntimeMs: number | null = null,
 ): CandidateConsideration {
   return {
     profile_id: candidate.profile_id,
     capability_tier: tier,
-    requested_worker_runtime_budget_ms: requestedBudget,
+    predicted_runtime_ms: predictedRuntimeMs,
     outcome: 'REJECTED',
     rejection_code: code,
     reason,
@@ -403,8 +380,12 @@ function block(reason: string, provenance: string, considered: CandidateConsider
 
 /**
  * Escolhe o menor tier adequado; empate é resolvido por tier, modelo, effort e
- * profile_id, nunca pela ordem de entrada. Budget insuficiente rejeita o
- * profile e permite tentar outro — o valor nunca é truncado ao bound.
+ * profile_id, nunca pela ordem de entrada.
+ *
+ * A previsão de duração NÃO participa desta escolha. Um forecast alto não
+ * rejeita profile, não escala tier e não bloqueia a work unit: ele acompanha a
+ * decisão como hipótese registrada. Capability insuficiente continua rejeitando
+ * — é a capacidade que decide, não o relógio.
  */
 export function routeInitialProfile(input: InitialRoutingInput): InitialRoutingResult {
   const roleParsed = WorkerRole.safeParse(input.role);
@@ -502,43 +483,25 @@ export function routeInitialProfile(input: InitialRoutingInput): InitialRoutingR
     return left.candidate.profile_id.localeCompare(right.candidate.profile_id);
   });
 
-  const violations: BudgetViolation[] = [];
   for (const entry of eligible) {
-    const budget = budgetFor(unit, entry.capability, entry.tier, entry.candidate.runtime_bounds);
-    if (budget === null) {
-      return block('worker runtime budget não é representável como inteiro seguro; requer replan', 'worker_runtime_budget.arithmetic', considered);
-    }
-    const violatedBounds = entry.candidate.runtime_bounds.filter(
-      (bound) => budget.milliseconds > bound.maximum_ms,
-    );
-    if (violatedBounds.length > 0) {
-      for (const violatedBound of violatedBounds) {
-        violations.push({
-          profile_id: entry.candidate.profile_id,
-          requested_budget_ms: budget.milliseconds,
-          violated_bound: violatedBound,
-          provenance: [...budget.provenance, violatedBound.provenance],
-        });
-      }
-      considered.push(
-        rejected(
-          entry.candidate,
-          entry.tier,
-          'BUDGET_UNSUPPORTED',
-          `budget solicitado=${budget.milliseconds}ms excede ${violatedBounds.map((bound) => `${bound.source}=${bound.maximum_ms}ms`).join(', ')}; valor não foi truncado`,
-          budget.milliseconds,
-        ),
+    const forecast = forecastFor(unit, entry.capability, entry.tier);
+    if (forecast === null) {
+      // Não é recusa por tempo: é aritmética que estourou a representação, e
+      // um número ilegível não pode entrar num record de evidência.
+      return block(
+        'previsão de runtime não é representável como inteiro seguro; requer replan',
+        'execution_runtime_forecast.arithmetic',
+        considered,
       );
-      continue;
     }
 
     considered.push({
       profile_id: entry.candidate.profile_id,
       capability_tier: entry.tier,
-      requested_worker_runtime_budget_ms: budget.milliseconds,
+      predicted_runtime_ms: forecast.predicted_runtime_ms,
       outcome: 'SELECTED',
       rejection_code: null,
-      reason: `menor tier adequado (${entry.tier}) com todos os WORKER_RUNTIME_BOUND satisfeitos`,
+      reason: `menor tier adequado (${entry.tier}) para as características declaradas da work unit`,
     });
     for (const alternative of eligible) {
       if (
@@ -550,7 +513,7 @@ export function routeInitialProfile(input: InitialRoutingInput): InitialRoutingR
       considered.push({
         profile_id: alternative.candidate.profile_id,
         capability_tier: alternative.tier,
-        requested_worker_runtime_budget_ms: null,
+        predicted_runtime_ms: null,
         outcome: 'NOT_SELECTED',
         rejection_code: null,
         reason: `alternativa elegível de custo igual ou maior que o profile selecionado ${entry.candidate.profile_id}`,
@@ -559,35 +522,25 @@ export function routeInitialProfile(input: InitialRoutingInput): InitialRoutingR
     return RoutingDecision.parse({
       outcome: 'ROUTED',
       profile: entry.capability,
-      worker_runtime_budget: budget,
+      execution_runtime_forecast: forecast,
       rationale: [
         `tier requerido=${requirement.tier} por score=${requirement.score}: ${requirement.reasons.join('; ')}`,
         `profile ${entry.candidate.profile_id} é o menor recurso elegível com capacidade suficiente`,
-        'worker runtime budget validado somente contra bounds de runtime do launcher/profile',
+        `previsão de runtime=${forecast.predicted_runtime_ms}ms é ADVISORY e não participou desta escolha`,
       ],
       provenance: [
         'work_unit.task.taxonomy',
         'work_unit.assessment',
         'work_unit.project_facts',
         'CapabilityRegistry',
-        'input.candidates.availability,input.candidates.runtime_bounds',
+        'input.candidates.availability',
       ],
       candidates_considered: considered,
     });
   }
 
-  if (violations.length > 0) {
-    return BudgetUnsupported.parse({
-      outcome: 'BUDGET_UNSUPPORTED',
-      violations,
-      candidates_considered: considered,
-      allowed_next_steps: ['TRY_ANOTHER_PROFILE', 'RECONFIGURE_RUNTIME', 'REPLAN', 'HUMAN_REQUIRED'],
-      rationale: ['nenhum profile de capacidade adequada suporta o worker runtime budget solicitado sem violar bound estrutural'],
-      provenance: ['worker_runtime_budget', 'input.candidates.runtime_bounds'],
-    });
-  }
   return block(
-    `nenhum profile disponível, compatível e com tier >= ${requirement.tier}; budget maior não substitui decomposição ou capacidade`,
+    `nenhum profile disponível, compatível e com tier >= ${requirement.tier}; mais tempo não substitui decomposição ou capacidade`,
     'CapabilityRegistry,input.candidates,work_unit.assessment',
     considered,
   );

@@ -50,7 +50,7 @@ async function main(): Promise<void> {
   });
 
   try {
-    const timeoutOverride = args.options.get('timeout-seconds');
+    const machineSafetyCeilingOverride = args.options.get('machine-safety-ceiling-seconds');
     const autonomy = parseRoutineAutonomy(args);
     const result = await runProject({
       paths,
@@ -61,7 +61,7 @@ async function main(): Promise<void> {
       ...(args.options.get('planner-profile') === undefined
         ? {}
         : { plannerProfileId: args.options.get('planner-profile') as string }),
-      ...(timeoutOverride === undefined ? {} : { timeoutOverride }),
+      ...(machineSafetyCeilingOverride === undefined ? {} : { machineSafetyCeilingOverride }),
       ...(autonomy === undefined ? {} : { autonomy }),
     });
     emit(result.payload);

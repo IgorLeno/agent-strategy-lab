@@ -24,7 +24,6 @@ argv:
   - gpt-5.6-sol
   - '-'
 prompt_delivery: stdin
-timeout_seconds: 1800
 forbidden_flags:
   - resume
   - fork

@@ -46,7 +46,7 @@ async function main(): Promise<void> {
     }),
   );
   const loaded = await loadPlan(paths.planFile);
-  const timeoutOverride = args.options.get('timeout-seconds');
+  const machineSafetyCeilingOverride = args.options.get('machine-safety-ceiling-seconds');
   const autonomy = parseRoutineAutonomy(args);
   const result = await runOrchestrate({
     paths,
@@ -55,7 +55,7 @@ async function main(): Promise<void> {
     maxIterations: parseMaxIterations(args),
     skipPreflight: args.flags.has(SKIP_PREFLIGHT_FLAG),
     verbose: isVerbose(args),
-    ...(timeoutOverride === undefined ? {} : { timeoutOverride }),
+    ...(machineSafetyCeilingOverride === undefined ? {} : { machineSafetyCeilingOverride }),
     ...(autonomy === undefined ? {} : { autonomy }),
   });
   emit(result.payload);

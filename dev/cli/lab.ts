@@ -50,14 +50,15 @@ async function readStdin(interactive: boolean, onWaiting?: () => void): Promise<
 
 function sharedFlags(args: ReturnType<typeof parseArgs>) {
   const plannerProfile = args.options.get('planner-profile');
-  const timeoutSeconds = args.options.get('timeout-seconds');
+  // Escape hatch do failsafe de INFRAESTRUTURA — nunca deadline de task.
+  const ceilingSeconds = args.options.get('machine-safety-ceiling-seconds');
   const controlRoot = process.env['AGENTLAB_CONTROL_ROOT'];
   return {
     publish: args.flags.has('publish'),
     max_iterations: parseMaxIterations(args),
     verbose: isVerbose(args),
     ...(plannerProfile === undefined ? {} : { planner_profile_id: plannerProfile }),
-    ...(timeoutSeconds === undefined ? {} : { timeout_override: timeoutSeconds }),
+    ...(ceilingSeconds === undefined ? {} : { machine_safety_ceiling_override: ceilingSeconds }),
     ...(parseRoutineAutonomy(args) === undefined ? {} : { autonomy: 'routine' as const }),
     ...(controlRoot === undefined ? {} : { control_root: controlRoot }),
   };

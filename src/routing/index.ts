@@ -16,24 +16,24 @@ export {
   type ReasoningEffortSource,
 } from './capability.js';
 
-/** Router inicial determinístico e budget de runtime do worker (M78). */
+/**
+ * Router inicial determinístico e PREVISÃO advisory de runtime (M78).
+ * A previsão não rejeita profile: quem decide é capability contra as
+ * características da work unit.
+ */
 export {
-  BudgetUnsupported,
   CandidateConsideration,
   CandidateRejectionCode,
   CapabilityTier,
+  ExecutionRuntimeForecast,
   InitialRoutingResult,
   RoutingBlocked,
   RoutingCandidate,
   RoutingDecision,
-  RuntimeBoundSource,
   StructuredWorkUnit,
   WorkerRole,
-  WorkerRuntimeBound,
-  WorkerRuntimeBudget,
   WorkUnitSource,
   routeInitialProfile,
-  type BudgetViolation,
   type InitialRoutingInput,
 } from './router.js';
 
@@ -44,7 +44,7 @@ export {
   HistoryRoutingEvidence,
   HistoryRoutingRecommendation,
   HistoryRoutingSource,
-  HistoryWorkerRuntimeBudget,
+  HistoryExecutionRuntimeForecast,
   routeHistoryInformedProfile,
   routeInitialProfileWithHistory,
   type HistoryRoutingInput,

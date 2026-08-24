@@ -34,7 +34,6 @@ argv:
   - --strict-mcp-config
   - --no-session-persistence
 prompt_delivery: argv
-timeout_seconds: 1800
 forbidden_flags:
   - --resume
   - -r

@@ -448,7 +448,7 @@ RUN DIRECTIVE (header estruturado + corpo) + preset
         │
    ROUTING ─ capability → router determinístico → histórico (Pareto)
         │
-   EXECUTION ─ worker descartável, budget e timeout externos
+   EXECUTION ─ worker descartável, supervisão de processo, sem task deadline
         │
    VALIDATION ─ validação oficial reexecutada + review gate
         │
@@ -468,9 +468,11 @@ RUN DIRECTIVE (header estruturado + corpo) + preset
   work units (`PlannedTask`) com acceptance, validações, dependências e
   envelope de recursos. Routing em três camadas: capabilities com provenance,
   router determinístico, histórico canônico Pareto-only.
-- **Execução subordinada.** Workers são processos frescos de CLI headless,
-  com timeout externo e ambiente sanitizado. Continuidade de sessão é
-  proibida: cada attempt tem identidade própria.
+- **Execução subordinada.** Workers são processos frescos de CLI headless, com
+  ambiente sanitizado, supervisão de process group e um
+  `MACHINE_SAFETY_CEILING` de infraestrutura — nunca um deadline derivado da
+  duração prevista da task. Continuidade de sessão é proibida: cada attempt tem
+  identidade própria.
 - **Validação, recovery e evidência.** A validação oficial é reexecutada pelo
   orquestrador. Repair automático é bounded. Falha de capability pode
   escalar dentro da ladder autorizada; esgotou a policy → `HUMAN_REQUIRED`.
@@ -490,8 +492,16 @@ versionados. `pnpm dev-run-project` permanece como primitive interna.
   humana com retomada automática do nó bloqueado.
 - Tarefas não nascem dinamicamente durante a execução; o grafo é estático por
   plano.
-- Não há interface unificada de eventos de execução; o stream do Codex ainda
-  não é parseado pelo harness.
+- Não há interface unificada de eventos SEMÂNTICOS de execução. O transporte
+  JSONL de `codex exec --json` (`thread.started`, `turn.started`,
+  `item.completed`, `turn.completed`, `turn.failed`, `error`) JÁ é parseado por
+  [`dev/lib/codex-transport.ts`](dev/lib/codex-transport.ts), e o
+  `stream-json` do Claude por [`dev/lib/claude-stream.ts`](dev/lib/claude-stream.ts)
+  — ambos POST-HOC, sobre o stdout já encerrado. A observação AO VIVO existe
+  hoje em v1 provider-neutra
+  ([`dev/lib/activity-observer.ts`](dev/lib/activity-observer.ts)): timestamp de
+  chunk em stdout/stderr, intervalos de silêncio e suspeita de stall. Ela mede
+  ATIVIDADE, não progresso semântico, e não tem autoridade de encerrar nada.
 - Execução estritamente serial (`concurrency = 1`).
 
 Documentos de referência: [`docs/LAB_CHARTER.md`](docs/LAB_CHARTER.md)

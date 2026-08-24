@@ -864,6 +864,72 @@ export const SubscriptionUsage = z
   .strict();
 export type SubscriptionUsage = z.infer<typeof SubscriptionUsage>;
 
+/**
+ * Telemetria de ATIVIDADE observada ao vivo (dev/lib/activity-observer.ts).
+ *
+ * Ela descreve I/O bruto e silêncio — nunca progresso semântico. `null` em
+ * todo LaunchRecord gravado antes de existir observação ao vivo: ausência é
+ * ausência, não é "worker mudo".
+ */
+export const WorkerActivityTelemetry = z
+  .object({
+    schema: z.literal('WORKER_ACTIVITY_V1'),
+    state: z.enum(['RUNNING_ACTIVE', 'RUNNING_IDLE', 'STALL_SUSPECTED']),
+    observation_started_at: z.string().datetime(),
+    last_activity_at: z.string().datetime().nullable(),
+    last_activity_source: z.enum(['stdout', 'stderr']).nullable(),
+    stdout_chunks: z.number().int().nonnegative(),
+    stderr_chunks: z.number().int().nonnegative(),
+    stdout_bytes: z.number().int().nonnegative(),
+    stderr_bytes: z.number().int().nonnegative(),
+    current_idle_ms: z.number().int().nonnegative(),
+    max_idle_ms: z.number().int().nonnegative(),
+    idle_threshold_ms: z.number().int().nonnegative(),
+    stall_suspicion_threshold_ms: z.number().int().nonnegative(),
+    stall_suspected_at: z.string().datetime().nullable(),
+    /** Literal: nesta fase a suspeita de stall NUNCA encerra processo. */
+    termination_authority: z.literal('NONE_OBSERVATION_ONLY'),
+    provenance: z.array(nonEmpty).min(1),
+  })
+  .strict();
+export type WorkerActivityTelemetry = z.infer<typeof WorkerActivityTelemetry>;
+
+/** Ver dev/lib/termination.ts para o significado de cada autoridade. */
+export const TerminationCause = z.enum([
+  'LEGACY_TASK_DEADLINE',
+  'MACHINE_SAFETY_CEILING',
+  'STALL_GUARD',
+  'EXPLICIT_CANCELLATION',
+]);
+export type TerminationCause = z.infer<typeof TerminationCause>;
+
+export const TerminationRequestRecord = z
+  .object({
+    cause: TerminationCause,
+    requested_at: z.string().datetime(),
+    detail: nonEmpty,
+    signals_sent: z.array(nonEmpty).min(1),
+    grace_period_ms: z.number().int().nonnegative(),
+    provenance: nonEmpty,
+  })
+  .strict();
+export type TerminationRequestRecord = z.infer<typeof TerminationRequestRecord>;
+
+/**
+ * O teto de segurança de MÁQUINA sob o qual o lançamento correu. Ele é
+ * registrado para que nenhum leitor confunda failsafe de infraestrutura com
+ * budget de task: o valor não deriva de estimativa, envelope, dificuldade nem
+ * planner, e não participou de nenhuma decisão de routing.
+ */
+export const MachineSafetyCeilingRecord = z
+  .object({
+    kind: z.literal('MACHINE_SAFETY_CEILING'),
+    seconds: z.number().positive(),
+    provenance: nonEmpty,
+  })
+  .strict();
+export type MachineSafetyCeilingRecord = z.infer<typeof MachineSafetyCeilingRecord>;
+
 export const LaunchRecord = z
   .object({
     schema_version: z.literal(DEV_SCHEMA_VERSION),
@@ -906,6 +972,21 @@ export const LaunchRecord = z
      * "provider saudável": significa que não houve declaração a registrar.
      */
     provider_failure: ProviderTerminalFailure.nullable().default(null),
+    /**
+     * Teto de segurança de máquina vigente no lançamento. `null` nos records
+     * gravados quando o limite ainda era o deadline derivado da task.
+     */
+    machine_safety_ceiling: MachineSafetyCeilingRecord.nullable().default(null),
+    /**
+     * QUEM pediu o término, quando houve pedido. `null` em término espontâneo
+     * do worker e em todo record histórico — ali `timed_out: true` significava
+     * o deadline de task, e a leitura correta vive em `terminationCauseOf`,
+     * não num campo retroativamente inventado no arquivo.
+     */
+    termination_cause: TerminationCause.nullable().default(null),
+    termination_request: TerminationRequestRecord.nullable().default(null),
+    /** Observação AO VIVO do run; `null` antes de a interface live existir. */
+    activity: WorkerActivityTelemetry.nullable().default(null),
   })
   .strict();
 export type LaunchRecord = z.infer<typeof LaunchRecord>;

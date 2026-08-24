@@ -8,10 +8,10 @@
  * agora generalizado para Claude por um arquivo de settings versionado.
  *
  * Este módulo é PURO sobre profiles e argv: não lança processo, não fala com
- * provider e não decide policy de review. Ele responde três perguntas
- * separadas — qual argv o role recebe, se o worker runtime budget cabe no
- * bound de runtime, e se o timeout de um ValidationCommand cabe no contrato de
- * ValidationCommand. As duas últimas nunca se cruzam.
+ * provider e não decide policy de review. Ele responde duas perguntas
+ * separadas — qual argv o role recebe e se o timeout de um ValidationCommand
+ * cabe no contrato de ValidationCommand. Nenhuma delas conhece previsão de
+ * duração de task: ela deixou de ter autoridade operacional.
  */
 
 import path from 'node:path';
@@ -238,118 +238,33 @@ export function assertReadOnlyArgv(
 }
 
 // ---------------------------------------------------------------------------
-// Worker runtime budget — bound do launcher/profile, e NADA MAIS.
+// Runtime do worker — SEM deadline derivado da task.
 // ---------------------------------------------------------------------------
 
-/** Teto do próprio `LauncherProfile.timeout_seconds`: o launcher não representa mais que isso. */
-export const LAUNCHER_RUNTIME_BOUND_SECONDS = 7_200;
-
-export type WorkerRuntimeBoundSource = 'launcher' | 'profile_runtime';
-
-export interface WorkerRuntimeBound {
-  readonly kind: 'WORKER_RUNTIME_BOUND';
-  readonly source: WorkerRuntimeBoundSource;
-  readonly maximum_ms: number;
-  readonly provenance: string;
-}
-
 /**
- * Os DOIS bounds da mesma grandeza (runtime do worker). Nenhum timeout de
- * validação entra aqui — misturar as grandezas é exatamente o erro que o
- * contrato de M78 proíbe.
+ * O que existia aqui era `resolveWorkerRuntimeBudget`: uma previsão de duração
+ * comparada com `LauncherProfile.timeout_seconds`, capaz de recusar o profile
+ * (`BUDGET_UNSUPPORTED`) e, quando aceita, virar o wall-clock deadline do
+ * worker. As duas coisas foram removidas: a previsão não é autorização, e a
+ * duração de uma task não é limite operacional.
+ *
+ * O que ficou é de outra grandeza — o teto de segurança de MÁQUINA. Ele não
+ * conhece profile, planner, envelope nem dificuldade; não entra em routing;
+ * não recusa nada; e só existe para que nenhum processo do harness seja
+ * imortal. `machineSafetyCeiling()` é sua única fonte.
  */
-export function workerRuntimeBoundsOf(profile: LauncherProfile): readonly WorkerRuntimeBound[] {
-  return [
-    {
-      kind: 'WORKER_RUNTIME_BOUND',
-      source: 'launcher',
-      maximum_ms: LAUNCHER_RUNTIME_BOUND_SECONDS * 1_000,
-      provenance: 'LauncherProfile.timeout_seconds.max (dev/lib/profile.ts)',
-    },
-    {
-      kind: 'WORKER_RUNTIME_BOUND',
-      source: 'profile_runtime',
-      maximum_ms: profile.timeout_seconds * 1_000,
-      provenance: `${profile.id}.timeout_seconds`,
-    },
-  ];
-}
 
+// ---------------------------------------------------------------------------
+// Timeout de ValidationCommand — grandeza SEPARADA, bound próprio.
+// ---------------------------------------------------------------------------
+
+/** Saídas oferecidas quando um timeout de validação não cabe no seu contrato. */
 export const BUDGET_UNSUPPORTED_NEXT_STEPS = [
   'TRY_ANOTHER_PROFILE',
   'RECONFIGURE_RUNTIME',
   'REPLAN',
   'HUMAN_REQUIRED',
 ] as const;
-
-export type WorkerRuntimeBudgetResolution =
-  | {
-      readonly outcome: 'RESOLVED';
-      /** Valor a passar como `timeoutSecondsOverride` do launcher — derivado por policy, não fixo. */
-      readonly timeout_seconds_override: number;
-      readonly requested_budget_ms: number;
-      readonly checked_bounds: readonly WorkerRuntimeBound[];
-      readonly provenance: readonly string[];
-    }
-  | {
-      readonly outcome: 'BUDGET_UNSUPPORTED';
-      readonly requested_budget_ms: number;
-      readonly violated_bound: WorkerRuntimeBound;
-      readonly checked_bounds: readonly WorkerRuntimeBound[];
-      readonly allowed_next_steps: typeof BUDGET_UNSUPPORTED_NEXT_STEPS;
-      readonly reason: string;
-    };
-
-/**
- * Promove o `timeoutSecondsOverride` que existia só para testes a valor
- * derivado por policy. O budget é validado SOMENTE contra os bounds de runtime
- * do launcher/profile: budget acima do bound não é reduzido em silêncio ao
- * bound (isso seria degradação disfarçada), vira `BUDGET_UNSUPPORTED` nomeando
- * o bound violado.
- */
-export function resolveWorkerRuntimeBudget(input: {
-  readonly profile: LauncherProfile;
-  readonly budgetMs: number;
-}): WorkerRuntimeBudgetResolution {
-  const { budgetMs } = input;
-  const bounds = workerRuntimeBoundsOf(input.profile);
-
-  if (!Number.isSafeInteger(budgetMs) || budgetMs <= 0) {
-    const violated = bounds[1] as WorkerRuntimeBound;
-    return {
-      outcome: 'BUDGET_UNSUPPORTED',
-      requested_budget_ms: Number.isSafeInteger(budgetMs) ? budgetMs : 0,
-      violated_bound: violated,
-      checked_bounds: bounds,
-      allowed_next_steps: BUDGET_UNSUPPORTED_NEXT_STEPS,
-      reason: 'worker runtime budget não é um inteiro positivo representável; requer replan',
-    };
-  }
-
-  const violated = bounds.find((bound) => budgetMs > bound.maximum_ms);
-  if (violated) {
-    return {
-      outcome: 'BUDGET_UNSUPPORTED',
-      requested_budget_ms: budgetMs,
-      violated_bound: violated,
-      checked_bounds: bounds,
-      allowed_next_steps: BUDGET_UNSUPPORTED_NEXT_STEPS,
-      reason: `worker runtime budget de ${budgetMs}ms excede o bound ${violated.source} (${violated.maximum_ms}ms, ${violated.provenance})`,
-    };
-  }
-
-  return {
-    outcome: 'RESOLVED',
-    timeout_seconds_override: Math.max(1, Math.ceil(budgetMs / 1_000)),
-    requested_budget_ms: budgetMs,
-    checked_bounds: bounds,
-    provenance: ['worker_runtime_budget', ...bounds.map((bound) => bound.provenance)],
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Timeout de ValidationCommand — grandeza SEPARADA, bound próprio.
-// ---------------------------------------------------------------------------
 
 export interface ValidationCommandTimeoutBound {
   readonly kind: 'VALIDATION_COMMAND_TIMEOUT_BOUND';
@@ -375,7 +290,7 @@ export type ValidationCommandTimeoutCheck =
 
 /**
  * Checa o timeout de UM comando de validação contra o contrato de
- * `ValidationCommand`. Não recebe profile, não conhece o worker runtime budget
+ * `ValidationCommand`. Não recebe profile, não conhece previsão de runtime
  * e nunca tira `min` entre as duas grandezas: um comando de validação longo
  * não encolhe o runtime do worker, e um runtime curto não invalida o comando.
  */

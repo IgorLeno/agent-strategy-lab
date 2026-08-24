@@ -218,7 +218,6 @@ async function writeFakeProfile(
       ...ownership,
       'argv: [node, fixtures/fake-worker.mjs]',
       'prompt_delivery: argv',
-      'timeout_seconds: 60',
       'forbidden_flags: []',
       'env_allowlist: [PATH, HOME, AGENTLAB_FAKE_MODE]',
     ].join('\n'),
@@ -1145,14 +1144,6 @@ describe('M85 — External Project Fake E2E', () => {
     const candidates = [intermediate, advanced].map((profile) => ({
       profile_id: profile.profile_id,
       availability: { value: true, provenance: 'fixture preflight' },
-      runtime_bounds: [
-        {
-          kind: 'WORKER_RUNTIME_BOUND' as const,
-          source: 'profile_runtime' as const,
-          maximum_ms: advancedBoundMs,
-          provenance: 'fixture LauncherProfile.timeout_seconds',
-        },
-      ],
     })) satisfies RoutingCandidate[];
     const registry = new CapabilityRegistry([intermediate, advanced]);
 
@@ -1260,8 +1251,9 @@ describe('M85 — External Project Fake E2E', () => {
       outcome: 'REJECTED',
       rejection_code: 'CAPABILITY_INSUFFICIENT',
     }));
-    expect(baseline.result.worker_runtime_budget).toMatchObject({
-      milliseconds: 1_445_000,
+    expect(baseline.result.execution_runtime_forecast).toMatchObject({
+      predicted_runtime_ms: 1_445_000,
+      authority: 'ADVISORY',
       components: {
         envelope_duration_expected_ms: implementationMs,
         aggregate_validation_cost_ms: validationMs,
@@ -1275,15 +1267,15 @@ describe('M85 — External Project Fake E2E', () => {
     expect(expensiveValidation.built.task.resource_envelope).toEqual(
       baseline.built.task.resource_envelope,
     );
-    expect(expensiveValidation.result.worker_runtime_budget.milliseconds).toBe(
-      baseline.result.worker_runtime_budget.milliseconds,
+    expect(expensiveValidation.result.execution_runtime_forecast.predicted_runtime_ms).toBe(
+      baseline.result.execution_runtime_forecast.predicted_runtime_ms,
     );
-    expect(expensiveValidation.result.worker_runtime_budget.components).toMatchObject({
+    expect(expensiveValidation.result.execution_runtime_forecast.components).toMatchObject({
       aggregate_validation_cost_ms: 900_000,
       worker_owned_validation_cost_ms: 0,
     });
 
-    const components = baseline.result.worker_runtime_budget.components;
+    const components = baseline.result.execution_runtime_forecast.components;
     const legacyWorkerBudgetMs = Math.ceil(
       ((implementationMs + validationMs) *
         components.capability_multiplier *
@@ -1296,18 +1288,20 @@ describe('M85 — External Project Fake E2E', () => {
     expect(legacyWorkerBudgetMs).toBeGreaterThan(advancedBoundMs);
     expect(baseline.built.task.resource_envelope.duration_ms.expected).toBe(implementationMs);
 
+    // Envelope que ANTES estourava o bound de 1.800.000ms e derrubava a work
+    // unit. Hoje ele roteia: a previsão é registrada e não recusa nada.
     const oversizedImplementation = routeMaterialized(validationMs, 2_000_000);
-    expect(oversizedImplementation.result.outcome).toBe('BUDGET_UNSUPPORTED');
-    if (oversizedImplementation.result.outcome !== 'BUDGET_UNSUPPORTED') {
+    expect(oversizedImplementation.result.outcome).toBe('ROUTED');
+    if (oversizedImplementation.result.outcome !== 'ROUTED') {
       throw new Error('unreachable');
     }
-    expect(oversizedImplementation.result.violations).toContainEqual(
-      expect.objectContaining({
-        profile_id: advanced.profile_id,
-        requested_budget_ms: 1_926_000,
-        violated_bound: expect.objectContaining({ maximum_ms: advancedBoundMs }),
-      }),
-    );
+    expect(oversizedImplementation.result.profile.profile_id).toBe(advanced.profile_id);
+    expect(
+      oversizedImplementation.result.execution_runtime_forecast.predicted_runtime_ms,
+    ).toBe(1_926_000);
+    expect(
+      oversizedImplementation.result.execution_runtime_forecast.predicted_runtime_ms,
+    ).toBeGreaterThan(advancedBoundMs);
   });
 });
 

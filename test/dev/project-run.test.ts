@@ -18,7 +18,6 @@ import {
   routeInitialProfileWithHistory,
 } from '../../src/routing/index.js';
 import { assessExecution } from '../../src/planner/assess.js';
-import { workerRuntimeBoundsOf } from '../../dev/lib/project-roles.js';
 import { EvaluationOutcome, QualificationStatus } from '../../src/core/index.js';
 import { AttemptRole, queryPerformanceHistory } from '../../src/performance/index.js';
 import { RunIndex, verifyRunIntegrity } from '../../src/storage/index.js';
@@ -266,7 +265,6 @@ const CLAUDE_LIKE_PROFILE = LauncherProfile.parse({
   worker_validation_policy: 'targeted',
   argv: ['claude', '--print'],
   prompt_delivery: 'argv',
-  timeout_seconds: 60,
   forbidden_flags: [],
   env_allowlist: ['PATH', 'HOME'],
 });
@@ -450,7 +448,6 @@ describe('capability de profile para routing real', () => {
       billing_mode: 'subscription_only',
       argv: ['codex', 'exec'],
       prompt_delivery: 'stdin',
-      timeout_seconds: 60,
       forbidden_flags: [],
       env_allowlist: ['PATH'],
       test_double_of: { agent: 'codex', model: 'gpt-5.6-sol', reasoning_effort: 'max' },
@@ -815,7 +812,6 @@ const HISTORY_PROFILE_A = LauncherProfile.parse({
   worker_validation_policy: 'targeted',
   argv: ['node', 'fake-worker.mjs'],
   prompt_delivery: 'argv',
-  timeout_seconds: 60,
   forbidden_flags: [],
   env_allowlist: ['PATH'],
   test_double_of: {
@@ -1417,13 +1413,11 @@ describe('história canônica de project attempts', () => {
     const cheap = LauncherProfile.parse({
       ...HISTORY_PROFILE_A,
       id: 'fake-routing-cheap',
-      timeout_seconds: 600,
       test_double_of: { ...HISTORY_PROFILE_A.test_double_of!, model: 'gpt-5.6-terra' },
     });
     const strong = LauncherProfile.parse({
       ...HISTORY_PROFILE_A,
       id: 'fake-routing-strong',
-      timeout_seconds: 600,
       test_double_of: { ...HISTORY_PROFILE_A.test_double_of!, model: 'gpt-5.6-sol' },
     });
 
@@ -1492,7 +1486,6 @@ describe('história canônica de project attempts', () => {
       candidates: [cheap, strong].map((profile) => ({
         profile_id: profile.id,
         availability: { value: true, provenance: 'fixture: profile carregado do catálogo' },
-        runtime_bounds: workerRuntimeBoundsOf(profile).map((bound) => ({ ...bound })),
       })),
       profile_fingerprints_sha256: {
         [cheap.id]: projectProfileFingerprint(cheap),

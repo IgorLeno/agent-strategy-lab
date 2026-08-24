@@ -53,8 +53,17 @@ export const LauncherProfile = z
     /** argv base; o prompt entra conforme prompt_delivery. */
     argv: z.array(nonEmpty).min(1),
     prompt_delivery: z.enum(['argv', 'stdin']),
-    timeout_seconds: z.number().int().positive().max(7_200),
-    /** Graça entre SIGTERM e SIGKILL — worker que ignora TERM ainda morre. */
+    /**
+     * NÃO existe mais `timeout_seconds`. Ele era o deadline derivado da task —
+     * 1800s em todo o catálogo — e um profile não é o lugar onde a duração de
+     * uma tarefa vira limite operacional. O que encerra processo hoje é o
+     * MACHINE_SAFETY_CEILING (dev/lib/machine-safety.ts), que é de
+     * infraestrutura: não vem do profile, não vem do planner e não entra em
+     * routing.
+     *
+     * Graça entre o PEDIDO de término (SIGTERM) e o SIGKILL. Worker que ignora
+     * TERM ainda morre; isto nunca foi e não é duração máxima da task.
+     */
     kill_after_seconds: z.number().int().positive().max(120).default(10),
     /** Recusa de lançamento se qualquer um aparecer no argv final. */
     forbidden_flags: z.array(nonEmpty),

@@ -108,7 +108,7 @@ interface SharedLabInput {
   readonly on_progress?: LabProgressListener;
   readonly planner_profile_id?: string;
   readonly max_iterations?: number;
-  readonly timeout_override?: string;
+  readonly machine_safety_ceiling_override?: string;
   readonly verbose?: boolean;
   readonly autonomy?: 'routine';
   readonly control_root?: string;
@@ -265,7 +265,7 @@ async function executeProject(input: {
   readonly authorizationFile: string;
   readonly plannerProfileId?: string;
   readonly maxIterations: number;
-  readonly timeoutOverride?: string;
+  readonly machineSafetyCeilingOverride?: string;
   readonly verbose?: boolean;
   readonly autonomy?: 'routine';
   readonly onProgress?: LabProgressListener;
@@ -279,7 +279,7 @@ async function executeProject(input: {
     maxIterations: input.maxIterations,
     ...(input.onProgress === undefined ? {} : { onProgress: input.onProgress }),
     ...(input.plannerProfileId === undefined ? {} : { plannerProfileId: input.plannerProfileId }),
-    ...(input.timeoutOverride === undefined ? {} : { timeoutOverride: input.timeoutOverride }),
+    ...(input.machineSafetyCeilingOverride === undefined ? {} : { machineSafetyCeilingOverride: input.machineSafetyCeilingOverride }),
     ...(input.verbose === undefined ? {} : { verbose: input.verbose }),
     ...(input.autonomy === undefined ? {} : { autonomy: input.autonomy }),
   });
@@ -430,7 +430,7 @@ function sharedResumeInput(
     ...(input.publish === undefined ? {} : { publish: input.publish }),
     ...(input.planner_profile_id === undefined ? {} : { planner_profile_id: input.planner_profile_id }),
     ...(input.max_iterations === undefined ? {} : { max_iterations: input.max_iterations }),
-    ...(input.timeout_override === undefined ? {} : { timeout_override: input.timeout_override }),
+    ...(input.machine_safety_ceiling_override === undefined ? {} : { machine_safety_ceiling_override: input.machine_safety_ceiling_override }),
     ...(input.verbose === undefined ? {} : { verbose: input.verbose }),
     ...(input.autonomy === undefined ? {} : { autonomy: input.autonomy }),
     ...(input.control_root === undefined ? {} : { control_root: input.control_root }),
@@ -492,7 +492,7 @@ export async function submitRunDirective(input: SubmitRunDirectiveInput): Promis
     ...(preset === undefined ? {} : { policy_preset: preset }),
     ...(input.planner_profile_id === undefined ? {} : { planner_profile_id: input.planner_profile_id }),
     ...(input.max_iterations === undefined ? {} : { max_iterations: input.max_iterations }),
-    ...(input.timeout_override === undefined ? {} : { timeout_override: input.timeout_override }),
+    ...(input.machine_safety_ceiling_override === undefined ? {} : { machine_safety_ceiling_override: input.machine_safety_ceiling_override }),
     ...(input.verbose === undefined ? {} : { verbose: input.verbose }),
     ...(parsed.header?.execution?.autonomy === 'routine' || input.autonomy === 'routine'
       ? { autonomy: 'routine' }
@@ -712,7 +712,7 @@ export async function submitHumanInstruction(
     runProjectImpl: input.run_project ?? runProject,
     ...(onProgress === undefined ? {} : { onProgress }),
     ...(input.planner_profile_id === undefined ? {} : { plannerProfileId: input.planner_profile_id }),
-    ...(input.timeout_override === undefined ? {} : { timeoutOverride: input.timeout_override }),
+    ...(input.machine_safety_ceiling_override === undefined ? {} : { machineSafetyCeilingOverride: input.machine_safety_ceiling_override }),
     ...(input.verbose === undefined ? {} : { verbose: input.verbose }),
     ...(input.autonomy === undefined ? {} : { autonomy: input.autonomy }),
   });
@@ -817,7 +817,7 @@ export async function resumeHumanInstruction(
     runProjectImpl: input.run_project ?? runProject,
     ...(onProgress === undefined ? {} : { onProgress }),
     ...(input.planner_profile_id === undefined ? {} : { plannerProfileId: input.planner_profile_id }),
-    ...(input.timeout_override === undefined ? {} : { timeoutOverride: input.timeout_override }),
+    ...(input.machine_safety_ceiling_override === undefined ? {} : { machineSafetyCeilingOverride: input.machine_safety_ceiling_override }),
     ...(input.verbose === undefined ? {} : { verbose: input.verbose }),
     ...(input.autonomy === undefined ? {} : { autonomy: input.autonomy }),
   });

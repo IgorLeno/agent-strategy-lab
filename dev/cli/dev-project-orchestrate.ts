@@ -21,7 +21,8 @@ interface LifecycleRequestFile {
   readonly inspection: unknown;
   readonly authorization_scope: unknown;
   readonly classification: DirectTaskClassification;
-  readonly worker_runtime_budget_ms: number;
+  /** Previsão ADVISORY de runtime; entra no plano como evidência, não como limite. */
+  readonly predicted_runtime_ms: number;
   readonly minimal_facts_source?: 'cached_inspection' | 'fresh_minimal_collection';
   /** Ausente, os critérios de M75 ficam `unknown` e o caminho vira REVIEWED. */
   readonly observed_taxonomy?: ObservedTaxonomyFacts;
@@ -59,7 +60,7 @@ async function main(): Promise<void> {
       ? {}
       : { observedTaxonomy: request.observed_taxonomy }),
     profile,
-    workerRuntimeBudgetMs: request.worker_runtime_budget_ms,
+    predictedRuntimeMs: request.predicted_runtime_ms,
     // Dry-run não prova quota nem credencial: ambas permanecem UNKNOWN, e
     // UNKNOWN nunca é promovido a provado só para o plano seguir adiante.
     quota: { availability: null, provenance: 'dry-run: quota não é probada sem launch' },

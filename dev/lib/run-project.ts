@@ -227,7 +227,7 @@ export interface ProjectRunInput {
   readonly plannerProfileId?: string;
   readonly maxIterations: number;
   readonly autonomy?: 'routine';
-  readonly timeoutOverride?: string;
+  readonly machineSafetyCeilingOverride?: string;
   readonly verbose?: boolean;
   readonly onProgress?: LabProgressListener;
 }
@@ -268,8 +268,6 @@ export async function runProject(input: ProjectRunInput): Promise<PlanRunResult>
         dryRun: false,
         credential: facts.credential,
         quota: facts.quota,
-        workerRuntimeBudgetMs:
-          authorization.work_units.default.resource_envelope.duration_ms.maximum,
         port: createProviderRoleInvocationPort(),
       });
     },
@@ -282,7 +280,7 @@ export async function runProject(input: ProjectRunInput): Promise<PlanRunResult>
     maxIterations: input.maxIterations,
     ...(input.onProgress === undefined ? {} : { onProgress: input.onProgress }),
     ...(input.autonomy === undefined ? {} : { autonomy: input.autonomy }),
-    ...(input.timeoutOverride === undefined ? {} : { timeoutOverride: input.timeoutOverride }),
+    ...(input.machineSafetyCeilingOverride === undefined ? {} : { machineSafetyCeilingOverride: input.machineSafetyCeilingOverride }),
     ...(input.verbose === undefined ? {} : { verbose: input.verbose }),
   });
   return {

@@ -17,7 +17,6 @@ import type {
 import { ProfileCapability } from './capability.js';
 import {
   InitialRoutingResult,
-  WorkerRuntimeBound,
   routeInitialProfile,
   type InitialRoutingInput,
   type RoutingCandidate,
@@ -98,57 +97,33 @@ const NumericDistributionSchema = z
   })
   .strict();
 
-export const HistoryWorkerRuntimeBudget = z
+/**
+ * Previsão derivada da HISTÓRIA: o p90 da duração observada em execuções
+ * comparáveis. Continua sendo previsão — nada aqui autoriza, rejeita ou
+ * encerra. Sem `checked_runtime_bounds`: não há mais bound contra o qual
+ * comparar, porque a previsão deixou de ter poder de recusa.
+ */
+export const HistoryExecutionRuntimeForecast = z
   .object({
-    kind: z.literal('HISTORY_DERIVED_WORKER_RUNTIME_BUDGET'),
-    milliseconds: z.number().int().nonnegative(),
+    kind: z.literal('HISTORY_DERIVED_EXECUTION_RUNTIME_FORECAST'),
+    authority: z.literal('ADVISORY'),
+    predicted_runtime_ms: z.number().int().nonnegative(),
     statistic: z.literal('observed_duration_ms_p90'),
     observed_distribution: NumericDistributionSchema,
     sample_size: z.number().int().positive(),
-    checked_runtime_bounds: z.array(WorkerRuntimeBound).min(1),
     provenance: z.array(nonEmpty).min(1),
   })
   .strict();
-export type HistoryWorkerRuntimeBudget = z.infer<typeof HistoryWorkerRuntimeBudget>;
+export type HistoryExecutionRuntimeForecast = z.infer<typeof HistoryExecutionRuntimeForecast>;
 
-const HistoryBudgetViolation = z
-  .object({
-    profile_id: nonEmpty,
-    requested_budget_ms: z.number().int().nonnegative(),
-    violated_bound: WorkerRuntimeBound,
-    provenance: z.array(nonEmpty).min(1),
-  })
-  .strict();
-
-const HistoryRoutedRecommendation = z
+export const HistoryRoutingRecommendation = z
   .object({
     outcome: z.literal('ROUTED'),
     profile: ProfileCapability,
-    worker_runtime_budget: HistoryWorkerRuntimeBudget,
+    execution_runtime_forecast: HistoryExecutionRuntimeForecast,
     series_key: sha256,
   })
   .strict();
-
-const HistoryBudgetUnsupportedRecommendation = z
-  .object({
-    outcome: z.literal('BUDGET_UNSUPPORTED'),
-    profile: ProfileCapability,
-    worker_runtime_budget: HistoryWorkerRuntimeBudget,
-    violations: z.array(HistoryBudgetViolation).min(1),
-    allowed_next_steps: z.tuple([
-      z.literal('TRY_ANOTHER_PROFILE'),
-      z.literal('RECONFIGURE_RUNTIME'),
-      z.literal('REPLAN'),
-      z.literal('HUMAN_REQUIRED'),
-    ]),
-    series_key: sha256,
-  })
-  .strict();
-
-export const HistoryRoutingRecommendation = z.discriminatedUnion('outcome', [
-  HistoryRoutedRecommendation,
-  HistoryBudgetUnsupportedRecommendation,
-]);
 export type HistoryRoutingRecommendation = z.infer<typeof HistoryRoutingRecommendation>;
 
 /**
@@ -432,7 +407,7 @@ function fallback(
 }
 
 /**
- * Recomenda profile e worker runtime budget somente quando uma única série
+ * Recomenda profile e previsão ADVISORY de runtime somente quando uma série
  * suficiente domina todas as alternativas. Trade-off, empate ou ausência de
  * qualquer dimensão obrigatória cai no M78.
  */
@@ -592,22 +567,19 @@ export function routeInitialProfileWithHistory(input: HistoryRoutingInput): Hist
   if (!Number.isSafeInteger(duration.value.p90)) {
     return fallback(input, minimumSampleSize, considerations, 'p90 observado não é um inteiro seguro de milissegundos');
   }
-  const budget = HistoryWorkerRuntimeBudget.parse({
-    kind: 'HISTORY_DERIVED_WORKER_RUNTIME_BUDGET',
-    milliseconds: duration.value.p90,
+  const forecast = HistoryExecutionRuntimeForecast.parse({
+    kind: 'HISTORY_DERIVED_EXECUTION_RUNTIME_FORECAST',
+    authority: 'ADVISORY',
+    predicted_runtime_ms: duration.value.p90,
     statistic: 'observed_duration_ms_p90',
     observed_distribution: duration.value,
     sample_size: duration.sample_size,
-    checked_runtime_bounds: selected.candidate.runtime_bounds,
     provenance: [
       `PerformanceSeries(${seriesKey}).aggregations.duration_ms`,
       'NumericDistribution.p90 (nearest-rank observado por M81)',
-      'RoutingCandidate.runtime_bounds (WORKER_RUNTIME_BOUND only)',
+      'ADVISORY: hipótese de duração; não autoriza, não rejeita e não encerra nada',
     ],
   });
-  const violatedBounds = selected.candidate.runtime_bounds.filter(
-    (bound) => budget.milliseconds > bound.maximum_ms,
-  );
   const evidence = {
     query_minimum_sample_size: input.history.minimum_sample_size,
     decision_minimum_sample_size: minimumSampleSize,
@@ -624,7 +596,7 @@ export function routeInitialProfileWithHistory(input: HistoryRoutingInput): Hist
     rationale: [
       `série=${seriesKey} profile=${selected.capability.profile_id} é a única dominante sem pesos inventados`,
       `minimum_sample_size=${minimumSampleSize}; menor amostra de métrica=${selected.minimumMetricSampleSize}`,
-      `budget=${budget.milliseconds}ms deriva diretamente do p90 da duração observada; não substitui decomposição/capacidade exigida por M78`,
+      `previsão=${forecast.predicted_runtime_ms}ms deriva do p90 da duração observada; é ADVISORY e não substitui decomposição/capacidade exigida por M78`,
     ],
     provenance: [
       `PerformanceHistoryQueryResult.series[series_key=${seriesKey}]`,
@@ -635,36 +607,12 @@ export function routeInitialProfileWithHistory(input: HistoryRoutingInput): Hist
     ],
   };
 
-  if (violatedBounds.length > 0) {
-    return HistoryInformedRoutingResult.parse({
-      ...common,
-      recommendation: {
-        outcome: 'BUDGET_UNSUPPORTED',
-        profile: selected.capability,
-        worker_runtime_budget: budget,
-        violations: violatedBounds.map((bound) => ({
-          profile_id: selected.capability.profile_id,
-          requested_budget_ms: budget.milliseconds,
-          violated_bound: bound,
-          provenance: [...budget.provenance, bound.provenance],
-        })),
-        allowed_next_steps: [
-          'TRY_ANOTHER_PROFILE',
-          'RECONFIGURE_RUNTIME',
-          'REPLAN',
-          'HUMAN_REQUIRED',
-        ],
-        series_key: seriesKey,
-      },
-    });
-  }
-
   return HistoryInformedRoutingResult.parse({
     ...common,
     recommendation: {
       outcome: 'ROUTED',
       profile: selected.capability,
-      worker_runtime_budget: budget,
+      execution_runtime_forecast: forecast,
       series_key: seriesKey,
     },
   });

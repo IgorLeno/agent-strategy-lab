@@ -23,6 +23,7 @@
  *   dirty      commita e ainda deixa arquivo não rastreado na árvore
  *   out-of-scope  commita alterando dev/plan.yaml
  *   timeout    ignora SIGTERM e nunca termina
+ *   stall      fala, fica MUDO por um intervalo longo, e então trabalha normalmente
  *   leak       deixa um descendente vivo depois de sair
  *
  * Role de reviewer (argv --agentlab-read-only), por AGENTLAB_FAKE_REVIEW:
@@ -187,6 +188,14 @@ if (mode === 'timeout') {
   process.on('SIGTERM', () => {});
   process.on('SIGINT', () => {});
   setInterval(() => {}, 1000);
+} else if (mode === 'stall') {
+  // Um worker SAUDÁVEL que simplesmente fica mudo: fala, pensa em silêncio por
+  // um intervalo longo, e termina o trabalho. É exatamente o caso que o stall
+  // detector observacional precisa registrar SEM encerrar nada — silêncio não
+  // prova travamento, e matar aqui destruiria trabalho legítimo.
+  console.log('AGENTLAB_FAKE_STALL_BEGIN');
+  const silenceMs = Number(process.env.AGENTLAB_FAKE_STALL_MS ?? '1500');
+  setTimeout(main, silenceMs);
 } else {
   main();
 }

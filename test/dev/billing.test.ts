@@ -94,7 +94,6 @@ async function writeFakeClaudeProfile(id = 'claude-fixture-v1'): Promise<string>
     'environment_mode: real-world',
     "argv: [claude, '--print', '--model', 'modelo-fixo', '--settings', 'dev/profiles/fixture.settings.json', '--setting-sources', 'project']",
     'prompt_delivery: argv',
-    'timeout_seconds: 30',
     'forbidden_flags: []',
     'env_allowlist: [PATH, AGENTLAB_FAKE_AUTH]',
   ]);
@@ -109,7 +108,6 @@ async function writeFakeCodexProfile(id = 'codex-fixture-v1'): Promise<string> {
     'environment_mode: real-world',
     "argv: [codex, exec, '--json', '--strict-config', '--ignore-user-config', '--model', 'gpt-5.6-sol', '--config', 'model_reasoning_effort=\"high\"', '-']",
     'prompt_delivery: stdin',
-    'timeout_seconds: 30',
     'forbidden_flags: []',
     'env_allowlist: [PATH, AGENTLAB_FAKE_AUTH]',
   ]);
@@ -128,7 +126,6 @@ describe('perfis subscription-only', () => {
       'billing_mode: subscription_only',
       "argv: [claude, '--print', '--model', 'x']",
       'prompt_delivery: argv',
-      'timeout_seconds: 30',
       'forbidden_flags: []',
       'env_allowlist: [PATH, ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN]',
     ]);
@@ -144,7 +141,6 @@ describe('perfis subscription-only', () => {
       'billing_mode: subscription_only',
       "argv: [codex, exec, '--model', 'x', '-']",
       'prompt_delivery: stdin',
-      'timeout_seconds: 30',
       'forbidden_flags: []',
       'env_allowlist: [PATH, OPENAI_API_KEY]',
     ]);
@@ -157,7 +153,6 @@ describe('perfis subscription-only', () => {
       'agent: claude',
       "argv: [claude, '--print', '--model', 'x']",
       'prompt_delivery: argv',
-      'timeout_seconds: 30',
       'forbidden_flags: []',
       'env_allowlist: [PATH]',
     ]);
@@ -173,7 +168,6 @@ describe('perfis subscription-only', () => {
       'billing_mode: api',
       "argv: [claude, '--print', '--model', 'x']",
       'prompt_delivery: argv',
-      'timeout_seconds: 30',
       'forbidden_flags: []',
       'env_allowlist: [PATH, ANTHROPIC_API_KEY]',
     ]);
@@ -243,7 +237,7 @@ describe('perfis subscription-only', () => {
       billing_mode: 'subscription_only',
       environment_mode: v1.environment_mode,
       instruction_environment: v1.instruction_environment,
-      timeout_seconds: v1.timeout_seconds,
+      kill_after_seconds: v1.kill_after_seconds,
     });
     expect(v2.argv).toEqual(v1.argv);
     expect(v2.argv[v2.argv.indexOf('--model') + 1]).toBe('claude-opus-5');
@@ -282,7 +276,6 @@ describe('perfis subscription-only', () => {
       'worker_validation_policy: targeted',
       "argv: [codex, exec, '--model', 'gpt-5.6-sol', '-']",
       'prompt_delivery: stdin',
-      'timeout_seconds: 30',
       'forbidden_flags: [resume]',
       'env_allowlist: [PATH]',
     ]);
@@ -525,7 +518,6 @@ describe('preflight do launcher', () => {
     'environment_mode: real-world',
     "argv: [claude, '--print', '--model', 'modelo-fixo', '--settings', 'dev/profiles/fixture.settings.json']",
     'prompt_delivery: argv',
-    'timeout_seconds: 30',
     'forbidden_flags: []',
     'env_allowlist: [PATH, AGENTLAB_FAKE_AUTH]',
   ];

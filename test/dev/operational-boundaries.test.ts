@@ -120,7 +120,6 @@ async function setup(options: { gitignore?: string } = {}): Promise<Fixture> {
       'worker_validation_policy: targeted',
       'argv: [node, fixtures/fake-worker.mjs]',
       'prompt_delivery: argv',
-      'timeout_seconds: 300',
       'forbidden_flags: []',
       'env_allowlist: [PATH, HOME, AGENTLAB_FAKE_MODE]',
       // `capabilityOf` e o router classificam MODELOS; um worker falso não tem

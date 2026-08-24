@@ -606,7 +606,6 @@ function fixtureProfile(agent: 'claude' | 'codex'): LauncherProfile {
     worker_validation_policy: 'targeted',
     argv: ['node', 'fixtures/fake-claude-stream.mjs', '--print', '--output-format', 'stream-json', '--verbose'],
     prompt_delivery: 'argv',
-    timeout_seconds: 30,
     kill_after_seconds: 2,
     forbidden_flags: [],
     env_allowlist: ['PATH', 'HOME'],

@@ -817,3 +817,33 @@ stage, não só tipo e unidade. `resource_envelope.duration_ms` é o envelope ba
 do coding worker e nunca incorpora `validation_budget` no planner; o control
 plane observa o budget separadamente e só o adiciona quando
 `ProfileCapability.ownership.official_validation_owner` pertence ao worker.
+
+[2026-08-24] Context: todo worker do harness era lançado sob `timeout <N>s`,
+onde N vinha da duração PREVISTA da task, e o router recusava profile quando a
+previsão excedia `LauncherProfile.timeout_seconds` (1800s em todo o catálogo).
+Mistake: tratar uma ESTIMATIVA como autorização. O número que o planner
+inventava passava a decidir qual modelo era permitido e quando o processo
+morria, contaminando o experimento — o que estava sendo medido deixava de ser a
+capacidade do agente e passava a ser a aderência do planner a um teto
+arbitrário —, e prejudicando execução long-horizon.
+Rule: previsão de duração é HIPÓTESE e nunca autorização. Nenhum forecast pode
+impedir routing, rejeitar profile, virar wall-clock deadline ou encerrar
+worker; ele é registrado como ADVISORY e comparado depois com o tempo
+observado. Ao remover um limite de tempo, prove que nenhuma janela de processo
+imortal ficou aberta: substitua-o por um failsafe de INFRAESTRUTURA explícito e
+separado (`MACHINE_SAFETY_CEILING`), com proveniência própria, independente de
+planner/profile/estimativa, e justificado como policy operacional — não como
+duração ótima de tarefa. Trocar o número no mesmo campo não é solução.
+
+[2026-08-24] Context: a primeira infraestrutura de detecção de stall poderia,
+de graça, ter recebido autoridade de matar processo silencioso.
+Mistake potencial: dar poder de termination a uma janela de silêncio nunca
+observada empiricamente. Um worker saudável que pensa em silêncio seria morto,
+e a evidência de que a janela estava errada seria destruída junto com o run.
+Rule: um detector novo nasce OBSERVACIONAL. Colete a distribuição real do sinal
+(por provider, model, reasoning effort, task class, dificuldade e outcome)
+antes de conceder autoridade de encerrar qualquer coisa, e registre no próprio
+telemetry que a autoridade é nula (`termination_authority`), para que nenhum
+leitor futuro precise inferir se aquilo matou algo. Corolário: nunca trate
+atividade de I/O bruto como prova de progresso semântico — nem silêncio como
+prova de travamento.

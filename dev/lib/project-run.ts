@@ -12,7 +12,7 @@
  *
  * NÃO existe segundo executor aqui. O loop continua sendo `runOrchestrate`; o
  * que este módulo faz é DECIDIR, por work unit, qual profile é lançado, com
- * qual worker runtime budget, se a review é exigida, o que um FAIL significa
+ * qual previsão de runtime, se a review é exigida, o que um FAIL significa
  * e se uma escalation está autorizada. As decisões entram no loop existente
  * por uma única porta (`ProjectControlPlane`), e o loop continua sendo o dono
  * de estado autoritativo, DAG, commit, validação oficial e recovery.
@@ -105,10 +105,7 @@ import {
   type ProjectLifecyclePathName,
   type ProjectReviewResult,
 } from './project-orchestrate.js';
-import {
-  resolveWorkerRuntimeBudget,
-  workerRuntimeBoundsOf,
-} from './project-roles.js';
+import { machineSafetyCeiling } from './machine-safety.js';
 import {
   OPERATIONAL_ATTEMPT_SCHEMA_VERSION,
   operationalAttemptPath,
@@ -266,11 +263,23 @@ function historyStatusOf(
   return 'EMPTY';
 }
 
-export interface ProjectBudgetReport {
-  readonly requested_ms: number;
-  readonly timeout_seconds: number;
+/**
+ * PREVISÃO e OBSERVAÇÃO lado a lado. `predicted_ms` é hipótese; `observed_ms` é
+ * fato, preenchido depois do término. O erro de previsão é telemetria pura:
+ * ele nunca muda PASS/FAIL, nunca rejeita profile e nunca encerra worker.
+ */
+export interface ProjectRuntimeForecastReport {
+  readonly predicted_ms: number;
+  readonly authority: 'ADVISORY';
   readonly source: string;
-  readonly checked_bounds: readonly string[];
+  /** `null` até o worker terminar. */
+  observed_ms: number | null;
+  absolute_prediction_error_ms: number | null;
+  relative_prediction_error: number | null;
+  observed_to_predicted_ratio: number | null;
+  /** Teto de segurança de MÁQUINA sob o qual o worker roda; não é budget. */
+  readonly machine_safety_ceiling_seconds: number;
+  readonly machine_safety_ceiling_provenance: string;
 }
 
 export interface ProjectReviewReport {
@@ -297,7 +306,7 @@ export interface ProjectWorkUnitReport {
   readonly environment_readiness: EnvironmentReadinessGate;
   readonly classification_provenance: string;
   readonly routing: ProjectRoutingReport;
-  readonly worker_runtime_budget: ProjectBudgetReport;
+  readonly runtime_forecast: ProjectRuntimeForecastReport;
   readonly credential: ProjectLaunchFactReport;
   readonly quota: ProjectLaunchFactReport;
   readonly launch_authorization: string;
@@ -350,7 +359,6 @@ export type WorkUnitDecision =
   | {
       readonly outcome: 'LAUNCH';
       readonly profile_id: string;
-      readonly timeout_seconds: number;
     }
   | { readonly outcome: 'HUMAN_REQUIRED'; readonly human_required: HumanRequiredOutput };
 
@@ -370,7 +378,6 @@ interface WorkUnitAssessment {
   /** `null` quando a avaliação parou antes de existir uma work unit avaliada. */
   readonly report: ProjectWorkUnitReport | null;
   readonly selectedProfileId: string | null;
-  readonly timeoutSeconds: number | null;
   readonly reviewRequirement: CandidateReviewRequirement | null;
   readonly history: PerformanceHistoryQueryResultV2 | null;
   readonly materialization: WorkUnitMaterializationContext | null;
@@ -400,7 +407,7 @@ export interface ProjectWorkUnitPreview {
     readonly inspection_provenance: string;
     readonly environment_readiness: EnvironmentReadinessGate;
     readonly routing: ProjectRoutingReport;
-    readonly worker_runtime_budget: ProjectBudgetReport;
+    readonly runtime_forecast: ProjectRuntimeForecastReport;
     readonly credential: ProjectLaunchFactReport;
     readonly quota: ProjectLaunchFactReport;
     readonly launch_authorization: string;
@@ -801,14 +808,6 @@ export interface CreateProjectControlPlaneInput {
  * mesmo número nos dois caminhos é o que faz a retomada não ser um segundo
  * regime de execução.
  */
-function reviewerBudgetMsOf(
-  authorization: ProjectRunAuthorizationFile,
-  taskId: string,
-): number {
-  return classificationFor(authorization, taskId).classification.resource_envelope.duration_ms
-    .maximum;
-}
-
 export async function createProjectControlPlane(
   input: CreateProjectControlPlaneInput,
 ): Promise<ProjectControlPlane> {
@@ -916,7 +915,6 @@ export async function createProjectControlPlane(
 
   function candidatesFor(eligible: readonly string[]): RoutingCandidate[] {
     return eligible.map((id) => {
-      const profile = profiles.get(id) as LauncherProfile;
       const provenance = provenances.get(id) as ProfileProvenance;
       return {
         profile_id: id,
@@ -924,7 +922,6 @@ export async function createProjectControlPlane(
           value: true,
           provenance: `profile carregado do catálogo do harness (${provenance.source_file})`,
         },
-        runtime_bounds: workerRuntimeBoundsOf(profile).map((bound) => ({ ...bound })),
       };
     });
   }
@@ -967,7 +964,6 @@ export async function createProjectControlPlane(
       gate,
       report: null,
       selectedProfileId: null,
-      timeoutSeconds: null,
       reviewRequirement: null,
       history: null,
       materialization: null,
@@ -1098,11 +1094,7 @@ export async function createProjectControlPlane(
       const reason =
         routingDecision === null
           ? 'routing histórico/base não produziu decisão aplicável'
-          : routingDecision.outcome === 'BUDGET_UNSUPPORTED'
-            ? `worker runtime budget não cabe nos bounds dos profiles autorizados: ${routingDecision.violations
-                .map((violation) => `${violation.profile_id}=${violation.requested_budget_ms}ms`)
-                .join(', ')}`
-            : 'routing não produziu profile executável';
+          : 'routing não produziu profile executável';
       return blocked({
         incidentId: `project:${request.taskId}:routing`,
         decisionNeeded: 'ampliar ou corrigir a profile policy autorizada',
@@ -1128,17 +1120,11 @@ export async function createProjectControlPlane(
       });
     }
 
-    const budgetMs = routingDecision.worker_runtime_budget.milliseconds;
-    const budget = resolveWorkerRuntimeBudget({ profile, budgetMs });
-    if (budget.outcome === 'BUDGET_UNSUPPORTED') {
-      return blocked({
-        incidentId: `project:${request.taskId}:budget`,
-        decisionNeeded: 'reconfigurar runtime ou replanejar a work unit',
-        why: budget.reason,
-        options: [...budget.allowed_next_steps],
-        evidencePaths: [input.authorizationFile],
-      });
-    }
+    // A previsão de runtime entra no relatório e PARA POR AÍ. Nada abaixo a
+    // compara com bound nenhum: um forecast alto não bloqueia a work unit, não
+    // rejeita o profile já escolhido por capability e não vira deadline.
+    const predictedRuntimeMs = routingDecision.execution_runtime_forecast.predicted_runtime_ms;
+    const ceiling = machineSafetyCeiling();
 
     // Fatos honestos, coletados pelas primitives canônicas imediatamente antes
     // do gate. Nenhum é afirmado por conveniência: o que não puder ser sabido
@@ -1210,13 +1196,19 @@ export async function createProjectControlPlane(
         ],
         ...(historyDegraded === null ? {} : { history_unreadable_reason: historyDegraded }),
       },
-      worker_runtime_budget: {
-        requested_ms: budget.requested_budget_ms,
-        timeout_seconds: budget.timeout_seconds_override,
-        source: routed.source === 'HISTORY' ? 'M81/M82 observed duration p90' : 'M78 adaptive worker runtime budget',
-        checked_bounds: budget.checked_bounds.map(
-          (bound) => `${bound.source}=${bound.maximum_ms}ms`,
-        ),
+      runtime_forecast: {
+        predicted_ms: predictedRuntimeMs,
+        authority: 'ADVISORY',
+        source:
+          routed.source === 'HISTORY'
+            ? 'M81/M82 observed duration p90'
+            : 'M78 execution runtime forecast',
+        observed_ms: null,
+        absolute_prediction_error_ms: null,
+        relative_prediction_error: null,
+        observed_to_predicted_ratio: null,
+        machine_safety_ceiling_seconds: ceiling.seconds,
+        machine_safety_ceiling_provenance: ceiling.provenance,
       },
       credential: factReportOf(facts.credential),
       quota: factReportOf(facts.quota),
@@ -1267,7 +1259,6 @@ export async function createProjectControlPlane(
       gate,
       report,
       selectedProfileId,
-      timeoutSeconds: budget.timeout_seconds_override,
       reviewRequirement,
       history,
       materialization: {
@@ -1384,7 +1375,6 @@ export async function createProjectControlPlane(
     return {
       outcome: 'LAUNCH',
       profile_id: assessment.selectedProfileId as string,
-      timeout_seconds: assessment.timeoutSeconds as number,
     };
   }
 
@@ -1451,7 +1441,7 @@ export async function createProjectControlPlane(
               inspection_provenance: assessment.report.inspection_provenance,
               environment_readiness: assessment.report.environment_readiness,
               routing: assessment.report.routing,
-              worker_runtime_budget: assessment.report.worker_runtime_budget,
+              runtime_forecast: assessment.report.runtime_forecast,
               credential: assessment.report.credential,
               quota: assessment.report.quota,
               launch_authorization: assessment.report.launch_authorization,
@@ -1768,7 +1758,6 @@ export async function createProjectControlPlane(
       implementerProfileId: record.profile_id,
       diversityRequirement: requirement.diversity_requirement as never,
       risk: classificationFor(authorization, taskId).classification.risk,
-      workerRuntimeBudgetMs: reviewerBudgetMsOf(authorization, taskId),
       // Os MESMOS fatos honestos do implementer, coletados agora para o
       // profile do reviewer. Review read-only não ganha autorização mais
       // fraca — e uma review que não pode ser autorizada vira
@@ -1935,6 +1924,7 @@ export async function createProjectControlPlane(
     const report = active ?? workUnits.at(-1);
     if (report === undefined) return { status: 'CONTINUE' };
     report.validation_outcome = observation.closeKind ?? observation.launch;
+    await recordObservedRuntime(observation, report);
 
     // FRONTEIRA 2I/2K: a materialização canônica é BENCHMARK-STYLE — envelope,
     // record, comparable facts, evaluation, score, qualification, manifests,
@@ -1972,6 +1962,38 @@ export async function createProjectControlPlane(
       };
     }
     return { status: 'CONTINUE' };
+  }
+
+  /**
+   * PREVISÃO vs OBSERVAÇÃO. Puramente observacional: nada aqui lê ou escreve
+   * `validation_outcome`, `review` ou qualquer veredito. Uma previsão errada
+   * por um fator de dez continua produzindo o mesmo PASS/FAIL — o erro é o
+   * dado que vai calibrar a previsão, não uma acusação contra o worker.
+   *
+   * Falhar ao LER a duração observada também não muda nada: o campo continua
+   * `null`, porque ausência de medição não é medição zero.
+   */
+  async function recordObservedRuntime(
+    observation: WorkUnitObservation,
+    report: ProjectWorkUnitReport,
+  ): Promise<void> {
+    let observedMs: number | null = null;
+    try {
+      const record = await readLaunchRecord(paths, observation.taskId);
+      observedMs = record?.duration_ms ?? null;
+    } catch {
+      observedMs = null;
+    }
+    if (observedMs === null) return;
+
+    const predicted = report.runtime_forecast.predicted_ms;
+    report.runtime_forecast.observed_ms = observedMs;
+    report.runtime_forecast.absolute_prediction_error_ms = Math.abs(observedMs - predicted);
+    // Previsão zero não tem razão definida; `null` diz isso em vez de fingir.
+    report.runtime_forecast.relative_prediction_error =
+      predicted === 0 ? null : (observedMs - predicted) / predicted;
+    report.runtime_forecast.observed_to_predicted_ratio =
+      predicted === 0 ? null : observedMs / predicted;
   }
 
   async function onRepairExhausted(request: {

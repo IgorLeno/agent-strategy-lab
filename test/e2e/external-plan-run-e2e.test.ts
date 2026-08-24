@@ -254,10 +254,15 @@ interface WorkUnitOutput {
     readonly selected_profile_id: string;
     readonly rationale: readonly string[];
   };
-  readonly worker_runtime_budget: {
-    readonly requested_ms: number;
-    readonly timeout_seconds: number;
-    readonly checked_bounds: readonly string[];
+  readonly runtime_forecast: {
+    readonly predicted_ms: number;
+    readonly authority: string;
+    readonly observed_ms: number | null;
+    readonly absolute_prediction_error_ms: number | null;
+    readonly relative_prediction_error: number | null;
+    readonly observed_to_predicted_ratio: number | null;
+    readonly machine_safety_ceiling_seconds: number;
+    readonly machine_safety_ceiling_provenance: string;
   };
   readonly launch_authorization: string;
   readonly review: { readonly required: boolean; readonly outcome: string | null };
@@ -315,7 +320,7 @@ interface DryRunPreviewOutput {
         }[];
       };
     };
-    readonly worker_runtime_budget: { readonly timeout_seconds: number };
+    readonly runtime_forecast: { readonly predicted_ms: number; readonly authority: string };
     readonly credential: { readonly availability: boolean | null; readonly evidence: string; readonly provenance: string };
     readonly quota: { readonly availability: boolean | null; readonly evidence: string; readonly provenance: string };
     readonly launch_authorization: string;
@@ -395,10 +400,16 @@ describe('external plan run — dev-run-plan pelo lifecycle universal', () => {
       expect(unit.routing.selected_profile_id).toBe(ECONOMY);
       expect(unit.routing.source).toBe('M78_FALLBACK');
       expect(unit.routing.rationale.join(' ')).toContain('tier requerido=economy');
-      // 6. worker runtime budget adaptativo, checado contra os bounds.
-      expect(unit.worker_runtime_budget.requested_ms).toBeGreaterThan(0);
-      expect(unit.worker_runtime_budget.timeout_seconds).toBeGreaterThan(0);
-      expect(unit.worker_runtime_budget.checked_bounds.join(' ')).toContain('profile_runtime=');
+      // 6. G/H/I — previsão ADVISORY persistida, tempo OBSERVADO persistido, e
+      // o erro de previsão registrado sem tocar em veredito nenhum.
+      expect(unit.runtime_forecast.predicted_ms).toBeGreaterThan(0);
+      expect(unit.runtime_forecast.authority).toBe('ADVISORY');
+      expect(unit.runtime_forecast.observed_ms).toBeGreaterThanOrEqual(0);
+      expect(unit.runtime_forecast.absolute_prediction_error_ms).toBeGreaterThanOrEqual(0);
+      expect(unit.runtime_forecast.observed_to_predicted_ratio).not.toBeNull();
+      // O teto que de fato limitou o processo é de MÁQUINA, não da task.
+      expect(unit.runtime_forecast.machine_safety_ceiling_seconds).toBeGreaterThan(0);
+      expect(unit.runtime_forecast.machine_safety_ceiling_provenance).toContain('policy operacional');
       // 8. validação oficial ocorreu.
       expect(unit.validation_outcome).toBe('PASS');
       // 9. review só quando a policy pedir — aqui não pediu.
@@ -864,7 +875,8 @@ describe('external plan run — dev-run-plan pelo lifecycle universal', () => {
     expect(unit?.environment_readiness.outcome).toBe('READY');
     expect(unit?.routing.selected_profile_id).toBe(ECONOMY);
     expect(unit?.routing.history_status).toBe('EMPTY');
-    expect(unit?.worker_runtime_budget.timeout_seconds).toBeGreaterThan(0);
+    expect(unit?.runtime_forecast.predicted_ms).toBeGreaterThan(0);
+    expect(unit?.runtime_forecast.authority).toBe('ADVISORY');
     expect(unit?.launch_authorization).toBe('ALLOW');
     expect(unit?.review_required).toBe(false);
     // Proveniência dos fatos, não afirmações.

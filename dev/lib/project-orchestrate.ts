@@ -103,11 +103,10 @@ import { buildEnvironment, resolveProfileArgv, type LauncherProfile } from './pr
 import {
   assertReadOnlyArgv,
   buildRoleArgv,
-  resolveWorkerRuntimeBudget,
   type ProjectWorkerRole,
   type RoleWorkspaceAccess,
-  type WorkerRuntimeBudgetResolution,
 } from './project-roles.js';
+import { machineSafetyCeiling, type MachineSafetyCeiling } from './machine-safety.js';
 import type { HumanRequiredOutput } from './routine-autonomy.js';
 
 export const PROJECT_LIFECYCLE_SCHEMA_VERSION = 1;
@@ -799,8 +798,6 @@ export interface LaunchedPlanningWorkerOptions {
   /** Fatos tri-state com proveniência; nunca booleans afirmados pelo chamador. */
   readonly credential: LaunchFact;
   readonly quota: LaunchFact;
-  /** Budget de runtime do worker, derivado por policy; validado só contra o bound de runtime. */
-  readonly workerRuntimeBudgetMs: number;
   readonly port?: ProviderRoleInvocationPort;
   readonly invocationId?: string;
 }
@@ -981,13 +978,9 @@ export function createLaunchedPlanningWorker(
         );
       }
 
-      const budget = resolveWorkerRuntimeBudget({
-        profile: options.profile,
-        budgetMs: options.workerRuntimeBudgetMs,
-      });
-      if (budget.outcome === 'BUDGET_UNSUPPORTED') {
-        return invocationFailure(options, invocationId, 'BUDGET_UNSUPPORTED', budget.reason, false);
-      }
+      // Nenhum deadline derivado da task: o planner roda sob o mesmo teto de
+      // segurança de MÁQUINA do implementer, que não conhece estimativa.
+      const ceiling = machineSafetyCeiling();
 
       const overlay = buildRoleArgv(options.profile, {
         role: 'planner',
@@ -1056,7 +1049,7 @@ export function createLaunchedPlanningWorker(
           prompt: buildPlannerPrompt(invocation),
           cwd: options.paths.repoRoot,
           env,
-          timeoutSeconds: budget.timeout_seconds_override,
+          timeoutSeconds: ceiling.seconds,
         });
       } catch (error) {
         return invocationFailure(
@@ -1367,7 +1360,6 @@ export interface ProjectReviewerLaunchOptions {
   readonly diversityRequirement: DiversityRequirement;
   readonly packet: ProjectReviewPacket;
   readonly risk: TaskRisk;
-  readonly workerRuntimeBudgetMs: number;
   /**
    * Os MESMOS fatos honestos do implementer. Review read-only não ganha
    * autorização mais fraca: um reviewer lançado com credencial não provada
@@ -1440,13 +1432,9 @@ export async function launchProjectReviewer(
     return reviewUnavailable('REVIEW_LAUNCH_HUMAN_REQUIRED', authorization.reason);
   }
 
-  const budget = resolveWorkerRuntimeBudget({
-    profile: options.profile,
-    budgetMs: options.workerRuntimeBudgetMs,
-  });
-  if (budget.outcome === 'BUDGET_UNSUPPORTED') {
-    return reviewUnavailable('REVIEW_BUDGET_UNSUPPORTED', budget.reason);
-  }
+  // Mesmo teto de segurança de máquina do implementer; nenhuma previsão de
+  // duração de task limita a review.
+  const ceiling = machineSafetyCeiling();
 
   const home = path.join(options.paths.devDir, 'project', 'homes', options.profile.id);
   await mkdir(home, { recursive: true });
@@ -1485,7 +1473,7 @@ export async function launchProjectReviewer(
         prompt,
         cwd: options.paths.repoRoot,
         env,
-        timeoutSeconds: budget.timeout_seconds_override,
+        timeoutSeconds: ceiling.seconds,
       });
     } catch (error) {
       return reviewUnavailable(
@@ -1560,7 +1548,16 @@ export interface ProjectLifecyclePlan {
   readonly review_required: boolean;
   readonly diversity_requirement: DiversityRequirement;
   readonly environment: EnvironmentReadinessGate;
-  readonly worker_runtime_budget: WorkerRuntimeBudgetResolution;
+  /**
+   * PREVISÃO advisory de runtime somada ao teto de segurança de máquina sob o
+   * qual o worker vai rodar. A previsão não autoriza nada; o teto não é budget
+   * de task e não participou de nenhuma decisão.
+   */
+  readonly runtime_forecast: {
+    readonly predicted_runtime_ms: number;
+    readonly authority: 'ADVISORY';
+    readonly machine_safety_ceiling: MachineSafetyCeiling;
+  };
   readonly launch_authorization: ProjectLaunchAuthorization;
   readonly skipped_stages: readonly string[];
   readonly rationale: readonly string[];
@@ -1568,7 +1565,8 @@ export interface ProjectLifecyclePlan {
 
 export interface ProjectLifecyclePlanInput extends DirectPathInput {
   readonly profile: LauncherProfile;
-  readonly workerRuntimeBudgetMs: number;
+  /** Previsão ADVISORY; entra no plano como evidência, nunca como limite. */
+  readonly predictedRuntimeMs: number;
   readonly quota: LaunchFact;
   readonly credential: LaunchFact;
 }
@@ -1578,17 +1576,15 @@ export type ProjectLifecyclePlanResult =
   | { readonly outcome: 'REVIEWED_REQUIRED'; readonly reason: string };
 
 /**
- * Compõe o caminho DIRECT com budget e gate de launch numa vista única — é o
- * que o CLI publica em dry-run, sem tocar em provider, estado ou plano.
+ * Compõe o caminho DIRECT com a previsão de runtime e o gate de launch numa
+ * vista única — é o que o CLI publica em dry-run, sem tocar em provider,
+ * estado ou plano.
  */
 export function planDirectLifecycle(input: ProjectLifecyclePlanInput): ProjectLifecyclePlanResult {
   const direct = runDirectPath(input);
   if (direct.outcome === 'REVIEWED_REQUIRED') return direct;
 
-  const budget = resolveWorkerRuntimeBudget({
-    profile: input.profile,
-    budgetMs: input.workerRuntimeBudgetMs,
-  });
+  const ceiling = machineSafetyCeiling();
   const authorization = authorizeProjectLaunch({
     scope: ExecutionAuthorizationScope.parse(input.authorizationScope),
     capability: 'CONFIGURED_SUBSCRIPTION_WORKER',
@@ -1610,7 +1606,11 @@ export function planDirectLifecycle(input: ProjectLifecyclePlanInput): ProjectLi
       review_required: direct.decision.review_required,
       diversity_requirement: direct.decision.diversity_requirement,
       environment: direct.environment,
-      worker_runtime_budget: budget,
+      runtime_forecast: {
+        predicted_runtime_ms: input.predictedRuntimeMs,
+        authority: 'ADVISORY',
+        machine_safety_ceiling: ceiling,
+      },
       launch_authorization: authorization,
       skipped_stages: direct.skipped_stages,
       rationale: direct.decision.rationale,

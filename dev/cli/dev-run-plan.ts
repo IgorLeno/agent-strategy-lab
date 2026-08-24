@@ -34,7 +34,7 @@ function requireOption(args: ReturnType<typeof parseArgs>, name: string): string
  * `--profile` é obrigatório SEM `--authorization`: esta CLI não escolhe um
  * default implícito. Com `--authorization <agentlab-run.yaml>`, a run passa
  * pelo control plane universal (M71–M84) — intake, inspeção, assessment,
- * routing dentro da policy autorizada, worker runtime budget adaptativo,
+ * routing dentro da policy autorizada, previsão ADVISORY de runtime,
  * review quando a policy exigir, diagnosis, escalation autorizada e gate
  * humano na fronteira — e `--profile`, se informado, precisa pertencer à
  * policy. Sem `--authorization`, o comportamento histórico é idêntico.
@@ -62,7 +62,7 @@ async function main(): Promise<void> {
   );
 
   try {
-    const timeoutOverride = args.options.get('timeout-seconds');
+    const machineSafetyCeilingOverride = args.options.get('machine-safety-ceiling-seconds');
     const autonomy = parseRoutineAutonomy(args);
     const result = await runPlan({
       paths,
@@ -71,7 +71,7 @@ async function main(): Promise<void> {
       dryRun: args.flags.has(DRY_RUN_FLAG),
       maxIterations: parseMaxIterations(args),
       verbose: isVerbose(args),
-      ...(timeoutOverride === undefined ? {} : { timeoutOverride }),
+      ...(machineSafetyCeilingOverride === undefined ? {} : { machineSafetyCeilingOverride }),
       ...(autonomy === undefined ? {} : { autonomy }),
     });
     emit(result.payload);

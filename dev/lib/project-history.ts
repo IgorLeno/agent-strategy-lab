@@ -40,6 +40,7 @@ import {
   type RunRecord,
   type SectionManifest,
 } from '../../src/storage/index.js';
+import { machineSafetyCeiling, machineSafetyCeilingMs } from './machine-safety.js';
 import { writeJsonOnce } from './atomic.js';
 import type { HarnessPaths } from './paths.js';
 import { recordComparableRunFacts } from './project-orchestrate.js';
@@ -442,7 +443,10 @@ function buildExecutionEnvelope(input: CanonicalProjectAttemptInput): ExecutionE
     environment_profile: environment,
     adapter: { name: 'external-project-lifecycle', version: '1.0.0' },
     budgets: input.classification.resource_envelope,
-    timeout_ms: input.profile.timeout_seconds * 1_000,
+    // O record descreve o limite REAL sob o qual o attempt correu. Não existe
+    // mais deadline derivado da task: o que existe é o teto de segurança de
+    // máquina, e é ele que fica registrado.
+    timeout_ms: machineSafetyCeilingMs(machineSafetyCeiling()),
   };
 }
 

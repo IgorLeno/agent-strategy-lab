@@ -3,6 +3,7 @@ import { mkdir, readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { assertNoApiCredentials, runBillingPreflight } from './billing.js';
 import { buildTimeoutArgv, runValidation, toValidationResult } from './exec.js';
+import { machineSafetyCeiling } from './machine-safety.js';
 import {
   changedFiles,
   git,
@@ -331,7 +332,10 @@ async function runAgentProcess(
     }),
   };
   const agentArgv = buildRoutineAgentArgv(resolvedProfile, input);
-  const [program, ...args] = buildTimeoutArgv(agentArgv, profile.timeout_seconds);
+  // Failsafe de INFRAESTRUTURA, não deadline de task: a sessão de routine
+  // autonomy roda sob o mesmo teto de segurança de máquina do implementer.
+  const ceiling = machineSafetyCeiling();
+  const [program, ...args] = buildTimeoutArgv(agentArgv, ceiling.seconds);
   return new Promise((resolve, reject) => {
     const child = spawn(program as string, args, {
       cwd: input.clone.clonePath,

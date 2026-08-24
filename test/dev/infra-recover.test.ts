@@ -66,7 +66,6 @@ argv:
   - stream-json
   - --verbose
 prompt_delivery: argv
-timeout_seconds: 60
 forbidden_flags:
   - --bare
 env_allowlist:

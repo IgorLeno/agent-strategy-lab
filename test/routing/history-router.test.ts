@@ -135,18 +135,10 @@ function capability(profileId: string): ProfileCapability {
   });
 }
 
-function candidate(profileId: string, maximumMs = 5_000_000): RoutingCandidate {
+function candidate(profileId: string): RoutingCandidate {
   return {
     profile_id: profileId,
     availability: { value: true, provenance: 'doctor.ok' },
-    runtime_bounds: [
-      {
-        kind: 'WORKER_RUNTIME_BOUND',
-        source: 'launcher',
-        maximum_ms: maximumMs,
-        provenance: 'LauncherProfile.timeout_seconds',
-      },
-    ],
   };
 }
 
@@ -474,8 +466,8 @@ describe('routeInitialProfileWithHistory', () => {
     expect(result.recommendation).toMatchObject({
       outcome: 'ROUTED',
       profile: { profile_id: 'profile-a' },
-      worker_runtime_budget: {
-        milliseconds: 4_000_000,
+      execution_runtime_forecast: {
+        predicted_runtime_ms: 4_000_000,
         statistic: 'observed_duration_ms_p90',
         sample_size: 3,
       },
@@ -599,32 +591,26 @@ describe('routeInitialProfileWithHistory', () => {
       input([series('profile-a', FINGERPRINT_A, SERIES_A, { durationP90: 4_000_000 })]),
     );
     expect(result.recommendation?.outcome).toBe('ROUTED');
-    expect(result.recommendation?.worker_runtime_budget.milliseconds).toBeGreaterThan(1_000);
-    expect(result.recommendation?.worker_runtime_budget.provenance.join(' ')).not.toContain(
+    expect(result.recommendation?.execution_runtime_forecast.predicted_runtime_ms).toBeGreaterThan(1_000);
+    expect(result.recommendation?.execution_runtime_forecast.provenance.join(' ')).not.toContain(
       'timeout_seconds',
     );
   });
 
-  it('budget fora do runtime bound produz BUDGET_UNSUPPORTED nomeando somente o bound', () => {
+  it('p90 histórico muito acima do antigo bound continua ROUTED: previsão não recusa', () => {
     const result = routeInitialProfileWithHistory(
-      input(
-        [series('profile-a', FINGERPRINT_A, SERIES_A, { durationP90: 4_000_000 })],
-        { candidates: [candidate('profile-a', 3_000_000)] },
-      ),
+      input([series('profile-a', FINGERPRINT_A, SERIES_A, { durationP90: 4_000_000 })], {
+        candidates: [candidate('profile-a')],
+      }),
     );
     expect(result.source).toBe('HISTORY');
     expect(result.recommendation).toMatchObject({
-      outcome: 'BUDGET_UNSUPPORTED',
-      violations: [
-        {
-          requested_budget_ms: 4_000_000,
-          violated_bound: {
-            kind: 'WORKER_RUNTIME_BOUND',
-            source: 'launcher',
-            maximum_ms: 3_000_000,
-          },
-        },
-      ],
+      outcome: 'ROUTED',
+      execution_runtime_forecast: {
+        kind: 'HISTORY_DERIVED_EXECUTION_RUNTIME_FORECAST',
+        authority: 'ADVISORY',
+        predicted_runtime_ms: 4_000_000,
+      },
     });
   });
 

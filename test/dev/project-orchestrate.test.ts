@@ -29,10 +29,14 @@ import {
   buildRoleArgv,
   checkValidationCommandTimeout,
   CLAUDE_READ_ONLY_SETTINGS_FILE,
-  resolveWorkerRuntimeBudget,
   RoleOverlayError,
   VALIDATION_COMMAND_TIMEOUT_BOUND,
 } from '../../dev/lib/project-roles.js';
+import {
+  DEFAULT_MACHINE_SAFETY_CEILING_SECONDS,
+  MachineSafetyCeilingError,
+  machineSafetyCeiling,
+} from '../../dev/lib/machine-safety.js';
 import type { ProjectInspection } from '../../src/inspection/index.js';
 import type { ExecutionAuthorizationScope, ProjectIntakeRequest } from '../../src/intake/index.js';
 import { humanInstructionSha256 } from '../../src/planner/draft.js';
@@ -397,58 +401,34 @@ describe('transporte do provider vs payload do modelo', () => {
   });
 });
 
-describe('worker runtime budget e timeout de validation são grandezas separadas', () => {
-  it('valida o budget somente contra o bound de runtime do launcher/profile', async () => {
-    const profile = await loadProfile(REPO_ROOT, CODEX_PROFILE_ID);
-    const resolved = resolveWorkerRuntimeBudget({ profile, budgetMs: 900_000 });
+describe('teto de segurança de máquina e timeout de validation são grandezas separadas', () => {
+  it('o teto de segurança não vem do profile, do planner nem de estimativa nenhuma', () => {
+    const ceiling = machineSafetyCeiling({ env: {} });
 
-    expect(resolved.outcome).toBe('RESOLVED');
-    if (resolved.outcome !== 'RESOLVED') return;
-    expect(resolved.timeout_seconds_override).toBe(900);
-    expect(resolved.checked_bounds.map((bound) => bound.kind)).toEqual([
-      'WORKER_RUNTIME_BOUND',
-      'WORKER_RUNTIME_BOUND',
-    ]);
-    // Nenhum bound de validation entra na conta do runtime do worker.
-    expect(JSON.stringify(resolved)).not.toContain('VALIDATION_COMMAND_TIMEOUT_BOUND');
+    expect(ceiling.kind).toBe('MACHINE_SAFETY_CEILING');
+    expect(ceiling.seconds).toBe(DEFAULT_MACHINE_SAFETY_CEILING_SECONDS);
+    expect(ceiling.provenance).toContain('policy operacional');
+    // Ele é ordens de grandeza maior que o antigo deadline de task de 1800s:
+    // é failsafe de infraestrutura, não duração ótima de tarefa.
+    expect(ceiling.seconds).toBeGreaterThan(1_800);
+    // Nenhum bound de validation entra na conta do teto de máquina.
+    expect(JSON.stringify(ceiling)).not.toContain('VALIDATION_COMMAND_TIMEOUT_BOUND');
   });
 
-  it('budget fora do bound produz BUDGET_UNSUPPORTED nomeando o bound violado', async () => {
-    const profile = await loadProfile(REPO_ROOT, CODEX_PROFILE_ID);
-    const resolved = resolveWorkerRuntimeBudget({
-      profile,
-      budgetMs: profile.timeout_seconds * 1_000 + 1,
-    });
-
-    expect(resolved.outcome).toBe('BUDGET_UNSUPPORTED');
-    if (resolved.outcome !== 'BUDGET_UNSUPPORTED') return;
-    expect(resolved.violated_bound.source).toBe('profile_runtime');
-    expect(resolved.violated_bound.provenance).toContain(profile.id);
-    expect(resolved.allowed_next_steps).toEqual([
-      'TRY_ANOTHER_PROFILE',
-      'RECONFIGURE_RUNTIME',
-      'REPLAN',
-      'HUMAN_REQUIRED',
-    ]);
-    // Nunca degradação silenciosa para o valor do bound.
-    expect(resolved).not.toHaveProperty('timeout_seconds_override');
+  it('o override existe para exercitar o failsafe em segundos, sem virar budget de task', () => {
+    const tiny = machineSafetyCeiling({ overrideSeconds: 0.25 });
+    expect(tiny.seconds).toBe(0.25);
+    expect(tiny.provenance).toContain('override');
+    expect(() => machineSafetyCeiling({ overrideSeconds: 0 })).toThrow(MachineSafetyCeilingError);
   });
 
-  it('timeout de ValidationCommand é checado só contra o próprio contrato, sem min com o runtime', async () => {
-    const profile = await loadProfile(REPO_ROOT, CODEX_PROFILE_ID);
-    const shortRuntime: LauncherProfile = { ...profile, timeout_seconds: 60 };
-
+  it('timeout de ValidationCommand é checado só contra o próprio contrato, intocado', () => {
     const accepted = checkValidationCommandTimeout(300);
     expect(accepted.outcome).toBe('ACCEPTED');
     if (accepted.outcome === 'ACCEPTED') {
       expect(accepted.timeout_seconds).toBe(300);
       expect(accepted.bound).toEqual(VALIDATION_COMMAND_TIMEOUT_BOUND);
     }
-
-    // Runtime de 60s não encolhe o comando de 300s, e o comando não estica o runtime.
-    const runtime = resolveWorkerRuntimeBudget({ profile: shortRuntime, budgetMs: 60_000 });
-    expect(runtime.outcome).toBe('RESOLVED');
-    if (runtime.outcome === 'RESOLVED') expect(runtime.timeout_seconds_override).toBe(60);
 
     const rejected = checkValidationCommandTimeout(
       VALIDATION_COMMAND_TIMEOUT_BOUND.maximum_seconds + 1,
@@ -457,6 +437,9 @@ describe('worker runtime budget e timeout de validation são grandezas separadas
     if (rejected.outcome !== 'BUDGET_UNSUPPORTED') return;
     expect(rejected.violated_bound.kind).toBe('VALIDATION_COMMAND_TIMEOUT_BOUND');
     expect(rejected.reason).toContain('VALIDATION_COMMAND_TIMEOUT_BOUND');
+
+    // O teto de máquina nunca aparece na decisão sobre um comando de validação.
+    expect(JSON.stringify(rejected)).not.toContain('MACHINE_SAFETY_CEILING');
   });
 });
 
@@ -866,7 +849,6 @@ describe('adapter real da PlanningWorkerPort', () => {
       scope: authorizationScope(),
       credential: { availability: true, provenance: 'probe local provou a assinatura' },
       quota: { availability: null, provenance: 'quota não probada antes do launch' },
-      workerRuntimeBudgetMs: 600_000,
       ...overrides,
     });
   }
@@ -979,14 +961,20 @@ describe('adapter real da PlanningWorkerPort', () => {
     expect(result.failure.code).toBe('PLANNING_LAUNCH_HUMAN_REQUIRED');
   });
 
-  it('recusa budget fora do bound de runtime antes de lançar', async () => {
-    const port = await worker({ workerRuntimeBudgetMs: 99_999_999, providerEnabled: true, dryRun: false });
+  /**
+   * O gate de budget que existia aqui foi removido: previsão de duração não
+   * recusa mais invocação nenhuma. O que continua recusando ANTES de qualquer
+   * efeito são as guardas reais — escopo, billing, credencial, role e a
+   * ausência de porta de invocação configurada.
+   */
+  it('previsão longa não recusa a invocação; a recusa vem das guardas reais', async () => {
+    const port = await worker({ providerEnabled: true, dryRun: false });
     const result = await port.invoke(invocation());
 
     expect(result.outcome).toBe('INVOCATION_FAILED');
     if (result.outcome !== 'INVOCATION_FAILED') return;
-    expect(result.failure.code).toBe('BUDGET_UNSUPPORTED');
-    expect(result.failure.message).toContain('bound');
+    expect(result.failure.code).toBe('PROVIDER_PORT_NOT_CONFIGURED');
+    expect(result.failure.code).not.toBe('BUDGET_UNSUPPORTED');
   });
 
   it('recusa invocação que não declare role read-only', async () => {
@@ -1136,7 +1124,7 @@ describe('dev-project-orchestrate', () => {
       file,
       JSON.stringify({
         task_id: 'T1',
-        worker_runtime_budget_ms: 900_000,
+        predicted_runtime_ms: 900_000,
         minimal_facts_source: 'cached_inspection',
         classification: { task_class: 'bugfix', difficulty_declared: 'easy', risk: 'low' },
         intake: intake(),
@@ -1258,7 +1246,6 @@ describe('G — reviewer não ganha autorização mais fraca que o implementer',
         implementerProfileId: CLAUDE_PROFILE_ID,
         diversityRequirement: 'required',
         risk: 'low',
-        workerRuntimeBudgetMs: 600_000,
         credential,
         quota: { availability: null, provenance: 'quota não probada antes do launch' },
         packet: reviewerPacket(),
@@ -1287,7 +1274,6 @@ describe('G — reviewer não ganha autorização mais fraca que o implementer',
       implementerProfileId: CLAUDE_PROFILE_ID,
       diversityRequirement: 'required',
       risk: 'low',
-      workerRuntimeBudgetMs: 600_000,
       credential: { availability: true, provenance: 'probe local provou a assinatura' },
       quota: { availability: false, provenance: 'provider recusou por limite' },
       packet: reviewerPacket(),
@@ -1318,7 +1304,6 @@ describe('G — reviewer não ganha autorização mais fraca que o implementer',
       implementerProfileId: CLAUDE_PROFILE_ID,
       diversityRequirement: 'required',
       risk: 'low',
-      workerRuntimeBudgetMs: 600_000,
       credential: { availability: true, provenance: 'probe local provou a assinatura' },
       quota: { availability: null, provenance: 'quota não probada antes do launch' },
       packet: reviewerPacket(),
@@ -1345,7 +1330,6 @@ describe('G — reviewer não ganha autorização mais fraca que o implementer',
       implementerProfileId: CLAUDE_PROFILE_ID,
       diversityRequirement: 'required',
       risk: 'low',
-      workerRuntimeBudgetMs: 600_000,
       credential: { availability: true, provenance: 'probe local provou a assinatura' },
       quota: { availability: null, provenance: 'quota não probada antes do launch' },
       packet: reviewerPacket(),
@@ -1371,7 +1355,6 @@ describe('G — reviewer não ganha autorização mais fraca que o implementer',
       implementerProfileId: CLAUDE_PROFILE_ID,
       diversityRequirement: 'required',
       risk: 'low',
-      workerRuntimeBudgetMs: 600_000,
       credential: { availability: true, provenance: 'probe local provou a assinatura' },
       quota: { availability: null, provenance: 'quota não probada antes do launch' },
       packet: reviewerPacket(),
@@ -1389,12 +1372,14 @@ describe('G — reviewer não ganha autorização mais fraca que o implementer',
 });
 
 describe('vista consolidada do lifecycle', () => {
-  it('publica caminho, budget e gate de launch sem tocar em provider', async () => {
+  it('publica caminho, previsão ADVISORY, teto de máquina e gate de launch sem tocar em provider', async () => {
     const profile = await loadProfile(REPO_ROOT, CODEX_PROFILE_ID);
     const result = planDirectLifecycle({
       ...directInput(),
       profile,
-      workerRuntimeBudgetMs: 900_000,
+      // Previsão muito acima do antigo deadline de 1.800.000ms: ela entra no
+      // plano como evidência e não impede nada.
+      predictedRuntimeMs: 3_600_000,
       quota: { availability: null, provenance: 'quota não probada antes do launch' },
       credential: { availability: true, provenance: 'probe local provou a assinatura' },
     });
@@ -1402,7 +1387,11 @@ describe('vista consolidada do lifecycle', () => {
     expect(result.outcome).toBe('PLANNED');
     if (result.outcome !== 'PLANNED') return;
     expect(result.plan.path).toBe('DIRECT');
-    expect(result.plan.worker_runtime_budget.outcome).toBe('RESOLVED');
+    expect(result.plan.runtime_forecast.predicted_runtime_ms).toBe(3_600_000);
+    expect(result.plan.runtime_forecast.authority).toBe('ADVISORY');
+    expect(result.plan.runtime_forecast.machine_safety_ceiling.kind).toBe(
+      'MACHINE_SAFETY_CEILING',
+    );
     expect(result.plan.launch_authorization.outcome).toBe('ALLOW');
     expect(result.plan.task_id).toBe('T1');
   });

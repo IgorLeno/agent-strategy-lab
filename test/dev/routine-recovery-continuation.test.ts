@@ -92,7 +92,6 @@ async function setup(plan?: string): Promise<Fixture> {
       'worker_validation_policy: targeted',
       'argv: [node, fixtures/fake-worker.mjs]',
       'prompt_delivery: argv',
-      'timeout_seconds: 60',
       'forbidden_flags: []',
       'env_allowlist: [PATH, HOME, AGENTLAB_FAKE_MODE]',
     ].join('\n'),

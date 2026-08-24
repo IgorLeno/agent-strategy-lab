@@ -118,7 +118,6 @@ function streamFixtureProfile(scenario: string): LauncherProfile {
       'project',
     ],
     prompt_delivery: 'argv',
-    timeout_seconds: 30,
     kill_after_seconds: 2,
     forbidden_flags: [],
     env_allowlist: ['PATH', 'HOME'],
@@ -696,8 +695,8 @@ describe('precedência dos diagnósticos de término', () => {
   });
 
   const facts = (overrides: Partial<TerminationFacts> = {}): TerminationFacts => ({
-    timedOut: false,
-    timeoutSeconds: 1800,
+    terminationCause: null,
+    terminationDetail: null,
     exitCode: 1,
     signal: null,
     survivorsRemaining: [],
@@ -706,10 +705,18 @@ describe('precedência dos diagnósticos de término', () => {
     ...overrides,
   });
 
-  it('I — timeout continua tendo precedência sobre a falha do provider', () => {
-    expect(facts({ timedOut: true, providerFailure: apiError, exitCode: 124 })).toBeDefined();
-    expect(classifyTermination(facts({ timedOut: true, providerFailure: apiError, exitCode: 124 })))
-      .toMatchObject({ classification: 'TIMED_OUT' });
+  it('I — término pedido por autoridade externa precede a falha do provider', () => {
+    const terminated = facts({
+      terminationCause: 'MACHINE_SAFETY_CEILING',
+      terminationDetail: 'teto de segurança de máquina atingido',
+      providerFailure: apiError,
+      exitCode: null,
+    });
+    const classified = classifyTermination(terminated);
+    expect(classified.classification).toBe('TIMED_OUT');
+    // A CAUSA é nomeada: nenhum leitor confunde failsafe de máquina com o
+    // deadline de task que existia antes.
+    expect(classified.reason).toContain('MACHINE_SAFETY_CEILING');
   });
 
   it('I — sobrevivente e exit code de launcher também vêm antes', () => {
@@ -871,7 +878,6 @@ describe('doctor reconhece o perfil stream sem relaxar os demais', () => {
         'environment_mode: real-world',
         "argv: [claude, '--print', '--output-format', 'stream-json', '--model', 'claude-sonnet-5', '--effort', 'medium', '--settings', 'dev/profiles/stream.settings.json', '--setting-sources', 'project']",
         'prompt_delivery: argv',
-        'timeout_seconds: 30',
         'forbidden_flags: []',
         'env_allowlist: [PATH, HOME]',
       ].join('\n'),
@@ -903,7 +909,6 @@ describe('doctor reconhece o perfil stream sem relaxar os demais', () => {
         'environment_mode: real-world',
         "argv: [claude, '--print', '--output-format', 'json', '--output-format', 'stream-json', '--verbose', '--model', 'claude-sonnet-5', '--settings', 'dev/profiles/stream.settings.json', '--setting-sources', 'project']",
         'prompt_delivery: argv',
-        'timeout_seconds: 30',
         'forbidden_flags: []',
         'env_allowlist: [PATH, HOME]',
       ].join('\n'),

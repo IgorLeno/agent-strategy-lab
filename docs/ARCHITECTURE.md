@@ -240,7 +240,7 @@ do run **inclusive no caminho de erro**; cleanup não confirmado é reportado
 como erro, não silenciado.
 
 **Sinais vão ao process group.** O processo é criado em grupo próprio
-(`setsid`) e o timeout é SIGTERM → graça → SIGKILL **no grupo**. Matar só o pai
+(`setsid`) e todo pedido de término é SIGTERM → graça → SIGKILL **no grupo**. Matar só o pai
 deixa descendente vivo mexendo no workspace depois que o run "terminou". Depois
 do kill, sobreviventes são procurados; cleanup não confirmável marca o run como
 `INFRA_ERROR`, nunca `COMPLETED` silencioso.
@@ -412,10 +412,18 @@ As fronteiras principais são:
   `planner_metadata` por task (taxonomy, risco, envelope, escopo de contexto);
   o executor usa essa classificação. PlanFiles manuais seguem no fallback de
   `agentlab-run.yaml`, e o default global nunca sobrescreve o planner.
-- **Tempos não se cruzam.** `estimated_duration` estima a task;
-  `worker_runtime_budget` limita o processo contra o bound do launcher/profile;
-  `validation[].timeout_seconds` limita um comando contra o contrato de
-  validation. Violação de runtime é `BUDGET_UNSUPPORTED` com bound nomeado.
+- **Tempo não é autoridade.** `ExecutionRuntimeForecast` é HIPÓTESE
+  (`authority: 'ADVISORY'`): previsão alta não impede routing, não rejeita
+  profile, não vira deadline e não encerra worker. O que encerra processo é o
+  `MACHINE_SAFETY_CEILING`, failsafe de INFRAESTRUTURA que não conhece planner,
+  estimativa, envelope, dificuldade nem profile, e que não participa de routing.
+  `validation[].timeout_seconds` continua sendo grandeza SEPARADA, limitada
+  pelo seu próprio `VALIDATION_COMMAND_TIMEOUT_BOUND`.
+- **Silêncio é observado, não punido.** A observação ao vivo registra
+  `last_activity_at`, intervalos de silêncio e `STALL_SUSPECTED`. Nesta fase
+  isso é OBSERVACIONAL: a janela não tem autoridade de termination, e existe
+  para ser calibrada empiricamente contra execuções saudáveis antes que
+  qualquer múltiplo de sinais possa encerrar um processo.
 - **Contexto é montado por mapa.** Inspection registra instruction files,
   source anchors e relevância; documentação não é concatenada num prompt.
 - **DIRECT não significa sem fatos.** Ele exige minimal factual preflight e

@@ -60,7 +60,6 @@ argv:
   - --effort
   - medium
 prompt_delivery: argv
-timeout_seconds: 60
 forbidden_flags:
   - --bare
 env_allowlist:
@@ -178,7 +177,6 @@ describe('dev-doctor: saída padrão enxuta', () => {
       'billing_mode: subscription_only',
       "argv: [node, '--print']",
       'prompt_delivery: argv',
-      'timeout_seconds: 30',
       'forbidden_flags: []',
       'env_allowlist: [PATH]',
     ]);
@@ -624,6 +622,11 @@ describe('dev-orchestrate: saída padrão orientada ao resultado', () => {
         finished_at: _finishedAt,
         duration_ms: _durationMs,
         argv: _argv,
+        // Telemetria de atividade é medição AO VIVO: timestamps e contagem de
+        // chunks variam entre execuções por natureza, como a identidade do
+        // processo. O que a regressão compara é o que a escolha de verbosidade
+        // poderia mudar, e ela não muda observação nenhuma.
+        activity: _activity,
         ...rest
       } = record as LaunchRecord;
       return rest;

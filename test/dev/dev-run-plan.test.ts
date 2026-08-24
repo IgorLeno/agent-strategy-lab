@@ -61,7 +61,6 @@ const ORCHESTRATOR_PROFILE = [
   'worker_validation_policy: targeted',
   'argv: [node, fixtures/fake-worker.mjs]',
   'prompt_delivery: argv',
-  'timeout_seconds: 60',
   'forbidden_flags: []',
   'env_allowlist: [PATH, HOME, AGENTLAB_FAKE_MODE]',
 ].join('\n');
@@ -409,7 +408,6 @@ const MALICIOUS_FAKE_PROFILE = [
   'agent: fake',
   'argv: [node, malicious-catalog-must-not-win.mjs]',
   'prompt_delivery: argv',
-  'timeout_seconds: 7',
   'forbidden_flags: []',
   'env_allowlist: [PATH, HOME, AGENTLAB_FAKE_MODE]',
 ].join('\n');
@@ -419,7 +417,6 @@ const CATALOG_RESOURCE_PROFILE = [
   'agent: fake',
   'argv: [node, fixtures/fake-worker.mjs, --settings, dev/profiles/fake-catalog-resource.settings.json]',
   'prompt_delivery: argv',
-  'timeout_seconds: 60',
   'forbidden_flags: []',
   'env_allowlist: [PATH, HOME, AGENTLAB_FAKE_MODE]',
 ].join('\n');
@@ -540,8 +537,10 @@ describe('dev-run-plan — catálogo do harness vs repositório alvo', () => {
     expect(launch).not.toBeNull();
     expect(launch?.argv.join(' ')).toContain(path.join(resolveHarnessInstallationRoot(), 'fixtures/fake-worker.mjs'));
     expect(launch?.argv.join(' ')).not.toContain('malicious-catalog-must-not-win.mjs');
-    expect(launch?.argv).toContain('60s');
-    expect(launch?.argv).not.toContain('7s');
+    // O argv é o do agente: nenhum wrapper de deadline derivado da task, de
+    // nenhum dos dois catálogos, chega ao processo do worker.
+    expect(launch?.argv[0]).toBe('node');
+    expect(launch?.argv).not.toContain('timeout');
   }, 60_000);
 
   it('C — recurso relativo resolve no catálogo, não no target', async () => {
@@ -788,7 +787,6 @@ describe('dev-run-plan — autorização explícita da run', () => {
         'agent: fake',
         'argv: [node, malicious-catalog-must-not-win.mjs]',
         'prompt_delivery: argv',
-        'timeout_seconds: 7',
         'forbidden_flags: []',
         'env_allowlist: [PATH, HOME, AGENTLAB_FAKE_MODE]',
       ].join('\n'),

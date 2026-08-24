@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buildTaskPacket } from '../../dev/lib/packet.js';
 import { headSha } from '../../dev/lib/git.js';
 import { AccessContractError } from '../../dev/lib/access-contract.js';
-import { launchWorker } from '../../dev/lib/launch.js';
+import { LaunchError, launchWorker } from '../../dev/lib/launch.js';
 import { resolveHarnessPaths, type HarnessPaths } from '../../dev/lib/paths.js';
 import { loadPlan, type LoadedPlan } from '../../dev/lib/plan.js';
 import {
@@ -176,7 +176,9 @@ describe('launchWorker', () => {
     expect(outcome.record.process.pgid).toBe(outcome.record.process.pid);
     expect(outcome.record.process.proc_start_ticks).toBeGreaterThan(0);
     expect(outcome.record.process.command_sha256).toMatch(/^[0-9a-f]{64}$/);
-    expect(outcome.record.argv[0]).toBe('timeout');
+    // E — o argv é o do AGENTE, sem wrapper de deadline derivado da task.
+    expect(outcome.record.argv[0]).toBe('node');
+    expect(outcome.record.argv).not.toContain('timeout');
     // O processo do worker não existe mais depois do término.
     expect(await isSameProcessAlive(outcome.record.process)).toBe(false);
 
@@ -205,26 +207,108 @@ describe('launchWorker', () => {
     expect(runtimeFiles.filter((file) => /report|draft/.test(String(file)))).toEqual([]);
   });
 
-  it('timeout externo mata worker que ignora SIGTERM', async () => {
+  /**
+   * O — nenhum processo é imortal, e nenhum humano precisa intervir.
+   *
+   * O fixture ignora SIGTERM e nunca termina sozinho. Sem o failsafe de
+   * infraestrutura, a remoção do task deadline deixaria exatamente esta janela
+   * aberta. O teto é injetado em SEGUNDOS: o failsafe é exercitável sem uma
+   * suíte de doze horas, e continua não sendo budget de task.
+   */
+  it('O/P — machine safety ceiling encerra worker imortal com SIGTERM -> graça -> SIGKILL', async () => {
     await persistPacket();
     const packet = buildTaskPacket({
       task: loaded.byId.get('T1')!,
       baseSha: await headSha(paths.repoRoot),
       previousHandoff: null,
     });
-    const timeoutProfile = {
+    const immortalProfile = {
       ...profile,
       env_extra: { ...profile.env_extra, AGENTLAB_FAKE_MODE: 'timeout' },
     };
     const outcome = await launchWorker({
       paths,
-      profile: timeoutProfile,
+      profile: immortalProfile,
       packet,
-      timeoutSecondsOverride: 1,
+      machineSafetyCeilingSecondsOverride: 1,
     });
+
     expect(outcome.classification).toBe('TIMED_OUT');
     expect(outcome.record.timed_out).toBe(true);
+    // U — a CAUSA distingue failsafe de máquina do deadline de task legado.
+    expect(outcome.record.termination_cause).toBe('MACHINE_SAFETY_CEILING');
+    expect(outcome.reason).toContain('MACHINE_SAFETY_CEILING');
+    expect(outcome.record.machine_safety_ceiling).toMatchObject({
+      kind: 'MACHINE_SAFETY_CEILING',
+      seconds: 1,
+    });
+    // P — o worker ignora SIGTERM, então a escada precisou chegar ao SIGKILL.
+    expect(outcome.record.termination_request?.signals_sent).toEqual(['SIGTERM', 'SIGKILL']);
+    expect(outcome.record.termination_request?.grace_period_ms).toBe(
+      profile.kill_after_seconds * 1_000,
+    );
+    // R/Q — nenhum descendente sobreviveu e a auditoria continua funcional.
+    expect(outcome.record.survivors_remaining).toEqual([]);
     expect(await isSameProcessAlive(outcome.record.process)).toBe(false);
+  }, 30_000);
+
+  /**
+   * S — cancelamento explícito de um worker AINDA VIVO. `killSurvivors` roda
+   * depois do término e nunca ofereceu esse caminho.
+   */
+  it('S — cancelamento explícito encerra o worker vivo e nomeia a causa', async () => {
+    await persistPacket();
+    const packet = buildTaskPacket({
+      task: loaded.byId.get('T1')!,
+      baseSha: await headSha(paths.repoRoot),
+      previousHandoff: null,
+    });
+    const immortalProfile = {
+      ...profile,
+      env_extra: { ...profile.env_extra, AGENTLAB_FAKE_MODE: 'timeout' },
+    };
+    const outcome = await launchWorker({
+      paths,
+      profile: immortalProfile,
+      packet,
+      // Teto alto de propósito: quem encerra aqui é o cancelamento, não ele.
+      machineSafetyCeilingSecondsOverride: 600,
+      onSupervisor: (supervisor) => {
+        setTimeout(() => {
+          void supervisor.requestTermination(
+            'EXPLICIT_CANCELLATION',
+            'operador cancelou a work unit',
+          );
+        }, 300);
+      },
+    });
+
+    expect(outcome.record.termination_cause).toBe('EXPLICIT_CANCELLATION');
+    expect(outcome.record.termination_request?.detail).toContain('operador cancelou');
+    expect(outcome.record.termination_request?.signals_sent[0]).toBe('SIGTERM');
+    expect(await isSameProcessAlive(outcome.record.process)).toBe(false);
+  }, 30_000);
+
+  /**
+   * F — o worker ativo ultrapassa QUALQUER previsão sem virar TIMED_OUT. O
+   * fixture leva ~600ms; o antigo deadline derivado da task teria sido 0.
+   */
+  it('F — worker que ultrapassa a previsão termina normalmente, sem termination_cause', async () => {
+    await persistPacket();
+    const packet = buildTaskPacket({
+      task: loaded.byId.get('T1')!,
+      baseSha: await headSha(paths.repoRoot),
+      previousHandoff: null,
+    });
+    const outcome = await launchWorker({ paths, profile, packet });
+
+    expect(outcome.classification).toBe('FINISHED');
+    expect(outcome.record.timed_out).toBe(false);
+    expect(outcome.record.termination_cause).toBeNull();
+    expect(outcome.record.termination_request).toBeNull();
+    // E — nenhum deadline derivado da task chega ao argv do implementer.
+    expect(outcome.record.argv[0]).not.toBe('timeout');
+    expect(outcome.record.argv.join(' ')).not.toContain('--kill-after');
   }, 30_000);
 
   // Regressão: o processo termina no mesmo instante do spawn, então o 'close'
@@ -246,23 +330,21 @@ describe('launchWorker', () => {
     // Repetido: a race é de ordenação de eventos, e uma passada só poderia
     // esconder o defeito atrás do escalonamento de um run específico.
     for (let repetition = 0; repetition < 3; repetition += 1) {
-      const outcome = await launchWorker({
-        paths,
-        profile: missingCommandProfile,
-        packet,
-        // Um timeout curto NÃO é o que faz o teste terminar: se o close se
-        // perder, a Promise nunca resolve e o caso estoura por timeout do
-        // vitest, não por classificação errada.
-        timeoutSecondsOverride: 30,
-      });
-      expect(outcome.classification).toBe('INFRA_ERROR');
-      expect(outcome.record.exit_code).toBe(127);
-      expect(outcome.record.timed_out).toBe(false);
-      expect(outcome.record.finished_at).not.toBeNull();
-      // O processo pode já ter sumido de /proc antes da captura: a identidade
-      // registra a sentinela em vez de derrubar o lançamento.
-      expect(outcome.record.process.pid).toBeGreaterThan(0);
-      expect(await isSameProcessAlive(outcome.record.process)).toBe(false);
+      // Sem o wrapper `timeout` no argv, um binário inexistente falha no
+      // PRÓPRIO spawn (ENOENT) em vez de virar exit 127 do wrapper. O que a
+      // regressão continua provando é o essencial: o lançamento sempre
+      // CLASSIFICA, em vez de pendurar a espera pelo término.
+      await expect(
+        launchWorker({
+          paths,
+          profile: missingCommandProfile,
+          packet,
+          // Um teto curto NÃO é o que faz o teste terminar: se o close se
+          // perder, a Promise nunca resolve e o caso estoura por timeout do
+          // vitest, não por classificação errada.
+          machineSafetyCeilingSecondsOverride: 30,
+        }),
+      ).rejects.toThrow(LaunchError);
     }
   }, 30_000);
 
@@ -416,9 +498,12 @@ describe('dev-launch CLI', () => {
     expect(record?.duration_ms).toBeGreaterThanOrEqual(0);
   });
 
-  it('exit 7 e TIMED_OUT quando estoura o limite', async () => {
+  it('exit 7 e TIMED_OUT quando o failsafe de máquina encerra o worker', async () => {
     await persistPacket();
-    const result = await launchCli(['--task', 'T1', '--timeout-seconds', '1'], 'timeout');
+    const result = await launchCli(
+      ['--task', 'T1', '--machine-safety-ceiling-seconds', '1'],
+      'timeout',
+    );
     expect(result.exitCode).toBe(7);
 
     const task = getTaskState(await readState(paths), 'T1');
@@ -434,7 +519,6 @@ describe('dev-launch CLI', () => {
         'agent: fake',
         'argv: [agentlab-comando-que-nao-existe]',
         'prompt_delivery: argv',
-        'timeout_seconds: 30',
         'forbidden_flags: []',
         'env_allowlist: [PATH]',
       ].join('\n'),
@@ -564,16 +648,19 @@ describe('launchTask: InboxProvenanceError é PREFLIGHT_BLOCKED', () => {
   });
 
   it('4 — INFRA_ERROR real DEPOIS de spawn continua INFRA_ERROR', async () => {
+    // O worker NASCE e só então sai com exit de falha de invocação. É o caso
+    // que precisa consumir attempt: houve processo, houve efeito possível.
     await writeFile(
       `${sandbox.root}/dev/profiles/inexistente-v1.yaml`,
       [
         'id: inexistente-v1',
         'agent: fake',
-        'argv: [agentlab-comando-que-nao-existe]',
+        'argv: [node, fixtures/fake-worker.mjs]',
         'prompt_delivery: argv',
-        'timeout_seconds: 30',
         'forbidden_flags: []',
-        'env_allowlist: [PATH]',
+        'env_allowlist: [PATH, HOME]',
+        'env_extra:',
+        '  AGENTLAB_FAKE_MODE: infra-error',
       ].join('\n'),
       'utf8',
     );

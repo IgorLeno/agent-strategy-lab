@@ -102,7 +102,11 @@ export async function launchTask(
   paths: HarnessPaths,
   packet: TaskPacket,
   profileId: string,
-  timeoutSecondsOverride?: number,
+  /**
+   * Encolhe o TETO DE SEGURANÇA DE MÁQUINA — escape hatch de teste. Nunca é
+   * deadline de task: nenhuma previsão de duração chega até aqui.
+   */
+  machineSafetyCeilingSecondsOverride?: number,
 ): Promise<LaunchStepResult> {
   const taskId = packet.task_id;
   const profile = await loadProfile(paths.repoRoot, profileId, {
@@ -131,7 +135,9 @@ export async function launchTask(
       paths,
       profile,
       packet,
-      ...(timeoutSecondsOverride === undefined ? {} : { timeoutSecondsOverride }),
+      ...(machineSafetyCeilingSecondsOverride === undefined
+        ? {}
+        : { machineSafetyCeilingSecondsOverride }),
       onStarted: async (identity) => {
         const state = await readState(paths);
         await writeState(

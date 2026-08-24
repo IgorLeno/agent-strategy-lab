@@ -92,7 +92,6 @@ describe('protocolo de sessões descartáveis — duas tarefas em sequência', (
         'worker_validation_policy: targeted',
         'argv: [node, fixtures/fake-worker.mjs]',
         'prompt_delivery: argv',
-        'timeout_seconds: 60',
         'forbidden_flags: []',
         'env_allowlist: [PATH, HOME, AGENTLAB_FAKE_MODE]',
       ].join('\n'),
@@ -291,8 +290,8 @@ describe('protocolo — o fluxo para', () => {
     expect(await readHandoff(paths, 'T1')).toBeNull();
   }, 60_000);
 
-  it('TIMED_OUT interrompe e não avança', async () => {
-    const result = await orchestrate('timeout', ['--timeout-seconds', '1']);
+  it('TIMED_OUT (failsafe de máquina) interrompe e não avança', async () => {
+    const result = await orchestrate('timeout', ['--machine-safety-ceiling-seconds', '1']);
     expect(result.exitCode).toBe(9);
     expect(JSON.parse(result.stdout).stopped_by).toBe('TIMED_OUT');
 
@@ -377,7 +376,6 @@ describe('handoff v2 no protocolo real do worker', () => {
         'worker_validation_policy: targeted',
         'argv: [node, fixtures/fake-worker.mjs]',
         'prompt_delivery: argv',
-        'timeout_seconds: 60',
         'forbidden_flags: []',
         'env_allowlist: [PATH, HOME, AGENTLAB_FAKE_MODE]',
       ].join('\n'),
