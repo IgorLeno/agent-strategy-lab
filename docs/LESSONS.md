@@ -5,6 +5,14 @@ Regra, não narrativa: cada entrada termina numa restrição aplicável.
 
 ---
 
+[2026-08-24] Context: helper de subprocesso carregado por Vitest/Vite precisava
+resolver o entrypoint público de uma dependência fora do worktree descartável.
+Mistake: usar `import.meta.resolve`, disponível no Node 22 direto, sem considerar
+que o transform SSR do Vite substitui `import.meta` e não implementa `resolve`.
+Rule: em módulos de teste transformados pelo Vite, resolva entrypoints de pacote
+com `createRequire(import.meta.url).resolve`; valide o helper através do Vitest,
+não apenas com uma invocação direta de Node.
+
 [2026-08-24] Context: review independente de candidate já aprovado nos gates
 oficiais do self-run real.
 Mistake: tratar um único `ACCEPT` sem `coverage` como bloqueio terminal, embora

@@ -8,7 +8,7 @@
  * apontando para o mesmo worker falso, então nenhum provider real, custo ou
  * credencial é exercitado em nenhum cenário.
  *
- * Oito cenários, cada um uma prova independente e mínima:
+ * Nove cenários, cada um uma prova independente e mínima:
  *   1. DIRECT        — preflight factual mínimo, route, worker, validation, PASS;
  *                       fato mínimo ausente impede DIRECT em vez de virar default.
  *   2. REVIEWED       — normalization insuficiente aciona planning worker,
@@ -27,6 +27,9 @@
  *                       automação com decision_needed/options expostos e ZERO
  *                       spawn depois do gate. Integra a prova de PARADA na
  *                       fronteira.
+ *   9. ROUTING_BUDGET — materialização operacional preserva validation como
+ *                       stage do orchestrator; runtime genuíno ainda respeita
+ *                       o bound do coding worker.
  */
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -51,8 +54,10 @@ import {
   CapabilityRegistry,
   capabilityOf,
   decideEscalation,
+  routeInitialProfile,
   type EscalationExecutionPolicy,
   type EscalationLadder,
+  type RoutingCandidate,
 } from '../../src/routing/index.js';
 import type { FailureDiagnosis } from '../../src/routing/diagnosis.js';
 import { AUTOMATIC_REPAIR_EXHAUSTED } from '../../dev/lib/automatic-repair.js';
@@ -71,6 +76,7 @@ import {
   type DirectPathInput,
   type ObservedTaxonomyFacts,
 } from '../../dev/lib/project-orchestrate.js';
+import { buildWorkUnitFromPlan } from '../../dev/lib/project-run.js';
 import { readLaunchRecord, readValidationFailedAttempt } from '../../dev/lib/records.js';
 import { retryFailedAttempt } from '../../dev/lib/retry-failed.js';
 import { buildInitialState, ensureRuntimeDirs, readState, writeState } from '../../dev/lib/state.js';
@@ -1100,6 +1106,209 @@ describe('M85 — External Project Fake E2E', () => {
     expect(await headSha(sandbox.root)).toBe(headBefore);
     expect(stateAfter.tasks.every((task) => task.status === 'READY')).toBe(true);
   }, 60_000);
+
+  // -------------------------------------------------------------------------
+  // 9. ROUTING_BUDGET — integração materialização operacional → M76 → M78
+  // -------------------------------------------------------------------------
+  it('ROUTING_BUDGET — validation do orchestrator permanece fora do runtime do coding worker', () => {
+    const implementationMs = 1_500_000;
+    const validationMs = 420_000;
+    const advancedBoundMs = 1_800_000;
+    const routingInspection = inspection({
+      required_tools: [{ name: 'node', reason: 'executar Vitest', source: 'package.json' }],
+      source_anchors: [
+        { area: 'routing', path: 'src/routing/router.ts' },
+        { area: 'orchestration', path: 'dev/lib/project-run.ts' },
+      ],
+    });
+
+    function routingCapability(profileId: string, model: string, reasoningEffort: string) {
+      return capabilityOf({
+        profile_id: profileId,
+        agent: 'codex',
+        model,
+        reasoning_effort: reasoningEffort,
+        reasoning_effort_source: 'codex_config_override',
+        billing_mode: 'subscription_only',
+        credential_source: 'fixture_subscription',
+        environment_mode: 'real-world',
+        instruction_environment: 'sanitized_user_home',
+        commit_owner: 'orchestrator',
+        official_validation_owner: 'orchestrator',
+        worker_validation_policy: 'targeted',
+        sandbox: 'workspace-write',
+        session_persistence: 'ephemeral',
+      });
+    }
+    const intermediate = routingCapability('fixture-intermediate', 'gpt-5.6-terra', 'medium');
+    const advanced = routingCapability('fixture-advanced', 'gpt-5.6-sol', 'high');
+    const candidates = [intermediate, advanced].map((profile) => ({
+      profile_id: profile.profile_id,
+      availability: { value: true, provenance: 'fixture preflight' },
+      runtime_bounds: [
+        {
+          kind: 'WORKER_RUNTIME_BOUND' as const,
+          source: 'profile_runtime' as const,
+          maximum_ms: advancedBoundMs,
+          provenance: 'fixture LauncherProfile.timeout_seconds',
+        },
+      ],
+    })) satisfies RoutingCandidate[];
+    const registry = new CapabilityRegistry([intermediate, advanced]);
+
+    function routeMaterialized(validationExpectedMs: number, envelopeExpectedMs = implementationMs) {
+      const built = buildWorkUnitFromPlan({
+        planTask: {
+          id: 'routing-budget-self-maintenance',
+          title: 'Preservar ownership do budget de validação',
+          blocked_by: [],
+          objective: 'Adicionar uma regressão de routing para uma correção real do harness',
+          initial_files: [
+            'test/e2e/project-orchestration-e2e.test.ts',
+            'src/routing/router.ts',
+            'dev/lib/project-run.ts',
+          ],
+          acceptance: ['routing separa validação oficial e implementação'],
+          validation: [
+            {
+              argv: ['pnpm', 'exec', 'vitest', 'run', 'test/e2e/project-orchestration-e2e.test.ts'],
+              timeout_seconds: 180,
+            },
+            { argv: ['pnpm', 'typecheck'], timeout_seconds: 120 },
+            { argv: ['pnpm', 'build'], timeout_seconds: 120 },
+          ],
+          constraints: [],
+          include_previous_handoff: false,
+          planner_metadata: {
+            taxonomy: {
+              version: 1,
+              task_class: 'bugfix',
+              difficulty_declared: 'hard',
+              complexity: 'subsystem',
+              ambiguity: 'low',
+              verification: 'deterministic',
+            },
+            risk: 'high',
+            probable_files: [],
+            context_scope: { areas: ['routing', 'orchestration'] },
+            context_requirements: [{
+              description: 'contratos públicos do routing e do control plane',
+              source_anchor: 'src/routing/router.ts',
+            }],
+            environment_requirements: [{ kind: 'tool', name: 'node', reason: 'executar Vitest' }],
+            estimated_duration: { expected: implementationMs, maximum: 2_400_000 },
+            validation_budget: { expected: validationExpectedMs, maximum: 900_000 },
+            resource_envelope: {
+              duration_ms: { expected: envelopeExpectedMs, maximum: 2_400_000 },
+              tokens: { expected: 28_000, maximum: 45_000 },
+              changed_files: { expected: 1, maximum: 3 },
+            },
+          },
+        },
+        inspection: routingInspection,
+        classification: {
+          task_class: 'feature',
+          difficulty_declared: 'easy',
+          risk: 'low',
+          complexity: 'local',
+          ambiguity: 'low',
+          verification: 'deterministic',
+          resource_envelope: {
+            duration_ms: { expected: 60_000, maximum: 120_000 },
+            tokens: { expected: 1_000, maximum: 2_000 },
+            changed_files: { expected: 1, maximum: 2 },
+          },
+        },
+      });
+      const assessment = assessExecution(built.task, {
+        inspection: routingInspection,
+        expectedBaseRevisionSha: FIXTURE_HEAD_SHA,
+        factsSource: 'full_inspection',
+      });
+      const result = routeInitialProfile({
+        work_unit: {
+          source: 'planner',
+          task: built.task,
+          assessment,
+          project_facts: routingInspection,
+        },
+        role: 'implementer',
+        capability_registry: registry,
+        candidates,
+      });
+      return { built, result };
+    }
+
+    const baseline = routeMaterialized(validationMs);
+    expect(baseline.built.provenance).toContain(
+      'taxonomy/risk/resource_envelope=plan.planner_metadata',
+    );
+    expect(baseline.built.task).toMatchObject({
+      taxonomy: { task_class: 'bugfix', difficulty_declared: 'hard', complexity: 'subsystem' },
+      risk: 'high',
+      validation_budget: { expected: validationMs },
+      resource_envelope: { duration_ms: { expected: implementationMs } },
+    });
+    expect(baseline.result.outcome).toBe('ROUTED');
+    if (baseline.result.outcome !== 'ROUTED') throw new Error('unreachable');
+
+    expect(baseline.result.profile.profile_id).toBe(advanced.profile_id);
+    expect(baseline.result.profile.environment_mode).toBe('real-world');
+    expect(baseline.result.rationale.join(' ')).toContain('tier requerido=advanced');
+    expect(baseline.result.candidates_considered).toContainEqual(expect.objectContaining({
+      profile_id: intermediate.profile_id,
+      outcome: 'REJECTED',
+      rejection_code: 'CAPABILITY_INSUFFICIENT',
+    }));
+    expect(baseline.result.worker_runtime_budget).toMatchObject({
+      milliseconds: 1_445_000,
+      components: {
+        envelope_duration_expected_ms: implementationMs,
+        aggregate_validation_cost_ms: validationMs,
+        worker_owned_validation_cost_ms: 0,
+      },
+    });
+
+    const expensiveValidation = routeMaterialized(900_000);
+    expect(expensiveValidation.result.outcome).toBe('ROUTED');
+    if (expensiveValidation.result.outcome !== 'ROUTED') throw new Error('unreachable');
+    expect(expensiveValidation.built.task.resource_envelope).toEqual(
+      baseline.built.task.resource_envelope,
+    );
+    expect(expensiveValidation.result.worker_runtime_budget.milliseconds).toBe(
+      baseline.result.worker_runtime_budget.milliseconds,
+    );
+    expect(expensiveValidation.result.worker_runtime_budget.components).toMatchObject({
+      aggregate_validation_cost_ms: 900_000,
+      worker_owned_validation_cost_ms: 0,
+    });
+
+    const components = baseline.result.worker_runtime_budget.components;
+    const legacyWorkerBudgetMs = Math.ceil(
+      ((implementationMs + validationMs) *
+        components.capability_multiplier *
+        components.task_class_multiplier *
+        components.stack_multiplier *
+        components.environment_multiplier) /
+        1_000,
+    ) * 1_000;
+    expect(legacyWorkerBudgetMs).toBe(1_849_000);
+    expect(legacyWorkerBudgetMs).toBeGreaterThan(advancedBoundMs);
+    expect(baseline.built.task.resource_envelope.duration_ms.expected).toBe(implementationMs);
+
+    const oversizedImplementation = routeMaterialized(validationMs, 2_000_000);
+    expect(oversizedImplementation.result.outcome).toBe('BUDGET_UNSUPPORTED');
+    if (oversizedImplementation.result.outcome !== 'BUDGET_UNSUPPORTED') {
+      throw new Error('unreachable');
+    }
+    expect(oversizedImplementation.result.violations).toContainEqual(
+      expect.objectContaining({
+        profile_id: advanced.profile_id,
+        requested_budget_ms: 1_926_000,
+        violated_bound: expect.objectContaining({ maximum_ms: advancedBoundMs }),
+      }),
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------

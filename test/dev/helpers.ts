@@ -1,10 +1,12 @@
 import { spawn } from 'node:child_process';
 import { copyFile, mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { API_CREDENTIAL_VARIABLES } from '../../dev/lib/billing.js';
 
 export const REPO_ROOT = path.resolve(import.meta.dirname, '../..');
+const TSX_CLI = createRequire(import.meta.url).resolve('tsx/cli');
 
 export interface CliResult {
   readonly exitCode: number | null;
@@ -57,7 +59,7 @@ export function runDevCli(
   return new Promise((resolve, reject) => {
     const child = spawn(
       process.execPath,
-      [path.join(REPO_ROOT, 'node_modules', 'tsx', 'dist', 'cli.mjs'), path.join(REPO_ROOT, 'dev', 'cli', script), ...args],
+      [TSX_CLI, path.join(REPO_ROOT, 'dev', 'cli', script), ...args],
       {
         cwd: REPO_ROOT,
         env: buildTestProcessEnvironment(env, sourceEnvironment),

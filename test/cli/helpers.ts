@@ -1,7 +1,9 @@
 import { spawn } from 'node:child_process';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 
 export const REPO_ROOT = path.resolve(import.meta.dirname, '../..');
+const TSX_CLI = createRequire(import.meta.url).resolve('tsx/cli');
 
 export interface CliResult {
   readonly exitCode: number | null;
@@ -22,7 +24,7 @@ export function runAgentlabCli(
     const child = spawn(
       process.execPath,
       [
-        path.join(REPO_ROOT, 'node_modules', 'tsx', 'dist', 'cli.mjs'),
+        TSX_CLI,
         path.join(REPO_ROOT, 'src', 'cli', 'index.ts'),
         ...args,
       ],
