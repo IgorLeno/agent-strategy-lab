@@ -147,6 +147,37 @@ export function executionAuthorizationScopeSha256(scope: ExecutionAuthorizationS
   return canonicalSha256(scope);
 }
 
+/**
+ * FONTE ÚNICA de verdade de "como o header estruturado da Run Directive pode
+ * satisfazer uma categoria human-gated implicada pelo corpo".
+ *
+ * - `{ kind: 'publish' }` — a intenção é coberta por `authorization.publish`
+ *   (publicar no remoto/ref concedido). É a ÚNICA categoria com caminho de
+ *   grant pelo header.
+ * - `{ kind: 'never' }` — a política do produto NUNCA concede a categoria por
+ *   Run Directive (espelha `DirectiveNeverGrantablePermission`); a resposta
+ *   HUMAN_REQUIRED não pode oferecer "conceda no header" para estas.
+ *
+ * Qualquer UX de HUMAN_REQUIRED deve derivar opções DAQUI, nunca de uma lista
+ * paralela.
+ */
+export type HumanGateGrantPath = { readonly kind: 'publish' } | { readonly kind: 'never' };
+
+export const HUMAN_GATE_GRANT_PATH: Readonly<Record<HumanGatedCapability, HumanGateGrantPath>> = {
+  UNAUTHORIZED_API_BILLING: { kind: 'never' },
+  BILLING_MODE_CHANGE: { kind: 'never' },
+  DESTRUCTIVE_ACTION: { kind: 'never' },
+  DEPLOYMENT_OR_PRODUCTION: { kind: 'never' },
+  EXTERNAL_SIDE_EFFECT: { kind: 'publish' },
+  SCOPE_EXPANSION: { kind: 'never' },
+  NEW_CREDENTIAL_BOUNDARY: { kind: 'never' },
+  UNRESOLVED_ARCHITECTURE_OR_PRODUCT_DECISION: { kind: 'never' },
+  CRITICAL_OR_SECURITY_SENSITIVE_ACTION: { kind: 'never' },
+  PROFILE_OR_PROVIDER_OUTSIDE_POLICY: { kind: 'never' },
+  INSUFFICIENT_EVIDENCE: { kind: 'never' },
+  SAFE_ESCALATION_EXHAUSTED: { kind: 'never' },
+};
+
 export type ExecutionAction =
   | { readonly kind: 'autonomous'; readonly capability: AutonomousExecutionCapability }
   | { readonly kind: 'human_gated'; readonly capability: HumanGatedCapability };
@@ -198,4 +229,5 @@ export {
   deterministicIntakeCompiler,
 } from './compile.js';
 export type { IntakeCompilerPort } from './compile.js';
-export { classifyImpliedHumanGated } from './implied-gates.js';
+export { classifyImpliedHumanGated, classifyImpliedHumanGatedMatches } from './implied-gates.js';
+export type { ImpliedGateMatch } from './implied-gates.js';

@@ -88,7 +88,14 @@ import {
 } from '../../src/routing/diagnosis.js';
 import { writeJsonOnce } from './atomic.js';
 import { assertNoApiCredentials, runBillingPreflight } from './billing.js';
-import { claudeOutputFormat, providerTerminalFailure } from './claude-stream.js';
+import {
+  claudeOutputFormat,
+  providerTerminalFailure,
+  readClaudeStream,
+  streamContractViolation,
+  usesClaudeStreamJson,
+} from './claude-stream.js';
+import { codexUsesEventStream, decodeCodexEventStream } from './codex-transport.js';
 import { buildTimeoutArgv } from './exec.js';
 import { evidenceOf, type LaunchFact, type LaunchFactEvidence } from './project-preflight.js';
 import type { HarnessPaths } from './paths.js';
@@ -1062,6 +1069,14 @@ export function createLaunchedPlanningWorker(
             extracted.message,
             true,
           );
+        case 'TRANSPORT_MALFORMED':
+          return invocationFailure(
+            options,
+            invocationId,
+            'TRANSPORT_MALFORMED',
+            extracted.message,
+            true,
+          );
         case 'NOT_PARSEABLE':
           return invocationFailure(
             options,
@@ -1151,11 +1166,33 @@ function parseExactlyOneJsonObject(text: string): Record<string, unknown> | null
 export type RoleModelJsonExtraction =
   | { readonly outcome: 'EXTRACTED'; readonly value: unknown }
   | { readonly outcome: 'PROVIDER_TERMINAL_FAILURE'; readonly message: string }
+  /** Transporte do provider ilegível/truncado — diagnóstico distinto de payload inválido. */
+  | { readonly outcome: 'TRANSPORT_MALFORMED'; readonly message: string }
+  /** Transporte válido, mas o payload textual do modelo não é o JSON esperado. */
   | { readonly outcome: 'NOT_PARSEABLE'; readonly message: string };
 
+function extractFromModelText(text: string, provider: string): RoleModelJsonExtraction {
+  const value = extractJsonObject(text);
+  if (value === null) {
+    return {
+      outcome: 'NOT_PARSEABLE',
+      message: `payload textual do modelo (${provider}) não contém um único objeto JSON legível`,
+    };
+  }
+  return { outcome: 'EXTRACTED', value };
+}
+
 /**
- * Separa transporte do provider do payload do modelo. Claude `--output-format json`
- * emite um envelope; só `result` (texto) vai para extractJsonObject.
+ * Separa TRANSPORTE do provider do PAYLOAD do modelo, provider-aware:
+ *
+ * - Claude `--output-format json` — um único objeto de envelope; só `result`
+ *   (texto do modelo) vai para extração de JSON.
+ * - Claude `--output-format stream-json` — JSONL; a mensagem `type=result`
+ *   carrega os mesmos campos do envelope único (dev/lib/claude-stream.ts).
+ * - Codex `--json` — JSONL de eventos; só o texto da `agent_message` é payload
+ *   (dev/lib/codex-transport.ts, contrato real da CLI instalada).
+ * - fallback (fake e formatos não estruturados) — stdout inteiro é o texto do
+ *   modelo.
  */
 export function extractRoleModelJson(input: {
   readonly agent: string;
@@ -1166,7 +1203,7 @@ export function extractRoleModelJson(input: {
     const envelope = parseExactlyOneJsonObject(input.stdout);
     if (envelope === null) {
       return {
-        outcome: 'NOT_PARSEABLE',
+        outcome: 'TRANSPORT_MALFORMED',
         message: 'stdout Claude --output-format json não contém exatamente um objeto JSON de transporte',
       };
     }
@@ -1184,24 +1221,51 @@ export function extractRoleModelJson(input: {
         message: 'envelope Claude terminou normalmente sem result textual',
       };
     }
-    const value = extractJsonObject(result);
-    if (value === null) {
-      return {
-        outcome: 'NOT_PARSEABLE',
-        message: 'result textual do Claude não contém um único objeto JSON legível',
-      };
-    }
-    return { outcome: 'EXTRACTED', value };
+    return extractFromModelText(result, 'claude');
   }
 
-  const value = extractJsonObject(input.stdout);
-  if (value === null) {
-    return {
-      outcome: 'NOT_PARSEABLE',
-      message: 'saída não contém um único objeto JSON legível',
-    };
+  if (usesClaudeStreamJson(input.agent, input.argv)) {
+    const reading = readClaudeStream(input.stdout);
+    const violation = streamContractViolation(reading);
+    if (violation !== null) {
+      return { outcome: 'TRANSPORT_MALFORMED', message: violation };
+    }
+    const failure = providerTerminalFailure(reading.result);
+    if (failure !== null) {
+      return {
+        outcome: 'PROVIDER_TERMINAL_FAILURE',
+        message: failure.message ?? failure.signals.join(', '),
+      };
+    }
+    const result = reading.result?.['result'];
+    if (typeof result !== 'string') {
+      return {
+        outcome: 'NOT_PARSEABLE',
+        message: 'stream-json Claude terminou normalmente sem result textual',
+      };
+    }
+    return extractFromModelText(result, 'claude');
   }
-  return { outcome: 'EXTRACTED', value };
+
+  if (input.agent === 'codex' && codexUsesEventStream(input.argv)) {
+    const decoded = decodeCodexEventStream(input.stdout);
+    switch (decoded.outcome) {
+      case 'AGENT_MESSAGE':
+        return extractFromModelText(decoded.text, 'codex');
+      case 'TURN_FAILED':
+        return { outcome: 'PROVIDER_TERMINAL_FAILURE', message: decoded.message };
+      case 'NO_AGENT_MESSAGE':
+        return { outcome: 'NOT_PARSEABLE', message: decoded.message };
+      case 'TRANSPORT_MALFORMED':
+        return { outcome: 'TRANSPORT_MALFORMED', message: decoded.message };
+      default: {
+        const _exhaustive: never = decoded;
+        return _exhaustive;
+      }
+    }
+  }
+
+  return extractFromModelText(input.stdout, input.agent);
 }
 
 // ---------------------------------------------------------------------------
@@ -1402,6 +1466,8 @@ export async function launchProjectReviewer(
     case 'EXTRACTED':
       break;
     case 'PROVIDER_TERMINAL_FAILURE':
+      return reviewUnavailable('REVIEW_INVOCATION_FAILED', extracted.message);
+    case 'TRANSPORT_MALFORMED':
       return reviewUnavailable('REVIEW_INVOCATION_FAILED', extracted.message);
     case 'NOT_PARSEABLE':
       return reviewUnavailable('REVIEW_VERDICT_NOT_PARSEABLE', extracted.message);
