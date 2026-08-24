@@ -1,0 +1,28 @@
+# Overlay de teste sobre local-autonomous-development.
+# Só substitui profiles e billing — a policy humana vem do preset real.
+id: local-autonomous-development-fake
+billing:
+  allowed_billing_modes:
+    - not_applicable
+profile_policy:
+  id: local-autonomous-development-fake-v1
+  allowed_providers:
+    - fake
+    - codex
+  profiles:
+    - id: fake-worker-economy-v1
+      capability_rank: 0
+      rationale: test double econômico autorizado
+work_units:
+  default:
+    task_class: feature
+    difficulty_declared: easy
+    risk: low
+    complexity: local
+    ambiguity: low
+    verification: deterministic
+    resource_envelope:
+      duration_ms: { expected: 20000, maximum: 60000 }
+      tokens: { expected: 30000, maximum: 90000 }
+      changed_files: { expected: 1, maximum: 3 }
+  overrides: {}

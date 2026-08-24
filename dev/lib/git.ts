@@ -357,6 +357,28 @@ export async function headSha(repoRoot: string): Promise<string> {
   return (await gitOrThrow(repoRoot, ['rev-parse', 'HEAD'])).trim();
 }
 
+export async function currentBranch(repoRoot: string): Promise<string | null> {
+  const name = (await gitOrThrow(repoRoot, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim();
+  return name === 'HEAD' ? null : name;
+}
+
+export async function repoTopLevel(repoRoot: string): Promise<string> {
+  return (await gitOrThrow(repoRoot, ['rev-parse', '--show-toplevel'])).trim();
+}
+
+export async function resolveBranchSha(repoRoot: string, ref: string): Promise<string | null> {
+  const result = await git(repoRoot, ['rev-parse', '--verify', `refs/heads/${ref}`]);
+  return result.exitCode === 0 ? result.stdout.trim() : null;
+}
+
+export async function worktreePaths(repoRoot: string): Promise<readonly string[]> {
+  const output = await gitOrThrow(repoRoot, ['worktree', 'list', '--porcelain']);
+  return output
+    .split('\n')
+    .filter((line) => line.startsWith('worktree '))
+    .map((line) => line.slice('worktree '.length));
+}
+
 export async function commitExists(repoRoot: string, sha: string): Promise<boolean> {
   const result = await git(repoRoot, ['cat-file', '-e', `${sha}^{commit}`]);
   return result.exitCode === 0;

@@ -168,3 +168,18 @@ export function authorizeExecutionAction(
     ? 'ALLOWED'
     : 'HUMAN_REQUIRED';
 }
+
+export {
+  HumanInstruction,
+  createHumanInstruction,
+  humanInstructionHash,
+} from './human-instruction.js';
+export type { HumanInstruction as HumanInstructionRecord } from './human-instruction.js';
+export {
+  CompiledIntakeFields,
+  DETERMINISTIC_INTAKE_COMPILER_PROFILE,
+  compileIntakeFieldsDeterministic,
+  deterministicIntakeCompiler,
+} from './compile.js';
+export type { IntakeCompilerPort } from './compile.js';
+export { classifyImpliedHumanGated } from './implied-gates.js';

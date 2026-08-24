@@ -1,0 +1,72 @@
+# PRESET versionado: execução local autônoma.
+# Fonte única da ladder operacional. Não copiar esta lista para outro arquivo.
+schema_version: 1
+id: local-autonomous-development
+preset_version: 1
+
+requested_scope:
+  summary: desenvolvimento local autônomo a partir de instrução humana
+
+constraints: []
+exclusions: []
+
+autonomous_execution_boundary:
+  - DISPOSABLE_LOCAL_WORKSPACE
+  - CONFIGURED_SUBSCRIPTION_WORKER
+  - DETERMINISTIC_VALIDATION
+  - BOUNDED_REPAIR
+  - CAPABILITY_ESCALATION_WITHIN_LADDER
+  - CROSS_PROVIDER_WITHIN_ALLOWED_SUBSCRIPTION_PROFILES
+
+human_gated_capabilities:
+  - UNAUTHORIZED_API_BILLING
+  - BILLING_MODE_CHANGE
+  - DESTRUCTIVE_ACTION
+  - DEPLOYMENT_OR_PRODUCTION
+  - EXTERNAL_SIDE_EFFECT
+  - SCOPE_EXPANSION
+  - NEW_CREDENTIAL_BOUNDARY
+  - UNRESOLVED_ARCHITECTURE_OR_PRODUCT_DECISION
+  - CRITICAL_OR_SECURITY_SENSITIVE_ACTION
+  - PROFILE_OR_PROVIDER_OUTSIDE_POLICY
+  - INSUFFICIENT_EVIDENCE
+  - SAFE_ESCALATION_EXHAUSTED
+
+billing:
+  allowed_billing_modes:
+    - subscription_only
+
+profile_policy:
+  id: local-autonomous-development-ladder-v1
+  allowed_providers:
+    - codex
+    - claude
+  profiles:
+    - id: codex-build-worker-subscription-terra-medium-v2
+      capability_rank: 0
+      rationale: degrau baseline da ladder operacional
+    - id: claude-build-worker-subscription-sonnet5-medium-stream-v4
+      capability_rank: 1
+      rationale: degrau seguinte da ladder operacional
+    - id: codex-build-worker-subscription-sol-high-v2
+      capability_rank: 2
+      rationale: degrau alto Codex
+    - id: claude-build-worker-subscription-opus5-high-v3
+      capability_rank: 3
+      rationale: degrau alto Claude
+
+review: {}
+
+work_units:
+  default:
+    task_class: feature
+    difficulty_declared: medium
+    risk: low
+    complexity: local
+    ambiguity: low
+    verification: deterministic
+    resource_envelope:
+      duration_ms: { expected: 900000, maximum: 1800000 }
+      tokens: { expected: 80000, maximum: 200000 }
+      changed_files: { expected: 4, maximum: 12 }
+  overrides: {}

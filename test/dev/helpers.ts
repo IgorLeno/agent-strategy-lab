@@ -52,6 +52,7 @@ export function runDevCli(
   args: readonly string[],
   env: Record<string, string> = {},
   sourceEnvironment: NodeJS.ProcessEnv = process.env,
+  options: { readonly stdin?: string } = {},
 ): Promise<CliResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(
@@ -60,9 +61,10 @@ export function runDevCli(
       {
         cwd: REPO_ROOT,
         env: buildTestProcessEnvironment(env, sourceEnvironment),
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: ['pipe', 'pipe', 'pipe'],
       },
     );
+    child.stdin.end(options.stdin ?? '');
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (chunk: Buffer) => {
