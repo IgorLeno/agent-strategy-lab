@@ -877,6 +877,15 @@ são MILISSEGUNDOS; validation[].timeout_seconds é em SEGUNDOS; tokens são
 tokens; changed_files é número de arquivos. "expected" nunca excede "maximum".
 "argv" é vetor de argumentos, nunca uma linha de shell.
 
+OWNERSHIP DE RUNTIME: resource_envelope.duration_ms é o envelope BASE do
+runtime do coding worker e NÃO inclui validation_budget. Mantenha sempre o
+budget agregado de validação separado: o planner não seleciona profile e o
+control plane decidirá depois, por
+ProfileCapability.ownership.official_validation_owner, se esse custo pertence
+ao processo do worker. Quando a validação oficial for orchestrator-owned,
+NUNCA some validation_budget a resource_envelope.duration_ms; ela continua
+declarada e observável somente em validation_budget.
+
 acceptance: todo objetivo do acceptance_contract precisa aparecer VERBATIM em
 alguma task. Você PODE acrescentar critérios técnicos adicionais que a work
 unit precise satisfazer; não pode reescrever nem substituir os do usuário.

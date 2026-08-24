@@ -1049,6 +1049,15 @@ describe('adapter real da PlanningWorkerPort', () => {
     expect(prompt).toMatch(/múltiplas raízes e ramos\s*\n?independentes são válidos/);
   });
 
+  it('o prompt separa o envelope base do worker da validação conforme ownership', () => {
+    const prompt = buildPlannerPrompt(invocation());
+    expect(prompt).toMatch(
+      /resource_envelope\.duration_ms[^]*NÃO inclui validation_budget/,
+    );
+    expect(prompt).toMatch(/ProfileCapability\.ownership\.official_validation_owner/);
+    expect(prompt).toMatch(/orchestrator-owned[^]*NUNCA some validation_budget/);
+  });
+
   it('o prompt de revisão entrega feedback determinístico e exige replacement completo', () => {
     const revisedInvocation = {
       ...invocation(),

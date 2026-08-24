@@ -785,3 +785,18 @@ pré-condições estruturais que distinguem seu estado conhecido; para
 protocol-output recovery isso inclui `HEAD == task.base_sha ==
 authorized_head_sha`. Se qualquer precondição falhar, preserve a razão original
 e retorne `HUMAN_REQUIRED` sem invocar a primitive.
+
+[2026-08-24] Context: uma self-run real planejou
+`estimated_duration.expected=1.200.000ms` e
+`validation_budget.expected=1.500.000ms`, mas somou ambos em
+`resource_envelope.duration_ms.expected=2.700.000ms`; o routing recusou todos
+os profiles advanced antes do coding worker.
+Mistake: o schema e o router separavam corretamente as grandezas, porém o
+prompt do planning worker declarava apenas campos e unidades, sem explicar a
+ownership. O draft colapsou validação orchestrator-owned no envelope base do
+worker.
+Rule: contratos de output para planners devem declarar consumidor e lifecycle
+stage, não só tipo e unidade. `resource_envelope.duration_ms` é o envelope base
+do coding worker e nunca incorpora `validation_budget` no planner; o control
+plane observa o budget separadamente e só o adiciona quando
+`ProfileCapability.ownership.official_validation_owner` pertence ao worker.
