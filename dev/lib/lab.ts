@@ -9,9 +9,15 @@ import {
   createHumanInstruction,
   DETERMINISTIC_INTAKE_COMPILER_PROFILE,
   deterministicIntakeCompiler,
+  humanInstructionBody,
+  parseRunDirective,
   ProjectIntakeRequest,
+  RunDirectiveError,
+  runDirectiveHash,
+  type AgentLabRunDirectiveHeader,
   type HumanInstruction,
   type IntakeCompilerPort,
+  type ParsedRunDirective,
 } from '../../src/intake/index.js';
 import { headSha, isWorkingTreeClean, repoTopLevel } from './git.js';
 import {
@@ -21,10 +27,15 @@ import {
   loadAuthorizationSnapshot,
   loadHumanInstruction,
   loadPersistedIntake,
+  loadPersistedRunDirective,
+  loadPublishGrant,
   pathExists,
   persistHumanInstruction,
   persistObservability,
   persistProjectIntake,
+  persistPublishGrant,
+  persistRunDirective,
+  persistRunDirectiveHeader,
   type LabObservability,
 } from './lab-runtime.js';
 import {
@@ -42,6 +53,12 @@ import { resolveHarnessInstallationRoot } from './paths.js';
 import { PlanSetupError, type PlanRunResult } from './run-plan.js';
 import { runProject } from './run-project.js';
 import {
+  overlayAuthorization,
+  resolveDirectivePublishGrant,
+  resolvedPublishLabel,
+  type ResolvedPublishGrant,
+} from './run-directive-auth.js';
+import {
   authorizationYaml,
   DEFAULT_POLICY_PRESET,
   loadPolicyPreset,
@@ -57,16 +74,35 @@ export class LabRunError extends Error {
   }
 }
 
-export interface SubmitHumanInstructionInput {
-  readonly raw_instruction: string;
-  readonly instruction_source: 'stdin' | 'file';
-  readonly source_path?: string;
-  readonly repo?: string;
-  readonly self?: boolean;
-  readonly publish?: boolean;
-  readonly runtime_dir?: string;
-  readonly authorization_file?: string;
-  readonly policy_preset?: string;
+export interface LabRunSummary {
+  readonly target: string;
+  readonly mode: 'new' | 'resume';
+  readonly base: string;
+  readonly policy: string;
+  readonly providers: string;
+  readonly local_write: boolean;
+  readonly repair: boolean;
+  readonly escalation: boolean;
+  readonly publish: string;
+  readonly runtime: string;
+}
+
+export function formatRunSummary(summary: LabRunSummary): string {
+  return [
+    `Target: ${summary.target}`,
+    `Mode: ${summary.mode}`,
+    `Base: ${summary.base}`,
+    `Policy: ${summary.policy}`,
+    `Providers: ${summary.providers}`,
+    `Local write: ${summary.local_write ? 'granted' : 'denied'}`,
+    `Repair: ${summary.repair ? 'granted' : 'denied'}`,
+    `Escalation: ${summary.escalation ? 'granted' : 'denied'}`,
+    `Publish: ${summary.publish}`,
+    `Runtime: ${summary.runtime}`,
+  ].join('\n');
+}
+
+interface SharedLabInput {
   readonly planner_profile_id?: string;
   readonly max_iterations?: number;
   readonly timeout_override?: string;
@@ -78,20 +114,37 @@ export interface SubmitHumanInstructionInput {
   readonly inspect?: (repoRoot: string) => Promise<ProjectInspection>;
   readonly run_project?: typeof runProject;
   readonly on_runtime?: (runtimeDir: string) => void;
+  readonly on_summary?: (summary: LabRunSummary) => void;
 }
 
-export interface ResumeHumanInstructionInput {
+export interface SubmitHumanInstructionInput extends SharedLabInput {
+  readonly raw_instruction: string;
+  readonly instruction_source: 'stdin' | 'file';
+  readonly source_path?: string;
+  readonly repo?: string;
+  readonly self?: boolean;
+  readonly publish?: boolean;
+  readonly runtime_dir?: string;
+  readonly authorization_file?: string;
+  readonly policy_preset?: string;
+}
+
+export interface SubmitRunDirectiveInput extends SharedLabInput {
+  readonly raw_directive: string;
+  readonly instruction_source: 'stdin' | 'file';
+  readonly source_path?: string;
+  readonly repo?: string;
+  readonly self?: boolean;
+  readonly publish?: boolean;
+  readonly resume_runtime?: string;
+  readonly runtime_dir?: string;
+  readonly authorization_file?: string;
+  readonly policy_preset?: string;
+}
+
+export interface ResumeHumanInstructionInput extends SharedLabInput {
   readonly runtime_dir: string;
   readonly publish?: boolean;
-  readonly planner_profile_id?: string;
-  readonly max_iterations?: number;
-  readonly timeout_override?: string;
-  readonly verbose?: boolean;
-  readonly autonomy?: 'routine';
-  readonly control_root?: string;
-  readonly env?: Readonly<Record<string, string | undefined>>;
-  readonly run_project?: typeof runProject;
-  readonly on_runtime?: (runtimeDir: string) => void;
 }
 
 export interface LabRunResult {
@@ -114,8 +167,8 @@ function humanRequiredPayload(
     decision_needed: capability,
     why_automation_stopped: why,
     options: [
-      'autorizar explicitamente via --authorization ou um preset que cubra esta categoria',
-      'remover o pedido gated da instrução e rerodar',
+      'conceder a categoria no header estruturado da Run Directive, se a política do produto permitir',
+      'remover o pedido gated do corpo e rerodar',
       `inspecionar o runtime em ${runtimeDir}`,
     ],
     evidence_paths: [runtimeDir],
@@ -131,7 +184,7 @@ async function requireCleanRepo(repoRoot: string, label: string): Promise<void> 
 
 async function resolveExternalRepo(repo: string | undefined): Promise<string> {
   if (repo === undefined || repo.trim() === '') {
-    throw new LabRunError('--repo é obrigatório sem --self e sem --resume.');
+    throw new LabRunError('o alvo externo precisa de um caminho de repositório.');
   }
   try {
     return path.resolve(await repoTopLevel(repo));
@@ -149,7 +202,7 @@ function assembleIntake(
     schema_version: 1,
     target_repo: { url: targetRepoUrl },
     base_revision: { sha: instruction.base_sha },
-    user_request: instruction.raw_instruction,
+    user_request: humanInstructionBody(instruction),
     objectives: fields.objectives,
     constraints: fields.constraints,
     exclusions: fields.exclusions,
@@ -184,7 +237,7 @@ async function executeProject(input: {
 
 async function maybeIntegrateSelf(input: {
   readonly self: boolean;
-  readonly publish: boolean;
+  readonly publish: ResolvedPublishGrant;
   readonly controlRoot: string;
   readonly identity: SelfTargetIdentity | null;
   readonly executed: PlanRunResult;
@@ -205,7 +258,7 @@ async function maybeIntegrateSelf(input: {
       controlRoot: input.controlRoot,
       identity: input.identity,
     });
-    if (!input.publish) {
+    if (!input.publish.allowed) {
       return {
         self_maintenance: {
           isolated_worktree: input.identity.target_worktree_path,
@@ -216,9 +269,15 @@ async function maybeIntegrateSelf(input: {
         },
       };
     }
+    if (input.publish.ref !== input.identity.original_ref) {
+      throw new LabRunError(
+        `publish.ref ${input.publish.ref} não coincide com a ref original ${input.identity.original_ref}.`,
+      );
+    }
     const pushed = await publishControlRef({
       controlRoot: input.controlRoot,
       ref: input.identity.original_ref,
+      remote: input.publish.remote,
     });
     return {
       self_maintenance: {
@@ -246,12 +305,164 @@ async function maybeIntegrateSelf(input: {
   }
 }
 
+export function resolveLabTarget(input: {
+  readonly header: AgentLabRunDirectiveHeader | null;
+  readonly cliRepo?: string;
+  readonly cliSelf?: boolean;
+}): { readonly type: 'external' | 'self'; readonly repo?: string; readonly self: boolean } {
+  const target = input.header?.target;
+  const cliSelf = input.cliSelf === true;
+  const cliRepo = input.cliRepo?.trim() ? input.cliRepo : undefined;
+
+  if (target === undefined) {
+    if (cliSelf) return { type: 'self', self: true };
+    if (cliRepo !== undefined) return { type: 'external', repo: cliRepo, self: false };
+    throw new LabRunError(
+      'o alvo precisa estar na Run Directive (target.type) ou, na interface avançada, em --repo/--self.',
+    );
+  }
+
+  if (target.type === 'self') {
+    if (cliRepo !== undefined) {
+      throw new LabRunError(
+        'conflito de alvo: a Run Directive pede target.type=self e a CLI passou --repo. Não há precedência silenciosa.',
+      );
+    }
+    return { type: 'self', self: true };
+  }
+
+  if (cliSelf) {
+    throw new LabRunError(
+      'conflito de alvo: a Run Directive pede um repositório externo e a CLI passou --self. Não há precedência silenciosa.',
+    );
+  }
+  if (cliRepo !== undefined && path.resolve(cliRepo) !== path.resolve(target.path)) {
+    throw new LabRunError(
+      `conflito de alvo: a Run Directive pede ${path.resolve(target.path)} e a CLI passou ${path.resolve(cliRepo)}. Não há precedência silenciosa.`,
+    );
+  }
+  return { type: 'external', repo: target.path, self: false };
+}
+
+function executionModeOf(header: AgentLabRunDirectiveHeader | null): 'new' | 'resume' {
+  return header?.execution?.mode === 'resume' ? 'resume' : 'new';
+}
+
+function resolveResumeRuntime(input: {
+  readonly header: AgentLabRunDirectiveHeader | null;
+  readonly resumeRuntime?: string;
+  readonly runtimeDir?: string;
+}): string {
+  const fromHeader = input.header?.execution?.runtime;
+  const fromCli = input.resumeRuntime ?? input.runtimeDir;
+  if (fromHeader !== undefined && fromCli !== undefined && path.resolve(fromHeader) !== path.resolve(fromCli)) {
+    throw new LabRunError(
+      `conflito de runtime: a Run Directive pede ${path.resolve(fromHeader)} e a CLI passou ${path.resolve(fromCli)}.`,
+    );
+  }
+  const runtime = fromHeader ?? fromCli;
+  if (runtime === undefined || runtime.trim() === '') {
+    throw new LabRunError('execution.mode=resume exige execution.runtime ou `pnpm lab resume RUNTIME`.');
+  }
+  return path.resolve(runtime);
+}
+
+function sharedResumeInput(
+  input: SharedLabInput & { readonly publish?: boolean },
+  runtimeDir: string,
+): ResumeHumanInstructionInput {
+  return {
+    runtime_dir: runtimeDir,
+    ...(input.publish === undefined ? {} : { publish: input.publish }),
+    ...(input.planner_profile_id === undefined ? {} : { planner_profile_id: input.planner_profile_id }),
+    ...(input.max_iterations === undefined ? {} : { max_iterations: input.max_iterations }),
+    ...(input.timeout_override === undefined ? {} : { timeout_override: input.timeout_override }),
+    ...(input.verbose === undefined ? {} : { verbose: input.verbose }),
+    ...(input.autonomy === undefined ? {} : { autonomy: input.autonomy }),
+    ...(input.control_root === undefined ? {} : { control_root: input.control_root }),
+    ...(input.env === undefined ? {} : { env: input.env }),
+    ...(input.run_project === undefined ? {} : { run_project: input.run_project }),
+    ...(input.on_runtime === undefined ? {} : { on_runtime: input.on_runtime }),
+    ...(input.on_summary === undefined ? {} : { on_summary: input.on_summary }),
+  };
+}
+
+/**
+ * Porta de produto transport-neutral: uma Run Directive crua.
+ * O adapter (CLI) só lê terminal e chama isto.
+ */
+export async function submitRunDirective(input: SubmitRunDirectiveInput): Promise<LabRunResult> {
+  let parsed: ParsedRunDirective;
+  try {
+    parsed = parseRunDirective(input.raw_directive);
+  } catch (error) {
+    if (error instanceof RunDirectiveError) throw error;
+    throw error;
+  }
+
+  if (executionModeOf(parsed.header) === 'resume') {
+    const runtimeDir = resolveResumeRuntime({
+      header: parsed.header,
+      ...(input.resume_runtime === undefined ? {} : { resumeRuntime: input.resume_runtime }),
+      ...(input.runtime_dir === undefined ? {} : { runtimeDir: input.runtime_dir }),
+    });
+    const artifacts = labArtifactPaths(runtimeDir);
+    if (await pathExists(artifacts.runDirective)) {
+      const persisted = await loadPersistedRunDirective(artifacts.runDirective);
+      if (parsed.hash !== runDirectiveHash(persisted)) {
+        throw new LabRunError(
+          `a Run Directive colada não coincide com a autoridade persistida em ${artifacts.runDirective}. Resume não substitui a autoridade original.`,
+        );
+      }
+    }
+    return resumeHumanInstruction(sharedResumeInput(input, runtimeDir));
+  }
+
+  const target = resolveLabTarget({
+    header: parsed.header,
+    ...(input.repo === undefined ? {} : { cliRepo: input.repo }),
+    ...(input.self === undefined ? {} : { cliSelf: input.self }),
+  });
+
+  const preset = input.policy_preset ?? parsed.header?.authorization?.preset;
+  return submitHumanInstruction({
+    raw_instruction: parsed.raw,
+    ...(parsed.header === null ? {} : { instruction_body: parsed.body }),
+    instruction_source: input.instruction_source,
+    ...(input.source_path === undefined ? {} : { source_path: input.source_path }),
+    ...(target.repo === undefined ? {} : { repo: target.repo }),
+    self: target.self,
+    ...(input.publish === undefined ? {} : { publish: input.publish }),
+    ...(input.runtime_dir === undefined ? {} : { runtime_dir: input.runtime_dir }),
+    ...(input.authorization_file === undefined ? {} : { authorization_file: input.authorization_file }),
+    ...(preset === undefined ? {} : { policy_preset: preset }),
+    ...(input.planner_profile_id === undefined ? {} : { planner_profile_id: input.planner_profile_id }),
+    ...(input.max_iterations === undefined ? {} : { max_iterations: input.max_iterations }),
+    ...(input.timeout_override === undefined ? {} : { timeout_override: input.timeout_override }),
+    ...(input.verbose === undefined ? {} : { verbose: input.verbose }),
+    ...(parsed.header?.execution?.autonomy === 'routine' || input.autonomy === 'routine'
+      ? { autonomy: 'routine' }
+      : {}),
+    ...(input.control_root === undefined ? {} : { control_root: input.control_root }),
+    ...(input.env === undefined ? {} : { env: input.env }),
+    ...(input.compile_intake === undefined ? {} : { compile_intake: input.compile_intake }),
+    ...(input.inspect === undefined ? {} : { inspect: input.inspect }),
+    ...(input.run_project === undefined ? {} : { run_project: input.run_project }),
+    ...(input.on_runtime === undefined ? {} : { on_runtime: input.on_runtime }),
+    ...(input.on_summary === undefined ? {} : { on_summary: input.on_summary }),
+    directive: parsed,
+  });
+}
+
 /**
  * Porta de aplicação transport-neutral. CLI e um futuro MCP chamam isto;
  * stdin/console/argv ficam no adapter.
  */
 export async function submitHumanInstruction(
-  input: SubmitHumanInstructionInput,
+  input: SubmitHumanInstructionInput & {
+    readonly instruction_body?: string;
+    readonly directive?: ParsedRunDirective;
+  },
 ): Promise<LabRunResult> {
   const raw = input.raw_instruction.trim();
   if (raw.length === 0) throw new LabRunError('a instrução humana está vazia.');
@@ -268,7 +479,7 @@ export async function submitHumanInstruction(
     repoRoot = await resolveExternalRepo(input.repo);
     if (await isSameGitRepo(repoRoot, controlRoot)) {
       throw new LabRunError(
-        'o repositório alvo é o próprio Agent Lab. Use --self para self-maintenance isolada.',
+        'o repositório alvo é o próprio Agent Lab. Use target.type=self ou --self para self-maintenance isolada.',
       );
     }
   }
@@ -277,6 +488,7 @@ export async function submitHumanInstruction(
   const baseSha = await headSha(repoRoot);
   const instruction = createHumanInstruction({
     raw_instruction: raw,
+    ...(input.instruction_body === undefined ? {} : { instruction_body: input.instruction_body }),
     source: input.instruction_source,
     ...(input.source_path === undefined ? {} : { source_path: input.source_path }),
     target_type: targetType,
@@ -305,22 +517,20 @@ export async function submitHumanInstruction(
         `runtime ${runtimeDir} já contém outra instrução. Use --runtime-dir novo ou --resume.`,
       );
     }
-    return resumeHumanInstruction({
-      runtime_dir: runtimeDir,
-      ...(input.publish === undefined ? {} : { publish: input.publish }),
-      ...(input.planner_profile_id === undefined ? {} : { planner_profile_id: input.planner_profile_id }),
-      ...(input.max_iterations === undefined ? {} : { max_iterations: input.max_iterations }),
-      ...(input.timeout_override === undefined ? {} : { timeout_override: input.timeout_override }),
-      ...(input.verbose === undefined ? {} : { verbose: input.verbose }),
-      ...(input.autonomy === undefined ? {} : { autonomy: input.autonomy }),
-      control_root: controlRoot,
-      env,
-      ...(input.run_project === undefined ? {} : { run_project: input.run_project }),
-      ...(input.on_runtime === undefined ? {} : { on_runtime: input.on_runtime }),
-    });
+    return resumeHumanInstruction(sharedResumeInput(input, runtimeDir));
   }
 
+  const directive = input.directive ?? parseRunDirective(input.raw_instruction);
+  await persistRunDirective(artifacts.runDirective, directive.raw);
+  if (directive.header !== null) {
+    await persistRunDirectiveHeader(artifacts.runDirectiveHeader, directive.header);
+  }
   await persistHumanInstruction(artifacts.humanInstruction, instruction);
+  const publishGrant = resolveDirectivePublishGrant({
+    header: directive.header,
+    ...(input.publish === undefined ? {} : { cliPublish: input.publish }),
+  });
+  await persistPublishGrant(artifacts.publishGrant, publishGrant);
 
   let selfIdentity: SelfTargetIdentity | null = null;
   if (targetType === 'self') {
@@ -340,10 +550,11 @@ export async function submitHumanInstruction(
   const intake = assembleIntake(instruction, repoRoot, fields);
   await persistProjectIntake(artifacts.intake, stringifyYaml(intake));
 
+  const headerPreset = directive.header?.authorization?.preset;
   const presetName =
     input.authorization_file === undefined
       ? resolvePolicyPresetName({
-          ...(input.policy_preset === undefined ? {} : { requested: input.policy_preset }),
+          requested: input.policy_preset ?? headerPreset,
           env,
         })
       : 'authorization-file';
@@ -351,14 +562,14 @@ export async function submitHumanInstruction(
   if (input.authorization_file !== undefined) {
     const loaded = await loadAuthorizationSnapshot(input.authorization_file);
     const snapshot = materializeAuthorization({
-      preset: loaded.file,
+      preset: overlayAuthorization({ preset: loaded.file, header: directive.header }),
       requested_scope: intake.requested_scope,
     });
     await writeFileAtomic(authorizationFile, authorizationYaml(snapshot));
   } else {
     const loaded = await loadPolicyPreset(presetName, path.join(controlRoot, 'dev', 'presets'));
     const snapshot = materializeAuthorization({
-      preset: loaded.file,
+      preset: overlayAuthorization({ preset: loaded.file, header: directive.header }),
       requested_scope: intake.requested_scope,
     });
     await writeFileAtomic(authorizationFile, authorizationYaml(snapshot));
@@ -369,6 +580,8 @@ export async function submitHumanInstruction(
     schema_version: 1,
     instruction_source: input.instruction_source,
     instruction_sha256: instruction.instruction_hash,
+    run_directive_sha256: directive.hash,
+    directive_format: directive.header === null ? 'legacy' : 'agentlab-v1',
     target_type: targetType,
     controller_sha: await headSha(controlRoot),
     intake_compiler_profile: DETERMINISTIC_INTAKE_COMPILER_PROFILE,
@@ -377,7 +590,20 @@ export async function submitHumanInstruction(
   };
   await persistObservability(artifacts.observability, observability);
 
-  const implied = classifyImpliedHumanGated(instruction.raw_instruction);
+  input.on_summary?.({
+    target: targetType === 'self' ? 'self' : repoRoot,
+    mode: 'new',
+    base: baseSha,
+    policy: presetName,
+    providers: directive.header?.providers?.policy ?? 'default',
+    local_write: authorization.file.autonomous_execution_boundary.includes('DISPOSABLE_LOCAL_WORKSPACE'),
+    repair: authorization.file.autonomous_execution_boundary.includes('BOUNDED_REPAIR'),
+    escalation: authorization.file.autonomous_execution_boundary.includes('CAPABILITY_ESCALATION_WITHIN_LADDER'),
+    publish: resolvedPublishLabel(publishGrant),
+    runtime: runtimeDir,
+  });
+
+  const implied = classifyImpliedHumanGated(humanInstructionBody(instruction));
   for (const capability of implied) {
     const decision = authorizeExecutionAction(
       {
@@ -394,7 +620,7 @@ export async function submitHumanInstruction(
           ...humanRequiredPayload(
             capability,
             runtimeDir,
-            `a instrução implica ${capability}; o texto do prompt não autoriza esta categoria.`,
+            `a instrução implica ${capability}; texto livre não autoriza esta categoria e o header estruturado também não a concedeu.`,
           ),
           human_instruction: artifacts.humanInstruction,
           intake_file: artifacts.intake,
@@ -426,7 +652,7 @@ export async function submitHumanInstruction(
 
   const selfReport = await maybeIntegrateSelf({
     self: targetType === 'self',
-    publish: input.publish === true,
+    publish: publishGrant,
     controlRoot,
     identity: selfIdentity,
     executed,
@@ -458,12 +684,24 @@ export async function resumeHumanInstruction(
   }
   const instruction = await loadHumanInstruction(artifacts.humanInstruction);
   const intake = await loadPersistedIntake(artifacts.intake);
-  if (intake.user_request !== instruction.raw_instruction) {
+  if (intake.user_request !== humanInstructionBody(instruction)) {
     throw new LabRunError(
       'intake persistido diverge da instrução humana raw. O planner não será chamado.',
     );
   }
   const authorization = await loadAuthorizationSnapshot(artifacts.authorization);
+  const persistedGrant = await loadPublishGrant(artifacts.publishGrant);
+  const publishGrant =
+    persistedGrant ??
+    resolveDirectivePublishGrant({
+      header: null,
+      ...(input.publish === undefined ? {} : { cliPublish: input.publish }),
+    });
+  if (input.publish === true && persistedGrant?.allowed === false) {
+    throw new LabRunError(
+      'conflito: --publish tenta conceder publicação e a Run Directive persistida a nega.',
+    );
+  }
   const controlRoot = await resolveControlRepo(input.control_root ?? resolveHarnessInstallationRoot());
 
   let repoRoot = path.resolve(instruction.target.identity);
@@ -482,6 +720,19 @@ export async function resumeHumanInstruction(
     await assertControllerUnchanged(selfIdentity, controlRoot);
   }
 
+  input.on_summary?.({
+    target: instruction.target.type === 'self' ? 'self' : repoRoot,
+    mode: 'resume',
+    base: instruction.base_sha,
+    policy: authorization.file.profile_policy.id,
+    providers: 'default',
+    local_write: authorization.file.autonomous_execution_boundary.includes('DISPOSABLE_LOCAL_WORKSPACE'),
+    repair: authorization.file.autonomous_execution_boundary.includes('BOUNDED_REPAIR'),
+    escalation: authorization.file.autonomous_execution_boundary.includes('CAPABILITY_ESCALATION_WITHIN_LADDER'),
+    publish: resolvedPublishLabel(input.publish === true && persistedGrant === null ? { ...publishGrant, allowed: true } : publishGrant),
+    runtime: runtimeDir,
+  });
+
   const executed = await executeProject({
     repoRoot,
     runtimeDir,
@@ -494,9 +745,12 @@ export async function resumeHumanInstruction(
     ...(input.verbose === undefined ? {} : { verbose: input.verbose }),
     ...(input.autonomy === undefined ? {} : { autonomy: input.autonomy }),
   });
+  const effectivePublish =
+    persistedGrant ??
+    (input.publish === true ? { allowed: true, remote: 'origin', ref: 'main' } : publishGrant);
   const selfReport = await maybeIntegrateSelf({
     self: instruction.target.type === 'self',
-    publish: input.publish === true,
+    publish: effectivePublish,
     controlRoot,
     identity: selfIdentity,
     executed,
@@ -519,3 +773,4 @@ export async function resumeHumanInstruction(
 
 export { DEFAULT_POLICY_PRESET };
 export { PlanSetupError };
+export { RunDirectiveError };

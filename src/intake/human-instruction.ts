@@ -8,13 +8,16 @@ const gitCommitSha = z
 const sha256hex = z.string().regex(/^[0-9a-f]{64}$/);
 
 /**
- * Instrução humana persistida. O texto RAW é a autoridade humana — não
- * contém raciocínio de planner, premissas derivadas nem autorização.
+ * Instrução humana persistida. `raw_instruction` é o documento humano
+ * original (Run Directive completa ou texto legado). Autorização estruturada
+ * vive no header; o corpo (`instruction_body`) é a intenção para o planner.
  */
 export const HumanInstruction = z
   .object({
     schema_version: z.literal(1),
     raw_instruction: nonEmpty,
+    /** Corpo sem o header. Ausente = formato legado (raw === corpo). */
+    instruction_body: nonEmpty.optional(),
     source: z.enum(['stdin', 'file']),
     source_path: z.string().min(1).nullable(),
     target: z
@@ -29,6 +32,11 @@ export const HumanInstruction = z
   .strict();
 export type HumanInstruction = z.infer<typeof HumanInstruction>;
 
+/** Texto que o planner/intake recebem: corpo, nunca o header de autorização. */
+export function humanInstructionBody(instruction: HumanInstruction): string {
+  return instruction.instruction_body ?? instruction.raw_instruction;
+}
+
 /** Hash da autoridade humana: só o texto raw, em UTF-8. */
 export function humanInstructionHash(rawInstruction: string): string {
   return createHash('sha256').update(rawInstruction, 'utf8').digest('hex');
@@ -36,6 +44,7 @@ export function humanInstructionHash(rawInstruction: string): string {
 
 export function createHumanInstruction(input: {
   readonly raw_instruction: string;
+  readonly instruction_body?: string;
   readonly source: 'stdin' | 'file';
   readonly source_path?: string;
   readonly target_type: 'external' | 'self';
@@ -43,9 +52,11 @@ export function createHumanInstruction(input: {
   readonly base_sha: string;
 }): HumanInstruction {
   const raw = input.raw_instruction.trim();
+  const body = input.instruction_body?.trim();
   return HumanInstruction.parse({
     schema_version: 1,
     raw_instruction: raw,
+    ...(body === undefined || body === raw ? {} : { instruction_body: body }),
     source: input.source,
     source_path: input.source_path ?? null,
     target: {

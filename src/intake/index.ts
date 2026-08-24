@@ -172,9 +172,25 @@ export function authorizeExecutionAction(
 export {
   HumanInstruction,
   createHumanInstruction,
+  humanInstructionBody,
   humanInstructionHash,
 } from './human-instruction.js';
 export type { HumanInstruction as HumanInstructionRecord } from './human-instruction.js';
+export {
+  AgentLabRunDirectiveHeader,
+  DirectiveAuthorization,
+  DirectiveExecution,
+  DirectiveGrantablePermission,
+  DirectiveNeverGrantablePermission,
+  DirectivePermission,
+  DirectivePublishGrant,
+  DirectiveTarget,
+  RunDirectiveError,
+  normalizeDirectiveText,
+  parseRunDirective,
+  runDirectiveHash,
+} from './run-directive.js';
+export type { ParsedRunDirective } from './run-directive.js';
 export {
   CompiledIntakeFields,
   DETERMINISTIC_INTAKE_COMPILER_PROFILE,

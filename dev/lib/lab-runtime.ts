@@ -2,14 +2,16 @@ import { createHash } from 'node:crypto';
 import { access, readFile } from 'node:fs/promises';
 import path from 'node:path';
 
-import { parse as parseYaml } from 'yaml';
+import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 
 import { resolveDataDir } from '../../src/project/index.js';
 import {
+  AgentLabRunDirectiveHeader,
   HumanInstruction,
   ProjectIntakeRequest,
   type HumanInstruction as HumanInstructionRecord,
 } from '../../src/intake/index.js';
+import type { ResolvedPublishGrant } from './run-directive-auth.js';
 import { writeFileAtomic, writeJsonOnce } from './atomic.js';
 import { resolveHarnessInstallationRoot, resolveHarnessPaths, type HarnessPaths } from './paths.js';
 import {
@@ -22,11 +24,16 @@ export const PROJECT_INTAKE_FILE = 'lab/project-intake.yaml';
 export const AUTHORIZATION_SNAPSHOT_FILE = 'lab/authorization.yaml';
 export const OBSERVABILITY_FILE = 'lab/observability.json';
 export const SELF_TARGET_FILE = 'lab/self-target.json';
+export const RUN_DIRECTIVE_FILE = 'lab/run-directive.txt';
+export const RUN_DIRECTIVE_HEADER_FILE = 'lab/run-directive-header.yaml';
+export const PUBLISH_GRANT_FILE = 'lab/publish-grant.json';
 
 export interface LabObservability {
   readonly schema_version: 1;
   readonly instruction_source: 'stdin' | 'file';
   readonly instruction_sha256: string;
+  readonly run_directive_sha256?: string;
+  readonly directive_format?: 'agentlab-v1' | 'legacy';
   readonly target_type: 'external' | 'self';
   readonly controller_sha: string;
   readonly intake_compiler_profile: string;
@@ -75,6 +82,9 @@ export function labArtifactPaths(runtimeDir: string): {
   readonly authorization: string;
   readonly observability: string;
   readonly selfTarget: string;
+  readonly runDirective: string;
+  readonly runDirectiveHeader: string;
+  readonly publishGrant: string;
 } {
   return {
     humanInstruction: path.join(runtimeDir, HUMAN_INSTRUCTION_FILE),
@@ -82,6 +92,9 @@ export function labArtifactPaths(runtimeDir: string): {
     authorization: path.join(runtimeDir, AUTHORIZATION_SNAPSHOT_FILE),
     observability: path.join(runtimeDir, OBSERVABILITY_FILE),
     selfTarget: path.join(runtimeDir, SELF_TARGET_FILE),
+    runDirective: path.join(runtimeDir, RUN_DIRECTIVE_FILE),
+    runDirectiveHeader: path.join(runtimeDir, RUN_DIRECTIVE_HEADER_FILE),
+    publishGrant: path.join(runtimeDir, PUBLISH_GRANT_FILE),
   };
 }
 
@@ -129,6 +142,35 @@ export async function loadPersistedIntake(file: string): Promise<ProjectIntakeRe
 
 export async function persistObservability(file: string, record: LabObservability): Promise<void> {
   await writeJsonOnce(file, record);
+}
+
+/** Persiste a Run Directive original após a política canônica de texto. */
+export async function persistRunDirective(file: string, raw: string): Promise<void> {
+  await writeFileAtomic(file, raw);
+}
+
+export async function loadPersistedRunDirective(file: string): Promise<string> {
+  return readFile(file, 'utf8');
+}
+
+export async function persistRunDirectiveHeader(
+  file: string,
+  header: AgentLabRunDirectiveHeader,
+): Promise<void> {
+  await writeFileAtomic(file, stringifyYaml(header));
+}
+
+export async function persistPublishGrant(file: string, grant: ResolvedPublishGrant): Promise<void> {
+  await writeJsonOnce(file, grant);
+}
+
+export async function loadPublishGrant(file: string): Promise<ResolvedPublishGrant | null> {
+  if (!(await pathExists(file))) return null;
+  const parsed = JSON.parse(await readFile(file, 'utf8')) as ResolvedPublishGrant;
+  if (typeof parsed.allowed !== 'boolean' || typeof parsed.remote !== 'string' || typeof parsed.ref !== 'string') {
+    throw new Error(`publish grant inválido em ${file}`);
+  }
+  return parsed;
 }
 
 export async function loadAuthorizationSnapshot(file: string): Promise<LoadedProjectRunAuthorization> {

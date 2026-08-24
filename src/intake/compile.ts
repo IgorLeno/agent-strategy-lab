@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 import type { ProjectInspection } from '../inspection/index.js';
-import type { HumanInstruction } from './human-instruction.js';
+import { humanInstructionBody, type HumanInstruction } from './human-instruction.js';
 
 const nonEmpty = z.string().trim().min(1);
 
@@ -44,7 +44,7 @@ function clip(text: string, maximum: number): string {
  * (repo/SHA). Não inventa restrições nem autorização.
  */
 export function compileIntakeFieldsDeterministic(instruction: HumanInstruction): CompiledIntakeFields {
-  const raw = instruction.raw_instruction;
+  const raw = humanInstructionBody(instruction);
   const summary = clip(firstLine(raw), MAX_SUMMARY_CHARS);
   return CompiledIntakeFields.parse({
     objectives: [clip(raw, MAX_OBJECTIVE_CHARS)],

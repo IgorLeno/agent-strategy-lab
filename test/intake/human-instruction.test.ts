@@ -38,6 +38,22 @@ describe('HumanInstruction', () => {
     expect(fields.objectives[0]).toContain('Create a small README note.');
     expect(instruction.raw_instruction).toContain('Keep it local.');
   });
+
+  it('o compile usa o corpo, não o header estruturado', () => {
+    const body = '# Objective\n\nCreate a small README note.\nKeep it local.';
+    const instruction = createHumanInstruction({
+      raw_instruction: `---agentlab\nversion: 1\n---\n${body}`,
+      instruction_body: body,
+      source: 'stdin',
+      target_type: 'external',
+      target_identity: '/tmp/project',
+      base_sha: SHA,
+    });
+    const fields = compileIntakeFieldsDeterministic(instruction);
+    expect(fields.objectives[0]).toContain('Create a small README note.');
+    expect(fields.objectives[0]).not.toContain('---agentlab');
+    expect(instruction.raw_instruction).toContain('---agentlab');
+  });
 });
 
 describe('classifyImpliedHumanGated', () => {

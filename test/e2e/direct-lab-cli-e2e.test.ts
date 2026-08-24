@@ -194,3 +194,152 @@ describe('pnpm lab --self', () => {
     expect((await runGit(control, ['merge-base', '--is-ancestor', original, integrated])).exitCode).toBe(0);
   }, 60_000);
 });
+
+function runDirective(input: { readonly header: string; readonly body: string }): string {
+  return `---agentlab\nversion: 1\n${input.header}---\n${input.body}`;
+}
+
+describe('pnpm lab run — Run Directive', () => {
+  it('A/B — `lab run` resolve alvo externo só da directive', async () => {
+    const fixture = await externalProject();
+    const raw = runDirective({
+      header: `target:\n  type: repository\n  path: ${fixture.target}\nexecution:\n  mode: new\n`,
+      body: '# Objective\n\nCreate a small README note.\n',
+    });
+    const first = await runLab(['run', '--max-iterations', '4'], labEnv(fixture.runs), raw);
+    expect(first.exitCode, first.stderr).toBe(0);
+    expect(first.stderr).toMatch(/Target: /);
+    expect(first.stderr).toMatch(/Mode: new/);
+    const output = JSON.parse(first.stdout) as {
+      stopped_by: string;
+      observability: { target_type: string; directive_format: string };
+      human_instruction: string;
+    };
+    expect(output.stopped_by).toBe('ALL_DONE');
+    expect(output.observability.target_type).toBe('external');
+    expect(output.observability.directive_format).toBe('agentlab-v1');
+    const persisted = await loadHumanInstruction(output.human_instruction);
+    expect(persisted.instruction_body).toContain('Create a small README note.');
+    expect(persisted.raw_instruction).toContain('---agentlab');
+  }, 60_000);
+
+  it('C/K — target.self isola o worktree e preserva o controller', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'agentlab-self-dir-'));
+    created.push(root);
+    const control = path.join(root, 'control');
+    await mkdir(control, { recursive: true });
+    await writeFile(path.join(control, 'README.md'), '# control\n', 'utf8');
+    await writeFile(
+      path.join(control, 'package.json'),
+      JSON.stringify({ name: 'self-lab', scripts: { test: 'true' } }),
+      'utf8',
+    );
+    await mkdir(path.join(control, 'dev', 'presets'), { recursive: true });
+    await cp(
+      path.join(REPO_ROOT, 'dev', 'presets', 'local-autonomous-development.yaml'),
+      path.join(control, 'dev', 'presets', 'local-autonomous-development.yaml'),
+    );
+    await cp(
+      path.join(REPO_ROOT, 'dev', 'presets', 'local-autonomous-development-fake.yaml'),
+      path.join(control, 'dev', 'presets', 'local-autonomous-development-fake.yaml'),
+    );
+    await runGit(control, ['init', '-q', '-b', 'main']);
+    await runGit(control, ['config', 'user.email', 'harness@example.invalid']);
+    await runGit(control, ['config', 'user.name', 'Harness Test']);
+    await runGit(control, ['add', '-A']);
+    await runGit(control, ['commit', '-q', '-m', 'base']);
+    const original = (await runGit(control, ['rev-parse', 'HEAD'])).stdout.trim();
+
+    const result = await runLab(
+      ['run', '--max-iterations', '4'],
+      {
+        ...labEnv(path.join(root, 'runs')),
+        AGENTLAB_CONTROL_ROOT: control,
+      },
+      runDirective({
+        header: 'target:\n  type: self\nexecution:\n  mode: new\n',
+        body: 'Update a documentation typo and validate it.\n',
+      }),
+    );
+    expect(result.exitCode, result.stderr).toBe(0);
+    const output = JSON.parse(result.stdout) as {
+      observability: { target_type: string; controller_sha: string };
+      self_maintenance: { isolated_worktree: string; publish: string };
+    };
+    expect(output.observability.target_type).toBe('self');
+    expect(output.observability.controller_sha).toBe(original);
+    expect(output.self_maintenance.isolated_worktree).not.toBe(control);
+    expect(output.self_maintenance.publish).toBe('PUSH_REQUIRED');
+    expect((await runGit(control, ['rev-parse', 'HEAD'])).stdout.trim()).not.toBe(original);
+  }, 60_000);
+
+  it('F — publish estreito empurra origin/main; ausência de grant não dá push', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'agentlab-self-pub-'));
+    created.push(root);
+    const control = path.join(root, 'control');
+    const remote = path.join(root, 'remote.git');
+    await mkdir(control, { recursive: true });
+    await writeFile(path.join(control, 'README.md'), '# control\n', 'utf8');
+    await writeFile(
+      path.join(control, 'package.json'),
+      JSON.stringify({ name: 'self-lab', scripts: { test: 'true' } }),
+      'utf8',
+    );
+    await mkdir(path.join(control, 'dev', 'presets'), { recursive: true });
+    await cp(
+      path.join(REPO_ROOT, 'dev', 'presets', 'local-autonomous-development.yaml'),
+      path.join(control, 'dev', 'presets', 'local-autonomous-development.yaml'),
+    );
+    await cp(
+      path.join(REPO_ROOT, 'dev', 'presets', 'local-autonomous-development-fake.yaml'),
+      path.join(control, 'dev', 'presets', 'local-autonomous-development-fake.yaml'),
+    );
+    await runGit(control, ['init', '-q', '-b', 'main']);
+    await runGit(control, ['config', 'user.email', 'harness@example.invalid']);
+    await runGit(control, ['config', 'user.name', 'Harness Test']);
+    await runGit(control, ['add', '-A']);
+    await runGit(control, ['commit', '-q', '-m', 'base']);
+    await mkdir(remote, { recursive: true });
+    await runGit(remote, ['init', '-q', '-b', 'main', '--bare']);
+    await runGit(control, ['remote', 'add', 'origin', remote]);
+
+    const result = await runLab(
+      ['run', '--max-iterations', '4'],
+      {
+        ...labEnv(path.join(root, 'runs')),
+        AGENTLAB_CONTROL_ROOT: control,
+      },
+      runDirective({
+        header:
+          'target:\n  type: self\nauthorization:\n  publish:\n    allowed: true\n    remote: origin\n    ref: main\n',
+        body: 'Update a documentation typo and validate it.\n',
+      }),
+    );
+    expect(result.exitCode, result.stderr).toBe(0);
+    const output = JSON.parse(result.stdout) as {
+      self_maintenance: { publish: string; remote: string };
+    };
+    expect(output.self_maintenance.publish).toBe('PUSHED');
+    expect(output.self_maintenance.remote).toBe('origin');
+    expect((await runGit(remote, ['rev-parse', 'refs/heads/main'])).exitCode).toBe(0);
+  }, 60_000);
+
+  it('H — header malformado: zero provider e mensagem de parse', async () => {
+    const fixture = await externalProject();
+    const result = await runLab(['run'], labEnv(fixture.runs), '---agentlab\nversion: 1\ntarget: [\n---\n# body\n');
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toMatch(/malformada|YAML/);
+    expect(result.stdout).not.toMatch(/generated_plan/);
+  }, 30_000);
+
+  it('J — `pnpm lab` sem subcomando ainda aceita --repo legado', async () => {
+    const fixture = await externalProject();
+    const first = await runLab(
+      ['--repo', fixture.target, '--max-iterations', '4'],
+      labEnv(fixture.runs),
+      'Create a small README note.',
+    );
+    expect(first.exitCode, first.stderr).toBe(0);
+    expect(JSON.parse(first.stdout).stopped_by).toBe('ALL_DONE');
+  }, 60_000);
+});
