@@ -5,6 +5,13 @@ Regra, não narrativa: cada entrada termina numa restrição aplicável.
 
 ---
 
+[2026-08-23] Context: interface canônica `pnpm lab run`.
+Mistake: tratar flags CLI (`--repo`, `--self`, `--publish`) e frases do
+prompt como se carregassem a mesma autoridade.
+Rule: a Run Directive colada é o artefato de produto; INTENT ≠ AUTHORIZATION;
+só o header estruturado (sobre o preset) concede capability; texto livre
+nunca autoriza; flags avançadas que contradizem o header falham fechadas.
+
 [2026-08-23] Context: porta de produto `pnpm lab` e self-maintenance.
 Mistake: exigir que o humano escreva ProjectIntakeRequest/agentlab-run.yaml
 — ou editar o control repo no mesmo working tree que carrega as primitives —

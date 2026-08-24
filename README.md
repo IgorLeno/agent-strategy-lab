@@ -338,23 +338,58 @@ arquiteturalmente elegante. Melhoria do Lab é *evidence-triggered*.
 
 ## Quick Start
 
-A porta de produto é `pnpm lab`. O usuário cola a instrução; o Lab persiste o
-texto raw, deriva o intake e aplica o preset local. Intent ≠ authorization:
-pedir deploy no prompt não autoriza deploy.
+```text
+pnpm lab run
+```
+
+Cole a Run Directive completa e pressione Ctrl+D. Um único artefato carrega
+alvo, modo, autorização estruturada e a instrução humana. O Lab persiste o
+documento original, deriva o intake e começa.
+
+```text
+---agentlab
+version: 1
+target:
+  type: repository
+  path: /path/to/project
+execution:
+  mode: new
+authorization:
+  preset: local-autonomous-development
+  allow:
+    local_repository_write: true
+    subscription_workers: true
+    deterministic_validation: true
+    bounded_repair: true
+    capability_escalation: true
+  deny:
+    deployment: true
+    destructive_actions: true
+    api_billing: true
+---
+# Objective
+Implement the requested change in the target repository.
+```
+
+Intent ≠ authorization: o corpo não concede permissão. Só o header
+estruturado (sobre o preset) autoriza. Self-maintenance usa
+`target.type: self`. Publicar origin/main exige um grant estreito no header.
+
+### Advanced / Compatibility Interface
+
+Flags continuam válidas, mas não são o fluxo principal:
 
 ```text
 pnpm lab --repo /path/to/project
-# paste instruction, Ctrl+D
-
-pnpm lab --resume /path/to/runtime
-
 pnpm lab --self
-# safe isolated self-maintenance
+pnpm lab --resume /path/to/runtime
+pnpm lab resume /path/to/runtime
+pnpm lab run --prompt-file directive.md
 ```
 
-`stdin` e `--prompt-file` são equivalentes. `--self` executa contra um
-worktree isolado; o control repo só integra no fim, em fast-forward.
-`--publish` é o único caminho que empurra para o remote.
+`--authorization`, `--policy`, `--publish`, `--planner-profile` e
+`--runtime-dir` são overrides avançados. `--self` ainda isola o worktree;
+`--publish` na CLI conflita com um deny da directive (fail closed).
 
 Os CLIs `dev-*` continuam como primitives internas.
 
@@ -370,9 +405,9 @@ possuindo, a liberdade de implementação **dentro** das fronteiras
 autorizadas.
 
 ```text
-HUMAN INSTRUCTION (raw) + preset local-autonomous-development
+RUN DIRECTIVE (header estruturado + corpo) + preset
         │
-   INTAKE ─ compile estrutural; o raw permanece a autoridade humana
+   INTAKE ─ compile estrutural; o raw da directive permanece a autoridade humana
         │
    INSPECTION ─ leitura do repositório alvo (stack, validações, âncoras)
         │
@@ -390,11 +425,11 @@ HUMAN INSTRUCTION (raw) + preset local-autonomous-development
    CANONICAL EVIDENCE ─ runs selados alimentam o routing futuro
 ```
 
-- **Intake e autorização.** A instrução humana raw é persistida antes de
-  qualquer provider. O Lab deriva `ProjectIntakeRequest`; o preset
-  `local-autonomous-development` autoriza execução local subscription-only.
-  `--authorization` / `--policy` são overrides avançados. O que não foi
-  autorizado explicitamente não acontece. Ver
+- **Intake e autorização.** A Run Directive crua é persistida antes de
+  qualquer provider. O Lab deriva `ProjectIntakeRequest` do corpo; o preset
+  `local-autonomous-development` mais o header estruturado materializam o
+  snapshot imutável. Texto livre não autoriza. `--authorization` / `--policy`
+  são overrides avançados. Ver
   [`docs/agentlab-run.example.yaml`](docs/agentlab-run.example.yaml).
 - **Inspection, planejamento e routing.** Fatos do repositório alvo alimentam
   work units (`PlannedTask`) com acceptance, validações, dependências e
@@ -410,7 +445,7 @@ HUMAN INSTRUCTION (raw) + preset local-autonomous-development
   medido permanece `UNKNOWN`.
 
 **Implementado e testado** (incluindo E2E do fluxo de projeto externo com
-providers fake): ciclo autônomo via `pnpm lab --repo <alvo>`; evidence
+providers fake): ciclo autônomo via `pnpm lab run`; evidence
 kernel; billing/credencial com fatos tri-state; catálogo de perfis
 versionados. `pnpm dev-run-project` permanece como primitive interna.
 

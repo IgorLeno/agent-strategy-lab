@@ -17,12 +17,15 @@ oficial usado neste documento:
 O medidor empírico de agentes continua existindo — como Experimental Plane, a
 serviço do control plane, não como definição do produto.
 
-> **Estado v0.1 operacional.** O entrypoint de produto `pnpm lab` aceita
-> `HumanInstruction` raw, deriva `ProjectIntakeRequest`, aplica o preset
-> `local-autonomous-development` e reutiliza `runProject` / `runPlan`.
-> `dev-run-project` permanece como primitive interna. Self-maintenance
-> (`--self`) executa num git worktree isolado; o processo do control plane
-> continua na SHA original até um fast-forward fail-closed no fim. A evolução seguinte está descrita
+> **Estado v0.1 operacional.** O entrypoint canônico `pnpm lab run` aceita
+> uma Run Directive (header estruturado + corpo), persiste o documento raw,
+> deriva `ProjectIntakeRequest` do corpo, aplica o preset
+> `local-autonomous-development` com overlay do header e reutiliza
+> `submitHumanInstruction` / `runProject` / `runPlan`. Flags `--repo` /
+> `--self` / `--resume` permanecem como interface avançada. Self-maintenance
+> (`target.type: self`) executa num git worktree isolado; o processo do
+> control plane continua na SHA original até um fast-forward fail-closed no
+> fim. A evolução seguinte está descrita
 > em
 > [docs/superpowers/plans/2026-08-21-agentlab-control-plane-jcode-evolution.md](superpowers/plans/2026-08-21-agentlab-control-plane-jcode-evolution.md).
 > Post-v0.1 capabilities M95–M126 are evidence-triggered backlog. They are not
