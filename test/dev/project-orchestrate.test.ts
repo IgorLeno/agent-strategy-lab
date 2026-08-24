@@ -35,6 +35,7 @@ import {
 } from '../../dev/lib/project-roles.js';
 import type { ProjectInspection } from '../../src/inspection/index.js';
 import type { ExecutionAuthorizationScope, ProjectIntakeRequest } from '../../src/intake/index.js';
+import { humanInstructionSha256 } from '../../src/planner/draft.js';
 import type {
   PlanningWorkerInvocation,
   PlanningWorkerInvocationResult,
@@ -881,7 +882,7 @@ describe('adapter real da PlanningWorkerPort', () => {
         target_repo_url: 'https://example.test/project.git',
         base_revision_sha: HEAD_SHA,
         user_intent: {
-          request: 'Corrigir o parser',
+          instruction_sha256: humanInstructionSha256('Corrigir o parser'),
           objectives: ['Parser corrigido'],
           requested_scope: 'Corrigir o parser',
         },
@@ -923,6 +924,7 @@ describe('adapter real da PlanningWorkerPort', () => {
           safety_boundaries: { exclusions: [], authorization_scope: authorizationScope() },
         },
       },
+      human_instruction: 'Corrigir o parser',
     };
   }
 

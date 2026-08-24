@@ -37,7 +37,7 @@ class Planner implements PlanningWorkerPort {
           {
             schema_version: 1,
             task_id: 'T1',
-            objective: invocation.packet.user_intent.request,
+            objective: invocation.packet.user_intent.requested_scope,
             blocked_by: [],
             taxonomy: {
               version: 1,

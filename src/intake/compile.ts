@@ -27,11 +27,22 @@ export interface IntakeCompilerPort {
 }
 
 const MAX_SUMMARY_CHARS = 240;
-const MAX_OBJECTIVE_CHARS = 1_000;
 
-function firstLine(text: string): string {
-  const line = text.split(/\r?\n/, 1)[0]?.trim() ?? '';
-  return line.length > 0 ? line : text.trim();
+/**
+ * Primeira linha SUBSTANTIVA: marcadores de markdown (headings, fences,
+ * bullets vazios) não descrevem o pedido. `# Objective` seguido do texto real
+ * deve produzir o texto real.
+ */
+function headlineOf(text: string): string {
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) continue;
+    if (/^(?:#{1,6}\s|```|---|\*\*\*|===)/.test(trimmed)) continue;
+    const withoutBullet = trimmed.replace(/^[-*+]\s+/, '').trim();
+    if (withoutBullet.length === 0) continue;
+    return withoutBullet;
+  }
+  return text.trim();
 }
 
 function clip(text: string, maximum: number): string {
@@ -42,12 +53,21 @@ function clip(text: string, maximum: number): string {
 /**
  * Compilador determinístico. Usa a inspeção só como fato de identidade
  * (repo/SHA). Não inventa restrições nem autorização.
+ *
+ * `objectives` é o ACCEPTANCE CONTRACT protegido: o planner precisa repetir
+ * cada objetivo VERBATIM em `tasks[].acceptance`. Por isso ele é uma linha
+ * citável, não o corpo inteiro recortado — pedir que um modelo reproduza
+ * milhares de caracteres de markdown palavra por palavra transformaria o gate
+ * de acceptance num gerador de rejeição. A intenção completa não se perde:
+ * ela viaja íntegra como `human_instruction` na invocação do planner
+ * (`src/planner/draft.ts`), e o corpo raw continua sendo a autoridade
+ * persistida em `user_request`.
  */
 export function compileIntakeFieldsDeterministic(instruction: HumanInstruction): CompiledIntakeFields {
   const raw = humanInstructionBody(instruction);
-  const summary = clip(firstLine(raw), MAX_SUMMARY_CHARS);
+  const summary = clip(headlineOf(raw), MAX_SUMMARY_CHARS);
   return CompiledIntakeFields.parse({
-    objectives: [clip(raw, MAX_OBJECTIVE_CHARS)],
+    objectives: [summary],
     constraints: [],
     exclusions: [],
     requested_scope: { summary },

@@ -15,6 +15,15 @@ export function runDirectiveHash(raw: string): string {
   return createHash('sha256').update(normalizeDirectiveText(raw), 'utf8').digest('hex');
 }
 
+/**
+ * Guard de produto para o TAMANHO da Run Directive — política de input, não
+ * bound incidental de packet. 256 KiB (~64k tokens) cabe com folga na janela
+ * dos providers de planning suportados e mantém prompt + packet dentro de um
+ * único launch. Estourou: falha explícita ANTES de persistência e de qualquer
+ * provider; nunca truncation silenciosa.
+ */
+export const MAX_RUN_DIRECTIVE_BYTES = 256 * 1024;
+
 export class RunDirectiveError extends Error {
   constructor(message: string) {
     super(message);
@@ -172,6 +181,15 @@ export function parseRunDirective(raw: string): ParsedRunDirective {
   const normalized = normalizeDirectiveText(raw);
   if (normalized.trim().length === 0) {
     throw new RunDirectiveError('a Run Directive está vazia.');
+  }
+
+  const bytes = Buffer.byteLength(normalized, 'utf8');
+  if (bytes > MAX_RUN_DIRECTIVE_BYTES) {
+    throw new RunDirectiveError(
+      `a Run Directive tem ${bytes} bytes e excede o limite de produto de ${MAX_RUN_DIRECTIVE_BYTES} bytes ` +
+        '(guard de input do Agent Lab, não um limite de packet). Nada foi truncado e nenhum provider será chamado. ' +
+        'Divida a instrução ou remova conteúdo colado que não é instrução (logs extensos, transcripts).',
+    );
   }
 
   const firstLine = normalized.split('\n', 1)[0]?.trim() ?? '';

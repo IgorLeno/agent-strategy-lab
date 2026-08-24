@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import { z } from 'zod';
 
 import { ExecutionAuthorizationScope, type ProjectIntakeRequest } from '../intake/index.js';
@@ -110,7 +112,13 @@ export const PlannerPacket = z
     base_revision_sha: z.string().regex(/^[0-9a-f]{40}$/),
     user_intent: z
       .object({
-        request: boundedText(4_000),
+        /**
+         * Identidade (SHA-256) da instrução humana COMPLETA. O texto integral
+         * NUNCA entra no packet: ele viaja em
+         * `PlanningWorkerInvocation.human_instruction`, que é a autoridade de
+         * intenção. O packet carrega só fatos derivados e bounded.
+         */
+        instruction_sha256: z.string().regex(/^[0-9a-f]{64}$/),
         objectives: z.array(boundedText(1_000)).min(1).max(50),
         requested_scope: boundedText(2_000),
       })
@@ -131,6 +139,11 @@ export const PlannerPacket = z
     }
   });
 export type PlannerPacket = z.infer<typeof PlannerPacket>;
+
+/** Hash da instrução humana completa, em UTF-8 — a ponte packet ↔ autoridade. */
+export function humanInstructionSha256(instruction: string): string {
+  return createHash('sha256').update(instruction, 'utf8').digest('hex');
+}
 
 export interface BuildPlannerPacketInput {
   readonly packetId: string;
@@ -160,7 +173,7 @@ export function buildPlannerPacket(input: BuildPlannerPacketInput): PlannerPacke
     target_repo_url: input.intake.target_repo.url,
     base_revision_sha: input.intake.base_revision.sha,
     user_intent: {
-      request: input.intake.user_request,
+      instruction_sha256: humanInstructionSha256(input.intake.user_request),
       objectives: input.intake.objectives,
       requested_scope: input.intake.requested_scope.summary,
     },
@@ -203,14 +216,38 @@ export function buildPlannerPacket(input: BuildPlannerPacketInput): PlannerPacke
   return PlannerPacket.parse(packet);
 }
 
+/**
+ * Invocação do planning worker: separa a AUTORIDADE da instrução humana do
+ * PACKET estruturado de controle.
+ *
+ * - `packet` — fatos derivados, bounded e validáveis (identidade, inspeção,
+ *   contrato de planejamento). Continua pequeno: o texto humano não entra.
+ * - `human_instruction` — o corpo COMPLETO da instrução humana, byte a byte.
+ *   Não há bound aqui: o tamanho de input é policy de produto
+ *   (`MAX_RUN_DIRECTIVE_BYTES` em `src/intake/run-directive.ts`), aplicada
+ *   antes de qualquer persistência — nunca truncation neste contrato.
+ *
+ * O superRefine amarra as duas partes: o hash no packet precisa ser o hash da
+ * instrução entregue, então nenhuma das duas pode ser trocada isoladamente.
+ */
 export const PlanningWorkerInvocation = z
   .object({
     schema_version: z.literal(1),
     role: z.literal('READ_ONLY_PLANNER'),
     workspace_access: z.literal('READ_ONLY'),
     packet: PlannerPacket,
+    human_instruction: z.string().trim().min(1),
   })
-  .strict();
+  .strict()
+  .superRefine((invocation, context) => {
+    if (humanInstructionSha256(invocation.human_instruction) !== invocation.packet.user_intent.instruction_sha256) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          'human_instruction não corresponde ao user_intent.instruction_sha256 do packet: a instrução entregue ao planner divergiu da autoridade',
+      });
+    }
+  });
 export type PlanningWorkerInvocation = z.infer<typeof PlanningWorkerInvocation>;
 
 const InvocationIdentity = {

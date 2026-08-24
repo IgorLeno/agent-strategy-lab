@@ -6,6 +6,7 @@ import {
   normalizeDirectiveText,
   runDirectiveHash,
 } from '../../src/intake/index.js';
+import { MAX_RUN_DIRECTIVE_BYTES } from '../../src/intake/run-directive.js';
 
 const SAMPLE = `---agentlab
 version: 1
@@ -87,5 +88,17 @@ describe('parseRunDirective', () => {
 
   it('recusa documento vazio', () => {
     expect(() => parseRunDirective('   \n')).toThrow(/vazia/);
+  });
+
+  it('guard de produto: directive acima de MAX_RUN_DIRECTIVE_BYTES falha explícito, sem truncation', () => {
+    const body = `# Objective\n\n${'x'.repeat(MAX_RUN_DIRECTIVE_BYTES)}\n`;
+    expect(() => parseRunDirective(body)).toThrow(/excede o limite de produto/);
+    expect(() => parseRunDirective(body)).toThrow(/Nada foi truncado/);
+  });
+
+  it('directive grande DENTRO do guard continua aceita com corpo íntegro', () => {
+    const body = `# Objective\n\n${'y'.repeat(30_000)}`;
+    const parsed = parseRunDirective(`---agentlab\nversion: 1\ntarget:\n  type: self\n---\n${body}\n`);
+    expect(parsed.body.trim()).toBe(body);
   });
 });

@@ -74,7 +74,7 @@ if (process.argv.slice(2).includes('--agentlab-read-only')) {
           {
             schema_version: 1,
             task_id: 'T1',
-            objective: plannerPacket.user_intent.request,
+            objective: plannerPacket.user_intent.requested_scope,
             blocked_by: [],
             taxonomy: {
               version: 1,

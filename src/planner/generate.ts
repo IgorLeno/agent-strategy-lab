@@ -185,6 +185,9 @@ export async function generateImplementationPlan(
       role: 'READ_ONLY_PLANNER',
       workspace_access: 'READ_ONLY',
       packet: buildPlannerPacket({ packetId, intake, inspection, authorizationScope }),
+      // A instrução humana completa é a autoridade de intenção e viaja fora
+      // do packet bounded; o superRefine da invocação amarra hash e texto.
+      human_instruction: intake.user_request,
     });
   } catch (error) {
     return rejected(

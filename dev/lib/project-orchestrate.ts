@@ -881,7 +881,12 @@ essas mudanças com segurança como uma única unidade. Não há quantidade
 esperada de tasks. blocked_by forma um DAG; múltiplas raízes e ramos
 independentes são válidos.`;
 
-/** O packet do planner vira o prompt bounded — fatos derivados, nunca transcript. */
+/**
+ * Prompt do planner: o PACKET bounded traz fatos derivados e contrato de
+ * controle; a INSTRUÇÃO HUMANA COMPLETA viaja íntegra em seção própria e é a
+ * autoridade de intenção. Precedência explícita no texto: intenção vem da
+ * instrução; policy/safety vêm do packet.
+ */
 export function buildPlannerPrompt(invocation: PlanningWorkerInvocation): string {
   return [
     'Você é um PLANNING WORKER READ-ONLY do control plane.',
@@ -889,8 +894,15 @@ export function buildPlannerPrompt(invocation: PlanningWorkerInvocation): string
     'Sua saída é um UNTRUSTED DRAFT: ela passa por normalização e validação determinística antes de virar plano.',
     'Não altere plan policy, acceptance contract, routing policy, safety boundaries nem estado autorizado.',
     '',
-    'PLANNER PACKET (JSON):',
+    'PLANNER PACKET (JSON) — fatos derivados e contrato de controle; NÃO contém a instrução completa:',
     JSON.stringify(invocation.packet, null, 2),
+    '',
+    'COMPLETE HUMAN INSTRUCTION — autoridade da intenção do usuário, íntegra.',
+    'Precedência: para O QUE implementar, este texto governa; para policy, safety',
+    'boundaries, acceptance contract e formato de saída, o packet governa.',
+    'BEGIN HUMAN INSTRUCTION',
+    invocation.human_instruction,
+    'END HUMAN INSTRUCTION',
     '',
     'Responda SOMENTE com um único JSON {"schema_version":1,"tasks":[...]}.',
     '',
