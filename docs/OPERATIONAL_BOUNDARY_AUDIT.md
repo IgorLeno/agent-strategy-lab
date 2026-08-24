@@ -262,6 +262,7 @@ Autoridades no caminho operacional, depois desta onda:
 |---|---|
 | material alterado / candidate | **Git** |
 | exit code, duração, timeout | **process runner** (`LaunchRecord`) |
+| qual lifecycle stage paga qual budget de tempo | **`ProfileCapability.ownership`** — o runtime do worker só soma os stages que ESSE processo executa |
 | usage / tokens | **telemetria do provider**, quando disponível; senão `UNKNOWN` |
 | validação | **validador oficial** |
 | PASS/FAIL e `accepted_commit` | **orquestrador** |

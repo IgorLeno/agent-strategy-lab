@@ -445,3 +445,235 @@ describe('routeInitialProfile — fatos e compatibilidade bloqueiam defaults sil
     expect(result.reason).toContain('work unit inválida');
   });
 });
+
+/**
+ * O incidente que originou estas regressões: o runtime do coding worker
+ * recebia `validation_budget.expected` mesmo quando a validação oficial é do
+ * orchestrator, e o excesso derrubava por BUDGET_UNSUPPORTED tasks que cabiam
+ * no bound. Os shapes abaixo são genéricos de propósito — nenhum `task_id`,
+ * profile ou repositório real participa da regra.
+ */
+describe('routeInitialProfile — validation budget pertence ao stage que o executa', () => {
+  const IMPLEMENTATION_MS = 1_500_000;
+  const VALIDATION_MS = 420_000;
+  const ADVANCED_BOUND_MS = 1_800_000;
+
+  /** Shape do incidente: hard, subsystem, feature, risco alto. */
+  function heavyTask(overrides: Partial<PlannedTask> = {}): PlannedTask {
+    return task({
+      taxonomy: {
+        version: 1,
+        task_class: 'feature',
+        difficulty_declared: 'hard',
+        complexity: 'subsystem',
+        ambiguity: 'low',
+        verification: 'deterministic',
+      },
+      risk: 'high',
+      estimated_duration: { expected: IMPLEMENTATION_MS, maximum: 1_800_000 },
+      validation_budget: { expected: VALIDATION_MS, maximum: 900_000 },
+      resource_envelope: {
+        duration_ms: { expected: IMPLEMENTATION_MS, maximum: 1_800_000 },
+        tokens: { expected: 28_000, maximum: 45_000 },
+        changed_files: { expected: 4, maximum: 6 },
+      },
+      ...overrides,
+    });
+  }
+
+  function orchestratedAdvanced(): ProfileCapability {
+    return capability('sol-high', 'gpt-5.6-sol', 'high');
+  }
+
+  /** Policy legada suportada: o próprio worker executa a validação oficial. */
+  function workerOwnedAdvanced(): ProfileCapability {
+    return capability('sol-high', 'gpt-5.6-sol', 'high', {
+      commit_owner: 'worker',
+      official_validation_owner: 'worker',
+      worker_validation_policy: 'full',
+    });
+  }
+
+  function routeWith(
+    capabilityUsed: ProfileCapability,
+    plannedTask: PlannedTask,
+    boundMs = ADVANCED_BOUND_MS,
+  ) {
+    return routeInitialProfile(
+      input(workUnit(plannedTask), [capabilityUsed], [candidate(capabilityUsed.profile_id, boundMs)]),
+    );
+  }
+
+  it('A — com validação oficial do orchestrator, o custo de validação não entra no runtime do worker', () => {
+    const result = routeWith(orchestratedAdvanced(), heavyTask());
+    expect(result.outcome).toBe('ROUTED');
+    if (result.outcome !== 'ROUTED') throw new Error('unreachable');
+
+    const { components, milliseconds } = result.worker_runtime_budget;
+    expect(components.aggregate_validation_cost_ms).toBe(VALIDATION_MS);
+    expect(components.worker_owned_validation_cost_ms).toBe(0);
+    expect(milliseconds).toBe(
+      Math.ceil(
+        (IMPLEMENTATION_MS *
+          components.capability_multiplier *
+          components.task_class_multiplier *
+          components.stack_multiplier *
+          components.environment_multiplier) /
+          1_000,
+      ) * 1_000,
+    );
+  });
+
+  it('B — na mesma policy, mudar só o validation_budget não altera o runtime do worker', () => {
+    const cheap = routeWith(orchestratedAdvanced(), heavyTask());
+    const expensive = routeWith(
+      orchestratedAdvanced(),
+      heavyTask({ validation_budget: { expected: 900_000, maximum: 1_800_000 } }),
+    );
+    expect(cheap.outcome).toBe('ROUTED');
+    expect(expensive.outcome).toBe('ROUTED');
+    if (cheap.outcome !== 'ROUTED' || expensive.outcome !== 'ROUTED') throw new Error('unreachable');
+
+    expect(expensive.worker_runtime_budget.milliseconds).toBe(
+      cheap.worker_runtime_budget.milliseconds,
+    );
+    // O budget de validação continua observado, não some do contrato.
+    expect(expensive.worker_runtime_budget.components.aggregate_validation_cost_ms).toBe(900_000);
+  });
+
+  it('C — shape hard/subsystem/feature/risco alto cabe num bound advanced de 1.8M e roteia', () => {
+    const result = routeWith(orchestratedAdvanced(), heavyTask());
+    expect(result.outcome).toBe('ROUTED');
+    if (result.outcome !== 'ROUTED') throw new Error('unreachable');
+
+    expect(result.profile.profile_id).toBe('sol-high');
+    expect(result.worker_runtime_budget.milliseconds).toBe(1_560_000);
+    expect(result.worker_runtime_budget.milliseconds).toBeLessThanOrEqual(ADVANCED_BOUND_MS);
+    // A soma antiga (implementação + validação) estourava o mesmo bound.
+    expect(
+      (IMPLEMENTATION_MS + VALIDATION_MS) *
+        result.worker_runtime_budget.components.capability_multiplier *
+        result.worker_runtime_budget.components.task_class_multiplier *
+        result.worker_runtime_budget.components.stack_multiplier *
+        result.worker_runtime_budget.components.environment_multiplier,
+    ).toBeGreaterThan(ADVANCED_BOUND_MS);
+  });
+
+  it('D — shape de self-maintenance (bugfix, uma tool exigida) deixa de estourar o bound', () => {
+    const bugfix = heavyTask({
+      taxonomy: {
+        version: 1,
+        task_class: 'bugfix',
+        difficulty_declared: 'hard',
+        complexity: 'subsystem',
+        ambiguity: 'low',
+        verification: 'deterministic',
+      },
+    });
+    const facts = inspection({
+      required_tools: [{ name: 'node', reason: 'vitest', source: 'package.json' }],
+    });
+    const unit = workUnit(bugfix, facts);
+    const orchestrated = orchestratedAdvanced();
+    const legacy = workerOwnedAdvanced();
+
+    const beforeOwnershipFix = routeInitialProfile(
+      input(unit, [legacy], [candidate(legacy.profile_id, ADVANCED_BOUND_MS)]),
+    );
+    const afterOwnershipFix = routeInitialProfile(
+      input(unit, [orchestrated], [candidate(orchestrated.profile_id, ADVANCED_BOUND_MS)]),
+    );
+
+    // Cobrar a validação oficial do worker é exatamente o cálculo que produziu
+    // o deadlock de bootstrap: 1.849.000ms contra um bound de 1.800.000ms.
+    expect(beforeOwnershipFix.outcome).toBe('BUDGET_UNSUPPORTED');
+    if (beforeOwnershipFix.outcome !== 'BUDGET_UNSUPPORTED') throw new Error('unreachable');
+    expect(beforeOwnershipFix.violations[0]?.requested_budget_ms).toBe(1_849_000);
+
+    expect(afterOwnershipFix.outcome).toBe('ROUTED');
+    if (afterOwnershipFix.outcome !== 'ROUTED') throw new Error('unreachable');
+    expect(afterOwnershipFix.worker_runtime_budget.milliseconds).toBe(1_445_000);
+  });
+
+  it('E — na policy legada, o worker executa a validação oficial e é cobrado por ela', () => {
+    const legacy = workerOwnedAdvanced();
+    const bound = 4_000_000;
+    const withValidation = routeWith(legacy, heavyTask(), bound);
+    const withoutValidationChange = routeWith(
+      legacy,
+      heavyTask({ validation_budget: { expected: 0, maximum: 900_000 } }),
+      bound,
+    );
+    expect(withValidation.outcome).toBe('ROUTED');
+    expect(withoutValidationChange.outcome).toBe('ROUTED');
+    if (withValidation.outcome !== 'ROUTED' || withoutValidationChange.outcome !== 'ROUTED') {
+      throw new Error('unreachable');
+    }
+
+    expect(withValidation.worker_runtime_budget.components.worker_owned_validation_cost_ms).toBe(
+      VALIDATION_MS,
+    );
+    expect(withValidation.worker_runtime_budget.milliseconds).toBeGreaterThan(
+      withoutValidationChange.worker_runtime_budget.milliseconds,
+    );
+  });
+
+  it('F — runtime genuíno de implementação acima de todo bound continua BUDGET_UNSUPPORTED, sem clamp', () => {
+    const huge = heavyTask({
+      validation_budget: { expected: 0, maximum: 0 },
+      resource_envelope: {
+        ...heavyTask().resource_envelope,
+        duration_ms: { expected: 6_000_000, maximum: 8_000_000 },
+      },
+    });
+    const result = routeWith(orchestratedAdvanced(), huge);
+    expect(result.outcome).toBe('BUDGET_UNSUPPORTED');
+    if (result.outcome !== 'BUDGET_UNSUPPORTED') throw new Error('unreachable');
+
+    const violation = result.violations[0];
+    expect(violation?.violated_bound.maximum_ms).toBe(ADVANCED_BOUND_MS);
+    expect(violation?.requested_budget_ms).toBeGreaterThan(ADVANCED_BOUND_MS);
+  });
+
+  it('H — a ownership da validação não move a capability tier exigida', () => {
+    const orchestrated = routeWith(orchestratedAdvanced(), heavyTask());
+    const legacy = routeWith(workerOwnedAdvanced(), heavyTask(), 4_000_000);
+    expect(orchestrated.outcome).toBe('ROUTED');
+    expect(legacy.outcome).toBe('ROUTED');
+    if (orchestrated.outcome !== 'ROUTED' || legacy.outcome !== 'ROUTED') {
+      throw new Error('unreachable');
+    }
+
+    expect(orchestrated.candidates_considered[0]?.capability_tier).toBe('advanced');
+    expect(legacy.candidates_considered[0]?.capability_tier).toBe('advanced');
+    expect(orchestrated.worker_runtime_budget.components.capability_multiplier).toBe(
+      legacy.worker_runtime_budget.components.capability_multiplier,
+    );
+
+    // Um profile intermediate não se torna elegível por causa do budget menor.
+    const intermediate = capability('terra-medium', 'gpt-5.6-terra', 'medium');
+    const rejected = routeWith(intermediate, heavyTask());
+    expect(rejected.outcome).toBe('HUMAN_REQUIRED');
+  });
+
+  it('I — a provenance diz se a validação foi observada e excluída, ou incluída', () => {
+    const orchestrated = routeWith(orchestratedAdvanced(), heavyTask());
+    const legacy = routeWith(workerOwnedAdvanced(), heavyTask(), 4_000_000);
+    expect(orchestrated.outcome).toBe('ROUTED');
+    expect(legacy.outcome).toBe('ROUTED');
+    if (orchestrated.outcome !== 'ROUTED' || legacy.outcome !== 'ROUTED') {
+      throw new Error('unreachable');
+    }
+
+    const orchestratedProvenance = orchestrated.worker_runtime_budget.provenance.join(' ');
+    expect(orchestratedProvenance).toContain('task.resource_envelope.duration_ms.expected');
+    expect(orchestratedProvenance).toContain('EXCLUÍDO');
+    expect(orchestratedProvenance).toContain('official_validation_owner=orchestrator');
+    expect(orchestratedProvenance).not.toContain('INCLUÍDO');
+
+    const legacyProvenance = legacy.worker_runtime_budget.provenance.join(' ');
+    expect(legacyProvenance).toContain('INCLUÍDO');
+    expect(legacyProvenance).toContain('official_validation_owner=worker');
+    expect(legacyProvenance).toContain('worker_validation_policy=full');
+  });
+});

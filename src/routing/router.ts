@@ -8,9 +8,15 @@
  * Tempos permanecem deliberadamente separados:
  * - `estimated_duration` é apenas uma estimativa da task e não entra na conta;
  * - `validation[].timeout_seconds` limita cada comando e não entra na conta;
- * - `validation_budget` é o custo agregado esperado de validação;
+ * - `validation_budget` é o custo agregado esperado da validação OFICIAL, e só
+ *   entra no runtime do worker quando é o worker que executa esse stage;
  * - o resultado abaixo é o WORKER RUNTIME BUDGET e só é comparado com bounds
  *   de runtime do launcher/profile fornecidos pelo control plane.
+ *
+ * Um budget de tempo pertence ao lifecycle stage que o consome. Com
+ * `official_validation_owner=orchestrator`, o processo do coding worker termina
+ * no candidate e nunca roda a validação oficial: cobrar dele esse custo apenas
+ * porque ambos são milissegundos inventa trabalho que ele não faz.
  */
 
 import { z } from 'zod';
@@ -114,10 +120,18 @@ export const CandidateConsideration = z
   .strict();
 export type CandidateConsideration = z.infer<typeof CandidateConsideration>;
 
+/**
+ * `aggregate_validation_cost_ms` é OBSERVADO sempre (planejamento e
+ * contabilidade da validation stage continuam precisando dele);
+ * `worker_owned_validation_cost_ms` é a parcela dele efetivamente cobrada
+ * deste worker — zero quando o stage é do orchestrator. Os dois campos juntos
+ * tornam a inclusão ou exclusão legível sem consultar o código.
+ */
 const BudgetComponents = z
   .object({
     envelope_duration_expected_ms: z.number().int().nonnegative(),
     aggregate_validation_cost_ms: z.number().int().nonnegative(),
+    worker_owned_validation_cost_ms: z.number().int().nonnegative(),
     capability_multiplier: z.number().positive(),
     task_class_multiplier: z.number().positive(),
     stack_multiplier: z.number().positive(),
@@ -280,6 +294,23 @@ function capabilityMultiplier(tier: CapabilityTier): number {
 }
 
 /**
+ * ÚNICA fonte de verdade sobre quem paga o custo da validação oficial: a
+ * ownership já declarada pelo profile. Nada aqui olha profile_id, provider,
+ * model, repositório ou task — um segundo sistema de ownership seria uma
+ * autoridade concorrente com a execution policy.
+ *
+ * O worker é cobrado pelo custo agregado da validação oficial exatamente
+ * quando ele é o dono desse stage E o executa por inteiro; `targeted` é
+ * verificação parcial do próprio worker, não o stage oficial.
+ */
+function workerOwnsOfficialValidation(ownership: ProfileCapability['ownership']): boolean {
+  return (
+    ownership.official_validation_owner === 'worker' &&
+    ownership.worker_validation_policy === 'full'
+  );
+}
+
+/**
  * Stack desconhecida não bloqueia: um repositório greenfield ainda não tem
  * manifesto de ecossistema, e é exatamente a primeira work unit que vai criá-lo.
  * O multiplicador de stack só cresce com ecossistemas ADICIONAIS observados,
@@ -301,16 +332,19 @@ function budgetFor(
     unit.project_facts.required_services.length * 0.05 +
     unit.project_facts.required_tools.length * 0.02 +
     (capability.environment_mode === 'controlled' ? 0 : 0.05);
+  const aggregateValidationCostMs = unit.task.validation_budget.expected;
+  const validationOwnedByWorker = workerOwnsOfficialValidation(capability.ownership);
   const components = {
     envelope_duration_expected_ms: unit.task.resource_envelope.duration_ms.expected,
-    aggregate_validation_cost_ms: unit.task.validation_budget.expected,
+    aggregate_validation_cost_ms: aggregateValidationCostMs,
+    worker_owned_validation_cost_ms: validationOwnedByWorker ? aggregateValidationCostMs : 0,
     capability_multiplier: capabilityMultiplier(tier),
     task_class_multiplier: taskClassMultiplier(unit.task.taxonomy.task_class),
     stack_multiplier: stackMultiplier,
     environment_multiplier: environmentMultiplier,
   };
   const unrounded =
-    (components.envelope_duration_expected_ms + components.aggregate_validation_cost_ms) *
+    (components.envelope_duration_expected_ms + components.worker_owned_validation_cost_ms) *
     components.capability_multiplier *
     components.task_class_multiplier *
     components.stack_multiplier *
@@ -325,7 +359,9 @@ function budgetFor(
     checked_runtime_bounds: runtimeBounds,
     provenance: [
       'task.resource_envelope.duration_ms.expected',
-      'task.validation_budget.expected (aggregate validation cost)',
+      validationOwnedByWorker
+        ? `task.validation_budget.expected INCLUÍDO no runtime do worker: ProfileCapability.ownership.official_validation_owner=${capability.ownership.official_validation_owner} e worker_validation_policy=${capability.ownership.worker_validation_policy} — o próprio worker executa a validação oficial`
+        : `task.validation_budget.expected OBSERVADO mas EXCLUÍDO do runtime do worker: ProfileCapability.ownership.official_validation_owner=${capability.ownership.official_validation_owner} e worker_validation_policy=${capability.ownership.worker_validation_policy} — a validação oficial é de outro lifecycle stage`,
       'selected ProfileCapability model/reasoning tier',
       'task.taxonomy.task_class',
       'project_facts.stack',

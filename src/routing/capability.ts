@@ -32,11 +32,18 @@ const SessionIsolation = z
   })
   .strict();
 
+/**
+ * Ownership de lifecycle stage. Espelha estruturalmente as enums de
+ * `dev/lib/execution-policy.ts` (`src` não importa `dev`) porque o control
+ * plane precisa DECIDIR sobre esses valores — em particular, qual stage
+ * consome qual budget de tempo. Uma string livre aqui deixaria o router
+ * adivinhar; a enum faz um valor desconhecido virar erro de parse.
+ */
 const Ownership = z
   .object({
-    commit_owner: nonEmpty,
-    official_validation_owner: nonEmpty,
-    worker_validation_policy: nonEmpty,
+    commit_owner: z.enum(['worker', 'orchestrator']),
+    official_validation_owner: z.enum(['worker', 'orchestrator']),
+    worker_validation_policy: z.enum(['full', 'targeted']),
   })
   .strict();
 

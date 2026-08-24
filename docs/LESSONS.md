@@ -732,3 +732,29 @@ artefato interno nunca vira política de input do produto — se existe máximo
 global, ele é declarado, justificado e falha explícito antes do provider.
 Corolário de UX: resposta de gate humano só pode oferecer opções que a
 política realmente concede, derivadas de uma fonte única de grantability.
+
+[2026-08-24] Contexto: o worker runtime budget do router somava
+`resource_envelope.duration_ms.expected` e `validation_budget.expected` antes
+de aplicar os multiplicadores, e comparava o total com o runtime bound do
+coding-worker profile. Duas reproduções reais: `coverage_engine_core`
+(1.996.000ms contra 1.800.000ms) e um deadlock de bootstrap em que a própria
+task que corrigiria o defeito ficou HUMAN_REQUIRED por 1.849.000ms contra o
+mesmo bound, com iteration_count=0.
+Mistake: as duas grandezas eram somadas só porque ambas são milissegundos. Com
+`official_validation_owner=orchestrator` e `worker_validation_policy=targeted`
+o processo do coding worker termina no candidate e nunca executa a validação
+oficial — o timeout dele carregava o custo previsto de trabalho de um stage
+posterior, que outro processo faz. O limite reportado era verdadeiro sobre um
+runtime que ninguém ia consumir.
+Rule: budget de tempo pertence ao lifecycle stage que o consome. Só some ao
+runtime de um processo o custo dos stages que ESSE processo executa, e derive
+a inclusão da ownership estruturada que já existe
+(`ProfileCapability.ownership`), nunca de profile id, provider, model,
+repositório ou task id. O custo excluído continua observado no telemetry
+(`aggregate_validation_cost_ms`) ao lado da parcela efetivamente cobrada
+(`worker_owned_validation_cost_ms`), e a provenance diz qual dos dois casos
+ocorreu e por quê — telemetry que soma o que não cobra é telemetry enganosa.
+Corolário: a correção é sempre no consumidor. Nunca clampe o budget ao bound,
+nunca aumente `timeout_seconds` do profile e nunca rebaixe a capability
+classification para fazer o routing caber — um limite genuíno continua
+verdadeiro e continua sendo BUDGET_UNSUPPORTED.
