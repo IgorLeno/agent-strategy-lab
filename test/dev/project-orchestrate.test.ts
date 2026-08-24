@@ -1048,6 +1048,25 @@ describe('adapter real da PlanningWorkerPort', () => {
     expect(prompt).toMatch(/Não crie uma task por\s*\n?arquivo, função, componente ou teste/);
     expect(prompt).toMatch(/múltiplas raízes e ramos\s*\n?independentes são válidos/);
   });
+
+  it('o prompt de revisão entrega feedback determinístico e exige replacement completo', () => {
+    const revisedInvocation = {
+      ...invocation(),
+      revision: {
+        attempt: 2,
+        previous_stage: 'SCHEMA_NORMALIZATION',
+        issues: ['T1.validation[0].argv contem metacaractere de shell'],
+        requires_complete_replacement: true,
+      },
+    } as PlanningWorkerInvocation;
+
+    const prompt = buildPlannerPrompt(revisedInvocation);
+
+    expect(prompt).toContain('PLANNER DRAFT REVISION');
+    expect(prompt).toContain('T1.validation[0].argv contem metacaractere de shell');
+    expect(prompt).toMatch(/draft completo de substituição/i);
+    expect(prompt).toMatch(/não.*patch|não.*merge/i);
+  });
 });
 
 describe('caminho REVIEWED', () => {

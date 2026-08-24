@@ -237,6 +237,19 @@ export const PlanningWorkerInvocation = z
     workspace_access: z.literal('READ_ONLY'),
     packet: PlannerPacket,
     human_instruction: z.string().trim().min(1),
+    revision: z
+      .object({
+        attempt: z.literal(2),
+        previous_stage: z.enum([
+          'SCHEMA_NORMALIZATION',
+          'AVC_DECOMPOSITION',
+          'DEPENDENCY_VALIDATION',
+        ]),
+        issues: z.array(z.string().trim().min(1)).min(1),
+        requires_complete_replacement: z.literal(true),
+      })
+      .strict()
+      .optional(),
   })
   .strict()
   .superRefine((invocation, context) => {

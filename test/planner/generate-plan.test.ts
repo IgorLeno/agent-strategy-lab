@@ -131,6 +131,29 @@ class FakePlanner implements PlanningWorkerPort {
   }
 }
 
+class SequencedPlanner implements PlanningWorkerPort {
+  readonly invocations: PlanningWorkerInvocation[] = [];
+
+  constructor(private readonly results: readonly PlanningWorkerInvocationResult[]) {}
+
+  async invoke(invocation: PlanningWorkerInvocation): Promise<PlanningWorkerInvocationResult> {
+    this.invocations.push(invocation);
+    const result = this.results[this.invocations.length - 1];
+    if (result === undefined) throw new Error('planner recebeu invocacao alem da sequencia esperada');
+    return result;
+  }
+}
+
+function draftReturned(draft: unknown, invocationId: string): PlanningWorkerInvocationResult {
+  return {
+    outcome: 'DRAFT_RETURNED',
+    invocation_id: invocationId,
+    provider_id: 'fake',
+    model: 'deterministic-test-double',
+    draft,
+  };
+}
+
 function fakeReturning(draft: unknown): FakePlanner {
   return new FakePlanner({
     outcome: 'DRAFT_RETURNED',
@@ -278,5 +301,90 @@ describe('generateImplementationPlan', () => {
     expect(result).toMatchObject({ outcome: 'REJECTED', stage: 'SCHEMA_NORMALIZATION' });
     if (result.outcome !== 'REJECTED') throw new Error('unreachable');
     expect(result.issues.join(' ')).toContain(reason);
+  });
+
+  it('pede uma unica revisao completa quando o primeiro draft falha em gate deterministico corrigivel', async () => {
+    const invalidTask = task({
+      validation: [{ argv: ['pnpm', 'test && pnpm typecheck'], timeout_seconds: 300 }],
+    });
+    const replacementTask = task({
+      validation: [
+        { argv: ['pnpm', 'test'], timeout_seconds: 300 },
+        { argv: ['pnpm', 'typecheck'], timeout_seconds: 300 },
+      ],
+    });
+    const planner = new SequencedPlanner([
+      draftReturned({ schema_version: 1, tasks: [invalidTask] }, 'fake-1'),
+      draftReturned({ schema_version: 1, tasks: [replacementTask] }, 'fake-2'),
+    ]);
+
+    const result = await generateImplementationPlan({
+      intake: intake(),
+      inspection: inspection(),
+      authorizationScope: authorizationScope(),
+      planningWorker: planner,
+    });
+
+    expect(result.outcome).toBe('AUTHORIZED');
+    expect(planner.invocations).toHaveLength(2);
+    expect(planner.invocations[1]).toMatchObject({
+      human_instruction: intake().user_request,
+      revision: {
+        attempt: 2,
+        previous_stage: 'SCHEMA_NORMALIZATION',
+        issues: ['M83.validation[0].argv contem metacaractere de shell'],
+        requires_complete_replacement: true,
+      },
+    });
+    expect(planner.invocations[1]).not.toHaveProperty('revision.previous_draft');
+    if (result.outcome !== 'AUTHORIZED') throw new Error('expected authorized replacement plan');
+    expect(result.plan.tasks[0]?.task.validation).toEqual(replacementTask.validation);
+  });
+
+  it('encerra depois da unica revisao quando o replacement draft continua invalido', async () => {
+    const invalidDraft = {
+      schema_version: 1,
+      tasks: [task({ validation: [{ argv: ['pnpm', 'test;rm'], timeout_seconds: 300 }] })],
+    };
+    const planner = new SequencedPlanner([
+      draftReturned(invalidDraft, 'fake-1'),
+      draftReturned(invalidDraft, 'fake-2'),
+    ]);
+
+    const result = await generateImplementationPlan({
+      intake: intake(),
+      inspection: inspection(),
+      authorizationScope: authorizationScope(),
+      planningWorker: planner,
+    });
+
+    expect(result).toMatchObject({ outcome: 'REJECTED', stage: 'SCHEMA_NORMALIZATION' });
+    expect(planner.invocations).toHaveLength(2);
+  });
+
+  it('nao revisa falha de invocacao sem draft retornado', async () => {
+    const planner = new SequencedPlanner([
+      {
+        outcome: 'INVOCATION_FAILED',
+        invocation_id: 'fake-1',
+        provider_id: 'fake',
+        model: 'deterministic-test-double',
+        failure: {
+          code: 'PROVIDER_INVOCATION_FAILED',
+          message: 'provider indisponivel',
+          retryable: true,
+        },
+      },
+    ]);
+
+    const result = await generateImplementationPlan({
+      intake: intake(),
+      inspection: inspection(),
+      authorizationScope: authorizationScope(),
+      planningWorker: planner,
+    });
+
+    expect(result).toMatchObject({ outcome: 'REJECTED', stage: 'PLANNING_WORKER' });
+    expect(planner.invocations).toHaveLength(1);
   });
 });

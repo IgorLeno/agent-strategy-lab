@@ -146,74 +146,20 @@ function validateProjectionCommands(tasks: readonly PlannedTask[]): string[] {
   return issues;
 }
 
-/**
- * Control-plane pipeline. O draft jamais e promovido diretamente: cada gate
- * devolve rejeicao explicita e nenhuma etapa reescreve a saida do worker.
- */
-export async function generateImplementationPlan(
-  input: GenerateImplementationPlanInput,
-): Promise<PlanGenerationResult> {
-  const intakeResult = ProjectIntakeRequest.safeParse(input.intake);
-  const inspectionResult = ProjectInspection.safeParse(input.inspection);
-  const authorizationResult = ExecutionAuthorizationScope.safeParse(input.authorizationScope);
-  const inputIssues = [
-    ...(intakeResult.success ? [] : zodIssues(intakeResult.error)),
-    ...(inspectionResult.success ? [] : zodIssues(inspectionResult.error)),
-    ...(authorizationResult.success ? [] : zodIssues(authorizationResult.error)),
-  ];
-  if (inputIssues.length > 0 || !intakeResult.success || !inspectionResult.success || !authorizationResult.success) {
-    return rejected('INPUT_VALIDATION', inputIssues);
-  }
+const REVISION_ELIGIBLE_STAGES = new Set<PlanGenerationStage>([
+  'SCHEMA_NORMALIZATION',
+  'AVC_DECOMPOSITION',
+  'DEPENDENCY_VALIDATION',
+]);
 
-  const { data: intake } = intakeResult;
-  const { data: inspection } = inspectionResult;
-  const { data: authorizationScope } = authorizationResult;
-  if (authorizationScope.requested_scope.summary !== intake.requested_scope.summary) {
-    return rejected('INPUT_VALIDATION', ['authorization_scope.requested_scope diverge do intake']);
-  }
-
-  const packetId = canonicalSha256({
-    intake: projectIntakeSha256(intake),
-    inspection: canonicalSha256(inspection),
-    authorization: executionAuthorizationScopeSha256(authorizationScope),
-  });
-
-  let invocation: z.infer<typeof PlanningWorkerInvocation>;
-  try {
-    invocation = PlanningWorkerInvocation.parse({
-      schema_version: 1,
-      role: 'READ_ONLY_PLANNER',
-      workspace_access: 'READ_ONLY',
-      packet: buildPlannerPacket({ packetId, intake, inspection, authorizationScope }),
-      // A instrução humana completa é a autoridade de intenção e viaja fora
-      // do packet bounded; o superRefine da invocação amarra hash e texto.
-      human_instruction: intake.user_request,
-    });
-  } catch (error) {
-    return rejected(
-      'PACKET_CONSTRUCTION',
-      error instanceof z.ZodError ? zodIssues(error) : [error instanceof Error ? error.message : String(error)],
-    );
-  }
-
-  let rawInvocationResult: unknown;
-  try {
-    rawInvocationResult = await input.planningWorker.invoke(invocation);
-  } catch (error) {
-    return rejected('PLANNING_WORKER', [error instanceof Error ? error.message : String(error)]);
-  }
-
-  const invocationResult = PlanningWorkerInvocationResult.safeParse(rawInvocationResult);
-  if (!invocationResult.success) {
-    return rejected('PLANNING_WORKER', zodIssues(invocationResult.error));
-  }
-  if (invocationResult.data.outcome === 'INVOCATION_FAILED') {
-    return rejected('PLANNING_WORKER', [
-      `${invocationResult.data.failure.code}: ${invocationResult.data.failure.message}`,
-    ]);
-  }
-
-  const normalized = normalizeUntrustedPlanDraft(invocationResult.data.draft);
+function validatePlannerDraft(input: {
+  readonly draft: unknown;
+  readonly intake: z.infer<typeof ProjectIntakeRequest>;
+  readonly inspection: z.infer<typeof ProjectInspection>;
+  readonly authorizationScope: z.infer<typeof ExecutionAuthorizationScope>;
+}): PlanGenerationResult {
+  const { intake, inspection, authorizationScope } = input;
+  const normalized = normalizeUntrustedPlanDraft(input.draft);
   if (normalized.outcome === 'INVALID_DRAFT') {
     return rejected(
       'SCHEMA_NORMALIZATION',
@@ -311,6 +257,104 @@ export async function generateImplementationPlan(
   return planResult.success
     ? { outcome: 'AUTHORIZED', plan: planResult.data }
     : rejected('IMPLEMENTATION_PLAN', zodIssues(planResult.error));
+}
+
+/**
+ * Control-plane pipeline. O draft jamais e promovido diretamente: cada gate
+ * devolve rejeicao explicita e nenhuma etapa reescreve a saida do worker.
+ */
+export async function generateImplementationPlan(
+  input: GenerateImplementationPlanInput,
+): Promise<PlanGenerationResult> {
+  const intakeResult = ProjectIntakeRequest.safeParse(input.intake);
+  const inspectionResult = ProjectInspection.safeParse(input.inspection);
+  const authorizationResult = ExecutionAuthorizationScope.safeParse(input.authorizationScope);
+  const inputIssues = [
+    ...(intakeResult.success ? [] : zodIssues(intakeResult.error)),
+    ...(inspectionResult.success ? [] : zodIssues(inspectionResult.error)),
+    ...(authorizationResult.success ? [] : zodIssues(authorizationResult.error)),
+  ];
+  if (inputIssues.length > 0 || !intakeResult.success || !inspectionResult.success || !authorizationResult.success) {
+    return rejected('INPUT_VALIDATION', inputIssues);
+  }
+
+  const { data: intake } = intakeResult;
+  const { data: inspection } = inspectionResult;
+  const { data: authorizationScope } = authorizationResult;
+  if (authorizationScope.requested_scope.summary !== intake.requested_scope.summary) {
+    return rejected('INPUT_VALIDATION', ['authorization_scope.requested_scope diverge do intake']);
+  }
+
+  const packetId = canonicalSha256({
+    intake: projectIntakeSha256(intake),
+    inspection: canonicalSha256(inspection),
+    authorization: executionAuthorizationScopeSha256(authorizationScope),
+  });
+
+  let invocation: z.infer<typeof PlanningWorkerInvocation>;
+  try {
+    invocation = PlanningWorkerInvocation.parse({
+      schema_version: 1,
+      role: 'READ_ONLY_PLANNER',
+      workspace_access: 'READ_ONLY',
+      packet: buildPlannerPacket({ packetId, intake, inspection, authorizationScope }),
+      // A instrução humana completa é a autoridade de intenção e viaja fora
+      // do packet bounded; o superRefine da invocação amarra hash e texto.
+      human_instruction: intake.user_request,
+    });
+  } catch (error) {
+    return rejected(
+      'PACKET_CONSTRUCTION',
+      error instanceof z.ZodError ? zodIssues(error) : [error instanceof Error ? error.message : String(error)],
+    );
+  }
+
+  for (const attempt of [1, 2] as const) {
+    let rawInvocationResult: unknown;
+    try {
+      rawInvocationResult = await input.planningWorker.invoke(invocation);
+    } catch (error) {
+      return rejected('PLANNING_WORKER', [error instanceof Error ? error.message : String(error)]);
+    }
+
+    const invocationResult = PlanningWorkerInvocationResult.safeParse(rawInvocationResult);
+    if (!invocationResult.success) {
+      return rejected('PLANNING_WORKER', zodIssues(invocationResult.error));
+    }
+    if (invocationResult.data.outcome === 'INVOCATION_FAILED') {
+      return rejected('PLANNING_WORKER', [
+        `${invocationResult.data.failure.code}: ${invocationResult.data.failure.message}`,
+      ]);
+    }
+
+    const validated = validatePlannerDraft({
+      draft: invocationResult.data.draft,
+      intake,
+      inspection,
+      authorizationScope,
+    });
+    if (validated.outcome === 'AUTHORIZED') return validated;
+    if (attempt === 2 || !REVISION_ELIGIBLE_STAGES.has(validated.stage)) return validated;
+
+    try {
+      invocation = PlanningWorkerInvocation.parse({
+        ...invocation,
+        revision: {
+          attempt: 2,
+          previous_stage: validated.stage,
+          issues: validated.issues,
+          requires_complete_replacement: true,
+        },
+      });
+    } catch (error) {
+      return rejected(
+        'PACKET_CONSTRUCTION',
+        error instanceof z.ZodError ? zodIssues(error) : [error instanceof Error ? error.message : String(error)],
+      );
+    }
+  }
+
+  return rejected('PLANNING_WORKER', ['planner revision loop terminou sem resultado']);
 }
 
 export const ProjectedPlanFile = z

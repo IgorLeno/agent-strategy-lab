@@ -895,6 +895,17 @@ independentes são válidos.`;
  * instrução; policy/safety vêm do packet.
  */
 export function buildPlannerPrompt(invocation: PlanningWorkerInvocation): string {
+  const revisionSection =
+    invocation.revision === undefined
+      ? []
+      : [
+          '',
+          'PLANNER DRAFT REVISION — tentativa final (2 de 2).',
+          'O draft anterior foi rejeitado pelos gates determinísticos abaixo:',
+          JSON.stringify(invocation.revision, null, 2),
+          'Produza um draft completo de substituição. Não envie patch, merge parcial ou instruções de correção.',
+          'Todos os gates determinísticos serão executados novamente e não haverá terceira tentativa.',
+        ];
   return [
     'Você é um PLANNING WORKER READ-ONLY do control plane.',
     'Não edite arquivos, não faça commit, não execute validação oficial e não chame outro agente.',
@@ -910,6 +921,7 @@ export function buildPlannerPrompt(invocation: PlanningWorkerInvocation): string
     'BEGIN HUMAN INSTRUCTION',
     invocation.human_instruction,
     'END HUMAN INSTRUCTION',
+    ...revisionSection,
     '',
     'Responda SOMENTE com um único JSON {"schema_version":1,"tasks":[...]}.',
     '',

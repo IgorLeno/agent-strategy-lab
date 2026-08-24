@@ -758,3 +758,17 @@ Corolário: a correção é sempre no consumidor. Nunca clampe o budget ao bound
 nunca aumente `timeout_seconds` do profile e nunca rebaixe a capability
 classification para fazer o routing caber — um limite genuíno continua
 verdadeiro e continua sendo BUDGET_UNSUPPORTED.
+
+[2026-08-24] Context: uma self-run real recebeu do planner um draft completo,
+mas `validation[].argv` continha uma linha de shell com metacaractere; o gate
+deterministico recusou corretamente o conteudo e encerrou o projeto antes do
+coding worker.
+Mistake: tratar toda rejeicao de draft como falha terminal da run, mesmo quando
+o provider respondeu normalmente e os issues determinísticos descreviam um
+problema que um novo draft podia corrigir sem decisao humana.
+Rule: depois de `DRAFT_RETURNED`, somente falhas de conteudo corrigiveis em
+schema/projecao, decomposicao ou DAG podem receber UMA revisao; entregar os
+issues determinísticos, exigir replacement completo sem patch/merge e executar
+todos os gates novamente. Nunca revisar automaticamente packet construction,
+provider/transport, autorizacao, billing, credencial, safety ou decisao humana;
+duas invocacoes totais sao o limite absoluto.
