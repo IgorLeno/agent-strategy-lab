@@ -1147,7 +1147,17 @@ describe('M85 — External Project Fake E2E', () => {
     })) satisfies RoutingCandidate[];
     const registry = new CapabilityRegistry([intermediate, advanced]);
 
-    function routeMaterialized(validationExpectedMs: number, envelopeExpectedMs = implementationMs) {
+    function routeMaterialized({
+      validationExpectedMs = validationMs,
+      envelopeExpectedMs = implementationMs,
+      envelopeMaximumMs = Math.max(2_400_000, envelopeExpectedMs),
+      validationCommandTimeoutSeconds = 180,
+    }: {
+      validationExpectedMs?: number;
+      envelopeExpectedMs?: number;
+      envelopeMaximumMs?: number;
+      validationCommandTimeoutSeconds?: number;
+    } = {}) {
       const built = buildWorkUnitFromPlan({
         planTask: {
           id: 'routing-budget-self-maintenance',
@@ -1163,7 +1173,7 @@ describe('M85 — External Project Fake E2E', () => {
           validation: [
             {
               argv: ['pnpm', 'exec', 'vitest', 'run', 'test/e2e/project-orchestration-e2e.test.ts'],
-              timeout_seconds: 180,
+              timeout_seconds: validationCommandTimeoutSeconds,
             },
             { argv: ['pnpm', 'typecheck'], timeout_seconds: 120 },
             { argv: ['pnpm', 'build'], timeout_seconds: 120 },
@@ -1190,7 +1200,7 @@ describe('M85 — External Project Fake E2E', () => {
             estimated_duration: { expected: implementationMs, maximum: 2_400_000 },
             validation_budget: { expected: validationExpectedMs, maximum: 900_000 },
             resource_envelope: {
-              duration_ms: { expected: envelopeExpectedMs, maximum: 2_400_000 },
+              duration_ms: { expected: envelopeExpectedMs, maximum: envelopeMaximumMs },
               tokens: { expected: 28_000, maximum: 45_000 },
               changed_files: { expected: 1, maximum: 3 },
             },
@@ -1230,7 +1240,7 @@ describe('M85 — External Project Fake E2E', () => {
       return { built, result };
     }
 
-    const baseline = routeMaterialized(validationMs);
+    const baseline = routeMaterialized();
     expect(baseline.built.provenance).toContain(
       'taxonomy/risk/resource_envelope=plan.planner_metadata',
     );
@@ -1261,12 +1271,13 @@ describe('M85 — External Project Fake E2E', () => {
       },
     });
 
-    const expensiveValidation = routeMaterialized(900_000);
+    const expensiveValidation = routeMaterialized({ validationExpectedMs: 900_000 });
     expect(expensiveValidation.result.outcome).toBe('ROUTED');
     if (expensiveValidation.result.outcome !== 'ROUTED') throw new Error('unreachable');
     expect(expensiveValidation.built.task.resource_envelope).toEqual(
       baseline.built.task.resource_envelope,
     );
+    expect(expensiveValidation.built.task.validation).toEqual(baseline.built.task.validation);
     expect(expensiveValidation.result.execution_runtime_forecast.predicted_runtime_ms).toBe(
       baseline.result.execution_runtime_forecast.predicted_runtime_ms,
     );
@@ -1290,7 +1301,7 @@ describe('M85 — External Project Fake E2E', () => {
 
     // Envelope que ANTES estourava o bound de 1.800.000ms e derrubava a work
     // unit. Hoje ele roteia: a previsão é registrada e não recusa nada.
-    const oversizedImplementation = routeMaterialized(validationMs, 2_000_000);
+    const oversizedImplementation = routeMaterialized({ envelopeExpectedMs: 2_000_000 });
     expect(oversizedImplementation.result.outcome).toBe('ROUTED');
     if (oversizedImplementation.result.outcome !== 'ROUTED') {
       throw new Error('unreachable');
@@ -1302,6 +1313,54 @@ describe('M85 — External Project Fake E2E', () => {
     expect(
       oversizedImplementation.result.execution_runtime_forecast.predicted_runtime_ms,
     ).toBeGreaterThan(advancedBoundMs);
+
+    // O requirement é derivado do shape hard/subsystem/high-risk da work unit,
+    // não do tamanho do forecast: o mesmo tier advanced é exigido com uma
+    // previsão pequena ou enorme, e o tier intermediate falha por capability.
+    const enormousEnvelopeMs = 86_400_000;
+    const enormous = routeMaterialized({
+      envelopeExpectedMs: enormousEnvelopeMs,
+      envelopeMaximumMs: 172_800_000,
+    });
+    expect(enormous.result.outcome).toBe('ROUTED');
+    if (enormous.result.outcome !== 'ROUTED') throw new Error('unreachable');
+    expect(enormous.result.profile.profile_id).toBe(advanced.profile_id);
+    expect(enormous.result.rationale[0]).toBe(baseline.result.rationale[0]);
+    expect(enormous.result.execution_runtime_forecast).toMatchObject({
+      authority: 'ADVISORY',
+      predicted_runtime_ms: 83_204_000,
+      components: { envelope_duration_expected_ms: enormousEnvelopeMs },
+    });
+
+    for (const routed of [baseline.result, enormous.result]) {
+      const rejectedCandidates = routed.candidates_considered.filter(
+        (consideration) => consideration.outcome === 'REJECTED',
+      );
+      expect(rejectedCandidates).toEqual([
+        expect.objectContaining({
+          profile_id: intermediate.profile_id,
+          rejection_code: 'CAPABILITY_INSUFFICIENT',
+        }),
+      ]);
+      expect(rejectedCandidates.map(({ reason }) => reason).join(' ')).not.toMatch(
+        /budget|runtime|tempo|previsão/i,
+      );
+    }
+
+    // O timeout limita seu ValidationCommand; mesmo um valor enorme não vira
+    // input do forecast e não altera o validation_budget oficial declarado.
+    const longValidationCommand = routeMaterialized({
+      validationCommandTimeoutSeconds: 3_600,
+    });
+    expect(longValidationCommand.result.outcome).toBe('ROUTED');
+    if (longValidationCommand.result.outcome !== 'ROUTED') throw new Error('unreachable');
+    expect(longValidationCommand.built.task.validation[0]?.timeout_seconds).toBe(3_600);
+    expect(longValidationCommand.built.task.validation_budget).toEqual(
+      baseline.built.task.validation_budget,
+    );
+    expect(longValidationCommand.result.execution_runtime_forecast).toEqual(
+      baseline.result.execution_runtime_forecast,
+    );
   });
 });
 
