@@ -14,6 +14,7 @@ import {
   capabilityOf,
   routeInitialProfile,
   routeInitialProfileWithHistory,
+  type EvidenceBalanceFacts,
   type HistoryRoutingInput,
   type InitialRoutingInput,
   type ProfileCapability,
@@ -181,6 +182,9 @@ interface SeriesUtilityOverrides {
   readonly qualification?: number;
   readonly sampleSize?: number;
   readonly costUnavailable?: boolean;
+  readonly quotaUnavailable?: boolean;
+  /** Métrica OBRIGATÓRIA ausente: a série continua insuficiente. */
+  readonly durationUnavailable?: boolean;
   readonly difficulty?: string;
   readonly contextPressure?: 'low' | 'medium' | 'high';
 }
@@ -202,6 +206,14 @@ function series(
         provenance: ['fixture_missing'],
       }
     : metric(distribution(overrides.costP90 ?? 1, sampleSize), sampleSize);
+  const unavailable = <T>(): EvidenceAggregation<T> => ({
+    value: null,
+    sample_size: 0,
+    population_size: sampleSize,
+    status: 'UNAVAILABLE' as const,
+    reason: 'métrica não registrada',
+    provenance: ['fixture_missing'],
+  });
   return {
     identity: {
       schema_version: 1,
@@ -251,7 +263,9 @@ function series(
       final_pass_rate: metric(overrides.finalPass ?? 1, sampleSize),
       repair_rate: metric(overrides.repair ?? 0, sampleSize),
       escalation_rate: metric(overrides.escalation ?? 0, sampleSize),
-      duration_ms: metric(distribution(overrides.durationP90 ?? 1_000, sampleSize), sampleSize),
+      duration_ms: overrides.durationUnavailable
+        ? unavailable<NumericDistribution>()
+        : metric(distribution(overrides.durationP90 ?? 1_000, sampleSize), sampleSize),
       tokens: {
         total: metric(distribution(overrides.tokensP90 ?? 1_000, sampleSize), sampleSize),
         input: metric(distribution(500, sampleSize), sampleSize),
@@ -260,16 +274,18 @@ function series(
         output: metric(distribution(300, sampleSize), sampleSize),
         reasoning: metric(distribution(200, sampleSize), sampleSize),
       },
-      quota: metric(
-        [
-          {
-            provider: 'openai',
-            window_id: 'weekly',
-            consumed_pp: metric(distribution(overrides.quotaP90 ?? 1, sampleSize), sampleSize),
-          },
-        ],
-        sampleSize,
-      ),
+      quota: overrides.quotaUnavailable
+        ? unavailable<readonly { readonly provider: string; readonly window_id: string; readonly consumed_pp: EvidenceAggregation<NumericDistribution> }[]>()
+        : metric(
+            [
+              {
+                provider: 'openai',
+                window_id: 'weekly',
+                consumed_pp: metric(distribution(overrides.quotaP90 ?? 1, sampleSize), sampleSize),
+              },
+            ],
+            sampleSize,
+          ),
       api_equivalent_usd: cost,
       human_intervention_rate: metric(overrides.intervention ?? 0, sampleSize),
       qualification: {
@@ -361,6 +377,17 @@ function input(
   };
 }
 
+/** Fatos de balanceamento que favorecem descaradamente `profile-b`. */
+function balanceTowardsB(): EvidenceBalanceFacts {
+  return {
+    profile_sample_sizes: { 'profile-a': 99, 'profile-b': 0 },
+    provider_sample_sizes: { codex: 99 },
+    run_launches_by_provider: { codex: 99 },
+    quota_headroom_by_provider: {},
+    provenance: ['fixture'],
+  };
+}
+
 function m78Input(value: HistoryRoutingInput): InitialRoutingInput {
   return {
     work_unit: value.work_unit,
@@ -402,7 +429,7 @@ describe('routeInitialProfileWithHistory', () => {
       ...withHistory,
       history: historyV2([
         historicalA,
-        series('profile-b', FINGERPRINT_B, SERIES_B, { costUnavailable: true }),
+        series('profile-b', FINGERPRINT_B, SERIES_B, { durationUnavailable: true }),
       ]),
     });
     expect(insufficient.source).toBe('M78_FALLBACK');
@@ -526,7 +553,7 @@ describe('routeInitialProfileWithHistory', () => {
   it('amostra minúscula e métrica ausente caem no M78 sem fabricar certeza', () => {
     for (const historical of [
       series('profile-a', FINGERPRINT_A, SERIES_A, { sampleSize: 1 }),
-      series('profile-a', FINGERPRINT_A, SERIES_A, { costUnavailable: true }),
+      series('profile-a', FINGERPRINT_A, SERIES_A, { durationUnavailable: true }),
     ]) {
       const value = input([historical]);
       const result = routeInitialProfileWithHistory(value);
@@ -651,5 +678,125 @@ describe('routeInitialProfileWithHistory', () => {
       utility: null,
     });
     expect(result.evidence.series_considered[0]?.reason).toContain('não foi fornecido');
+  });
+});
+
+describe('UNKNOWN não impossibilita o aprendizado, e história suficiente ainda decide', () => {
+  it('história suficiente vence o balanceamento de cold-start', () => {
+    const capabilities = [capability('profile-a'), capability('profile-b')];
+    const base = input(
+      [
+        series('profile-a', FINGERPRINT_A, SERIES_A),
+        series('profile-b', FINGERPRINT_B, SERIES_B, {
+          firstPass: 0.4,
+          finalPass: 0.5,
+          repair: 0.6,
+          escalation: 0.4,
+          durationP90: 5_000,
+          tokensP90: 5_000,
+          intervention: 0.5,
+          qualification: 0.5,
+        }),
+      ],
+      { capabilities },
+    );
+    const routed = routeInitialProfileWithHistory({
+      ...base,
+      selection_policy: 'evidence_balanced',
+      evidence_balance: balanceTowardsB(),
+    });
+
+    // A série de A domina; o balanceamento queria B com 0 amostras e não venceu.
+    expect(routed.source).toBe('HISTORY');
+    expect(routed.recommendation?.profile.profile_id).toBe('profile-a');
+    expect(routed.fallback).toBeNull();
+  });
+
+  it('quota e custo UNKNOWN em TODAS as séries saem da comparação e a história decide', () => {
+    const capabilities = [capability('profile-a'), capability('profile-b')];
+    const routed = routeInitialProfileWithHistory(
+      input(
+        [
+          series('profile-a', FINGERPRINT_A, SERIES_A, {
+            quotaUnavailable: true,
+            costUnavailable: true,
+            firstPass: 0.4,
+            finalPass: 0.5,
+            repair: 0.6,
+            escalation: 0.4,
+            durationP90: 5_000,
+            tokensP90: 5_000,
+            intervention: 0.5,
+            qualification: 0.5,
+          }),
+          series('profile-b', FINGERPRINT_B, SERIES_B, {
+            quotaUnavailable: true,
+            costUnavailable: true,
+          }),
+        ],
+        { capabilities },
+      ),
+    );
+
+    expect(routed.source).toBe('HISTORY');
+    expect(routed.recommendation?.profile.profile_id).toBe('profile-b');
+    expect(routed.evidence.dimensions_omitted.map((entry) => entry.dimension).sort()).toEqual([
+      'api_equivalent_usd_p90',
+      'quota_consumed_pp_p90_total',
+    ]);
+    for (const omitted of routed.evidence.dimensions_omitted) {
+      expect(omitted.reason).toContain('UNKNOWN em todas');
+    }
+    // A dimensão ausente ficou `null` — nunca virou zero.
+    const considered = routed.evidence.series_considered.find((entry) => entry.status === 'ELIGIBLE');
+    expect(considered?.utility?.quota_consumed_pp_p90_total).toBeNull();
+    expect(considered?.utility?.api_equivalent_usd_p90).toBeNull();
+  });
+
+  it('quota conhecida só para uma série é omitida em vez de punir quem não tem medidor', () => {
+    const capabilities = [capability('profile-a'), capability('profile-b')];
+    const routed = routeInitialProfileWithHistory(
+      input(
+        [
+          // A gasta quota pouquíssima e é observável; B não tem medidor. Se a
+          // dimensão participasse, A venceria por um número que B não tem como
+          // apresentar.
+          series('profile-a', FINGERPRINT_A, SERIES_A, {
+            quotaP90: 0,
+            costP90: 0,
+            firstPass: 0.4,
+            finalPass: 0.5,
+            repair: 0.6,
+            escalation: 0.4,
+            durationP90: 5_000,
+            tokensP90: 5_000,
+            intervention: 0.5,
+            qualification: 0.5,
+          }),
+          series('profile-b', FINGERPRINT_B, SERIES_B, {
+            quotaUnavailable: true,
+            costUnavailable: true,
+          }),
+        ],
+        { capabilities },
+      ),
+    );
+
+    expect(routed.source).toBe('HISTORY');
+    expect(routed.recommendation?.profile.profile_id).toBe('profile-b');
+    for (const omitted of routed.evidence.dimensions_omitted) {
+      expect(omitted.reason).toContain('inventaria o lado ausente');
+    }
+  });
+
+  it('métrica obrigatória ausente continua tornando a série insuficiente', () => {
+    const routed = routeInitialProfileWithHistory(
+      input([series('profile-a', FINGERPRINT_A, SERIES_A, { durationUnavailable: true })]),
+    );
+    expect(routed.source).toBe('M78_FALLBACK');
+    expect(routed.evidence.series_considered[0]).toMatchObject({
+      status: 'INSUFFICIENT_EVIDENCE',
+      utility: null,
+    });
   });
 });

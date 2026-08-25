@@ -65,6 +65,46 @@ describe('overlayAuthorization', () => {
   });
 });
 
+describe('providers.policy no header da Run Directive', () => {
+  it('evidence_balanced troca só o desempate do routing, sem tocar em autorização', async () => {
+    const loaded = await loadPolicyPreset(DEFAULT_POLICY_PRESET);
+    expect(loaded.file.profile_policy.selection_policy).toBe('static_cost');
+
+    const overlaid = overlayAuthorization({
+      preset: loaded.file,
+      header: headerOf('providers:\n  policy: evidence_balanced\n'),
+    });
+
+    expect(overlaid.profile_policy.selection_policy).toBe('evidence_balanced');
+    // Nada além do desempate mudou: boundary, gates, billing e a lista de
+    // profiles elegíveis continuam idênticos ao preset.
+    expect(overlaid.autonomous_execution_boundary).toEqual(loaded.file.autonomous_execution_boundary);
+    expect(overlaid.human_gated_capabilities).toEqual(loaded.file.human_gated_capabilities);
+    expect(overlaid.billing).toEqual(loaded.file.billing);
+    expect(overlaid.profile_policy.profiles).toEqual(loaded.file.profile_policy.profiles);
+    expect(overlaid.profile_policy.allowed_providers).toEqual(
+      loaded.file.profile_policy.allowed_providers,
+    );
+  });
+
+  it('directive antiga sem providers preserva o desempate histórico', async () => {
+    const loaded = await loadPolicyPreset(DEFAULT_POLICY_PRESET);
+    expect(
+      overlayAuthorization({ preset: loaded.file, header: headerOf('') }).profile_policy
+        .selection_policy,
+    ).toBe('static_cost');
+    expect(
+      overlayAuthorization({ preset: loaded.file, header: null }).profile_policy.selection_policy,
+    ).toBe('static_cost');
+    expect(
+      overlayAuthorization({
+        preset: loaded.file,
+        header: headerOf('providers:\n  policy: default\n'),
+      }).profile_policy.selection_policy,
+    ).toBe('static_cost');
+  });
+});
+
 describe('resolveDirectivePublishGrant', () => {
   it('concede publish estreito a origin/main', () => {
     const grant = resolveDirectivePublishGrant({

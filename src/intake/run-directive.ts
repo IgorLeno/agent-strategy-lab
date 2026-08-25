@@ -132,7 +132,13 @@ export const AgentLabRunDirectiveHeader = z
     authorization: DirectiveAuthorization.optional(),
     providers: z
       .object({
-        policy: z.literal('default').optional(),
+        /**
+         * DESEMPATE entre profiles já suficientes — nunca elegibilidade.
+         * `default` preserva o custo estático histórico; `evidence_balanced`
+         * prefere adquirir a evidência que falta quando o histórico não decide.
+         * Nenhum dos dois amplia autorização, billing ou capacidade.
+         */
+        policy: z.enum(['default', 'evidence_balanced']).optional(),
       })
       .strict()
       .optional(),

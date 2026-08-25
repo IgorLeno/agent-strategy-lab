@@ -43,6 +43,29 @@ export const HISTORY_UTILITY_AGGREGATIONS = [
   'environment_readiness.compatibility',
 ] as const;
 
+/**
+ * Dimensões de CUSTO que dependem de instrumento externo ao harness: o medidor
+ * de assinatura do provider e a estimativa de equivalência em dólar da CLI.
+ *
+ * Elas são OPCIONAIS por um motivo empírico. Nenhum profile Codex de
+ * assinatura expõe medidor de conta, e nenhum profile subscription-only reporta
+ * custo de API — exigi-las tornava a evidência histórica desses profiles
+ * permanentemente insuficiente, ou seja, tornava o aprendizado impossível
+ * exatamente onde ele era mais necessário. A ausência descrevia o instrumento,
+ * não a execução.
+ *
+ * A regra que substitui a exigência não inventa nada: uma dimensão opcional só
+ * participa da comparação quando é conhecida para TODAS as séries elegíveis.
+ * Conhecida para umas e ausente para outras, ela é OMITIDA e registrada — pois
+ * comparar um número observado contra um UNKNOWN só poderia inventar o lado
+ * ausente ou penalizar quem não tem medidor.
+ */
+export const OPTIONAL_HISTORY_UTILITY_DIMENSIONS = [
+  'quota_consumed_pp_p90_total',
+  'api_equivalent_usd_p90',
+] as const;
+export type OptionalHistoryUtilityDimension = (typeof OPTIONAL_HISTORY_UTILITY_DIMENSIONS)[number];
+
 const HistoryUtility = z
   .object({
     first_pass_rate: z.number().min(0).max(1),
@@ -51,8 +74,10 @@ const HistoryUtility = z
     escalation_rate: z.number().min(0),
     duration_p90_ms: z.number().nonnegative(),
     total_tokens_p90: z.number().nonnegative(),
-    quota_consumed_pp_p90_total: z.number().nonnegative(),
-    api_equivalent_usd_p90: z.number().nonnegative(),
+    /** `null` é UNKNOWN observado: o provider não expõe medidor de assinatura. */
+    quota_consumed_pp_p90_total: z.number().nonnegative().nullable(),
+    /** `null` é UNKNOWN observado: run de assinatura não reporta custo de API. */
+    api_equivalent_usd_p90: z.number().nonnegative().nullable(),
     human_intervention_rate: z.number().min(0).max(1),
     qualified_rate: z.number().min(0).max(1),
     context_pressure_compatibility: z.number().min(0).max(1),
@@ -81,6 +106,10 @@ export const HistoryRoutingEvidence = z
     selected_series_sample_size: z.number().int().nonnegative(),
     aggregations_considered: z.array(nonEmpty).min(1),
     series_considered: z.array(HistorySeriesConsideration),
+    /** Dimensões opcionais que ficaram fora da comparação, com o motivo. */
+    dimensions_omitted: z
+      .array(z.object({ dimension: nonEmpty, reason: nonEmpty }).strict())
+      .default([]),
   })
   .strict();
 export type HistoryRoutingEvidence = z.infer<typeof HistoryRoutingEvidence>;
@@ -213,7 +242,6 @@ function utilityOf(
     ['escalation_rate', aggregates.escalation_rate],
     ['duration_ms', aggregates.duration_ms],
     ['tokens.total', aggregates.tokens.total],
-    ['api_equivalent_usd', aggregates.api_equivalent_usd],
     ['human_intervention_rate', aggregates.human_intervention_rate],
     ['qualification.qualified_rate', aggregates.qualification.qualified_rate],
     ['context_pressure', aggregates.context_pressure],
@@ -227,29 +255,22 @@ function utilityOf(
       reason: `${name} sem amostra disponível >= minimum_sample_size=${minimumSampleSize} (status=${aggregation.status}, sample_size=${aggregation.sample_size})`,
     };
   }
-  if (!available(aggregates.quota, minimumSampleSize) || aggregates.quota.value.length === 0) {
-    return {
-      utility: null,
-      minimumMetricSampleSize: aggregates.quota.sample_size,
-      reason: `quota sem amostra disponível >= minimum_sample_size=${minimumSampleSize}`,
-    };
-  }
-  const quotaWindows = aggregates.quota.value;
-  const unavailableQuota = quotaWindows.find(
-    (window) => !available(window.consumed_pp, minimumSampleSize),
-  );
-  if (unavailableQuota !== undefined) {
-    return {
-      utility: null,
-      minimumMetricSampleSize: unavailableQuota.consumed_pp.sample_size,
-      reason: `quota ${unavailableQuota.provider}/${unavailableQuota.window_id} sem amostra disponível >= minimum_sample_size=${minimumSampleSize}`,
-    };
-  }
+
+  // Dimensões de custo: ausentes ficam `null` e SAEM da comparação mais
+  // adiante. Ausência aqui nunca desqualifica a série — ela só descreve que
+  // este provider não tem o instrumento correspondente.
+  const quotaAvailable =
+    available(aggregates.quota, minimumSampleSize) &&
+    aggregates.quota.value.length > 0 &&
+    aggregates.quota.value.every((window) => available(window.consumed_pp, minimumSampleSize));
+  const quotaWindows = quotaAvailable ? aggregates.quota.value : [];
+  const costAvailable = available(aggregates.api_equivalent_usd, minimumSampleSize);
 
   const sampleSizes = [
     ...required.map(([, metric]) => metric.sample_size),
-    aggregates.quota.sample_size,
+    ...(quotaAvailable ? [aggregates.quota.sample_size] : []),
     ...quotaWindows.map((window) => window.consumed_pp.sample_size),
+    ...(costAvailable ? [aggregates.api_equivalent_usd.sample_size] : []),
   ];
   const firstPassRate = aggregates.first_operational_pass_rate.value!;
   const finalPassRate = aggregates.final_pass_rate.value!;
@@ -257,7 +278,7 @@ function utilityOf(
   const escalationRate = aggregates.escalation_rate.value!;
   const durationDistribution = aggregates.duration_ms.value!;
   const tokenDistribution = aggregates.tokens.total.value!;
-  const costDistribution = aggregates.api_equivalent_usd.value!;
+  const costDistribution = costAvailable ? aggregates.api_equivalent_usd.value : null;
   const interventionRate = aggregates.human_intervention_rate.value!;
   const qualifiedRate = aggregates.qualification.qualified_rate.value!;
   const contextCounts = aggregates.context_pressure.value!;
@@ -270,11 +291,10 @@ function utilityOf(
       escalation_rate: escalationRate,
       duration_p90_ms: durationDistribution.p90,
       total_tokens_p90: tokenDistribution.p90,
-      quota_consumed_pp_p90_total: quotaWindows.reduce(
-        (total, window) => total + (window.consumed_pp.value?.p90 ?? 0),
-        0,
-      ),
-      api_equivalent_usd_p90: costDistribution.p90,
+      quota_consumed_pp_p90_total: quotaAvailable
+        ? quotaWindows.reduce((total, window) => total + (window.consumed_pp.value?.p90 ?? 0), 0)
+        : null,
+      api_equivalent_usd_p90: costDistribution === null ? null : costDistribution.p90,
       human_intervention_rate: interventionRate,
       qualified_rate: qualifiedRate,
       context_pressure_compatibility: contextCount / aggregates.context_pressure.sample_size,
@@ -358,25 +378,65 @@ const maximize: readonly (keyof HistoryUtility)[] = [
   'qualified_rate',
   'context_pressure_compatibility',
 ];
-const minimize: readonly (keyof HistoryUtility)[] = [
+const REQUIRED_MINIMIZE: readonly (keyof HistoryUtility)[] = [
   'repair_rate',
   'escalation_rate',
   'duration_p90_ms',
   'total_tokens_p90',
-  'quota_consumed_pp_p90_total',
-  'api_equivalent_usd_p90',
   'human_intervention_rate',
 ];
 
-/** Dominância de Pareto: nenhuma ponderação ou precisão externa aos dados. */
-function dominates(left: HistoryUtility, right: HistoryUtility): boolean {
+function numberAt(utility: HistoryUtility, key: keyof HistoryUtility): number {
+  return utility[key] as number;
+}
+
+/**
+ * Dominância de Pareto sobre as dimensões ATIVAS: nenhuma ponderação, nenhuma
+ * precisão externa aos dados e nenhuma dimensão comparada contra um UNKNOWN.
+ */
+function dominates(
+  left: HistoryUtility,
+  right: HistoryUtility,
+  minimize: readonly (keyof HistoryUtility)[],
+): boolean {
   const noWorse =
-    maximize.every((key) => left[key] >= right[key]) &&
-    minimize.every((key) => left[key] <= right[key]);
+    maximize.every((key) => numberAt(left, key) >= numberAt(right, key)) &&
+    minimize.every((key) => numberAt(left, key) <= numberAt(right, key));
   const strictlyBetter =
-    maximize.some((key) => left[key] > right[key]) ||
-    minimize.some((key) => left[key] < right[key]);
+    maximize.some((key) => numberAt(left, key) > numberAt(right, key)) ||
+    minimize.some((key) => numberAt(left, key) < numberAt(right, key));
   return noWorse && strictlyBetter;
+}
+
+/**
+ * Uma dimensão opcional só entra na comparação quando é conhecida para TODAS
+ * as séries elegíveis. Conhecida só para algumas, ela é omitida com motivo —
+ * nem inventar o lado ausente, nem punir quem não tem o instrumento.
+ */
+function activeMinimizeDimensions(eligible: readonly EligibleSeries[]): {
+  readonly minimize: readonly (keyof HistoryUtility)[];
+  readonly omitted: readonly { readonly dimension: string; readonly reason: string }[];
+} {
+  const omitted: { dimension: string; reason: string }[] = [];
+  const optional: (keyof HistoryUtility)[] = [];
+  for (const dimension of OPTIONAL_HISTORY_UTILITY_DIMENSIONS) {
+    const missing = eligible.filter((entry) => entry.utility[dimension] === null);
+    if (missing.length === 0) {
+      optional.push(dimension);
+      continue;
+    }
+    omitted.push({
+      dimension,
+      reason:
+        missing.length === eligible.length
+          ? `UNKNOWN em todas as ${eligible.length} séries elegíveis: dimensão fora da comparação, nunca substituída por zero`
+          : `UNKNOWN em ${missing.length} de ${eligible.length} séries elegíveis (${missing
+              .map((entry) => entry.capability.profile_id)
+              .sort()
+              .join(', ')}): comparar observado contra UNKNOWN inventaria o lado ausente`,
+    });
+  }
+  return { minimize: [...REQUIRED_MINIMIZE, ...optional], omitted };
 }
 
 function fallback(
@@ -384,6 +444,7 @@ function fallback(
   minimumSampleSize: number,
   considerations: readonly HistorySeriesConsideration[],
   reason: string,
+  dimensionsOmitted: readonly { readonly dimension: string; readonly reason: string }[] = [],
 ): HistoryInformedRoutingResult {
   return HistoryInformedRoutingResult.parse({
     schema_version: 1,
@@ -397,6 +458,7 @@ function fallback(
       selected_series_sample_size: 0,
       aggregations_considered: [...HISTORY_UTILITY_AGGREGATIONS],
       series_considered: considerations,
+      dimensions_omitted: dimensionsOmitted,
     },
     rationale: [
       reason,
@@ -540,8 +602,12 @@ export function routeInitialProfileWithHistory(input: HistoryRoutingInput): Hist
   if (eligible.length === 0) {
     return fallback(input, minimumSampleSize, considerations, 'nenhuma série compatível tem evidência suficiente');
   }
+  const dimensions = activeMinimizeDimensions(eligible);
   const frontier = eligible.filter(
-    (candidate) => !eligible.some((other) => other !== candidate && dominates(other.utility, candidate.utility)),
+    (candidate) =>
+      !eligible.some(
+        (other) => other !== candidate && dominates(other.utility, candidate.utility, dimensions.minimize),
+      ),
   );
   if (frontier.length !== 1) {
     const frontierKeys = new Set(frontier.map((entry) => entry.series.identity.series_key));
@@ -555,6 +621,7 @@ export function routeInitialProfileWithHistory(input: HistoryRoutingInput): Hist
       minimumSampleSize,
       ambiguous,
       `${frontier.length} séries permanecem empatadas ou ambíguas sem pesos autorizados`,
+      dimensions.omitted,
     );
   }
 
@@ -562,10 +629,22 @@ export function routeInitialProfileWithHistory(input: HistoryRoutingInput): Hist
   const seriesKey = selected.series.identity.series_key!;
   const duration = selected.series.aggregations.duration_ms;
   if (!available(duration, minimumSampleSize)) {
-    return fallback(input, minimumSampleSize, considerations, 'distribuição de duração selecionada deixou de ser suficiente');
+    return fallback(
+      input,
+      minimumSampleSize,
+      considerations,
+      'distribuição de duração selecionada deixou de ser suficiente',
+      dimensions.omitted,
+    );
   }
   if (!Number.isSafeInteger(duration.value.p90)) {
-    return fallback(input, minimumSampleSize, considerations, 'p90 observado não é um inteiro seguro de milissegundos');
+    return fallback(
+      input,
+      minimumSampleSize,
+      considerations,
+      'p90 observado não é um inteiro seguro de milissegundos',
+      dimensions.omitted,
+    );
   }
   const forecast = HistoryExecutionRuntimeForecast.parse({
     kind: 'HISTORY_DERIVED_EXECUTION_RUNTIME_FORECAST',
@@ -587,6 +666,7 @@ export function routeInitialProfileWithHistory(input: HistoryRoutingInput): Hist
     selected_series_sample_size: selected.series.aggregations.trials.sample_size,
     aggregations_considered: [...HISTORY_UTILITY_AGGREGATIONS],
     series_considered: considerations,
+    dimensions_omitted: dimensions.omitted,
   };
   const common = {
     schema_version: 1 as const,
@@ -596,6 +676,9 @@ export function routeInitialProfileWithHistory(input: HistoryRoutingInput): Hist
     rationale: [
       `série=${seriesKey} profile=${selected.capability.profile_id} é a única dominante sem pesos inventados`,
       `minimum_sample_size=${minimumSampleSize}; menor amostra de métrica=${selected.minimumMetricSampleSize}`,
+      dimensions.omitted.length === 0
+        ? 'todas as dimensões de utilidade participaram da comparação'
+        : `dimensões omitidas por UNKNOWN observado: ${dimensions.omitted.map((entry) => entry.dimension).join(', ')}`,
       `previsão=${forecast.predicted_runtime_ms}ms deriva do p90 da duração observada; é ADVISORY e não substitui decomposição/capacidade exigida por M78`,
     ],
     provenance: [

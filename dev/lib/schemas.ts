@@ -852,6 +852,22 @@ export const SubscriptionUsageWindow = z
   .strict();
 export type SubscriptionUsageWindow = z.infer<typeof SubscriptionUsageWindow>;
 
+/**
+ * Contagem de tokens observada no stream do provider. Campo ausente vira
+ * `null`; a soma só existe quando o provider reportou algo positivo.
+ */
+export const ObservedWorkerTokensRecord = z
+  .object({
+    total: z.number().int().positive(),
+    input: z.number().int().nonnegative().nullable(),
+    cached_input: z.number().int().nonnegative().nullable(),
+    output: z.number().int().nonnegative().nullable(),
+    reasoning: z.number().int().nonnegative().nullable(),
+    provenance: nonEmpty,
+  })
+  .strict();
+export type ObservedWorkerTokensRecord = z.infer<typeof ObservedWorkerTokensRecord>;
+
 export const SubscriptionUsage = z
   .object({
     source: z.literal('claude_print_usage'),
@@ -987,6 +1003,14 @@ export const LaunchRecord = z
     termination_request: TerminationRequestRecord.nullable().default(null),
     /** Observação AO VIVO do run; `null` antes de a interface live existir. */
     activity: WorkerActivityTelemetry.nullable().default(null),
+    /**
+     * Tokens que o PRÓPRIO provider reportou sobre a inferência deste launch.
+     * Não é billing e não é quota: é a contagem do turno, lida do stream de
+     * eventos. `null` em todo record gravado antes deste campo existir e em
+     * todo provider que não reporta contagem — ausência permanece UNKNOWN e
+     * nunca é reescrita como zero.
+     */
+    observed_tokens: ObservedWorkerTokensRecord.nullable().default(null),
   })
   .strict();
 export type LaunchRecord = z.infer<typeof LaunchRecord>;

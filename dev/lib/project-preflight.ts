@@ -32,7 +32,7 @@
 import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 
-import type { EscalationCandidatePreflight } from '../../src/routing/index.js';
+import type { EscalationCandidatePreflight, QuotaHeadroom } from '../../src/routing/index.js';
 import {
   assertNoApiCredentials,
   expectedSubscriptionSource,
@@ -176,6 +176,38 @@ async function launchRecordsOf(paths: HarnessPaths): Promise<DatedLaunchRecord[]
   return records.sort((left, right) =>
     right.record.started_at.localeCompare(left.record.started_at),
   );
+}
+
+/**
+ * FOLGA de quota por provider, a partir da evidência JÁ GRAVADA neste runtime.
+ *
+ * A fonte é o probe de assinatura que o próprio launch executou — nenhuma
+ * chamada nova ao provider acontece aqui, e portanto medir a folga não custa
+ * exatamente aquilo que o experimento quer medir. Um provider sem medidor de
+ * assinatura permanece `UNKNOWN` COM MOTIVO: ausência de instrumento nunca
+ * vira "quota livre" nem "quota esgotada".
+ */
+export async function quotaHeadroomByProvider(
+  paths: HarnessPaths,
+  providerOf: (profileId: string) => string | null,
+): Promise<Record<string, QuotaHeadroom>> {
+  const headroom: Record<string, QuotaHeadroom> = {};
+  // `launchRecordsOf` devolve do mais recente para o mais antigo: o primeiro
+  // record utilizável de cada provider é a observação mais nova.
+  for (const { record, file } of await launchRecordsOf(paths)) {
+    const provider = providerOf(record.profile_id);
+    if (provider === null || headroom[provider] !== undefined) continue;
+    const usage = record.subscription_usage;
+    if (usage === null || !usage.probe_contract.after.available) continue;
+    const used = usage.five_hour.after_used_pct;
+    if (used === null || !Number.isFinite(used)) continue;
+    headroom[provider] = {
+      status: 'OBSERVED',
+      remaining_pct: Math.min(100, Math.max(0, 100 - used)),
+      provenance: `${file}: subscription_usage.five_hour.after_used_pct=${used}`,
+    };
+  }
+  return headroom;
 }
 
 /**

@@ -33,6 +33,7 @@ import {
 } from '../../src/intake/index.js';
 import { TaskBudget, TaskTaxonomy } from '../../src/schemas/task-spec.js';
 import { TaskRisk } from '../../src/planner/task.js';
+import { RoutingSelectionPolicy } from '../../src/routing/index.js';
 
 const nonEmpty = z.string().trim().min(1);
 const identifier = z
@@ -91,6 +92,13 @@ export const ProfilePolicy = z
     id: identifier,
     profiles: z.array(AuthorizedProfile).min(1),
     allowed_providers: z.array(z.enum(['claude', 'codex', 'fake'])).min(1),
+    /**
+     * DESEMPATE entre profiles já suficientes — nunca elegibilidade.
+     * Ausente preserva `static_cost`, o comportamento histórico. A policy não
+     * amplia autorização: um profile fora de `profiles` continua fora, e um
+     * profile sem capacidade suficiente continua sendo recusado.
+     */
+    selection_policy: RoutingSelectionPolicy.default('static_cost'),
   })
   .strict()
   .superRefine((policy, context) => {

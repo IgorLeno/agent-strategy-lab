@@ -57,6 +57,7 @@ import {
   type LauncherProfile,
 } from './profile.js';
 import { buildWorkerPrompt } from './prompt.js';
+import { observedWorkerTokens } from './worker-token-usage.js';
 import { ensureTaskInbox, writeLaunchRecord } from './records.js';
 import { WorkerSupervisor, type TerminationCause } from './termination.js';
 import {
@@ -328,6 +329,7 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
     | 'billing'
     | 'rate_limit_observations'
     | 'subscription_usage'
+    | 'observed_tokens'
     | 'provider_failure'
     | 'machine_safety_ceiling'
     | 'termination_cause'
@@ -365,6 +367,8 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
     subscription_usage: measuresUsage
       ? buildSubscriptionUsage(usageBefore, NOT_RUN_OUTCOME)
       : null,
+    // O worker ainda nem terminou: não existe contagem de turno a registrar.
+    observed_tokens: null,
     machine_safety_ceiling: { ...ceiling },
     termination_cause: null,
     termination_request: null,
@@ -453,6 +457,14 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
         ? null
         : { ...terminationRequest, signals_sent: [...terminationRequest.signals_sent] },
     activity: { ...activityTelemetry, provenance: [...activityTelemetry.provenance] },
+    // Contagem que o próprio provider reportou sobre o turno. É a evidência
+    // mais direta de que houve inferência — e a única disponível num provider
+    // de assinatura que não expõe medidor de conta.
+    observed_tokens: observedWorkerTokens({
+      agent: profile.agent,
+      stdout,
+      ...(stream === null ? {} : { streamResult: stream.result }),
+    }),
   };
   await writeLaunchRecord(paths, record);
 

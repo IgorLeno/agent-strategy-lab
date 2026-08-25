@@ -38,6 +38,7 @@ import {
 import { buildWorkUnitFromPlan, capabilityInputOf } from '../../dev/lib/project-run.js';
 import {
   materializeCanonicalProjectAttempt,
+  observedTokensOf,
   projectProfileFingerprint,
   projectWorkDefinitionFingerprint,
   queryCanonicalProjectHistory,
@@ -877,6 +878,8 @@ function historyLaunch(options: {
   readonly apiEquivalent?: number | null;
   readonly durationMs?: number;
   readonly quotaPp?: number | null;
+  /** Contagem reportada pelo provider; `null` reproduz um record sem stream. */
+  readonly observedTokensTotal?: number | null;
 }) {
   const minute = String(options.attempt).padStart(2, '0');
   const apiEquivalent = options.apiEquivalent === undefined ? 1 : options.apiEquivalent;
@@ -925,6 +928,17 @@ function historyLaunch(options: {
       authoritative_billing_verified: false,
     },
     rate_limit_observations: null,
+    observed_tokens:
+      options.observedTokensTotal === undefined || options.observedTokensTotal === null
+        ? null
+        : {
+            total: options.observedTokensTotal,
+            input: options.observedTokensTotal,
+            cached_input: null,
+            output: null,
+            reasoning: null,
+            provenance: 'fixture: turn.completed.usage',
+          },
     subscription_usage: quotaPp === null
       ? null
       : {
@@ -957,6 +971,7 @@ async function historyAttempt(input: {
   readonly durationMs?: number;
   readonly totalTokens?: number;
   readonly quotaPp?: number | null;
+  readonly observedTokensTotal?: number | null;
   readonly afterStage?: Parameters<typeof materializeCanonicalProjectAttempt>[0]['afterStage'];
 }) {
   const profile = input.profile ?? HISTORY_PROFILE_A;
@@ -968,6 +983,9 @@ async function historyAttempt(input: {
       apiEquivalent: input.apiEquivalent === undefined ? 1 : input.apiEquivalent,
       ...(input.durationMs === undefined ? {} : { durationMs: input.durationMs }),
       ...(input.quotaPp === undefined ? {} : { quotaPp: input.quotaPp }),
+      ...(input.observedTokensTotal === undefined
+        ? {}
+        : { observedTokensTotal: input.observedTokensTotal }),
     }),
     profile_id: profile.id,
   });
@@ -1028,21 +1046,96 @@ async function historyAttempt(input: {
     changedFiles: ['src/index.ts'],
     contextPressure: 'low',
     environmentReadiness: 'READY',
-    ...(input.tokens === 'UNKNOWN'
-      ? {}
-      : {
-          observedTokens: {
-            total: input.totalTokens ?? 100,
-            input: 70,
-            cachedInput: 10,
-            output: 30,
-            reasoning: 5,
-            provenance: 'fixture observed usage',
-          },
-        }),
+    // Mesmo caminho do control plane real: a contagem entra na história a
+    // partir do LaunchRecord quando o provider a reportou.
+    ...(launch.observed_tokens !== null
+      ? { observedTokens: observedTokensOf(launch) }
+      : input.tokens === 'UNKNOWN'
+        ? {}
+        : {
+            observedTokens: {
+              total: input.totalTokens ?? 100,
+              input: 70,
+              cachedInput: 10,
+              output: 30,
+              reasoning: 5,
+              provenance: 'fixture observed usage',
+            },
+          }),
     ...(input.afterStage === undefined ? {} : { afterStage: input.afterStage }),
   });
 }
+
+describe('inferência provada — regressão do piloto Augmented Chess', () => {
+  /**
+   * Forma EXATA dos 13 launches reais do piloto: provider de assinatura sem
+   * medidor de conta (`/usage` é comando do Claude) e sem custo de API. Antes
+   * da correção o attempt caía em `had_inference UNKNOWN`, nenhuma run
+   * canônica nascia, a história ficava permanentemente vazia e todo routing
+   * reescolhia o mesmo provider pelo fallback estático.
+   */
+  const PILOT_LAUNCH_SHAPE = { apiEquivalent: null, quotaPp: null } as const;
+
+  it('attempt de assinatura sem medidor vira run canônica quando o provider reporta tokens', async () => {
+    const target = await temporaryDir();
+    const labRoot = await temporaryDir();
+    const result = await historyAttempt({
+      target,
+      labRoot,
+      attempt: 1,
+      role: AttemptRole.INITIAL,
+      ...PILOT_LAUNCH_SHAPE,
+      observedTokensTotal: 759_082,
+    });
+
+    expect(result.outcome).toBe('MATERIALIZED');
+    if (result.outcome === 'SKIPPED') throw new Error(result.reason);
+    expect((await verifyRunIntegrity(path.join(labRoot, 'data', 'runs', result.run_id))).ok).toBe(true);
+  });
+
+  it('sem nenhuma das três evidências o attempt continua UNKNOWN e não vira amostra', async () => {
+    const target = await temporaryDir();
+    const labRoot = await temporaryDir();
+    const result = await historyAttempt({
+      target,
+      labRoot,
+      attempt: 1,
+      role: AttemptRole.INITIAL,
+      ...PILOT_LAUNCH_SHAPE,
+      observedTokensTotal: null,
+    });
+
+    expect(result).toMatchObject({
+      outcome: 'SKIPPED',
+      reason: expect.stringContaining('had_inference UNKNOWN'),
+    });
+    await expect(readdir(path.join(labRoot, 'data', 'runs'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
+  it('o LaunchRecord carrega a contagem do provider como evidência durável', async () => {
+    const target = await temporaryDir();
+    const labRoot = await temporaryDir();
+    const result = await historyAttempt({
+      target,
+      labRoot,
+      attempt: 1,
+      role: AttemptRole.INITIAL,
+      ...PILOT_LAUNCH_SHAPE,
+      observedTokensTotal: 12_345,
+    });
+    if (result.outcome === 'SKIPPED') throw new Error(result.reason);
+
+    const execution = JSON.parse(
+      await readFile(
+        path.join(labRoot, 'data', 'runs', result.run_id, 'execution', 'execution-record.json'),
+        'utf8',
+      ),
+    ) as { metrics: { tokens: { value: number | null } } };
+    expect(execution.metrics.tokens.value).toBe(12_345);
+  });
+});
 
 describe('história canônica de project attempts', () => {
   it('fingerprint de work definition ignora id literal, mas não mistura semântica diferente', () => {

@@ -632,9 +632,34 @@ function buildRunRecord(
   };
 }
 
+/**
+ * Houve inferência neste launch?
+ *
+ * A prova mais direta é a contagem de tokens que o PRÓPRIO provider reportou
+ * sobre o turno. Ela vem primeiro de propósito: as duas outras evidências —
+ * equivalência em dólar e delta de quota — são leituras EXTERNAS e específicas
+ * de provider, e a ausência delas descreve o instrumento, não a execução.
+ *
+ * Foi exatamente essa inversão que se provou custosa no piloto Augmented
+ * Chess: nenhum profile Codex de assinatura expõe medidor de conta (`/usage` é
+ * comando do Claude) e nenhum reporta custo de API, então todos os 13 attempts
+ * reais caíram em UNKNOWN, nenhum virou run canônico e a história ficou
+ * permanentemente vazia — o que fazia todo routing cair no fallback estático e
+ * reescolher o mesmo provider, sem nunca acumular a evidência que decidiria.
+ *
+ * O rigor original permanece: ausência de qualquer uma das três continua
+ * UNKNOWN, e UNKNOWN continua não virando capability sample.
+ */
 function observedInference(
   launch: LaunchRecord,
 ): { readonly value: boolean; readonly provenance: string } | null {
+  const tokens = launch.observed_tokens;
+  if (tokens !== null && tokens !== undefined && tokens.total > 0) {
+    return {
+      value: true,
+      provenance: `LaunchRecord.observed_tokens.total=${tokens.total} (${tokens.provenance})`,
+    };
+  }
   const apiEquivalent = launch.billing?.provider_estimated_api_equivalent_usd;
   if (apiEquivalent !== null && apiEquivalent !== undefined) {
     return {
@@ -649,6 +674,22 @@ function observedInference(
     return { value: true, provenance: 'LaunchRecord.subscription_usage observed positive delta' };
   }
   return null;
+}
+
+/** Contagem do LaunchRecord na forma que a materialização canônica consome. */
+export function observedTokensOf(
+  launch: LaunchRecord,
+): NonNullable<CanonicalProjectAttemptInput['observedTokens']> | null {
+  const tokens = launch.observed_tokens;
+  if (tokens === null || tokens === undefined) return null;
+  return {
+    total: tokens.total,
+    ...(tokens.input === null ? {} : { input: tokens.input }),
+    ...(tokens.cached_input === null ? {} : { cachedInput: tokens.cached_input }),
+    ...(tokens.output === null ? {} : { output: tokens.output }),
+    ...(tokens.reasoning === null ? {} : { reasoning: tokens.reasoning }),
+    provenance: tokens.provenance,
+  };
 }
 
 function quotaUsageFromLaunch(launch: LaunchRecord, provider: string) {

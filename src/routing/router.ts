@@ -97,6 +97,88 @@ export type RoutingCandidate = z.infer<typeof RoutingCandidate>;
 export const CapabilityTier = z.enum(['economy', 'intermediate', 'advanced']);
 export type CapabilityTier = z.infer<typeof CapabilityTier>;
 
+/**
+ * POLICY de desempate entre profiles JÁ suficientes.
+ *
+ * `static_cost` é o comportamento histórico: entre alternativas do menor tier
+ * suficiente vence a mais barata pela tabela estática de modelo/effort. Ele é
+ * determinístico e barato, e por isso mesmo reescolhe o MESMO profile para
+ * sempre — o que, quando a história ainda não decide, congela a evidência num
+ * único provider e impede que ela um dia decida.
+ *
+ * `evidence_balanced` troca APENAS esse desempate: entre alternativas do menor
+ * tier suficiente, prefere adquirir a evidência que falta. Ele não amplia
+ * elegibilidade, não relaxa capacidade e não vence história suficiente.
+ */
+export const RoutingSelectionPolicy = z.enum(['static_cost', 'evidence_balanced']);
+export type RoutingSelectionPolicy = z.infer<typeof RoutingSelectionPolicy>;
+
+/**
+ * Folga de quota do provider. `UNKNOWN` é estado de primeira classe COM
+ * motivo: um provider sem medidor de assinatura nunca vira "100% livre" nem
+ * "0% livre", e a dimensão simplesmente não participa da comparação.
+ */
+export const QuotaHeadroom = z.discriminatedUnion('status', [
+  z.object({ status: z.literal('UNKNOWN'), reason: nonEmpty }).strict(),
+  z
+    .object({
+      status: z.literal('OBSERVED'),
+      remaining_pct: z.number().min(0).max(100),
+      provenance: nonEmpty,
+    })
+    .strict(),
+]);
+export type QuotaHeadroom = z.infer<typeof QuotaHeadroom>;
+
+/**
+ * Fatos OBSERVADOS que alimentam o desempate por aquisição de evidência.
+ * Nenhum deles é inventado pelo router: amostragem vem da história canônica,
+ * concentração vem dos launches já feitos nesta run e headroom vem do probe
+ * autoritativo do provider. Ausência é ausência — zero amostras é um fato,
+ * quota ausente é UNKNOWN.
+ */
+export const EvidenceBalanceFacts = z
+  .object({
+    profile_sample_sizes: z.record(z.number().int().nonnegative()),
+    provider_sample_sizes: z.record(z.number().int().nonnegative()),
+    run_launches_by_provider: z.record(z.number().int().nonnegative()),
+    quota_headroom_by_provider: z.record(QuotaHeadroom),
+    provenance: z.array(nonEmpty).min(1),
+  })
+  .strict();
+export type EvidenceBalanceFacts = z.infer<typeof EvidenceBalanceFacts>;
+
+export const BalancedCandidate = z
+  .object({
+    profile_id: identifier,
+    provider: nonEmpty,
+    capability_tier: CapabilityTier,
+    profile_sample_size: z.number().int().nonnegative(),
+    provider_sample_size: z.number().int().nonnegative(),
+    run_launches: z.number().int().nonnegative(),
+    quota_headroom: QuotaHeadroom,
+  })
+  .strict();
+export type BalancedCandidate = z.infer<typeof BalancedCandidate>;
+
+/**
+ * Evidência AUDITÁVEL do desempate. Ela responde, sem abrir o código, por que
+ * este profile e não o outro: quem estava no menor tier suficiente, quanta
+ * amostra cada um tinha, quanta quota era conhecida, quanta concentração já
+ * havia nesta run e qual critério finalmente decidiu.
+ */
+export const SelectionEvidence = z
+  .object({
+    policy: RoutingSelectionPolicy,
+    minimum_sufficient_tier: CapabilityTier,
+    balanced_candidates: z.array(BalancedCandidate),
+    exploration_reason: nonEmpty,
+    tie_break: nonEmpty,
+    quota_considered: z.boolean(),
+  })
+  .strict();
+export type SelectionEvidence = z.infer<typeof SelectionEvidence>;
+
 export const CandidateRejectionCode = z.enum([
   'PROFILE_UNAVAILABLE',
   'API_BILLING_REQUIRES_EXPLICIT_SELECTION',
@@ -163,6 +245,11 @@ export const RoutingDecision = z
     rationale: z.array(nonEmpty).min(1),
     provenance: z.array(nonEmpty).min(1),
     candidates_considered: z.array(CandidateConsideration).min(1),
+    /**
+     * Por que ESTE profile entre os igualmente suficientes. Opcional só para
+     * não invalidar decisões já gravadas; toda decisão nova a carrega.
+     */
+    selection_evidence: SelectionEvidence.optional(),
   })
   .strict();
 export type RoutingDecision = z.infer<typeof RoutingDecision>;
@@ -189,6 +276,10 @@ export interface InitialRoutingInput {
   readonly role: WorkerRole;
   readonly capability_registry: CapabilityRegistry;
   readonly candidates: readonly RoutingCandidate[];
+  /** Ausente preserva `static_cost`, o desempate histórico, verbatim. */
+  readonly selection_policy?: RoutingSelectionPolicy;
+  /** Obrigatório na prática para `evidence_balanced`; ausente degrada para o custo estático. */
+  readonly evidence_balance?: EvidenceBalanceFacts;
 }
 
 const TIER_ORDER: Readonly<Record<CapabilityTier, number>> = {
@@ -347,6 +438,118 @@ function forecastFor(
   });
 }
 
+interface EligibleEntry {
+  readonly candidate: RoutingCandidate;
+  readonly capability: ProfileCapability;
+  readonly tier: CapabilityTier;
+}
+
+const UNKNOWN_HEADROOM: QuotaHeadroom = {
+  status: 'UNKNOWN',
+  reason: 'nenhuma observação autoritativa de quota para este provider',
+};
+
+interface BalanceKeys {
+  readonly entry: EligibleEntry;
+  readonly candidate: BalancedCandidate;
+}
+
+/**
+ * Desempate por AQUISIÇÃO DE EVIDÊNCIA entre profiles do mesmo tier suficiente.
+ *
+ * A ordem dos critérios é a da política, não a do custo:
+ *
+ *  1. profile menos amostrado para esta classe comparável — o que falta saber
+ *     vale mais que o que já se sabe;
+ *  2. provider menos amostrado — evita aprender quatro variações do mesmo
+ *     provider antes de aprender qualquer coisa sobre o outro;
+ *  3. menor concentração NESTA run — evita drenar sistematicamente um provider
+ *     só porque ele ganhou o primeiro desempate;
+ *  4. maior folga de quota OBSERVADA — e só quando ela é conhecida para TODOS
+ *     os comparados; um UNKNOWN nunca é convertido em número nem penaliza quem
+ *     não tem medidor;
+ *  5. custo estático de modelo e effort;
+ *  6. profile_id.
+ *
+ * Nada aqui altera elegibilidade: a lista recebida já passou por autorização,
+ * billing, disponibilidade, role e capacidade suficiente.
+ */
+function balancedSelection(
+  balanceable: readonly EligibleEntry[],
+  policy: RoutingSelectionPolicy,
+  facts: EvidenceBalanceFacts | null,
+  minimumTier: CapabilityTier,
+): { readonly ordered: readonly EligibleEntry[]; readonly evidence: SelectionEvidence } | null {
+  if (policy !== 'evidence_balanced' || facts === null || balanceable.length === 0) return null;
+
+  const keyed: BalanceKeys[] = balanceable.map((entry) => ({
+    entry,
+    candidate: BalancedCandidate.parse({
+      profile_id: entry.candidate.profile_id,
+      provider: entry.capability.agent,
+      capability_tier: entry.tier,
+      profile_sample_size: facts.profile_sample_sizes[entry.candidate.profile_id] ?? 0,
+      provider_sample_size: facts.provider_sample_sizes[entry.capability.agent] ?? 0,
+      run_launches: facts.run_launches_by_provider[entry.capability.agent] ?? 0,
+      quota_headroom: facts.quota_headroom_by_provider[entry.capability.agent] ?? UNKNOWN_HEADROOM,
+    }),
+  }));
+
+  // Quota só entra na comparação quando é conhecida para TODOS: comparar um
+  // percentual observado contra um UNKNOWN inventaria o lado ausente.
+  const quotaConsidered = keyed.every((item) => item.candidate.quota_headroom.status === 'OBSERVED');
+  const headroomOf = (item: BalanceKeys): number =>
+    item.candidate.quota_headroom.status === 'OBSERVED' ? item.candidate.quota_headroom.remaining_pct : 0;
+
+  const ordered = [...keyed].sort((left, right) => {
+    const sample = left.candidate.profile_sample_size - right.candidate.profile_sample_size;
+    if (sample !== 0) return sample;
+    const providerSample = left.candidate.provider_sample_size - right.candidate.provider_sample_size;
+    if (providerSample !== 0) return providerSample;
+    const concentration = left.candidate.run_launches - right.candidate.run_launches;
+    if (concentration !== 0) return concentration;
+    if (quotaConsidered) {
+      const headroom = headroomOf(right) - headroomOf(left);
+      if (headroom !== 0) return headroom;
+    }
+    const [leftModelCost, leftEffortCost] = capabilityCostOf(left.entry.capability);
+    const [rightModelCost, rightEffortCost] = capabilityCostOf(right.entry.capability);
+    if (leftModelCost !== rightModelCost) return leftModelCost - rightModelCost;
+    if (leftEffortCost !== rightEffortCost) return leftEffortCost - rightEffortCost;
+    return left.candidate.profile_id.localeCompare(right.candidate.profile_id);
+  });
+
+  const winner = ordered[0] as BalanceKeys;
+  const runnerUp = ordered[1];
+  const tieBreak =
+    runnerUp === undefined
+      ? 'único profile no menor tier suficiente'
+      : winner.candidate.profile_sample_size !== runnerUp.candidate.profile_sample_size
+        ? `profile subamostrado: ${winner.candidate.profile_id} tem ${winner.candidate.profile_sample_size} episódios comparáveis contra ${runnerUp.candidate.profile_sample_size} de ${runnerUp.candidate.profile_id}`
+        : winner.candidate.provider_sample_size !== runnerUp.candidate.provider_sample_size
+          ? `provider subamostrado: ${winner.candidate.provider} tem ${winner.candidate.provider_sample_size} episódios contra ${runnerUp.candidate.provider_sample_size} de ${runnerUp.candidate.provider}`
+          : winner.candidate.run_launches !== runnerUp.candidate.run_launches
+            ? `menor concentração nesta run: ${winner.candidate.provider} lançou ${winner.candidate.run_launches} contra ${runnerUp.candidate.run_launches} de ${runnerUp.candidate.provider}`
+            : quotaConsidered && headroomOf(winner) !== headroomOf(runnerUp)
+              ? `maior folga de quota OBSERVADA: ${winner.candidate.provider} com ${headroomOf(winner)}% contra ${headroomOf(runnerUp)}% de ${runnerUp.candidate.provider}`
+              : 'custo estático de modelo, depois effort, depois profile_id';
+
+  return {
+    ordered: ordered.map((item) => item.entry),
+    evidence: SelectionEvidence.parse({
+      policy,
+      minimum_sufficient_tier: minimumTier,
+      balanced_candidates: ordered.map((item) => item.candidate),
+      exploration_reason:
+        runnerUp === undefined
+          ? 'nenhuma alternativa no menor tier suficiente: não havia o que equilibrar'
+          : `${ordered.length} profiles igualmente suficientes no tier ${minimumTier}; a escolha prefere adquirir a evidência que falta`,
+      tie_break: tieBreak,
+      quota_considered: quotaConsidered,
+    }),
+  };
+}
+
 function rejected(
   candidate: RoutingCandidate,
   tier: CapabilityTier | null,
@@ -424,11 +627,7 @@ export function routeInitialProfile(input: InitialRoutingInput): InitialRoutingR
 
   const requirement = requiredTierOf(unit);
   const considered: CandidateConsideration[] = [];
-  const eligible: Array<{
-    candidate: RoutingCandidate;
-    capability: ProfileCapability;
-    tier: CapabilityTier;
-  }> = [];
+  const eligible: EligibleEntry[] = [];
 
   for (const candidate of candidates) {
     const capability = input.capability_registry.get(candidate.profile_id);
@@ -473,7 +672,7 @@ export function routeInitialProfile(input: InitialRoutingInput): InitialRoutingR
     eligible.push({ candidate, capability, tier });
   }
 
-  eligible.sort((left, right) => {
+  const staticOrder = (left: EligibleEntry, right: EligibleEntry): number => {
     const tierDifference = TIER_ORDER[left.tier] - TIER_ORDER[right.tier];
     if (tierDifference !== 0) return tierDifference;
     const [leftModelCost, leftEffortCost] = capabilityCostOf(left.capability);
@@ -481,7 +680,34 @@ export function routeInitialProfile(input: InitialRoutingInput): InitialRoutingR
     if (leftModelCost !== rightModelCost) return leftModelCost - rightModelCost;
     if (leftEffortCost !== rightEffortCost) return leftEffortCost - rightEffortCost;
     return left.candidate.profile_id.localeCompare(right.candidate.profile_id);
-  });
+  };
+  eligible.sort(staticOrder);
+
+  const policy = input.selection_policy ?? 'static_cost';
+  const minimumTier = eligible[0]?.tier ?? requirement.tier;
+  // BALANCEAMENTO SÓ AQUI: entre os que já estão no MENOR tier suficiente.
+  // Nenhum profile de tier menor entra por equilíbrio, e nenhum profile
+  // insuficiente é promovido — a capacidade continua sendo o filtro, e o
+  // equilíbrio é apenas o critério de desempate entre iguais.
+  const balanceable = eligible.filter((entry) => entry.tier === minimumTier);
+  const facts = policy === 'evidence_balanced' ? (input.evidence_balance ?? null) : null;
+  const selection = balancedSelection(balanceable, policy, facts, minimumTier);
+  if (selection !== null) {
+    eligible.splice(0, balanceable.length, ...selection.ordered);
+  }
+  const selectionEvidence: SelectionEvidence =
+    selection?.evidence ??
+    SelectionEvidence.parse({
+      policy,
+      minimum_sufficient_tier: minimumTier,
+      balanced_candidates: [],
+      exploration_reason:
+        policy === 'evidence_balanced'
+          ? 'evidence_balanced pedido sem fatos observados de amostragem/quota: desempate degradou para o custo estático'
+          : 'policy static_cost: desempate por custo estático de modelo e effort',
+      tie_break: 'menor custo estático de modelo, depois effort, depois profile_id',
+      quota_considered: false,
+    });
 
   for (const entry of eligible) {
     const forecast = forecastFor(unit, entry.capability, entry.tier);
@@ -523,9 +749,12 @@ export function routeInitialProfile(input: InitialRoutingInput): InitialRoutingR
       outcome: 'ROUTED',
       profile: entry.capability,
       execution_runtime_forecast: forecast,
+      selection_evidence: selectionEvidence,
       rationale: [
         `tier requerido=${requirement.tier} por score=${requirement.score}: ${requirement.reasons.join('; ')}`,
         `profile ${entry.candidate.profile_id} é o menor recurso elegível com capacidade suficiente`,
+        `selection_policy=${selectionEvidence.policy}: ${selectionEvidence.exploration_reason}`,
+        `tie-break final: ${selectionEvidence.tie_break}`,
         `previsão de runtime=${forecast.predicted_runtime_ms}ms é ADVISORY e não participou desta escolha`,
       ],
       provenance: [

@@ -48,6 +48,7 @@ import {
   CapabilityRegistry,
   capabilityOf,
   decideEscalation,
+  EvidenceBalanceFacts,
   routeInitialProfileWithHistory,
   type EscalationAuthorization,
   type EscalationCandidatePreflight,
@@ -56,6 +57,7 @@ import {
   type HistoryInformedRoutingResult,
   type ProfileCapabilityInput,
   type RoutingCandidate,
+  type SelectionEvidence,
 } from '../../src/routing/index.js';
 import type { FailureDiagnosis } from '../../src/routing/diagnosis.js';
 import {
@@ -84,6 +86,7 @@ import {
   collectProjectLaunchFacts,
   escalationPreflightOf,
   evidenceOf,
+  quotaHeadroomByProvider,
   type LaunchFact,
   type LaunchFactEvidence,
   type ProjectLaunchFacts,
@@ -114,6 +117,7 @@ import {
 } from './operational-attempt.js';
 import {
   materializeCanonicalProjectAttempt,
+  observedTokensOf,
   projectProfileFingerprint,
   projectWorkDefinitionFingerprint,
   queryCanonicalProjectHistory,
@@ -217,6 +221,16 @@ export interface ProjectRoutingReport {
    * sabendo disso.
    */
   readonly history_status: 'EMPTY' | 'AVAILABLE' | 'INSUFFICIENT';
+  /**
+   * Quem realmente decidiu. `HISTORY` significa que uma série comparável
+   * dominou; `COLD_START` significa que a história não decidiu e a escolha
+   * saiu do desempate declarado pela policy.
+   */
+  readonly decision_mode: 'HISTORY' | 'COLD_START';
+  /** Desempate entre profiles igualmente suficientes; `null` quando a história decidiu. */
+  readonly selection: SelectionEvidence | null;
+  /** Dimensões de utilidade que ficaram fora da comparação por UNKNOWN observado. */
+  readonly dimensions_omitted: HistoryInformedRoutingResult['evidence']['dimensions_omitted'];
   readonly history_evidence: {
     readonly episode_count: number;
     readonly series_count: number;
@@ -855,6 +869,8 @@ export async function createProjectControlPlane(
     }
   }
 
+  /** Concentração OBSERVADA por provider nesta run: launches já decididos. */
+  const launchesByProvider = new Map<string, number>();
   const registry = new CapabilityRegistry(
     [...profiles.values()].map((profile) => capabilityOf(capabilityInputOf(profile))),
   );
@@ -916,6 +932,54 @@ export async function createProjectControlPlane(
       profile,
       ...(input.credentialRunner === undefined ? {} : { runner: input.credentialRunner }),
       ...(input.now === undefined ? {} : { now: input.now }),
+    });
+  }
+
+  /** Provider (agent) de um profile da policy; `null` fora dela. */
+  function providerOf(profileId: string): string | null {
+    return registry.get(profileId)?.agent ?? null;
+  }
+
+  /**
+   * Amostragem comparável POR PROFILE e POR PROVIDER, concentração nesta run e
+   * folga de quota observada. Zero amostras é um FATO — é justamente o fato que
+   * a política de cold-start precisa para preferir adquirir a evidência que
+   * falta. Quota ausente permanece UNKNOWN e simplesmente não desempata.
+   */
+  async function evidenceBalanceFactsOf(
+    eligible: readonly string[],
+    history: PerformanceHistoryQueryResultV2,
+  ): Promise<EvidenceBalanceFacts> {
+    const profileSamples: Record<string, number> = Object.fromEntries(
+      eligible.map((profileId) => [profileId, 0]),
+    );
+    const providerSamples: Record<string, number> = {};
+    for (const profileId of eligible) {
+      const provider = providerOf(profileId);
+      if (provider !== null) providerSamples[provider] = providerSamples[provider] ?? 0;
+    }
+    for (const series of history.series) {
+      const profileId = series.identity.profile.profile_id.value;
+      if (profileId === 'UNKNOWN' || profileSamples[profileId] === undefined) continue;
+      const observed = series.routing_aggregations.trials.sample_size;
+      profileSamples[profileId] = (profileSamples[profileId] ?? 0) + observed;
+      const provider = providerOf(profileId);
+      if (provider !== null) providerSamples[provider] = (providerSamples[provider] ?? 0) + observed;
+    }
+    const runLaunches: Record<string, number> = {};
+    for (const provider of Object.keys(providerSamples)) {
+      runLaunches[provider] = launchesByProvider.get(provider) ?? 0;
+    }
+    return EvidenceBalanceFacts.parse({
+      profile_sample_sizes: profileSamples,
+      provider_sample_sizes: providerSamples,
+      run_launches_by_provider: runLaunches,
+      quota_headroom_by_provider: await quotaHeadroomByProvider(paths, providerOf),
+      provenance: [
+        'PerformanceHistoryQueryResultV2.series[].routing_aggregations.trials.sample_size',
+        'launches já decididos por este control plane nesta run',
+        'LaunchRecord.subscription_usage do probe já pago pelos launches anteriores',
+      ],
     });
   }
 
@@ -1079,6 +1143,15 @@ export async function createProjectControlPlane(
           });
         },
       ));
+    // FATOS de aquisição de evidência. Nenhum deles é inventado: amostragem
+    // sai da história canônica já consultada, concentração sai dos launches
+    // que ESTE processo já fez, e headroom sai do probe de assinatura que os
+    // launches anteriores já pagaram. Nenhuma chamada nova ao provider.
+    const selectionPolicy = authorization.profile_policy.selection_policy;
+    const evidenceBalance =
+      selectionPolicy === 'evidence_balanced'
+        ? await evidenceBalanceFactsOf(eligible, history)
+        : null;
     const routed = routeInitialProfileWithHistory({
       work_unit: {
         source: 'direct_task_normalization',
@@ -1089,6 +1162,8 @@ export async function createProjectControlPlane(
       role: 'implementer',
       capability_registry: registry,
       candidates: candidatesFor(eligible),
+      selection_policy: selectionPolicy,
+      ...(evidenceBalance === null ? {} : { evidence_balance: evidenceBalance }),
       history,
       profile_fingerprints_sha256: Object.fromEntries(
         eligible.map((profileId) => [profileId, projectProfileFingerprint(profiles.get(profileId) as LauncherProfile)]),
@@ -1190,6 +1265,12 @@ export async function createProjectControlPlane(
         selected_profile_id: selectedProfileId,
         pinned: pinned !== null,
         history_status: historyStatusOf(routed),
+        decision_mode: routed.source === 'HISTORY' ? 'HISTORY' : 'COLD_START',
+        selection:
+          routed.source === 'HISTORY' || routed.fallback?.outcome !== 'ROUTED'
+            ? null
+            : (routed.fallback.selection_evidence ?? null),
+        dimensions_omitted: routed.evidence.dimensions_omitted,
         history_evidence: {
           episode_count: history.episodes.length,
           series_count: history.series.length,
@@ -1380,6 +1461,9 @@ export async function createProjectControlPlane(
 
     const selectedProfileId = assessment.selectedProfileId as string;
     const capability = registry.get(selectedProfileId);
+    if (capability !== undefined) {
+      launchesByProvider.set(capability.agent, (launchesByProvider.get(capability.agent) ?? 0) + 1);
+    }
     // A decisão de routing PROJETADA: provider, model e effort são fatos que
     // só o control plane conhece autoritativamente neste instante. Emitir é
     // observação; nada abaixo lê este evento de volta.
@@ -1624,6 +1708,9 @@ export async function createProjectControlPlane(
       instructionFiles: context.instructionFiles,
       instructionInventoryComplete: context.instructionInventoryComplete,
       interventionEvidence,
+      // Contagem reportada pelo provider: entra na história como métrica
+      // observada e é a mesma evidência que prova a inferência.
+      observedTokens: observedTokensOf(launch),
       ...(fakeInference === undefined ? {} : { observedHadInference: fakeInference }),
       ...(input.now === undefined ? {} : { now: input.now() }),
     });
@@ -1933,9 +2020,9 @@ export async function createProjectControlPlane(
       duration_ms: launch?.duration_ms ?? null,
       exit_code: launch?.exit_code ?? null,
       timed_out: launch?.timed_out ?? null,
-      // Equivalência estimada pela CLI é o único número disponível sem fonte
-      // autoritativa; ausência continua UNKNOWN, nunca zero.
-      usage_tokens: null,
+      // Contagem reportada pelo próprio provider sobre o turno; ausência
+      // continua UNKNOWN, nunca zero.
+      usage_tokens: launch?.observed_tokens?.total ?? null,
       candidate_commit: finalization?.candidate_commit ?? null,
       changed_files:
         finalization?.changed_files ?? completion?.orchestrator_evidence.changed_files ?? null,

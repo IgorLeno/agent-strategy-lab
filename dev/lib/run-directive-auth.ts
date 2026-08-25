@@ -92,9 +92,20 @@ export function overlayAuthorization(input: {
     );
   }
 
+  // `providers.policy` só troca o DESEMPATE do routing. Ele não concede
+  // capability, não amplia a lista de profiles e não muda billing: um profile
+  // fora da policy continua fora, e um insuficiente continua recusado.
+  const selectionPolicy =
+    input.header?.providers?.policy === 'evidence_balanced' ? 'evidence_balanced' : undefined;
+
   return {
     ...input.preset,
     autonomous_execution_boundary: boundary,
+    ...(selectionPolicy === undefined
+      ? {}
+      : {
+          profile_policy: { ...input.preset.profile_policy, selection_policy: selectionPolicy },
+        }),
   };
 }
 

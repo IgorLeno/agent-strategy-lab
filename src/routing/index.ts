@@ -22,14 +22,19 @@ export {
  * características da work unit.
  */
 export {
+  BalancedCandidate,
   CandidateConsideration,
   CandidateRejectionCode,
   CapabilityTier,
+  EvidenceBalanceFacts,
   ExecutionRuntimeForecast,
   InitialRoutingResult,
+  QuotaHeadroom,
   RoutingBlocked,
   RoutingCandidate,
   RoutingDecision,
+  RoutingSelectionPolicy,
+  SelectionEvidence,
   StructuredWorkUnit,
   WorkerRole,
   WorkUnitSource,
@@ -40,6 +45,7 @@ export {
 /** Camada histórica read-only sobre M78 (M82). */
 export {
   HISTORY_UTILITY_AGGREGATIONS,
+  OPTIONAL_HISTORY_UTILITY_DIMENSIONS,
   HistoryInformedRoutingResult,
   HistoryRoutingEvidence,
   HistoryRoutingRecommendation,
