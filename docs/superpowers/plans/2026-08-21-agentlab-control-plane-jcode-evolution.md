@@ -1,6 +1,9 @@
 # Agent Strategy Lab — Evolução do Control Plane Autônomo + Integração jcode
 
 **Data:** 2026-08-21 · **Status:** APROVADO COM AJUSTES (decisões humanas D1–D6 incorporadas)
+
+> **HISTÓRICO / SUPERSEDED (2026-08-25).** Documento preservado como registro do que foi decidido em 2026-08-21; nada abaixo foi reescrito. Deste plano só foram executadas as work units M87–M94 (M-A e M-B). Depois do primeiro piloto externo real, as tasks M95–M126 foram **removidas de `dev/plan.yaml`** e este plano **deixou de ser uma sequência de desenvolvimento autorizada**: não é o roadmap atual, não autoriza implementação e não deve ser retomado como plano. Os temas que sobreviveram estão em [`docs/FUTURE_DIRECTIONS.md`](../../FUTURE_DIRECTIONS.md), que não é plano.
+
 **Base de evidência:** main @ `a24c0cb1d55724438c6a1c13d546797f11512084` + auditoria read-only do jcode @ `a63dbc4` (v0.79.1)
 **Tasks operacionais:** M87–M126 em `dev/plan.yaml` (mapa na §17)
 

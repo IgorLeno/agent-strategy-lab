@@ -1358,17 +1358,15 @@ real depende de aprovação humana explícita posterior.
 
 ---
 
-## Marco 4 — Evolução do Control Plane Autônomo + jcode (M87–M126)
+## Marco 4 — Realinhamento documental + Typed Handoff v2 (M87–M94)
 
-Plano arquitetural aprovado:
-[`docs/superpowers/plans/2026-08-21-agentlab-control-plane-jcode-evolution.md`](superpowers/plans/2026-08-21-agentlab-control-plane-jcode-evolution.md).
-Milestones arquiteturais M-A…M-I mapeiam para as tasks operacionais abaixo
-(M-A=M87–M90 · M-B=M91–M94 · M-C=M95–M99 · M-D=M100–M104 · M-E=M105–M109 ·
-M-F=M110–M112 · M-G=M113–M118 · M-H=M119–M122 · M-I=M123–M126). Decisões
-humanas D1–D6 já resolvidas. Post-v0.1 capabilities M95–M126 are
-evidence-triggered backlog. They are not blockers for real-project operation.
-Se retomados por evidência de uso, preservam os gates específicos já descritos
-em cada task.
+Origem histórica: o plano datado
+[`docs/superpowers/plans/2026-08-21-agentlab-control-plane-jcode-evolution.md`](superpowers/plans/2026-08-21-agentlab-control-plane-jcode-evolution.md)
+(HISTÓRICO — ver o próprio arquivo). Dele só permaneceram as work units
+M87–M94 (M-A = M87–M90, realinhamento documental; M-B = M91–M94, Typed
+Handoff v2), executadas e fechadas. A continuação arquitetural que aquele
+plano descrevia **não é mais uma sequência autorizada**: ver
+[Ids aposentados — M95–M126](#ids-aposentados--m95m126).
 
 ### M87 — Root README — identidade de control plane
 **Depende de:** M86 · **Gate:** `pnpm build`
@@ -1423,196 +1421,19 @@ Reviewer nomeia cobertura e endereça `what_i_did_not_check` por item; ACCEPT
 sem cobertura mínima é estruturalmente inválido. Regra conjuntiva e 3 hashes
 intactos; diversidade default inalterada (D5).
 
-### M95 — ExecutionEventV1
-**Depende de:** M89, M90 · **Teste:** `test/schemas/execution-event.test.ts`
+---
 
-Contrato provider-neutral de leitura (deltas, tool, usage, result, failure,
-rate limit) com provenance; eventos desconhecidos preservados como raw.
+## Ids aposentados — M95–M126
 
-### M96 — Normalização Codex no harness
-**Depende de:** M95 · **Teste:** `test/dev/launch.test.ts`
+Os ids M95–M126 existiram como decomposição pré-piloto de capabilities
+pós-v0.1 (eventos de execução provider-neutral, plan store, decisão humana
+persistida, retrieval estrutural, adapter externo, concorrência, knowledge
+store). Foram **retirados de `dev/plan.yaml`** depois do primeiro piloto
+externo real: deixaram de ser uma sequência de desenvolvimento autorizada e
+não são backlog executável.
 
-Harness parseia o stream json do Codex (parser existente reusado), fechando a
-assimetria de observabilidade; falha de parse vira UNKNOWN com provenance.
+Os temas que sobreviveram estão em
+[FUTURE_DIRECTIONS.md](FUTURE_DIRECTIONS.md) — que **não é plano**, não tem
+ordem, não tem dependências e não autoriza implementação.
 
-### M97 — Normalização Claude para ExecutionEventV1
-**Depende de:** M95 · **Teste:** `test/dev/claude-stream.test.ts`
-
-Projeção do stream-json Claude para o contrato comum sem alterar leitura nem
-consumidores atuais; equivalência provada por teste.
-
-### M98 — Evidência de launch para planner e reviewer
-**Depende de:** M95 · **Teste:** `test/dev/project-orchestrate.test.ts`
-
-Roles read-only passam a produzir a mesma classe de evidência do implementer
-(launch record, duração, auditoria de sobreviventes).
-
-### M99 — Persistência canônica de eventos normalizados
-**Depende de:** M96, M97 · **Teste:** `test/storage/execution-events.test.ts`
-
-Eventos normalizados selados aditivamente na seção execution com redaction,
-manifest e integridade; runs antigos permanecem válidos.
-
-### M100 — Plan store — writer, loader e registry
-**Depende de:** M94, M99 · **Teste:** `test/dev/plan-store.test.ts`
-
-`ImplementationPlan` persiste em `.dev/plans/` com sha e fingerprints;
-registry resolve o plano ativo; PlanFile avulso segue funcionando.
-
-### M101 — Task graph status projection
-**Depende de:** M100 · **Teste:** `test/dev/graph-projection.test.ts`
-
-Nove estados derivados (nunca duplicados) expostos no lifecycle report e no
-comando `dev-graph`; dry-run usa a mesma derivação.
-
-### M102 — Promotion policy
-**Depende de:** M100 · **Teste:** `test/planner/promotion.test.ts`
-
-Política pura decide promover/arquivar/pedir decisão sobre
-`what_i_did_not_check`/`open_questions`/decomposição, com caps D6
-(2 por revision, 1 por task) configuráveis.
-
-### M103 — Plan revision versionada
-**Depende de:** M100, M102 · **Teste:** `test/dev/plan-revision.test.ts`
-
-Promoções viram plano novo com parent e diff; `afterWorkUnit` integra;
-revision inválida é rejeitada fail-closed.
-
-### M104 — E2E nascimento dinâmico de tarefas
-**Depende de:** M103 · **Teste:** `test/e2e/dynamic-task-birth-e2e.test.ts`
-
-Promoção dentro dos caps executa; estouro vira decision request; crash não
-duplica; dependente espera dependência.
-
-### M105 — HumanDecisionRequest/Record
-**Depende de:** M104 · **Teste:** `test/schemas/human-decision.test.ts`
-
-Schemas e store append-only de decisões humanas com classe, evidência
-referenciada e escopo concedido amarrado por sha.
-
-### M106 — HUMAN_REQUIRED persiste decision request
-**Depende de:** M105 · **Teste:** `test/dev/project-run.test.ts`
-
-Toda parada humana do caminho de projeto grava request e marca o nó
-`human_blocked`; zero spawn após o gate preservado.
-
-### M107 — CLI dev-decide
-**Depende de:** M105 · **Teste:** `test/dev/dev-decide.test.ts`
-
-Listar/decidir/histórico com exit codes contratuais; decisão duplicada falha
-fechado.
-
-### M108 — Resume após decisão humana
-**Depende de:** M106, M107 · **Teste:** `test/dev/decision-resume.test.ts`
-
-Record aprovador re-torna o nó runnable sem reinício; escopo concedido é o
-limite; decisão vira `InterventionRecord` na história.
-
-### M109 — E2E crash/resume com decisão pendente
-**Depende de:** M108 · **Teste:** `test/e2e/decision-resume-e2e.test.ts`
-
-Gate → crash → pedido persiste → aprovação → retomada e conclusão; variação
-com negação; evidência íntegra em todas as fases.
-
-### M110 — Retrieval estrutural — interface language-neutral
-**Depende de:** M89, M90 · **Teste:** `test/retrieval/contract.test.ts`
-
-Contrato único (outline, symbol, range, references) com adapters por
-linguagem e fallback generic-text; capacidade declarada com provenance; sem
-acoplamento a TypeScript.
-
-### M111 — Packet builder com retrieval estrutural
-**Depende de:** M110 · **Teste:** `test/dev/packet-retrieval.test.ts`
-
-Packets referenciam estrutura em vez de conteúdo amplo dentro dos budgets;
-teste estrutural proíbe conteúdo acima do budget.
-
-### M112 — Métricas de economia de contexto
-**Depende de:** M110, M99 · **Teste:** `test/performance/context-metrics.test.ts`
-
-`context_bytes_sent`, `handoff_size` e `full_files_read` por attempt com
-provenance; ausência permanece UNKNOWN.
-
-### M113 — Spike — fronteira de transporte jcode
-**Depende de:** M109, M111, M112 · **Gate:** decisão humana `GO_SDK | GO_ACP | NO_GO`
-
-Compara SDK TypeScript vs ACP/JSON-RPC contra dez critérios e registra o
-veredito como decision request. Nenhuma dependência jcode entra no repo.
-
-### M114 — Contrato do adapter jcode + eventos
-**Depende de:** M113 · **Teste:** `test/adapters/jcode-contract.test.ts`
-
-Contratos puros e mapeamento para ExecutionEventV1 com fixtures gravadas;
-`background_progress` descartado; capability ausente = perfil indisponível.
-
-### M115 — Runtime do adapter jcode isolado
-**Depende de:** M114 · **Teste:** `test/dev/jcode-runtime.test.ts`
-
-Instância privada, credencial isolada e provada, pinning duplo, deadline
-externa, classificação de falhas, auditoria de sobreviventes.
-
-### M116 — Perfil jcode no catálogo + doctor
-**Depende de:** M115 · **Teste:** `test/dev/doctor.test.ts`
-
-Perfil com capability provenance e ownership do orquestrador; memória, swarm,
-ambient e self-dev provadamente desligados; indisponível sai dos candidatos.
-
-### M117 — E2E adapter jcode com bridge fake
-**Depende de:** M115 · **Teste:** `test/e2e/jcode-adapter-e2e.test.ts`
-
-Duplo do transporte exercita happy path e modos de falha sem binário real;
-falhas recuperáveis pelas primitives existentes.
-
-### M118 — Gating do adapter por authorization
-**Depende de:** M116, M117 · **Teste:** `test/dev/project-authorization.test.ts`
-
-Adapter inalcançável sem habilitação explícita; ausência = desligado;
-comportamento sem jcode bit-idêntico.
-
-### M119 — Workspace isolado por work unit
-**Depende de:** M109 · **Teste:** `test/dev/unit-workspace.test.ts`
-
-Execução por workspace descartável com aceitação aplicada pelo orquestrador;
-com concurrency 1, equivalente ao atual.
-
-### M120 — Fila serializada de merge e aceitação
-**Depende de:** M119 · **Teste:** `test/dev/merge-queue.test.ts`
-
-Aceitação um-por-vez; conflito gera um rebase-repair bounded; falha dupla
-vira `human_blocked` com request.
-
-### M121 — Scheduler com concorrência limitada
-**Depende de:** M120 · **Gate:** decisão humana para N > 1
-
-`max_concurrency` na authorization (default 1); paralelo só com arquivos
-disjuntos e sem ancestral aberto; violação serializa fail-safe.
-
-### M122 — E2E conflito paralelo e recuperação
-**Depende de:** M121 · **Teste:** `test/e2e/concurrency-e2e.test.ts`
-
-Dois nós paralelos com aceitação serial; conflito recuperado; evidência
-distinta e íntegra; colisão evitada vira métrica.
-
-### M123 — KnowledgeEntry — schema e store
-**Depende de:** M109 · **Gate:** decisão humana (execução real suficiente)
-
-Conhecimento auditável com categoria, source, provenance, confidence,
-relations e identidade de projeto (D4); append-only com supersessão.
-
-### M124 — Derivadores de conhecimento
-**Depende de:** M123 · **Teste:** `test/knowledge/derive.test.ts`
-
-Derivadores idempotentes a partir de decisões, lessons, padrões de falha e
-routing; nenhuma entrada sem fonte verificável.
-
-### M125 — Retrieval pull de conhecimento
-**Depende de:** M124 · **Teste:** `test/knowledge/retrieval.test.ts`
-
-Consulta pull só em planner/router/reviewer/recovery, registrada com
-provenance; implementer nunca recebe injeção; cross-projeto exige policy.
-
-### M126 — Guard — derived nunca vira canônico sozinho
-**Depende de:** M123 · **Teste:** `test/knowledge/promotion-guard.test.ts`
-
-Promoção de `derived` exige `HumanDecisionRecord`; contradições ficam
-expostas; supersessão preserva histórico.
+Esses ids ficam aposentados: **não reutilizar M95–M126** para trabalho novo.

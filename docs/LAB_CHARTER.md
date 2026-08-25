@@ -192,4 +192,5 @@ seguiu para o adaptive router.
   Orchestration Control Plane
 - [HARNESS.md](HARNESS.md) — runtime de execução e sessões descartáveis (`dev/`)
 - [BACKLOG.md](BACKLOG.md) — espelho humano de `dev/plan.yaml`
+- [FUTURE_DIRECTIONS.md](FUTURE_DIRECTIONS.md) — temas evidence-triggered; não é plano
 - [LESSONS.md](LESSONS.md) — correções que viraram regra

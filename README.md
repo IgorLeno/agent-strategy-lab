@@ -224,8 +224,8 @@ PROMOTED        discard / defer
 Estágios intermediários equivalentes a `SANDBOXED` continuam válidos como
 isolamento antes de benchmark. **PROMOTED** significa *available /
 recommended based on evidence* — não *mandatory*. Esta integração adaptativa
-**não será implementada agora**; é fundação a aproveitar depois do primeiro
-piloto.
+**não está autorizada como trabalho**: é visão, e só vira mudança se a
+operação em projeto real produzir a evidência que a justifique.
 
 ## Melhoria evidence-driven
 
@@ -282,42 +282,27 @@ segurança necessária. Sem evidência de benefício: **defer**.
 
 ## Fase atual
 
-O Agent Lab está no **primeiro teste real end-to-end** em um projeto
-externo.
+O **primeiro teste real end-to-end em projeto externo está concluído**. O
+Agent Lab está em uso em projetos reais e acumula evidência operacional a
+cada execução.
 
-**Projeto piloto:** Augmented Chess. O piloto serve para encontrar
-integration gaps, autonomia real, comportamento de routing e repair,
-overhead, qualidade, custo e velocidade.
+Mudanças arquiteturais são **evidence-triggered**: nascem de observação em
+projeto real, não de antecipação. **Não existe sequência de milestones
+pré-autorizada depois da v0.1** — nem no plano, nem neste README.
 
-O primeiro projeto real/piloto ainda deve ser concluído **antes** de uma nova
-fase arquitetural. A visão adaptativa deste README **não** será implementada
-durante o piloto apenas por antecipação.
+O ritmo de desenvolvimento do Lab:
 
-Post-v0.1 capabilities (M95–M126) são backlog *evidence-triggered*. Não são
-bloqueadores da operação em projeto real e **não devem ser iniciadas** só
-porque a visão está escrita aqui.
+```text
+REAL PROJECT → OBSERVATION → CONCRETE NEED/DEFECT
+     → SMALLEST COHERENT CHANGE → REGRESSION → REAL PROJECT
+```
 
-## Depois do primeiro piloto
+A visão adaptativa descrita acima permanece visão. Ela não autoriza trabalho:
+cada peça só é construída quando um projeto real mostrar a necessidade
+concreta, e no menor recorte que a resolva.
 
-Primeiro: concluir o projeto real.
-
-Depois: análise completa do piloto.
-
-Perguntas da análise:
-
-- onde o Lab facilitou?
-- onde dificultou?
-- quanto overhead criou?
-- onde houve intervenção humana desnecessária?
-- quais models foram eficientes?
-- como o routing funcionou?
-- como repair/escalation funcionaram?
-- quais tools/methods apareceram?
-- que evidência foi perdida?
-- o que realmente vale registrar no futuro?
-
-**Só depois** dessa análise começar a direcionar a arquitetura do Lab para a
-visão adaptativa descrita neste README.
+Temas ainda plausíveis — sem ordem, sem dependências, sem autorização — estão
+em [`docs/FUTURE_DIRECTIONS.md`](docs/FUTURE_DIRECTIONS.md).
 
 ## Princípio de desenvolvimento
 
@@ -484,9 +469,9 @@ providers fake): ciclo autônomo via `pnpm lab run`; evidence
 kernel; billing/credencial com fatos tri-state; catálogo de perfis
 versionados. `pnpm dev-run-project` permanece como primitive interna.
 
-**Limitações atuais** (mapeadas como work units M95–M126 em
-[`dev/plan.yaml`](dev/plan.yaml); plano em
-[`docs/superpowers/plans/2026-08-21-agentlab-control-plane-jcode-evolution.md`](docs/superpowers/plans/2026-08-21-agentlab-control-plane-jcode-evolution.md)):
+**Limitações atuais** (descritas como fatos do sistema, não como trabalho
+planejado — nenhuma delas tem work unit autorizada; os temas correspondentes
+vivem em [`docs/FUTURE_DIRECTIONS.md`](docs/FUTURE_DIRECTIONS.md)):
 
 - `HUMAN_REQUIRED` é terminal: ainda não há registro persistido de decisão
   humana com retomada automática do nó bloqueado.
@@ -507,7 +492,9 @@ versionados. `pnpm dev-run-project` permanece como primitive interna.
 Documentos de referência: [`docs/LAB_CHARTER.md`](docs/LAB_CHARTER.md)
 (missão e fronteiras atuais), [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
 [`docs/HARNESS.md`](docs/HARNESS.md), [`docs/LESSONS.md`](docs/LESSONS.md),
-[`docs/adr/ADR-0003-control-plane-identity.md`](docs/adr/ADR-0003-control-plane-identity.md).
+[`docs/adr/ADR-0003-control-plane-identity.md`](docs/adr/ADR-0003-control-plane-identity.md),
+[`docs/FUTURE_DIRECTIONS.md`](docs/FUTURE_DIRECTIONS.md) (temas
+evidence-triggered — não é plano).
 
 ## Estrutura do repositório
 

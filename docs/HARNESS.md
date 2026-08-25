@@ -52,8 +52,9 @@ Estado honesto pós-M86: essa regra vale para **contratos e decisão** (que de
 fato vivem em `src/`), mas o **runtime** do Orchestration Control Plane foi
 construído em `dev/lib/project-*.ts`, consumindo os contratos de `src/`. Ou
 seja, `dev/` hoje contém duas coisas distintas — o harness de bootstrap
-(congelado pelas quatro condições acima) e o runtime do control plane (em
-evolução ativa pelo plano do Marco 4). A dívida de consolidação está
+(congelado pelas quatro condições acima) e o runtime do control plane (que
+evolui por evidência de projeto real, sem roadmap pré-autorizado). A dívida
+de consolidação está
 registrada em [ADR-0003](adr/ADR-0003-control-plane-identity.md); até lá, as
 quatro condições de freeze aplicam-se ao harness de bootstrap, e o runtime do
 control plane evolui pelas work units planejadas em `dev/plan.yaml`, nunca

@@ -1,5 +1,12 @@
 # Operational Boundary Audit — Wave 1
 
+> **Registro histórico.** Esta auditoria documenta a Wave 1, concluída. Wave 1
+> foi a última onda numerada: **não existe uma "Wave 2" planejada ou
+> autorizada**, e nada aqui autoriza trabalho futuro. O que sobreviveu como
+> tema plausível está em [FUTURE_DIRECTIONS.md](FUTURE_DIRECTIONS.md) — que
+> não é plano. As menções a candidatos ao longo do texto são o que se pensava
+> na época e ficam preservadas como tal.
+
 > Escopo: SOMENTE as fronteiras que uma execução operacional real atravessa
 > entre `ProjectIntake` e `History`. Não é uma análise geral do codebase.
 >
@@ -237,7 +244,7 @@ Custo de inferência da auditoria: **zero**.
 - **ASSUMPTION**: `HUMAN_REQUIRED` representa decisão genuinamente humana.
 - **REAL EVIDENCE**: no piloto, chegaram a `HUMAN_REQUIRED` ou a bloqueio equivalente: arquivo ignorado pelo Git, declaração errada do worker e fechamento pendente após restart. Nenhum dos três é decisão humana.
 - **SEVERITY**: alta — é a métrica central do README ("intervenção humana deve ser exceção").
-- **ACTION nesta onda**: remover as três causas acima na origem (G, H, J, L, P). A regra global `maximum_attempts=1 / same_profile_required=true / UNKNOWN→human` **não** foi redesenhada — é candidata explícita da Onda 2.
+- **ACTION nesta onda**: remover as três causas acima na origem (G, H, J, L, P). A regra global `maximum_attempts=1 / same_profile_required=true / UNKNOWN→human` **não** foi redesenhada — permanece como está, e só muda se a operação real produzir evidência de que precisa mudar.
 
 ---
 
@@ -249,7 +256,7 @@ Custo de inferência da auditoria: **zero**.
 | 2 | J | `AgentCompletionReport`/`HandoffDraft` são pré-condição capaz de invalidar candidate real | corrigido nesta onda |
 | 3 | L | `dev-run-project` não retoma `FINALIZING`; exige primitives internas | corrigido nesta onda |
 | 4 | P | Falha de telemetria benchmark-style aborta run operacional válida | corrigido nesta onda |
-| 5 | Q | `HUMAN_REQUIRED` usado para problema técnico | causas removidas; classificação geral fica para Onda 2 |
+| 5 | Q | `HUMAN_REQUIRED` usado para problema técnico | causas removidas; classificação geral não foi redesenhada |
 | 6 | A(colateral) | `src/adapters/*/invocation.ts` diverge dos profiles reais e não é usado no hot path | documentado, não alterado |
 
 ---
@@ -313,14 +320,17 @@ isso, não passa pelos hooks de observação — não grava
 retomado. Nenhuma evidência é perdida (CompletionRecord, HandoffRecord e
 OrchestratedFinalizationRecord são gravados normalmente), mas o registro leve
 de aprendizado fica ausente nesse caminho. Não foi corrigido nesta onda por
-disciplina de escopo; é candidato direto da Onda 2.
+disciplina de escopo; permanece limitação conhecida, sem trabalho autorizado.
 
-## WAVE 2 CANDIDATES
+## Sucessores desta auditoria
 
-- planner contract simplification;
-- isolated/disposable attempt workspace;
-- contextual repair/escalation;
-- plan revision;
-- richer `ExecutionEpisode`;
-- capabilities/extensions;
-- adaptive learning.
+Não há Wave 2. Os temas levantados aqui (simplificação do contrato do planner,
+workspace de attempt isolado/descartável, repair/escalation contextual,
+revisão de plano, episódio de execução mais rico, capabilities/extensions,
+aprendizado adaptativo) não foram promovidos a fase, plano ou backlog.
+
+Nada deles é trabalho autorizado. Cada um só existe como possibilidade, e só
+vira mudança pelo caminho normal: observação em projeto real → necessidade ou
+defeito concreto → menor mudança coerente → regressão. Os que ainda parecem
+plausíveis estão resumidos em
+[FUTURE_DIRECTIONS.md](FUTURE_DIRECTIONS.md).

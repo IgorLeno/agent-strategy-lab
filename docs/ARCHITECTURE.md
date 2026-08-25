@@ -25,11 +25,11 @@ serviço do control plane, não como definição do produto.
 > `--self` / `--resume` permanecem como interface avançada. Self-maintenance
 > (`target.type: self`) executa num git worktree isolado; o processo do
 > control plane continua na SHA original até um fast-forward fail-closed no
-> fim. A evolução seguinte está descrita
-> em
-> [docs/superpowers/plans/2026-08-21-agentlab-control-plane-jcode-evolution.md](superpowers/plans/2026-08-21-agentlab-control-plane-jcode-evolution.md).
-> Post-v0.1 capabilities M95–M126 are evidence-triggered backlog. They are not
-> blockers for real-project operation.
+> fim. O primeiro piloto externo end-to-end está concluído e o Lab opera em
+> projetos reais; **não existe sequência arquitetural pré-autorizada depois da
+> v0.1** — a evolução é evidence-triggered, e os temas ainda plausíveis (sem
+> ordem nem autorização) estão em
+> [docs/FUTURE_DIRECTIONS.md](FUTURE_DIRECTIONS.md).
 > Onde houver divergência futura, o código é a autoridade.
 
 ---
@@ -501,6 +501,7 @@ A escolha do driver de SQLite e o risco de addon nativo estão em
 ## 8. Documentos relacionados
 
 - [BACKLOG.md](BACKLOG.md) — espelho humano de `dev/plan.yaml`
+- [FUTURE_DIRECTIONS.md](FUTURE_DIRECTIONS.md) — temas evidence-triggered; não é plano
 - [LESSONS.md](LESSONS.md) — correções que viraram regra
 - [HARNESS.md](HARNESS.md) — runtime de execução e sessões descartáveis (`dev/`)
 - [BILLING.md](BILLING.md) — política de cobrança dos workers
