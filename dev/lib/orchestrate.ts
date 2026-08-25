@@ -43,8 +43,9 @@ import {
   createRoutinePostLaunchRuntime,
 } from './routine-autonomy-runtime.js';
 import type { ProjectControlPlane } from './project-run.js';
+import type { LaunchRecord } from './schemas.js';
 import { selectNextTask } from './select.js';
-import type { LabProgressListener } from './lab-progress.js';
+import type { LabProgressListener, LabProgressQuota } from './lab-progress.js';
 import { ensureRuntimeDirs, getTaskState, readState } from './state.js';
 import { launchTask, prepareNextTask, type LaunchStepResult } from './steps.js';
 
@@ -81,6 +82,39 @@ export const SKIP_PREFLIGHT_FLAG = 'skip-preflight';
  */
 function recordOf(launch: LaunchStepResult) {
   return launch.outcome?.record ?? null;
+}
+
+/**
+ * Quota do provider como EVIDÊNCIA de projeção. Só o probe de assinatura
+ * autoritativo produz `OBSERVED`; qualquer outra situação permanece UNKNOWN
+ * com motivo legível — nenhum provider sem medidor vira "0% consumido".
+ */
+function observedQuotaOf(record: LaunchRecord | null): LabProgressQuota {
+  const usage = record?.subscription_usage ?? null;
+  if (usage === null) {
+    return {
+      status: 'UNKNOWN',
+      reason: 'LaunchRecord.subscription_usage ausente: este provider não expõe medidor de assinatura',
+    };
+  }
+  if (!usage.probe_contract.before.available || !usage.probe_contract.after.available) {
+    return { status: 'UNKNOWN', reason: 'probe de quota indisponível antes ou depois do launch' };
+  }
+  return {
+    status: 'OBSERVED',
+    windows: [
+      {
+        window_id: 'five_hour',
+        used_pct: usage.five_hour.after_used_pct,
+        consumed_pp: usage.five_hour.consumed_pp,
+      },
+      {
+        window_id: 'seven_day_all_models',
+        used_pct: usage.seven_day_all_models.after_used_pct,
+        consumed_pp: usage.seven_day_all_models.consumed_pp,
+      },
+    ],
+  };
 }
 
 interface ExecutionResult {
@@ -165,7 +199,15 @@ async function executeReadyTask(
     await writePacket(paths, packet);
   }
 
-  onProgress?.({ stage: 'WORKER_RUNNING', detail: `task=${packet.task_id} profile=${profileId}` });
+  onProgress?.({
+    stage: 'WORKER_RUNNING',
+    detail: `task=${packet.task_id} profile=${profileId}`,
+    task: {
+      task_id: packet.task_id,
+      profile_id: profileId,
+      ...(repair === null ? {} : { attempt_role: 'repair' as const }),
+    },
+  });
   const launch = await launchTask(
     paths,
     packet,
@@ -195,7 +237,19 @@ async function executeReadyTask(
     };
   }
 
-  onProgress?.({ stage: 'VALIDATING', detail: `task=${packet.task_id}` });
+  onProgress?.({
+    stage: 'VALIDATING',
+    detail: `task=${packet.task_id}`,
+    task: {
+      task_id: packet.task_id,
+      attempt,
+      profile_id: profileId,
+      duration_ms: iterationBase.record?.duration_ms ?? null,
+      // Quota só quando o PROVIDER a reportou; ausência de medidor permanece
+      // UNKNOWN com motivo, nunca vira 0%.
+      quota: observedQuotaOf(iterationBase.record),
+    },
+  });
   const close = await closeTaskByLaunchPolicy({
     paths,
     loaded,
@@ -208,10 +262,30 @@ async function executeReadyTask(
     reason: close.reason,
   };
   if (close.kind === 'PASS') {
-    onProgress?.({ stage: 'TASK_ACCEPTED', detail: `task=${packet.task_id}` });
+    onProgress?.({
+      stage: 'TASK_ACCEPTED',
+      detail: `task=${packet.task_id}`,
+      task: {
+        task_id: packet.task_id,
+        attempt,
+        profile_id: profileId,
+        close_kind: close.kind,
+        duration_ms: iterationBase.record?.duration_ms ?? null,
+      },
+    });
     return { iteration, closeKind: close.kind, stop: null };
   }
-  onProgress?.({ stage: 'TASK_FAILED', detail: `task=${packet.task_id} close=${close.kind}` });
+  onProgress?.({
+    stage: 'TASK_FAILED',
+    detail: `task=${packet.task_id} close=${close.kind}`,
+    task: {
+      task_id: packet.task_id,
+      attempt,
+      profile_id: profileId,
+      close_kind: close.kind,
+      duration_ms: iterationBase.record?.duration_ms ?? null,
+    },
+  });
   return {
     iteration,
     closeKind: close.kind,
@@ -864,7 +938,11 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
             automaticRepair: true,
             repairSourceAttempt: rec.decision.source_attempt,
           };
-          onProgress?.({ stage: 'REPAIR', detail: `task=${subjectId} profile=${launchProfile}` });
+          onProgress?.({
+            stage: 'REPAIR',
+            detail: `task=${subjectId} profile=${launchProfile}`,
+            task: { task_id: subjectId, profile_id: launchProfile, attempt_role: 'repair' },
+          });
         }
       }
 

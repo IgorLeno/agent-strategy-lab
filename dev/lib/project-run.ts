@@ -105,6 +105,7 @@ import {
   type ProjectLifecyclePathName,
   type ProjectReviewResult,
 } from './project-orchestrate.js';
+import type { LabProgressListener } from './lab-progress.js';
 import { machineSafetyCeiling } from './machine-safety.js';
 import {
   OPERATIONAL_ATTEMPT_SCHEMA_VERSION,
@@ -798,6 +799,11 @@ export interface CreateProjectControlPlaneInput {
   readonly now?: () => Date;
   /** Data root do control plane; injetável para isolar testes. */
   readonly historyLabRoot?: string;
+  /**
+   * Projeção read-only do lifecycle. O control plane EMITE; o listener não
+   * devolve nada e não tem porta de volta para decisão, state ou provider.
+   */
+  readonly onProgress?: LabProgressListener;
 }
 
 /**
@@ -1372,9 +1378,37 @@ export async function createProjectControlPlane(
     }
     await ensureEpisode(request, assessment.selectedProfileId as string);
 
+    const selectedProfileId = assessment.selectedProfileId as string;
+    const capability = registry.get(selectedProfileId);
+    // A decisão de routing PROJETADA: provider, model e effort são fatos que
+    // só o control plane conhece autoritativamente neste instante. Emitir é
+    // observação; nada abaixo lê este evento de volta.
+    input.onProgress?.({
+      stage: 'ROUTED',
+      detail: `task=${request.taskId} profile=${selectedProfileId} source=${assessment.report.routing.source} history=${assessment.report.routing.history_status}`,
+      task: {
+        task_id: request.taskId,
+        profile_id: selectedProfileId,
+        attempt_role:
+          assessment.report.attempt_role === AttemptRole.REPAIR
+            ? 'repair'
+            : assessment.report.attempt_role === AttemptRole.ESCALATION
+              ? 'escalation'
+              : 'initial',
+        ...(capability === undefined
+          ? {}
+          : {
+              provider: capability.agent,
+              model: capability.model,
+              reasoning_effort: capability.reasoning_effort,
+            }),
+        escalated_from_profile_id: assessment.report.escalation,
+      },
+    });
+
     return {
       outcome: 'LAUNCH',
-      profile_id: assessment.selectedProfileId as string,
+      profile_id: selectedProfileId,
     };
   }
 

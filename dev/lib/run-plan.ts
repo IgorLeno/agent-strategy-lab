@@ -252,6 +252,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanRunResult> {
         loaded,
         authorization: authorization.file,
         authorizationFile: authorization.source_file,
+        ...(input.onProgress === undefined ? {} : { onProgress: input.onProgress }),
       });
     } catch (error) {
       throw error instanceof ProjectAuthorizationError
@@ -318,6 +319,23 @@ export async function runPlan(input: PlanRunInput): Promise<PlanRunResult> {
   }
 
   const controlPlane = await buildControlPlane();
+
+  // PROJEÇÃO do plano executável, emitida uma vez, antes do primeiro launch:
+  // é aqui que as N tasks passam a existir para quem observa a run. O evento
+  // é read-only e não participa de seleção, DAG nem autorização.
+  input.onProgress?.({
+    stage: 'PLAN_READY',
+    detail: `origin=PLAN_FILE tasks=${loaded.plan.tasks.length}`,
+    plan: {
+      origin: 'PLAN_FILE',
+      tasks: loaded.plan.tasks.map((task) => ({
+        task_id: task.id,
+        title: task.title,
+        estimated_duration_ms:
+          task.planner_metadata?.resource_envelope.duration_ms.expected ?? null,
+      })),
+    },
+  });
 
   const orchestrated = await runOrchestrate({
     paths,

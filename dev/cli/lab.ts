@@ -1,5 +1,6 @@
 #!/usr/bin/env tsx
 import { readFile } from 'node:fs/promises';
+import path from 'node:path';
 import { stdin as stdinStream } from 'node:process';
 
 import {
@@ -18,7 +19,8 @@ import {
   resumeHumanInstruction,
   submitRunDirective,
 } from '../lib/lab.js';
-import { createProgressRenderer } from '../lib/lab-progress.js';
+import { createLabUi } from '../lib/lab-ui.js';
+import { parseLabUiMode } from '../lib/lab-tui.js';
 import { PlanSetupError } from '../lib/run-plan.js';
 import { ProjectAuthorizationError } from '../lib/project-authorization.js';
 import { SelfMaintenanceError } from '../lib/lab-self.js';
@@ -79,9 +81,18 @@ async function main(): Promise<void> {
   const announceRuntime = (dir: string): void => {
     process.stderr.write(`runtime: ${dir}\n`);
   };
-  const progress = createProgressRenderer((line) => {
-    process.stderr.write(line);
+  const uiMode = args.flags.has('ui') ? null : parseLabUiMode(args.options.get('ui'));
+  if (uiMode === null) fail('--ui aceita somente auto, tui ou plain.');
+  const ui = createLabUi({
+    mode: uiMode,
+    isTTY: process.stderr.isTTY === true,
+    write: (chunk) => {
+      process.stderr.write(chunk);
+    },
+    title: path.basename(path.resolve(args.options.get('repo') ?? process.cwd())),
+    ...(process.stderr.columns === undefined ? {} : { columns: process.stderr.columns }),
   });
+  const progress = ui.listener;
   const announceSummary = (summary: Parameters<typeof formatRunSummary>[0]): void => {
     process.stderr.write(`${formatRunSummary(summary)}\n`);
   };
@@ -108,6 +119,7 @@ async function main(): Promise<void> {
         on_progress: progress,
         ...sharedFlags(args),
       });
+      ui.finish();
       emit(result.payload);
       if (result.exitCode !== 0) process.exit(result.exitCode);
       return;
@@ -142,9 +154,11 @@ async function main(): Promise<void> {
       ...(policy === undefined ? {} : { policy_preset: policy }),
       ...sharedFlags(args),
     });
+    ui.finish();
     emit(result.payload);
     if (result.exitCode !== 0) process.exit(result.exitCode);
   } catch (error) {
+    ui.finish();
     if (error instanceof LabRunError) fail(error.message);
     if (error instanceof RunDirectiveError) fail(error.message);
     if (error instanceof PlanSetupError) fail(error.message);

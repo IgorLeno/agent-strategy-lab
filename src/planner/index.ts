@@ -114,3 +114,16 @@ export type {
   GenerateImplementationPlanInput,
   PlanGenerationResult,
 } from './generate.js';
+
+/**
+ * Previsão ADVISORY de runtime do plano inteiro, derivada deterministicamente
+ * das estimativas que o plano já carrega. Projeção para leitura humana: não
+ * roteia, não encerra, não define timeout e não rejeita nada.
+ */
+export {
+  PlanRuntimeForecast,
+  PlanTaskRuntimeEstimate,
+  planRuntimeForecast,
+  remainingPlanRuntimeMs,
+} from './plan-forecast.js';
+export type { PlanRuntimeForecastTaskInput } from './plan-forecast.js';

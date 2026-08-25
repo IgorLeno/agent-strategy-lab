@@ -16,6 +16,8 @@ import {
   resolveHarnessInstallationRoot,
   resolveHarnessPaths,
 } from '../lib/paths.js';
+import { parseLabUiMode } from '../lib/lab-tui.js';
+import { createLabUi } from '../lib/lab-ui.js';
 import { PlanSetupError } from '../lib/run-plan.js';
 import { loadProjectIntakeRequest, runProject } from '../lib/run-project.js';
 
@@ -49,10 +51,23 @@ async function main(): Promise<void> {
     planFile: path.join(basePaths.devDir, 'project', 'generated-plan.yaml'),
   });
 
+  const uiMode = args.flags.has('ui') ? null : parseLabUiMode(args.options.get('ui'));
+  if (uiMode === null) fail('--ui aceita somente auto, tui ou plain.');
+  const ui = createLabUi({
+    mode: uiMode,
+    isTTY: process.stderr.isTTY === true,
+    write: (chunk) => {
+      process.stderr.write(chunk);
+    },
+    title: path.basename(path.resolve(repo)),
+    ...(process.stderr.columns === undefined ? {} : { columns: process.stderr.columns }),
+  });
+
   try {
     const machineSafetyCeilingOverride = args.options.get('machine-safety-ceiling-seconds');
     const autonomy = parseRoutineAutonomy(args);
     const result = await runProject({
+      onProgress: ui.listener,
       paths,
       intake: await loadProjectIntakeRequest(request),
       authorizationFile: authorization,
@@ -64,9 +79,11 @@ async function main(): Promise<void> {
       ...(machineSafetyCeilingOverride === undefined ? {} : { machineSafetyCeilingOverride }),
       ...(autonomy === undefined ? {} : { autonomy }),
     });
+    ui.finish();
     emit(result.payload);
     if (result.exitCode !== 0) process.exit(result.exitCode);
   } catch (error) {
+    ui.finish();
     if (error instanceof PlanSetupError) fail(error.message);
     throw error;
   }
