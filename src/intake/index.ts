@@ -210,7 +210,9 @@ export type { HumanInstruction as HumanInstructionRecord } from './human-instruc
 export {
   AgentLabRunDirectiveHeader,
   DirectiveAuthorization,
+  DirectiveDeliberation,
   DirectiveExecution,
+  DirectivePlanning,
   DirectiveGrantablePermission,
   DirectiveNeverGrantablePermission,
   DirectivePermission,

@@ -109,6 +109,7 @@ export {
   ProjectedPlanFile,
   generateImplementationPlan,
   projectImplementationPlan,
+  validatePlannerDraft,
 } from './generate.js';
 export type {
   GenerateImplementationPlanInput,
@@ -127,3 +128,34 @@ export {
   remainingPlanRuntimeMs,
 } from './plan-forecast.js';
 export type { PlanRuntimeForecastTaskInput } from './plan-forecast.js';
+
+/**
+ * Deliberação OPCIONAL sobre um plano de origem humana, antes da
+ * implementação. Deliberadores são read-only, revisões atravessam os mesmos
+ * gates de plano e `max_turns` encerra a deliberação sem nunca superar um
+ * human gate.
+ */
+export {
+  DeliberationConvergenceStatus,
+  DeliberationDecision,
+  DeliberationDiversity,
+  DeliberationPlanView,
+  DeliberationRevisionStatus,
+  DeliberationTurnRecord,
+  DeliberatorAssignment,
+  DeliberatorVerdict,
+  MAX_DELIBERATION_TURNS_CEILING,
+  PlanDeliberationArtifact,
+  PlanDeliberationInvocation,
+  deliberatePlan,
+  planRevalidator,
+  planVersionSha256,
+  planViewOf,
+  selectDeliberators,
+} from './deliberation.js';
+export type {
+  DeliberatePlanInput,
+  DeliberatePlanResult,
+  PlanDeliberationInvocationResult,
+  PlanDeliberationWorkerPort,
+} from './deliberation.js';

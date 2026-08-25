@@ -52,7 +52,7 @@ import {
 } from './lab-self.js';
 import { resolveHarnessInstallationRoot } from './paths.js';
 import { PlanSetupError, type PlanRunResult } from './run-plan.js';
-import { runProject } from './run-project.js';
+import { runProject, type ProjectDeliberationRequest } from './run-project.js';
 import {
   overlayAuthorization,
   resolveDirectivePublishGrant,
@@ -269,6 +269,7 @@ async function executeProject(input: {
   readonly verbose?: boolean;
   readonly autonomy?: 'routine';
   readonly onProgress?: LabProgressListener;
+  readonly deliberation?: ProjectDeliberationRequest;
   readonly runProjectImpl: typeof runProject;
 }): Promise<PlanRunResult> {
   const paths = labHarnessPaths({ repoRoot: input.repoRoot, runtimeDir: input.runtimeDir });
@@ -282,7 +283,22 @@ async function executeProject(input: {
     ...(input.machineSafetyCeilingOverride === undefined ? {} : { machineSafetyCeilingOverride: input.machineSafetyCeilingOverride }),
     ...(input.verbose === undefined ? {} : { verbose: input.verbose }),
     ...(input.autonomy === undefined ? {} : { autonomy: input.autonomy }),
+    ...(input.deliberation === undefined ? {} : { deliberation: input.deliberation }),
   });
+}
+
+/**
+ * Deliberação pedida pelo header da Run Directive. Ausência preserva o
+ * comportamento anterior verbatim: `max_turns: 0`, nenhum deliberador chamado.
+ */
+function deliberationRequestOf(
+  header: AgentLabRunDirectiveHeader | null,
+): ProjectDeliberationRequest {
+  const declared = header?.planning?.deliberation;
+  return {
+    maxTurns: declared?.max_turns ?? 0,
+    diversity: declared?.diversity ?? 'cross_provider_preferred',
+  };
 }
 
 async function maybeIntegrateSelf(input: {
@@ -710,6 +726,7 @@ export async function submitHumanInstruction(
     authorizationFile,
     maxIterations: input.max_iterations ?? 100,
     runProjectImpl: input.run_project ?? runProject,
+    deliberation: deliberationRequestOf(directive.header),
     ...(onProgress === undefined ? {} : { onProgress }),
     ...(input.planner_profile_id === undefined ? {} : { plannerProfileId: input.planner_profile_id }),
     ...(input.machine_safety_ceiling_override === undefined ? {} : { machineSafetyCeilingOverride: input.machine_safety_ceiling_override }),

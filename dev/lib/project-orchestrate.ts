@@ -62,6 +62,17 @@ import {
   type ImplementationPlan,
   type PlanGenerationStage,
 } from '../../src/planner/generate.js';
+import {
+  deliberatePlan,
+  planRevalidator,
+  type DeliberationDiversity,
+  type DeliberationTurnRecord,
+  type DeliberatorAssignment,
+  type PlanDeliberationArtifact,
+  type PlanDeliberationInvocation,
+  type PlanDeliberationInvocationResult,
+  type PlanDeliberationWorkerPort,
+} from '../../src/planner/deliberation.js';
 import { PlannedTask, type TaskRisk } from '../../src/planner/task.js';
 import {
   CandidateReviewCoverage,
@@ -542,12 +553,28 @@ export function runDirectPath(input: DirectPathInput): DirectPathResult {
 // Caminho REVIEWED.
 // ---------------------------------------------------------------------------
 
+/**
+ * Deliberação OPCIONAL sobre o plano gerado, antes da implementação. Ausente,
+ * nada muda: nenhum deliberador é chamado e o plano segue direto para o
+ * lifecycle normal, exatamente como antes.
+ */
+export interface ReviewedPathDeliberation {
+  readonly maxTurns: number;
+  readonly diversity: DeliberationDiversity;
+  readonly deliberators: readonly DeliberatorAssignment[];
+  readonly worker: PlanDeliberationWorkerPort;
+  /** Instrução humana verbatim: autoridade de intenção do refinamento. */
+  readonly humanRequest: string;
+  readonly onTurn?: (turn: DeliberationTurnRecord) => void;
+}
+
 export interface ReviewedPathInput {
   readonly intake: unknown;
   readonly inspection: unknown;
   readonly authorizationScope: unknown;
   /** Porta de M83; o adapter real Claude/Codex está mais abaixo neste módulo. */
   readonly planningWorker: PlanningWorkerPort;
+  readonly deliberation?: ReviewedPathDeliberation;
 }
 
 export type ReviewedPathResult =
@@ -555,6 +582,8 @@ export type ReviewedPathResult =
       readonly outcome: 'PLANNED';
       readonly plan: ImplementationPlan;
       readonly decisions: readonly ProjectWorkflowDecision[];
+      /** `null` quando a deliberação não foi pedida. */
+      readonly deliberation: PlanDeliberationArtifact | null;
     }
   | {
       readonly outcome: 'DECOMPOSITION_REQUIRED';
@@ -585,13 +614,46 @@ export async function runReviewedPath(input: ReviewedPathInput): Promise<Reviewe
       ? { outcome: 'DECOMPOSITION_REQUIRED', stage: generated.stage, issues: generated.issues }
       : { outcome: 'REJECTED', stage: generated.stage, issues: generated.issues };
   }
+  // A GERAÇÃO não conta como turno. A deliberação, quando pedida, refina a
+  // versão já autorizada; toda revisão volta pelos mesmos gates, e só depois
+  // da versão final o lifecycle normal de implementação começa.
+  const deliberation = input.deliberation;
+  if (deliberation === undefined || deliberation.maxTurns === 0) {
+    return {
+      outcome: 'PLANNED',
+      plan: generated.plan,
+      decisions: decisionsOf(generated.plan),
+      deliberation: null,
+    };
+  }
+
+  const deliberated = await deliberatePlan({
+    plan: generated.plan,
+    humanRequest: deliberation.humanRequest,
+    maxTurns: deliberation.maxTurns,
+    diversity: deliberation.diversity,
+    deliberators: deliberation.deliberators,
+    worker: deliberation.worker,
+    revalidate: planRevalidator({
+      intake: ProjectIntakeRequest.parse(input.intake),
+      inspection: ProjectInspection.parse(input.inspection),
+      authorizationScope: ExecutionAuthorizationScope.parse(input.authorizationScope),
+    }),
+  });
+  for (const turn of deliberated.artifact.turns) deliberation.onTurn?.(turn);
+
   return {
     outcome: 'PLANNED',
-    plan: generated.plan,
-    decisions: generated.plan.tasks.map((entry) =>
-      combineWorkflowAndReview(entry.workflow, entry.assessment.review_requirement),
-    ),
+    plan: deliberated.plan,
+    decisions: decisionsOf(deliberated.plan),
+    deliberation: deliberated.artifact,
   };
+}
+
+function decisionsOf(plan: ImplementationPlan): readonly ProjectWorkflowDecision[] {
+  return plan.tasks.map((entry) =>
+    combineWorkflowAndReview(entry.workflow, entry.assessment.review_requirement),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1104,6 +1166,153 @@ export function createLaunchedPlanningWorker(
           return _exhaustive;
         }
       }
+    },
+  };
+}
+
+export function buildDeliberationPrompt(invocation: PlanDeliberationInvocation): string {
+  return [
+    'Você é um PLAN DELIBERATOR READ-ONLY do control plane.',
+    'Você NÃO implementa. Não edite arquivos, não faça commit, não execute validação,',
+    'não altere autorização, não inicie deploy e não produza efeito externo nenhum.',
+    'Sua única saída é um veredito estruturado sobre a VERSÃO CORRENTE do plano.',
+    '',
+    `TURNO ${invocation.turn} de no máximo ${invocation.max_turns}.`,
+    'O máximo é teto, não meta: aceite assim que o plano estiver adequado.',
+    '',
+    'PEDIDO HUMANO — autoridade da intenção, íntegro:',
+    'BEGIN HUMAN REQUEST',
+    invocation.human_request,
+    'END HUMAN REQUEST',
+    '',
+    `VERSÃO CORRENTE DO PLANO (sha256=${invocation.plan_sha256}):`,
+    JSON.stringify(invocation.plan, null, 2),
+    ...(invocation.prior_objections.length === 0
+      ? []
+      : [
+          '',
+          'OBJEÇÕES MATERIAIS JÁ LEVANTADAS EM TURNOS ANTERIORES:',
+          JSON.stringify(invocation.prior_objections, null, 2),
+        ]),
+    '',
+    'Responda SOMENTE com um único JSON:',
+    '{"decision":"ACCEPT"|"REVISE","material_objections":[],"material_changes":[],',
+    ' "rationale":"...","revised_plan":null|{"schema_version":1,"tasks":[...]}}',
+    '',
+    'ACCEPT com listas vazias SELA o plano e encerra a deliberação — use quando não houver',
+    'objeção material. REVISE exige pelo menos uma objeção material, uma mudança material',
+    'ou um plano revisado completo. Um plano revisado passa pelos MESMOS gates',
+    'determinísticos do plano original; revisão recusada pelos gates não vira execução.',
+    '',
+    PLANNED_TASK_OUTPUT_CONTRACT,
+  ].join('\n');
+}
+
+export interface LaunchedDeliberationWorkerOptions extends LaunchedPlanningWorkerOptions {
+  readonly deliberatorProfileId?: string;
+}
+
+/**
+ * Adapter REAL do deliberador. Ele reusa, sem exceção, o mesmo overlay
+ * estrutural read-only do planner (`role: 'planner'` em `buildRoleArgv` +
+ * `assertReadOnlyArgv`): a incapacidade de escrever é do argv e das settings
+ * versionadas, não de uma frase do prompt. Também reusa a mesma autorização de
+ * launch, o mesmo preflight de cobrança e o mesmo teto de segurança de máquina
+ * — nenhuma via paralela de execução nasce aqui.
+ */
+export function createLaunchedDeliberationWorker(
+  options: LaunchedDeliberationWorkerOptions,
+): PlanDeliberationWorkerPort {
+  const invocationId = options.invocationId ?? `deliberator-${options.profile.id}`;
+  const failure = (code: string, message: string): PlanDeliberationInvocationResult => ({
+    outcome: 'INVOCATION_FAILED',
+    failure: { code, message: `${invocationId}: ${message}` },
+  });
+
+  return {
+    async invoke(invocation: PlanDeliberationInvocation): Promise<PlanDeliberationInvocationResult> {
+      if (invocation.role !== 'READ_ONLY_DELIBERATOR' || invocation.workspace_access !== 'READ_ONLY') {
+        return failure(
+          'DELIBERATOR_ROLE_CONTRACT_VIOLATED',
+          'invocação precisa ser READ_ONLY_DELIBERATOR com workspace_access READ_ONLY',
+        );
+      }
+
+      const authorization = authorizeProjectLaunch({
+        scope: options.scope,
+        capability: 'CONFIGURED_SUBSCRIPTION_WORKER',
+        billing_mode: options.profile.billing_mode,
+        quota: options.quota,
+        credential: options.credential,
+        risk: 'low',
+        worker_owns_commit: options.profile.commit_owner !== 'orchestrator',
+        worker_owns_official_validation: options.profile.official_validation_owner !== 'orchestrator',
+      });
+      if (authorization.outcome === 'HUMAN_REQUIRED') {
+        return failure('DELIBERATION_LAUNCH_HUMAN_REQUIRED', authorization.reason);
+      }
+
+      const ceiling = machineSafetyCeiling();
+      const prompt = buildDeliberationPrompt(invocation);
+      const overlay = buildRoleArgv(options.profile, { role: 'planner', prompt });
+      assertReadOnlyArgv('planner', options.profile.agent, overlay.argv);
+      const argv = resolveRoleOverlayArgv(options.paths, overlay.argv);
+
+      if (!(options.providerEnabled ?? PROVIDER_PATH_ENABLED_BY_DEFAULT)) {
+        return failure(
+          'PROVIDER_PATH_DISABLED',
+          'caminho de provider real desligado por default; habilite pelo ExecutionAuthorizationScope do projeto/run',
+        );
+      }
+      if (options.dryRun ?? true) {
+        return failure('DRY_RUN_NO_PROVIDER_CALL', 'dry-run/preflight não chama provider');
+      }
+      const port = options.port;
+      if (port === undefined) {
+        return failure(
+          'PROVIDER_PORT_NOT_CONFIGURED',
+          'nenhuma porta de invocação de processo configurada para o caminho real',
+        );
+      }
+
+      const home = path.join(options.paths.devDir, 'project', 'homes', options.profile.id);
+      await mkdir(home, { recursive: true });
+      const env = buildEnvironment(options.profile, process.env, { sanitizedHome: home });
+      assertNoApiCredentials('ambiente do deliberador de plano', env);
+      const billing = await runBillingPreflight({
+        agent: options.profile.agent,
+        billingMode: options.profile.billing_mode,
+        binary: options.profile.argv[0] as string,
+        env,
+        orchestratorEnv: process.env,
+      });
+      if (!billing.ok) {
+        return failure('BILLING_PREFLIGHT_REFUSED', billing.refusal ?? 'motivo não informado');
+      }
+
+      let stdout: string;
+      try {
+        stdout = await port.run({
+          role: 'planner',
+          profile: options.profile,
+          argv,
+          prompt,
+          cwd: options.paths.repoRoot,
+          env,
+          timeoutSeconds: ceiling.seconds,
+        });
+      } catch (error) {
+        return failure(
+          'PROVIDER_INVOCATION_FAILED',
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+
+      const extracted = extractRoleModelJson({ agent: options.profile.agent, argv, stdout });
+      if (extracted.outcome === 'EXTRACTED') {
+        return { outcome: 'VERDICT_RETURNED', verdict: extracted.value };
+      }
+      return failure(extracted.outcome, extracted.message);
     },
   };
 }

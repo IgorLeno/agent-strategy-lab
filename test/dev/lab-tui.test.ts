@@ -284,6 +284,46 @@ describe('projeção read-only do lifecycle', () => {
   });
 });
 
+describe('a TUI projeta a deliberação de plano', () => {
+  it('mostra os turnos e a convergência antecipada', () => {
+    const projection = createLabProjection(fakeClock().now);
+    const turns: readonly [number, string, string, 'ACCEPT' | 'REVISE', boolean][] = [
+      [1, 'a-claude', 'claude', 'REVISE', false],
+      [2, 'b-codex', 'codex', 'REVISE', false],
+      [3, 'a-claude', 'claude', 'ACCEPT', true],
+    ];
+    for (const [turn, profile, provider, decision, converged] of turns) {
+      projection.listener({
+        stage: 'DELIBERATING',
+        deliberation: {
+          turn,
+          max_turns: 5,
+          profile_id: profile,
+          provider,
+          model: provider === 'claude' ? 'opus-5' : 'gpt-5.6-sol',
+          decision,
+          converged,
+        },
+      });
+    }
+    projection.listener({ stage: 'PLAN_SEALED', detail: 'turns=3/5 CONVERGED' });
+    projection.listener(PLAN);
+
+    const snapshot = projection.snapshot();
+    expect(snapshot.deliberation?.converged_at_turn).toBe(3);
+    expect(snapshot.deliberation?.max_turns).toBe(5);
+
+    const frame = renderLabFrame(snapshot, { title: 'demo', columns: 100 }).join('\n');
+    expect(frame).toContain('PLAN DELIBERATION');
+    expect(frame).toContain('[x] 1 claude · opus-5 ... REVISE');
+    expect(frame).toContain('[x] 2 codex · gpt-5.6-sol ... REVISE');
+    expect(frame).toContain('[x] 3 claude · opus-5 ... ACCEPT');
+    expect(frame).toContain('CONVERGED AT TURN 3 / MAX 5');
+    // A projeção continua sendo projeção: as tasks do plano seguem ali.
+    expect(frame).toContain('[ ] 01 Foundation');
+  });
+});
+
 describe('modo de interface', () => {
   it('auto usa TUI só em terminal interativo; não-TTY continua log plain', () => {
     expect(parseLabUiMode(undefined)).toBe('auto');

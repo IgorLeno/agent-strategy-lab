@@ -124,11 +124,34 @@ export const DirectiveAuthorization = z
   .strict();
 export type DirectiveAuthorization = z.infer<typeof DirectiveAuthorization>;
 
+/**
+ * Deliberação OPCIONAL sobre o plano, antes da implementação. Ausente preserva
+ * o comportamento anterior verbatim: nenhum deliberador é chamado.
+ *
+ * `max_turns` é MÁXIMO, nunca obrigatório — a deliberação para antes assim que
+ * um deliberador devolve ACCEPT sem objeção nem mudança material.
+ */
+export const DirectiveDeliberation = z
+  .object({
+    max_turns: z.number().int().nonnegative().max(10).optional(),
+    diversity: z.enum(['none', 'cross_provider_preferred']).optional(),
+  })
+  .strict();
+export type DirectiveDeliberation = z.infer<typeof DirectiveDeliberation>;
+
+export const DirectivePlanning = z
+  .object({
+    deliberation: DirectiveDeliberation.optional(),
+  })
+  .strict();
+export type DirectivePlanning = z.infer<typeof DirectivePlanning>;
+
 export const AgentLabRunDirectiveHeader = z
   .object({
     version: z.literal(1),
     target: DirectiveTarget.optional(),
     execution: DirectiveExecution.optional(),
+    planning: DirectivePlanning.optional(),
     authorization: DirectiveAuthorization.optional(),
     providers: z
       .object({

@@ -102,3 +102,50 @@ describe('parseRunDirective', () => {
     expect(parsed.body.trim()).toBe(body);
   });
 });
+
+describe('planning.deliberation no header', () => {
+  it('declara max_turns e diversity, e o corpo continua intocado', () => {
+    const parsed = parseRunDirective(
+      [
+        '---agentlab',
+        'version: 1',
+        'planning:',
+        '  deliberation:',
+        '    max_turns: 3',
+        '    diversity: cross_provider_preferred',
+        'providers:',
+        '  policy: evidence_balanced',
+        '---',
+        '# Objetivo',
+        '',
+        'Implementar o filtro.',
+        '',
+      ].join('\n'),
+    );
+    expect(parsed.header?.planning?.deliberation?.max_turns).toBe(3);
+    expect(parsed.header?.planning?.deliberation?.diversity).toBe('cross_provider_preferred');
+    expect(parsed.header?.providers?.policy).toBe('evidence_balanced');
+    expect(parsed.body).toContain('Implementar o filtro.');
+  });
+
+  it('directives antigas continuam válidas e sem deliberação', () => {
+    const legacy = parseRunDirective('# Objetivo\n\nImplementar o filtro.\n');
+    expect(legacy.header).toBeNull();
+
+    const headerWithoutPlanning = parseRunDirective(
+      ['---agentlab', 'version: 1', 'execution:', '  autonomy: routine', '---', '# Objetivo', ''].join('\n'),
+    );
+    expect(headerWithoutPlanning.header?.planning).toBeUndefined();
+    expect(headerWithoutPlanning.header?.providers).toBeUndefined();
+  });
+
+  it('max_turns fora do contrato falha antes de qualquer provider', () => {
+    for (const value of ['-1', '99', '"tres"']) {
+      expect(() =>
+        parseRunDirective(
+          ['---agentlab', 'version: 1', 'planning:', '  deliberation:', `    max_turns: ${value}`, '---', '# Objetivo', ''].join('\n'),
+        ),
+      ).toThrow(RunDirectiveError);
+    }
+  });
+});

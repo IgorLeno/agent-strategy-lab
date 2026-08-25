@@ -1,4 +1,5 @@
 import { access, readFile } from 'node:fs/promises';
+import path from 'node:path';
 
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 
@@ -10,9 +11,11 @@ import {
   type ProjectRunAuthorizationFile,
 } from './project-authorization.js';
 import {
+  createLaunchedDeliberationWorker,
   createLaunchedPlanningWorker,
   createProviderRoleInvocationPort,
   runReviewedPath,
+  type ReviewedPathDeliberation,
 } from './project-orchestrate.js';
 import { collectProjectLaunchFacts } from './project-preflight.js';
 import { loadProfileFromCatalog, type LauncherProfile } from './profile.js';
@@ -28,6 +31,13 @@ import {
 } from '../../src/intake/index.js';
 import type { PlanningWorkerPort } from '../../src/planner/draft.js';
 import { projectImplementationPlan } from '../../src/planner/generate.js';
+import type {
+  DeliberationDiversity,
+  DeliberatorAssignment,
+  PlanDeliberationArtifact,
+} from '../../src/planner/deliberation.js';
+import { capabilityInputOf } from './project-run.js';
+import { capabilityOf } from '../../src/routing/index.js';
 
 export interface EnsureGeneratedProjectPlanInput {
   readonly paths: HarnessPaths;
@@ -38,13 +48,20 @@ export interface EnsureGeneratedProjectPlanInput {
   readonly onProgress?: LabProgressListener;
   /** Só para evidência de falha: qual profile o planner usaria. */
   readonly plannerProfileId?: string;
+  /** Lazy como o planner: `max_turns: 0` não constrói porta nem chama provider. */
+  readonly deliberation?: () => Promise<ReviewedPathDeliberation>;
 }
 
 export interface EnsuredGeneratedProjectPlan {
   readonly origin: 'GENERATED' | 'REUSED';
   readonly planFile: string;
   readonly taskCount: number;
+  /** `null` quando a deliberação não foi pedida ou o plano foi reusado. */
+  readonly deliberation: PlanDeliberationArtifact | null;
+  readonly deliberationArtifactFile: string | null;
 }
+
+export const PROJECT_DELIBERATION_ARTIFACT = 'deliberation.json';
 
 function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -101,7 +118,13 @@ export async function ensureGeneratedProjectPlan(
       stage: 'PLAN_READY',
       detail: `origin=REUSED tasks=${loaded.plan.tasks.length}`,
     });
-    return { origin: 'REUSED', planFile: input.paths.planFile, taskCount: loaded.plan.tasks.length };
+    return {
+      origin: 'REUSED',
+      planFile: input.paths.planFile,
+      taskCount: loaded.plan.tasks.length,
+      deliberation: null,
+      deliberationArtifactFile: null,
+    };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
       if (error instanceof PlanSetupError) throw error;
@@ -122,11 +145,34 @@ export async function ensureGeneratedProjectPlan(
   input.onProgress?.({ stage: 'PLANNING' });
   const inspect = input.inspect ?? ((repoRoot: string) => inspectRepository({ repoRoot }));
   const inspection = await inspect(input.paths.repoRoot);
+  const deliberation = input.deliberation === undefined ? undefined : await input.deliberation();
   const planned = await runReviewedPath({
     intake: input.intake,
     inspection,
     authorizationScope: input.authorizationScope,
     planningWorker: await input.planningWorker(),
+    ...(deliberation === undefined
+      ? {}
+      : {
+          deliberation: {
+            ...deliberation,
+            onTurn: (turn) => {
+              input.onProgress?.({
+                stage: 'DELIBERATING',
+                detail: `turn=${turn.turn} profile=${turn.profile_id} decision=${turn.decision ?? 'UNAVAILABLE'}`,
+                deliberation: {
+                  turn: turn.turn,
+                  max_turns: deliberation.maxTurns,
+                  profile_id: turn.profile_id,
+                  provider: turn.provider,
+                  model: turn.model,
+                  decision: turn.decision ?? 'REVISE',
+                  converged: turn.converged,
+                },
+              });
+            },
+          },
+        }),
   });
   if (planned.outcome !== 'PLANNED') {
     const details =
@@ -148,13 +194,39 @@ export async function ensureGeneratedProjectPlan(
     );
   }
 
+  // A versão FINAL é o que vira PlanFile. Só depois dela o lifecycle normal de
+  // implementação começa — deliberador nenhum tocou no repositório até aqui.
+  let deliberationArtifactFile: string | null = null;
+  if (planned.deliberation !== null) {
+    deliberationArtifactFile = path.join(
+      path.dirname(input.paths.planFile),
+      PROJECT_DELIBERATION_ARTIFACT,
+    );
+    await writeFileAtomic(
+      deliberationArtifactFile,
+      `${JSON.stringify(planned.deliberation, null, 2)}\n`,
+    );
+    input.onProgress?.({
+      stage: 'PLAN_SEALED',
+      detail:
+        `turns=${planned.deliberation.actual_turns}/${planned.deliberation.requested_max_turns} ` +
+        `${planned.deliberation.convergence_status}`,
+    });
+  }
+
   const projection = projectImplementationPlan(planned.plan);
   await writeFileAtomic(input.paths.planFile, stringifyYaml(projection));
   input.onProgress?.({
     stage: 'PLAN_READY',
     detail: `origin=GENERATED tasks=${projection.tasks.length}`,
   });
-  return { origin: 'GENERATED', planFile: input.paths.planFile, taskCount: projection.tasks.length };
+  return {
+    origin: 'GENERATED',
+    planFile: input.paths.planFile,
+    taskCount: projection.tasks.length,
+    deliberation: planned.deliberation,
+    deliberationArtifactFile,
+  };
 }
 
 function executionScopeOf(authorization: ProjectRunAuthorizationFile): ExecutionAuthorizationScope {
@@ -220,11 +292,56 @@ async function loadPlannerProfile(
   return profile;
 }
 
+/**
+ * Deliberação pedida pelo humano. `max_turns: 0` (ou ausência) preserva o
+ * comportamento anterior: nenhum deliberador é construído nem chamado.
+ */
+export interface ProjectDeliberationRequest {
+  readonly maxTurns: number;
+  readonly diversity: DeliberationDiversity;
+}
+
+/**
+ * Profiles elegíveis ao PAPEL de deliberação: os mesmos da policy autorizada,
+ * filtrados por compatibilidade com o papel de planning. Nenhum profile novo é
+ * inventado e nenhum de fora da policy entra.
+ */
+async function deliberatorAssignmentsOf(
+  paths: HarnessPaths,
+  authorization: ProjectRunAuthorizationFile,
+): Promise<{ readonly assignments: readonly DeliberatorAssignment[]; readonly profiles: Map<string, LauncherProfile> }> {
+  const assignments: DeliberatorAssignment[] = [];
+  const profiles = new Map<string, LauncherProfile>();
+  for (const entry of [...authorization.profile_policy.profiles].sort(
+    (left, right) => left.capability_rank - right.capability_rank,
+  )) {
+    let profile: LauncherProfile;
+    try {
+      profile = await loadProfileFromCatalog(paths.profileCatalogRoot, entry.id);
+    } catch {
+      // Profile ilegível não vira deliberador silencioso nem derruba a run:
+      // ele simplesmente não entra na lista de candidatos.
+      continue;
+    }
+    if (!authorization.billing.allowed_billing_modes.includes(profile.billing_mode)) continue;
+    const capability = capabilityOf(capabilityInputOf(profile));
+    if (capability.role_compatibility.planner.value !== true) continue;
+    profiles.set(profile.id, profile);
+    assignments.push({
+      profile_id: profile.id,
+      provider: capability.agent,
+      model: capability.model,
+    });
+  }
+  return { assignments, profiles };
+}
+
 export interface ProjectRunInput {
   readonly paths: HarnessPaths;
   readonly intake: ProjectIntakeRequest;
   readonly authorizationFile: string;
   readonly plannerProfileId?: string;
+  readonly deliberation?: ProjectDeliberationRequest;
   readonly maxIterations: number;
   readonly autonomy?: 'routine';
   readonly machineSafetyCeilingOverride?: string;
@@ -246,12 +363,72 @@ export async function runProject(input: ProjectRunInput): Promise<PlanRunResult>
   const authorizationScope = executionScopeOf(authorization);
   const plannerProfileId = plannerProfileIdOf(authorization, input.plannerProfileId);
 
+  const deliberationRequest = input.deliberation;
   const ensured = await ensureGeneratedProjectPlan({
     paths: input.paths,
     intake: ProjectIntakeRequest.parse(input.intake),
     authorizationScope,
     plannerProfileId,
     ...(input.onProgress === undefined ? {} : { onProgress: input.onProgress }),
+    ...(deliberationRequest === undefined || deliberationRequest.maxTurns === 0
+      ? {}
+      : {
+          deliberation: async (): Promise<ReviewedPathDeliberation> => {
+            const { assignments, profiles } = await deliberatorAssignmentsOf(
+              input.paths,
+              authorization,
+            );
+            // Uma porta por profile: cada turno é processo NOVO, read-only,
+            // com o preflight de credencial e cobrança do próprio profile.
+            const ports = new Map<string, Awaited<ReturnType<typeof buildDeliberationPort>>>();
+            async function buildDeliberationPort(profile: LauncherProfile) {
+              const facts = await collectProjectLaunchFacts({
+                paths: input.paths,
+                profile,
+                homeNamespace: 'deliberator-homes',
+              });
+              return createLaunchedDeliberationWorker({
+                paths: input.paths,
+                profile,
+                scope: authorizationScope,
+                providerEnabled: true,
+                dryRun: false,
+                credential: facts.credential,
+                quota: facts.quota,
+                port: createProviderRoleInvocationPort(),
+              });
+            }
+            return {
+              maxTurns: deliberationRequest.maxTurns,
+              diversity: deliberationRequest.diversity,
+              deliberators: assignments,
+              humanRequest: input.intake.user_request,
+              worker: {
+                async invoke(invocation) {
+                  // O turno corrente identifica o profile pela sequência que
+                  // `selectDeliberators` já fixou deterministicamente.
+                  const assignment = assignments[(invocation.turn - 1) % Math.max(1, assignments.length)];
+                  const profile = assignment === undefined ? undefined : profiles.get(assignment.profile_id);
+                  if (profile === undefined) {
+                    return {
+                      outcome: 'INVOCATION_FAILED',
+                      failure: {
+                        code: 'NO_DELIBERATOR_PROFILE',
+                        message: 'nenhum profile da policy é compatível com o papel de deliberação',
+                      },
+                    };
+                  }
+                  let worker = ports.get(profile.id);
+                  if (worker === undefined) {
+                    worker = await buildDeliberationPort(profile);
+                    ports.set(profile.id, worker);
+                  }
+                  return worker.invoke(invocation);
+                },
+              },
+            };
+          },
+        }),
     planningWorker: async () => {
       const profile = await loadPlannerProfile(input.paths, authorization, plannerProfileId);
       const facts = await collectProjectLaunchFacts({
@@ -290,6 +467,18 @@ export async function runProject(input: ProjectRunInput): Promise<PlanRunResult>
         origin: ensured.origin,
         file: ensured.planFile,
         planner_profile_id: plannerProfileId,
+        ...(ensured.deliberation === null
+          ? {}
+          : {
+              deliberation: {
+                artifact_file: ensured.deliberationArtifactFile,
+                requested_max_turns: ensured.deliberation.requested_max_turns,
+                actual_turns: ensured.deliberation.actual_turns,
+                convergence_status: ensured.deliberation.convergence_status,
+                final_plan_sha256: ensured.deliberation.final_plan_sha256,
+                stop_reason: ensured.deliberation.stop_reason,
+              },
+            }),
       },
     },
     exitCode: executed.exitCode,

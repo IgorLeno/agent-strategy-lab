@@ -152,7 +152,12 @@ const REVISION_ELIGIBLE_STAGES = new Set<PlanGenerationStage>([
   'DEPENDENCY_VALIDATION',
 ]);
 
-function validatePlannerDraft(input: {
+/**
+ * Os MESMOS gates de plano, exportados para que uma revisão vinda de outro
+ * lugar (deliberação humana, por exemplo) não possa entrar por uma porta
+ * paralela. Toda versão de plano que vira execução passa por aqui.
+ */
+export function validatePlannerDraft(input: {
   readonly draft: unknown;
   readonly intake: z.infer<typeof ProjectIntakeRequest>;
   readonly inspection: z.infer<typeof ProjectInspection>;

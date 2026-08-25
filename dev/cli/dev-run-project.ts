@@ -66,8 +66,18 @@ async function main(): Promise<void> {
   try {
     const machineSafetyCeilingOverride = args.options.get('machine-safety-ceiling-seconds');
     const autonomy = parseRoutineAutonomy(args);
+    const maxTurnsRaw = args.options.get('deliberation-max-turns');
+    const maxTurns = maxTurnsRaw === undefined ? 0 : Number(maxTurnsRaw);
+    if (!Number.isInteger(maxTurns) || maxTurns < 0 || maxTurns > 10) {
+      fail('--deliberation-max-turns precisa ser inteiro entre 0 e 10.');
+    }
+    const diversity = args.options.get('deliberation-diversity') ?? 'cross_provider_preferred';
+    if (diversity !== 'none' && diversity !== 'cross_provider_preferred') {
+      fail('--deliberation-diversity aceita somente none ou cross_provider_preferred.');
+    }
     const result = await runProject({
       onProgress: ui.listener,
+      ...(maxTurns === 0 ? {} : { deliberation: { maxTurns, diversity } }),
       paths,
       intake: await loadProjectIntakeRequest(request),
       authorizationFile: authorization,
