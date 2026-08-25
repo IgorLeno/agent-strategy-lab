@@ -1,4 +1,6 @@
 #!/usr/bin/env tsx
+import path from 'node:path';
+
 import {
   VERBOSE_FLAG,
   emit,
@@ -9,6 +11,8 @@ import {
   parseRoutineAutonomy,
   runMain,
 } from '../lib/cli.js';
+import { parseLabUiMode } from '../lib/lab-tui.js';
+import { createLabUi } from '../lib/lab-ui.js';
 import { harnessOverrideFromCli, resolveHarnessInstallationRoot, resolveHarnessPaths } from '../lib/paths.js';
 import { PlanSetupError, runPlan } from '../lib/run-plan.js';
 
@@ -61,11 +65,24 @@ async function main(): Promise<void> {
     }),
   );
 
+  const uiMode = args.flags.has('ui') ? null : parseLabUiMode(args.options.get('ui'));
+  if (uiMode === null) fail('--ui aceita somente auto, tui ou plain.');
+  const ui = createLabUi({
+    mode: uiMode,
+    isTTY: process.stderr.isTTY === true,
+    write: (chunk) => {
+      process.stderr.write(chunk);
+    },
+    title: path.basename(path.resolve(repo)),
+    ...(process.stderr.columns === undefined ? {} : { columns: process.stderr.columns }),
+  });
+
   try {
     const machineSafetyCeilingOverride = args.options.get('machine-safety-ceiling-seconds');
     const autonomy = parseRoutineAutonomy(args);
     const result = await runPlan({
       paths,
+      onProgress: ui.listener,
       ...(profile === undefined ? {} : { profileId: profile }),
       ...(authorization === undefined ? {} : { authorizationFile: authorization }),
       dryRun: args.flags.has(DRY_RUN_FLAG),
@@ -74,9 +91,11 @@ async function main(): Promise<void> {
       ...(machineSafetyCeilingOverride === undefined ? {} : { machineSafetyCeilingOverride }),
       ...(autonomy === undefined ? {} : { autonomy }),
     });
+    ui.finish();
     emit(result.payload);
     if (result.exitCode !== 0) process.exit(result.exitCode);
   } catch (error) {
+    ui.finish();
     if (error instanceof PlanSetupError) fail(error.message);
     throw error;
   }

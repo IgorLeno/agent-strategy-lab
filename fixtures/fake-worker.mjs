@@ -31,6 +31,12 @@
  *   reject       REJECT com a mesma cobertura
  *   no-coverage  ACCEPT SEM coverage — o schema do record precisa recusar
  *   invalid      saída sem veredito estruturado
+ *
+ * Role de deliberador de plano (mesmo argv read-only), por
+ * AGENTLAB_FAKE_DELIBERATION:
+ *   revise-then-accept  (default) REVISE nos turnos 1 e 2, ACCEPT no 3
+ *   always-accept       converge no primeiro turno
+ *   always-revise       nunca converge; a deliberação para em max_turns
  */
 import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
@@ -62,6 +68,41 @@ function promptObject(marker) {
  * devolve exatamente um JSON do role solicitado.
  */
 if (process.argv.slice(2).includes('--agentlab-read-only')) {
+  // Role de DELIBERADOR de plano: read-only como o planner e o reviewer, e o
+  // fixture sai devolvendo exatamente um veredito estruturado. O modo default
+  // (`revise-then-accept`) exercita convergência ANTES do máximo pedido.
+  const deliberationPrompt = process.argv
+    .slice(2)
+    .find((token) => token.includes('PLAN DELIBERATOR READ-ONLY'));
+  if (deliberationPrompt !== undefined) {
+    const turn = Number(/TURNO (\d+) de no máximo/.exec(deliberationPrompt)?.[1] ?? '1');
+    const mode = process.env.AGENTLAB_FAKE_DELIBERATION ?? 'revise-then-accept';
+    const accept = {
+      decision: 'ACCEPT',
+      material_objections: [],
+      material_changes: [],
+      rationale: 'fake deliberator: o plano cobre o objetivo declarado e respeita as exclusões',
+      revised_plan: null,
+    };
+    const revise = {
+      decision: 'REVISE',
+      material_objections: [`fake deliberator turno ${turn}: o plano não declara o critério observável`],
+      material_changes: [],
+      rationale: 'fake deliberator: objeção material registrada sem plano revisado',
+      revised_plan: null,
+    };
+    const verdict =
+      mode === 'always-accept'
+        ? accept
+        : mode === 'always-revise'
+          ? revise
+          : turn >= 3
+            ? accept
+            : revise;
+    console.log(JSON.stringify(verdict));
+    process.exit(0);
+  }
+
   const plannerPacket = promptObject('PLANNER PACKET');
   if (plannerPacket !== null) {
     const sourceAnchor = plannerPacket.source_anchors[0] ?? { area: 'project', path: 'README.md' };

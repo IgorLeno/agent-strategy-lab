@@ -349,6 +349,17 @@ export async function runPlan(input: PlanRunInput): Promise<PlanRunResult> {
     ...(controlPlane === null ? {} : { controlPlane }),
   });
 
+  // Desfecho TERMINAL do ciclo, para que qualquer projeção (TUI ou log) feche
+  // com o mesmo estado que o payload de máquina declara.
+  const terminal = orchestrated.stop.status;
+  input.onProgress?.(
+    terminal === 'ALL_DONE'
+      ? { stage: 'ALL_DONE' }
+      : terminal === 'HUMAN_REQUIRED'
+        ? { stage: 'HUMAN_REQUIRED', detail: orchestrated.stop.reason }
+        : { stage: 'FAILURE', detail: `${terminal}: ${orchestrated.stop.reason}` },
+  );
+
   return {
     payload: {
       ...context,
