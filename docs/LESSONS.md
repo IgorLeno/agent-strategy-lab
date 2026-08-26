@@ -906,3 +906,13 @@ pelo control plane ficaram indistinguíveis de campos ausentes no plano.
 Rule: quando um modelo valida um objeto contra um contrato canônico, entregue o
 objeto canônico completo ou torne cada omissão e sua provenance explícitas.
 Nunca apresente uma projeção lossy como se fosse o artefato que será validado.
+
+[2026-08-26] Context: ao preparar um retry real, o documento de estabilização
+descrevia a Run Directive e apontava para seu artefato persistido, mas foi
+copiado como se ele próprio fosse a directive executável.
+Mistake: confundir um documento de controle com a entrada canônica que ele
+referencia; o parser recusou corretamente a ausência de `target.type` antes de
+qualquer provider ou runtime.
+Rule: reproduza uma Run Directive somente a partir do `lab/run-directive.txt`
+persistido da execução fonte e prove o diff byte a byte. Nunca reconstrua ou
+substitua essa entrada por um documento que apenas a descreve.

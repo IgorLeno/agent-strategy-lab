@@ -2,8 +2,8 @@
 
 **Data:** 2026-08-26
 
-**Status:** BLOQUEADO antes do provider; exige autorizacao humana explicita de
-envio da directive e inspecao do target a OpenAI/Codex e Anthropic/Claude
+**Status:** CONCLUIDO — `PLAN_READY` e handoff provados em target descartavel;
+implementacao interrompida deliberadamente antes de mutacao material
 
 **Branch:** `fix/avc-retry-isolation`
 
@@ -64,17 +64,17 @@ DAG, nao compartilhamento necessario da fronteira de retry/rollback.
   `pnpm test`, `pnpm build` e `git diff --check`, com exit status explicitos.
 - [x] **6. Criar commit coerente.** Revisar escopo/impacto e commitar apenas o
   defeito comprovado; nao fazer push sem autorizacao separada.
-- [ ] **7. Reexecutar planning real em runtime novo.** Reusar a Run Directive
+- [x] **7. Reexecutar planning real em runtime novo.** Reusar a Run Directive
   integral e `evidence_balanced`; nunca sobrescrever runtimes anteriores.
   Parar antes de qualquer mutacao do Grimperium canonico.
-- [ ] **8. Classificar cada novo outcome.** Para target plan defect, planner
+- [x] **8. Classificar cada novo outcome.** Para target plan defect, planner
   contract defect, control-plane defect, provider/environment limitation ou
   human decision, inspecionar a evidencia primaria e corrigir somente novos
   defeitos concretos do Lab.
-- [ ] **9. Iterar ate condicao terminal util.** Para qualquer prova de handoff
+- [x] **9. Iterar ate condicao terminal util.** Para qualquer prova de handoff
   posterior a `PLAN_READY`, usar clone/copia descartavel do Grimperium no SHA
   base e impedir publicacao/efeito externo.
-- [ ] **10. Auditoria final requisito a requisito.** Revalidar os dois fixes
+- [x] **10. Auditoria final requisito a requisito.** Revalidar os dois fixes
   anteriores, AVC remanescente, billing/providers, todos os runtimes novos e a
   identidade/limpeza byte-observavel do Grimperium canonico; produzir comandos
   exatos de integracao e proxima execucao real.
@@ -125,15 +125,32 @@ passando (`decomposition`, evidencia por tentativa e canonicalizacao de versao).
 ## Outcome
 
 - Defeito do AVC corrigido e commitado em `161875e`.
-- O rerun `semi-imperium-retry-03` foi preparado com uma copia da directive
-  cuja unica diferenca e o target descartavel
-  `/tmp/agentlab-semi-imperium-retry-03.9NbIuv/target`, independente, limpo e no
-  SHA `2701620a959eca95e9596172c775812d38c64f1d`.
-- A solicitacao de executar `pnpm lab run` foi rejeitada antes de criar o
-  runtime ou invocar provider: o envio de directive e inspecao do target a
-  SaaS externos requer aprovacao explicita para os destinos nomeados.
-- Classificacao: **E. GENUINE HUMAN DECISION** sobre divulgacao externa. Nao e
-  nova rejeicao do planner nem defeito observado do control plane.
-- Consequencia: `PLAN_READY`, deliberation real e planning-to-execution handoff
-  ainda nao foram exercitados nesta branch. A iteracao pode continuar do mesmo
-  comando somente apos aprovacao explicita; nenhum workaround e autorizado.
+- Com autorizacao explicita de envio por assinatura, `semi-imperium-retry-03`
+  produziu plano autorizado, deliberacao cross-provider, `PLAN_READY` e
+  `WORKER_RUNNING` em clone descartavel. O processo foi interrompido com exit
+  130 antes de implementacao; nenhum target mudou.
+- A evidencia primaria do retry-03 revelou **planner contract defect**: o plano
+  persistido continha cada `PlannedTask` completa, mas `planViewOf` omitia dez
+  campos e convertia validacoes estruturadas em strings, enquanto o prompt
+  exigia avaliacao contra o contrato completo. Os dois deliberadores reagiram
+  coerentemente a essa visao enganosa.
+- RED: a regressao de `planViewOf` falhou por receber a projecao de sete campos.
+  Correcao minima: `DeliberationPlanView.tasks` reutiliza `PlannedTask` e recebe
+  diretamente cada task canonica. O overlay continua read-only e nao ganhou
+  filesystem, processo, provider ou state.
+- GREEN: modulo 17/17; planner 170/170; `pnpm typecheck` e `pnpm build` exit 0;
+  suite completa fora do sandbox 164 arquivos e 2308/2308 testes, exit 0;
+  `git diff --check` exit 0. Correcao commitada em `99e17b9`.
+- `semi-imperium-retry-04` usou runtime novo e clone independente no mesmo SHA.
+  O draft inicial foi `AUTHORIZED` sem issues e gerou sete tasks. Claude Opus 5
+  High levantou quatro lacunas materiais reais; Codex Sol High propôs a menor
+  revisao correspondente; ela foi `ACCEPTED_BY_GATES`, alterando o plano de
+  `aec3d1c...` para `cac456c...`. A diversidade cross-provider foi satisfeita.
+- O run publicou `PLAN_READY` para a versao revisada e chegou a
+  `WORKER_RUNNING` na primeira task. Foi interrompido deliberadamente com exit
+  130 antes de trabalho material. O PID registrado nao sobreviveu; clone e
+  Grimperium canonico permanecem limpos em `2701620a...`.
+- Classificacao terminal: **SUCCESS — valid plan plus deliberation transition e
+  planning-to-execution handoff**. `MAX_TURNS_REACHED` encerrou a deliberacao,
+  mas nao anulou a revisao aceita nem expandiu autorizacao. Billing continuou
+  subscription-only, policy `evidence_balanced`, publish negado e nenhum push.
