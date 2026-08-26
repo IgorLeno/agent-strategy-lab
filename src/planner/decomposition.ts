@@ -80,9 +80,11 @@ export type DecompositionVerdict = z.infer<typeof DecompositionVerdict>;
  * (cross_cutting, ambiguidade alta, verificação subjetiva, muitas
  * dependências/arquivos/tokens/comandos) é insumo de assessment, routing,
  * effort e budget: ela escolhe um modelo mais capaz, não recusa o plano.
+ * `retry_not_isolated` permanece no schema para ler records históricos, mas
+ * não é emitido: `blocked_by` prova apenas precedência no DAG, e `PlannedTask`
+ * não declara hoje nenhuma propriedade que prove retry compartilhado.
  */
 export const EMITTED_DECOMPOSITION_SIGNALS: readonly DecompositionSignalId[] = [
-  'retry_not_isolated',
   'unbounded_rollback_boundary',
 ];
 
@@ -120,18 +122,6 @@ function pushIf(
  */
 export function evaluateDecomposition(task: PlannedTask): DecompositionVerdict {
   const signals: TriggeredSignal[] = [];
-
-  pushIf(
-    signals,
-    task.risk === 'critical' && task.blocked_by.length > 0,
-    'retry_not_isolated',
-    'risk é critical e blocked_by não está vazio: um retry desta task não pode ser isolado das tasks das quais ela depende',
-    {
-      field: 'risk,blocked_by',
-      observed: `${task.risk}/${task.blocked_by.length}`,
-      threshold: 'critical + blocked_by > 0',
-    },
-  );
 
   pushIf(
     signals,

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  DecompositionSignalId,
   EMITTED_DECOMPOSITION_SIGNALS,
   evaluateDecomposition,
   PlannedTask,
@@ -127,11 +128,11 @@ describe('evaluateDecomposition', () => {
     expect(evaluateDecomposition(task).outcome).toBe('ATOMIC');
   });
 
-  it('risco crítico com dependências não tem isolamento de retry', () => {
+  it('risco crítico com dependências não prova falta de isolamento de retry', () => {
     const task = coherentTask({ risk: 'critical', blocked_by: ['M73'] });
     const verdict = evaluateDecomposition(task);
-    expect(verdict.outcome).toBe('DECOMPOSITION_REQUIRED');
-    expect(signalIds(verdict)).toContain('retry_not_isolated');
+    expect(verdict.outcome).toBe('ATOMIC');
+    expect(signalIds(verdict)).not.toContain('retry_not_isolated');
   });
 
   it('risco alto/crítico com superfície máxima de arquivos ampla não tem fronteira de rollback delimitada', () => {
@@ -196,21 +197,26 @@ describe('evaluateDecomposition', () => {
   });
 
   it('DECOMPOSITION_REQUIRED nomeia os sinais disparados com provenance rastreável', () => {
-    const task = coherentTask({ risk: 'critical', blocked_by: ['M73'] });
+    const task = coherentTask({
+      risk: 'critical',
+      resource_envelope: {
+        duration_ms: { expected: 600_000, maximum: 1_800_000 },
+        tokens: { expected: 50_000, maximum: 200_000 },
+        changed_files: { expected: 5, maximum: 40 },
+      },
+    });
     const verdict = evaluateDecomposition(task);
     expect(verdict.outcome).toBe('DECOMPOSITION_REQUIRED');
     if (verdict.outcome !== 'DECOMPOSITION_REQUIRED') throw new Error('unreachable');
-    const signal = verdict.signals.find((s) => s.signal === 'retry_not_isolated');
+    const signal = verdict.signals.find((s) => s.signal === 'unbounded_rollback_boundary');
     expect(signal).toBeDefined();
     expect(signal?.reason).toBeTruthy();
-    expect(signal?.provenance.field).toBe('risk,blocked_by');
+    expect(signal?.provenance.field).toBe('risk,resource_envelope.changed_files.maximum');
   });
 
-  it('só os sinais de fronteira de execução/rollback são emitidos', () => {
-    expect([...EMITTED_DECOMPOSITION_SIGNALS].sort()).toEqual([
-      'retry_not_isolated',
-      'unbounded_rollback_boundary',
-    ]);
+  it('só sinais com provenance concreta de fronteira são emitidos', () => {
+    expect(EMITTED_DECOMPOSITION_SIGNALS).toEqual(['unbounded_rollback_boundary']);
+    expect(DecompositionSignalId.options).toContain('retry_not_isolated');
   });
 
   it('taxonomy com campos opcionais ausentes, sem nenhum outro sinal, permanece ATOMIC (ausência não é decomposta por si só)', () => {
@@ -233,7 +239,7 @@ describe('evaluateDecomposition', () => {
     expect(evaluateDecomposition(task).outcome).toBe('ATOMIC');
   });
 
-  it('múltiplos sinais disparados aparecem todos no veredito', () => {
+  it('uma fronteira de rollback comprovada continua bloqueando sem inferir retry pelo DAG', () => {
     const task = coherentTask({
       risk: 'critical',
       blocked_by: ['M73'],
@@ -246,7 +252,6 @@ describe('evaluateDecomposition', () => {
     const verdict = evaluateDecomposition(task);
     expect(verdict.outcome).toBe('DECOMPOSITION_REQUIRED');
     const ids = signalIds(verdict);
-    expect(ids).toContain('retry_not_isolated');
-    expect(ids).toContain('unbounded_rollback_boundary');
+    expect(ids).toEqual(['unbounded_rollback_boundary']);
   });
 });

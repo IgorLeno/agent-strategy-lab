@@ -884,3 +884,35 @@ continua estrito, sem default, alias, coerção ou reparo heurístico. A regra �
 de sentido único: campo PRESENTE nunca é reescrito, então uma versão explícita
 incompatível continua rejeitando. Canonicalização nunca muta o candidato — a
 evidência crua do provider tem que continuar mostrando o que ele devolveu.
+
+[2026-08-26] Context: a revisão de um plano científico real decompôs uma task
+crítica em três unidades menores, mas todas conservaram dependências legítimas
+e foram novamente recusadas por `retry_not_isolated`.
+Mistake: inferir que `risk=critical` e `blocked_by` não vazio provavam uma
+fronteira de retry compartilhada. O lifecycle exige dependências `PASS`, parte
+do último commit aceito e reseta somente o patch do attempt downstream; a
+topologia descrevia precedência, não rollback conjunto.
+Rule: hard gate de decomposição só pode usar uma propriedade observável que
+prove que execução, retry ou rollback excede a work unit. Nunca converta
+dependência DAG ordinária em prova de não-isolamento; sem provenance suficiente,
+preserve o sinal apenas para compatibilidade histórica e não o emita.
+
+[2026-08-26] Context: uma deliberação real avaliou um plano autorizado contra
+o contrato completo de `PlannedTask`, mas recebeu uma projeção que omitia dez
+campos canônicos e transformava comandos estruturados em strings.
+Mistake: rotular uma visão parcial como a versão corrente do plano e, no mesmo
+prompt, exigir que o deliberador verifique um schema mais rico. Campos omitidos
+pelo control plane ficaram indistinguíveis de campos ausentes no plano.
+Rule: quando um modelo valida um objeto contra um contrato canônico, entregue o
+objeto canônico completo ou torne cada omissão e sua provenance explícitas.
+Nunca apresente uma projeção lossy como se fosse o artefato que será validado.
+
+[2026-08-26] Context: ao preparar um retry real, o documento de estabilização
+descrevia a Run Directive e apontava para seu artefato persistido, mas foi
+copiado como se ele próprio fosse a directive executável.
+Mistake: confundir um documento de controle com a entrada canônica que ele
+referencia; o parser recusou corretamente a ausência de `target.type` antes de
+qualquer provider ou runtime.
+Rule: reproduza uma Run Directive somente a partir do `lab/run-directive.txt`
+persistido da execução fonte e prove o diff byte a byte. Nunca reconstrua ou
+substitua essa entrada por um documento que apenas a descreve.

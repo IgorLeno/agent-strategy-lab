@@ -2,7 +2,7 @@
  * Regressão do run real `grimperium-d08cac29/semi-imperium-retry-01`.
  *
  * O draft inicial era estruturalmente válido e foi rejeitado em
- * AVC_DECOMPOSITION (retry_not_isolated / unbounded_rollback_boundary). O
+ * AVC_DECOMPOSITION (`unbounded_rollback_boundary`). O
  * planner respondeu com um plano de substituição maior — e omitiu, em TODAS as
  * tasks, o `schema_version` repetido. As 14 tasks morreram em
  * SCHEMA_NORMALIZATION com "tasks.N.schema_version: Invalid literal value,
@@ -230,8 +230,8 @@ describe('canonicalização do schema_version de protocolo na fronteira do draft
 
 describe('ciclo real: rejeição em AVC_DECOMPOSITION seguida de revisão sem schema_version', () => {
   it('a revisão completa deixa de morrer em SCHEMA_NORMALIZATION e chega aos gates seguintes', async () => {
-    // Draft inicial: task crítica com dependência — exatamente o
-    // retry_not_isolated observado no run real.
+    // Draft inicial: a fronteira máxima de arquivos de uma task crítica é
+    // realmente não delimitada, então AVC_DECOMPOSITION continua legítimo.
     const initialDraft = {
       schema_version: 1,
       tasks: [
@@ -240,6 +240,11 @@ describe('ciclo real: rejeição em AVC_DECOMPOSITION seguida de revisão sem sc
           task_id: 'mopac-minimum-verified-workflow',
           risk: 'critical',
           blocked_by: ['conformer-search-selection'],
+          resource_envelope: {
+            duration_ms: { expected: 600_000, maximum: 1_800_000 },
+            tokens: { expected: 50_000, maximum: 150_000 },
+            changed_files: { expected: 8, maximum: 40 },
+          },
         }),
       ],
     };
@@ -284,7 +289,7 @@ describe('ciclo real: rejeição em AVC_DECOMPOSITION seguida de revisão sem sc
       outcome: 'REJECTED',
       rejected_stage: 'AVC_DECOMPOSITION',
     });
-    expect(records[0]?.validation?.issues.join(' ')).toContain('retry_not_isolated');
+    expect(records[0]?.validation?.issues.join(' ')).toContain('unbounded_rollback_boundary');
 
     // A asserção central: a revisão passa da normalização de schema.
     expect(records[1]?.validation?.rejected_stage).not.toBe('SCHEMA_NORMALIZATION');
