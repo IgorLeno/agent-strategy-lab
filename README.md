@@ -393,6 +393,32 @@ linha por transição:
 Falha nomeia o stage, o planner profile e o runtime de evidência; stdout
 continua reservado ao payload JSON.
 
+#### Evidência de planejamento
+
+Toda tentativa REAL do planning worker deixa evidência estruturada no runtime,
+em `<runtime>/project/planning/attempt-NN/`, **mesmo quando nenhum PlanFile é
+produzido e a execução nunca começa**:
+
+```text
+attempt-01/invocation-metadata.json   attempt, provider, model, papel, hashes de intake/instrução/packet
+attempt-01/result.json                outcome da invocação (draft, falha estruturada ou resultado malformado)
+attempt-01/draft.json                 o draft EXATO entregue à normalização — nunca reescrito nem reparado
+attempt-01/validation.json            stage que aceitou/rejeitou + lista completa de issues
+attempt-02/revision-request.json      o previous_stage e as issues devolvidos ao worker na revisão
+```
+
+O diretório de cada tentativa é reivindicado com um `mkdir` atômico, então uma
+revisão — ou uma re-execução no mesmo runtime — nunca sobrescreve evidência
+anterior; ela ganha o próximo índice livre. Uma rejeição em
+`SCHEMA_NORMALIZATION` é diagnosticável direto do artifact
+(`jq '.tasks[0].schema_version' attempt-01/draft.json`), e a falha terminal
+aponta o diretório de cada tentativa em vez da raiz genérica do runtime. O
+draft nunca é despejado no terminal — só o caminho dele.
+
+Credencial, token, chave de API e ambiente de processo **não** entram na
+evidência: ela contém o contrato estruturado de entrada/saída do planner e o
+veredito determinístico, nada mais.
+
 ### Advanced / Compatibility Interface
 
 Flags continuam válidas, mas não são o fluxo principal:

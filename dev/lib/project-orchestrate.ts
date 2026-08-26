@@ -61,6 +61,7 @@ import {
   generateImplementationPlan,
   type ImplementationPlan,
   type PlanGenerationStage,
+  type PlanningAttemptObserver,
 } from '../../src/planner/generate.js';
 import {
   deliberatePlan,
@@ -574,6 +575,11 @@ export interface ReviewedPathInput {
   readonly authorizationScope: unknown;
   /** Porta de M83; o adapter real Claude/Codex está mais abaixo neste módulo. */
   readonly planningWorker: PlanningWorkerPort;
+  /**
+   * Observador de tentativas do planner. Puro repasse: quem decide ONDE a
+   * evidência é gravada é o runtime, não este módulo nem o pipeline de `src/`.
+   */
+  readonly onPlanningAttempt?: PlanningAttemptObserver;
   readonly deliberation?: ReviewedPathDeliberation;
 }
 
@@ -608,6 +614,7 @@ export async function runReviewedPath(input: ReviewedPathInput): Promise<Reviewe
     inspection: input.inspection,
     authorizationScope: input.authorizationScope,
     planningWorker: input.planningWorker,
+    ...(input.onPlanningAttempt === undefined ? {} : { onAttempt: input.onPlanningAttempt }),
   });
   if (generated.outcome === 'REJECTED') {
     return generated.stage === 'AVC_DECOMPOSITION'

@@ -47,6 +47,12 @@ export interface HarnessPaths {
   readonly plannedWorkAdoptionsDir: string;
   /** Binding append-only entre attempts do target e runs canônicos do control plane. */
   readonly projectHistoryBindingsDir: string;
+  /**
+   * Evidência append-only das tentativas do planning worker. Existe mesmo
+   * quando nenhum PlanFile nasce: é o que torna uma rejeição de planejamento
+   * auditável depois.
+   */
+  readonly planningEvidenceDir: string;
 }
 
 /**
@@ -137,5 +143,6 @@ export function resolveHarnessPaths(
     validationLogsDir: path.join(devDir, 'validation-logs'),
     plannedWorkAdoptionsDir: path.join(devDir, 'planned-work-adoptions'),
     projectHistoryBindingsDir: path.join(devDir, 'project', 'history-bindings'),
+    planningEvidenceDir: path.join(devDir, 'project', 'planning'),
   };
 }

@@ -847,3 +847,21 @@ telemetry que a autoridade é nula (`termination_authority`), para que nenhum
 leitor futuro precise inferir se aquilo matou algo. Corolário: nunca trate
 atividade de I/O bruto como prova de progresso semântico — nem silêncio como
 prova de travamento.
+
+[2026-08-26] Context: run real contra repositório externo parou em
+`PLANNER_RUNNING` → `SCHEMA_NORMALIZATION`, com 12 issues
+`tasks.N.schema_version: Invalid literal value, expected 1`. O runtime apontado
+como evidência continha só intake, directive, authorization e observability.
+Mistake: o pipeline determinístico descartava o draft não confiável assim que o
+gate o rejeitava. Nenhum postmortem conseguia distinguir se `schema_version`
+tinha sido omitido, vindo como string, como outro número ou alterado entre a
+saída do provider e a normalização — e, sem o draft, qualquer mudança de schema
+seria especulação.
+Rule: um gate que REJEITA uma saída não confiável precisa PERSISTIR essa saída
+antes de descartá-la. O artifact rejeitado é a evidência primária da rejeição;
+stage e lista de issues sozinhos não reconstroem a causa. Preserve por
+tentativa, append-only, e faça o relatório de falha apontar o artifact exato em
+vez da raiz genérica do runtime. A camada pura não ganha caminho de
+filesystem para isso: ela emite um record e o adapter de runtime persiste.
+Corolário: nunca "conserte" o schema com coerção, default ou reparo
+heurístico antes de ter o draft cru em mãos.

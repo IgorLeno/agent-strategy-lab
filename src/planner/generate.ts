@@ -98,11 +98,96 @@ export type PlanGenerationResult =
       readonly issues: readonly string[];
     };
 
+/**
+ * Identidade da tentativa de planejamento, tal como ela foi ENVIADA ao worker.
+ * Só hashes e identificadores de contrato: nenhuma credencial, token,
+ * variável de ambiente ou interno de provider entra aqui.
+ */
+export interface PlanningAttemptIdentity {
+  readonly role: 'READ_ONLY_PLANNER';
+  readonly workspace_access: 'READ_ONLY';
+  readonly packet_id: string;
+  readonly instruction_sha256: string;
+  readonly intake_sha256: string;
+  readonly inspection_sha256: string;
+  readonly authorization_scope_sha256: string;
+  readonly base_revision_sha: string;
+}
+
+/**
+ * O que o worker devolveu, ANTES de qualquer gate determinístico. Em
+ * `DRAFT_RETURNED`, `draft` é o valor EXATO entregue a
+ * `normalizeUntrustedPlanDraft` — nunca normalizado, reescrito nem reparado
+ * antes de ser observado.
+ */
+export type PlanningAttemptInvocationEvidence =
+  | {
+      readonly outcome: 'DRAFT_RETURNED';
+      readonly invocation_id: string;
+      readonly provider_id: string;
+      readonly model: string;
+      readonly draft: unknown;
+    }
+  | {
+      readonly outcome: 'INVOCATION_FAILED';
+      readonly invocation_id: string;
+      readonly provider_id: string;
+      readonly model: string;
+      readonly failure: {
+        readonly code: string;
+        readonly message: string;
+        readonly retryable: boolean;
+      };
+    }
+  /** A porta lançou: não houve resultado estruturado nenhum a preservar. */
+  | { readonly outcome: 'INVOCATION_ERROR'; readonly issues: readonly string[] }
+  /** Houve resultado, mas ele não satisfaz `PlanningWorkerInvocationResult`. */
+  | { readonly outcome: 'MALFORMED_RESULT'; readonly issues: readonly string[] };
+
+/** Veredito determinístico sobre o draft desta tentativa. */
+export interface PlanningAttemptValidationEvidence {
+  readonly outcome: 'AUTHORIZED' | 'REJECTED';
+  /** Stage que aceitou/rejeitou; `null` quando o plano foi autorizado inteiro. */
+  readonly rejected_stage: PlanGenerationStage | null;
+  readonly issues: readonly string[];
+}
+
+/**
+ * Evidência COMPLETA de uma tentativa real do planning worker. Emitida mesmo
+ * quando nenhum PlanFile nasce: é ela que torna a rejeição auditável depois.
+ */
+export interface PlanningAttemptRecord {
+  readonly schema_version: 1;
+  readonly attempt: 1 | 2;
+  readonly kind: 'INITIAL_DRAFT' | 'REVISION';
+  readonly identity: PlanningAttemptIdentity;
+  /** Pedido de revisão entregue ao worker; `null` na tentativa inicial. */
+  readonly revision_request: {
+    readonly attempt: 2;
+    readonly previous_stage: 'SCHEMA_NORMALIZATION' | 'AVC_DECOMPOSITION' | 'DEPENDENCY_VALIDATION';
+    readonly issues: readonly string[];
+    readonly requires_complete_replacement: true;
+  } | null;
+  readonly invocation: PlanningAttemptInvocationEvidence;
+  /** `null` quando não houve draft para validar. */
+  readonly validation: PlanningAttemptValidationEvidence | null;
+}
+
+/**
+ * Observador de tentativas. Puro por contrato: o planner não conhece
+ * filesystem nenhum — quem persiste é o adapter de runtime. Uma exceção aqui
+ * NÃO é engolida: evidência que não pôde ser preservada não vira sucesso
+ * silencioso.
+ */
+export type PlanningAttemptObserver = (record: PlanningAttemptRecord) => void | Promise<void>;
+
 export interface GenerateImplementationPlanInput {
   readonly intake: unknown;
   readonly inspection: unknown;
   readonly authorizationScope: unknown;
   readonly planningWorker: PlanningWorkerPort;
+  /** Opcional: ausente, o pipeline se comporta exatamente como antes. */
+  readonly onAttempt?: PlanningAttemptObserver;
 }
 
 function rejected(stage: PlanGenerationStage, issues: readonly string[]): PlanGenerationResult {
@@ -314,19 +399,57 @@ export async function generateImplementationPlan(
     );
   }
 
+  const identity: PlanningAttemptIdentity = {
+    role: 'READ_ONLY_PLANNER',
+    workspace_access: 'READ_ONLY',
+    packet_id: packetId,
+    instruction_sha256: invocation.packet.user_intent.instruction_sha256,
+    intake_sha256: projectIntakeSha256(intake),
+    inspection_sha256: canonicalSha256(inspection),
+    authorization_scope_sha256: executionAuthorizationScopeSha256(authorizationScope),
+    base_revision_sha: intake.base_revision.sha,
+  };
+
+  /**
+   * Toda saída deste loop passa por aqui: a evidência da tentativa é
+   * preservada ANTES de o draft ser descartado, inclusive quando a rejeição é
+   * terminal e nenhum PlanFile nasce.
+   */
+  async function observe(
+    attempt: 1 | 2,
+    invocationEvidence: PlanningAttemptInvocationEvidence,
+    validation: PlanningAttemptValidationEvidence | null,
+  ): Promise<void> {
+    const revision = invocation.revision;
+    await input.onAttempt?.({
+      schema_version: 1,
+      attempt,
+      kind: revision === undefined ? 'INITIAL_DRAFT' : 'REVISION',
+      identity,
+      revision_request: revision === undefined ? null : { ...revision, issues: [...revision.issues] },
+      invocation: invocationEvidence,
+      validation,
+    });
+  }
+
   for (const attempt of [1, 2] as const) {
     let rawInvocationResult: unknown;
     try {
       rawInvocationResult = await input.planningWorker.invoke(invocation);
     } catch (error) {
-      return rejected('PLANNING_WORKER', [error instanceof Error ? error.message : String(error)]);
+      const issues = [error instanceof Error ? error.message : String(error)];
+      await observe(attempt, { outcome: 'INVOCATION_ERROR', issues }, null);
+      return rejected('PLANNING_WORKER', issues);
     }
 
     const invocationResult = PlanningWorkerInvocationResult.safeParse(rawInvocationResult);
     if (!invocationResult.success) {
-      return rejected('PLANNING_WORKER', zodIssues(invocationResult.error));
+      const issues = zodIssues(invocationResult.error);
+      await observe(attempt, { outcome: 'MALFORMED_RESULT', issues }, null);
+      return rejected('PLANNING_WORKER', issues);
     }
     if (invocationResult.data.outcome === 'INVOCATION_FAILED') {
+      await observe(attempt, invocationResult.data, null);
       return rejected('PLANNING_WORKER', [
         `${invocationResult.data.failure.code}: ${invocationResult.data.failure.message}`,
       ]);
@@ -337,6 +460,11 @@ export async function generateImplementationPlan(
       intake,
       inspection,
       authorizationScope,
+    });
+    await observe(attempt, invocationResult.data, {
+      outcome: validated.outcome,
+      rejected_stage: validated.outcome === 'REJECTED' ? validated.stage : null,
+      issues: validated.outcome === 'REJECTED' ? validated.issues : [],
     });
     if (validated.outcome === 'AUTHORIZED') return validated;
     if (attempt === 2 || !REVISION_ELIGIBLE_STAGES.has(validated.stage)) return validated;

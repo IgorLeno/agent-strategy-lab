@@ -114,6 +114,11 @@ export {
 export type {
   GenerateImplementationPlanInput,
   PlanGenerationResult,
+  PlanningAttemptIdentity,
+  PlanningAttemptInvocationEvidence,
+  PlanningAttemptObserver,
+  PlanningAttemptRecord,
+  PlanningAttemptValidationEvidence,
 } from './generate.js';
 
 /**

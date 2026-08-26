@@ -4,6 +4,10 @@ import path from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 
 import { writeFileAtomic } from './atomic.js';
+import {
+  createPlanningEvidenceSink,
+  planningEvidenceReport,
+} from './planning-evidence.js';
 import type { HarnessPaths } from './paths.js';
 import {
   loadProjectRunAuthorization,
@@ -146,11 +150,16 @@ export async function ensureGeneratedProjectPlan(
   const inspect = input.inspect ?? ((repoRoot: string) => inspectRepository({ repoRoot }));
   const inspection = await inspect(input.paths.repoRoot);
   const deliberation = input.deliberation === undefined ? undefined : await input.deliberation();
+  // Evidência por tentativa do planner. Criar o sink não escreve nada: só uma
+  // invocação real do worker cria diretório — inclusive quando ela é rejeitada
+  // e nenhum PlanFile chega a existir.
+  const planningEvidence = createPlanningEvidenceSink(input.paths.planningEvidenceDir);
   const planned = await runReviewedPath({
     intake: input.intake,
     inspection,
     authorizationScope: input.authorizationScope,
     planningWorker: await input.planningWorker(),
+    onPlanningAttempt: planningEvidence.observer,
     ...(deliberation === undefined
       ? {}
       : {
@@ -179,8 +188,9 @@ export async function ensureGeneratedProjectPlan(
       planned.outcome === 'REJECTED' || planned.outcome === 'DECOMPOSITION_REQUIRED'
         ? planned.stage + ': ' + planned.issues.join('; ')
         : 'planning recusado';
-    // Evidência operacional da falha: stage, profile e runtime, para que o
-    // usuário saiba ONDE parou e onde inspecionar sem abrir o código.
+    // Evidência operacional da falha: stage, profile e — o que faltava quando
+    // uma run real morreu em SCHEMA_NORMALIZATION — o ARTIFACT exato de cada
+    // tentativa. O draft nunca é despejado no terminal: só o caminho dele.
     throw new PlanSetupError(
       'planning worker/gates recusaram o projeto: ' +
         details +
@@ -190,6 +200,7 @@ export async function ensureGeneratedProjectPlan(
           : 'PLANNING_WORKER') +
         (input.plannerProfileId === undefined ? '' : ' planner_profile=' + input.plannerProfileId) +
         '\nevidence: ' + input.paths.devDir +
+        '\n' + planningEvidenceReport(planningEvidence.attempts()) +
         '\nNenhum PlanFile foi persistido e o executor não foi chamado.',
     );
   }
