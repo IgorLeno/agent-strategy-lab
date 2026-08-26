@@ -12,6 +12,7 @@ import {
   deliberatePlan,
   planRevalidator,
   planVersionSha256,
+  planViewOf,
   selectDeliberators,
   validatePlannerDraft,
   type DeliberatorAssignment,
@@ -206,6 +207,13 @@ function revise(options: {
 }
 
 describe('deliberação de plano — turnos, convergência e fronteiras', () => {
+  it('entrega cada PlannedTask canônica completa ao deliberador', () => {
+    const plan = authorizedPlan();
+    const view = planViewOf(plan);
+
+    expect(view.tasks[0]).toEqual(plan.tasks[0]?.task);
+  });
+
   it('max_turns 0 não chama deliberador nenhum', async () => {
     const worker = scriptedWorker([]);
     const result = await deliberatePlan({
@@ -518,6 +526,7 @@ describe('deliberadores são estruturalmente read-only', () => {
       '../intake/index.js',
       './draft.js',
       './generate.js',
+      './task.js',
       'zod',
     ]);
     expect(source).not.toMatch(/node:fs|node:child_process|spawn\(|writeFile|exec\(/);
@@ -532,23 +541,7 @@ describe('deliberadores são estruturalmente read-only', () => {
       turn: 1,
       max_turns: 1,
       human_request: 'pedido',
-      plan: {
-        schema_version: 1,
-        acceptance_contract: [OBJECTIVE],
-        constraints: [],
-        exclusions: [],
-        tasks: [
-          {
-            task_id: 't',
-            objective: 'o',
-            blocked_by: [],
-            acceptance: [OBJECTIVE],
-            validation: ['pnpm typecheck'],
-            risk: 'low',
-            difficulty: 'medium',
-          },
-        ],
-      },
+      plan: planViewOf(authorizedPlan()),
       plan_sha256: '0'.repeat(64),
       prior_objections: [],
     });

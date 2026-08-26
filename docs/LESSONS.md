@@ -896,3 +896,13 @@ Rule: hard gate de decomposição só pode usar uma propriedade observável que
 prove que execução, retry ou rollback excede a work unit. Nunca converta
 dependência DAG ordinária em prova de não-isolamento; sem provenance suficiente,
 preserve o sinal apenas para compatibilidade histórica e não o emita.
+
+[2026-08-26] Context: uma deliberação real avaliou um plano autorizado contra
+o contrato completo de `PlannedTask`, mas recebeu uma projeção que omitia dez
+campos canônicos e transformava comandos estruturados em strings.
+Mistake: rotular uma visão parcial como a versão corrente do plano e, no mesmo
+prompt, exigir que o deliberador verifique um schema mais rico. Campos omitidos
+pelo control plane ficaram indistinguíveis de campos ausentes no plano.
+Rule: quando um modelo valida um objeto contra um contrato canônico, entregue o
+objeto canônico completo ou torne cada omissão e sua provenance explícitas.
+Nunca apresente uma projeção lossy como se fosse o artefato que será validado.

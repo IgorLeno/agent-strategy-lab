@@ -32,6 +32,7 @@ import type { ExecutionAuthorizationScope, ProjectIntakeRequest } from '../intak
 import type { ProjectInspection } from '../inspection/index.js';
 import { UntrustedPlanDraft } from './draft.js';
 import { ImplementationPlan, validatePlannerDraft, type PlanGenerationResult } from './generate.js';
+import { PlannedTask } from './task.js';
 
 const nonEmpty = z.string().trim().min(1);
 const boundedText = (maximum: number) => z.string().trim().min(1).max(maximum);
@@ -83,28 +84,14 @@ export const DeliberatorVerdict = z
   });
 export type DeliberatorVerdict = z.infer<typeof DeliberatorVerdict>;
 
-/** Projeção BOUNDED do plano entregue ao deliberador; nunca o repositório. */
+/** Plano canônico completo entregue ao deliberador; continua bounded pelo schema. */
 export const DeliberationPlanView = z
   .object({
     schema_version: z.literal(1),
     acceptance_contract: z.array(boundedText(1_000)).min(1),
     constraints: z.array(boundedText(1_000)),
     exclusions: z.array(boundedText(1_000)),
-    tasks: z
-      .array(
-        z
-          .object({
-            task_id: nonEmpty,
-            objective: boundedText(2_000),
-            blocked_by: z.array(nonEmpty),
-            acceptance: z.array(boundedText(1_000)).min(1),
-            validation: z.array(boundedText(1_000)),
-            risk: nonEmpty,
-            difficulty: nonEmpty,
-          })
-          .strict(),
-      )
-      .min(1),
+    tasks: z.array(PlannedTask).min(1),
   })
   .strict();
 export type DeliberationPlanView = z.infer<typeof DeliberationPlanView>;
@@ -226,15 +213,7 @@ export function planViewOf(plan: ImplementationPlan): DeliberationPlanView {
     acceptance_contract: plan.control.acceptance_contract,
     constraints: plan.control.constraints,
     exclusions: plan.control.exclusions,
-    tasks: plan.tasks.map((entry) => ({
-      task_id: entry.task.task_id,
-      objective: entry.task.objective,
-      blocked_by: entry.task.blocked_by,
-      acceptance: entry.task.acceptance,
-      validation: entry.task.validation.map((command) => command.argv.join(' ')),
-      risk: entry.task.risk,
-      difficulty: entry.assessment.difficulty.value,
-    })),
+    tasks: plan.tasks.map((entry) => entry.task),
   });
 }
 
