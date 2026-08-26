@@ -215,6 +215,31 @@ describe('evaluatePlanWorkflow — DECOMPOSITION_REQUIRED', () => {
     const [verdict] = evaluatePlanWorkflow([wide]);
     expect(verdict?.outcome).not.toBe('DECOMPOSITION_REQUIRED');
   });
+
+  it('não decompõe uma task crítica só porque ela depende de um predecessor separável', () => {
+    const predecessor = coherentTask({
+      task_id: 'prepare_authoritative_input',
+      objective: 'Preparar e validar a entrada autoritativa do estágio seguinte',
+      blocked_by: [],
+      risk: 'high',
+      context_scope: { areas: ['input preparation'] },
+    });
+    const downstream = coherentTask({
+      task_id: 'apply_critical_transformation',
+      objective: 'Aplicar uma transformação crítica e validável sobre a entrada já aceita',
+      blocked_by: [predecessor.task_id],
+      risk: 'critical',
+      context_scope: { areas: ['critical transformation'] },
+    });
+
+    const validated = validatePlan(plan([predecessor, downstream]));
+    expect(validated.valid).toBe(true);
+
+    const verdicts = evaluatePlanWorkflow([predecessor, downstream]);
+    expect(verdicts.find((verdict) => verdict.task_id === downstream.task_id)?.outcome).toBe(
+      'REVIEWED_REQUIRED',
+    );
+  });
 });
 
 describe('evaluatePlanWorkflow — MERGE_RECOMMENDED', () => {

@@ -884,3 +884,15 @@ continua estrito, sem default, alias, coerção ou reparo heurístico. A regra �
 de sentido único: campo PRESENTE nunca é reescrito, então uma versão explícita
 incompatível continua rejeitando. Canonicalização nunca muta o candidato — a
 evidência crua do provider tem que continuar mostrando o que ele devolveu.
+
+[2026-08-26] Context: a revisão de um plano científico real decompôs uma task
+crítica em três unidades menores, mas todas conservaram dependências legítimas
+e foram novamente recusadas por `retry_not_isolated`.
+Mistake: inferir que `risk=critical` e `blocked_by` não vazio provavam uma
+fronteira de retry compartilhada. O lifecycle exige dependências `PASS`, parte
+do último commit aceito e reseta somente o patch do attempt downstream; a
+topologia descrevia precedência, não rollback conjunto.
+Rule: hard gate de decomposição só pode usar uma propriedade observável que
+prove que execução, retry ou rollback excede a work unit. Nunca converta
+dependência DAG ordinária em prova de não-isolamento; sem provenance suficiente,
+preserve o sinal apenas para compatibilidade histórica e não o emita.
