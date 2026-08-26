@@ -938,6 +938,12 @@ com estes nomes, nem mais nem menos:
    "tokens":{"expected":<tokens>,"maximum":<tokens>},
    "changed_files":{"expected":<n>,"maximum":<n>}}}
 
+"schema_version" é metadado de protocolo FIXO (sempre 1), não uma decisão de
+planejamento: repita-o em cada task. Se ele faltar numa task, o control plane
+propaga a versão já validada do envelope externo — nenhum outro campo recebe
+esse tratamento, e uma versão explícita incompatível continua rejeitando o
+draft.
+
 UNIDADES: estimated_duration, validation_budget e resource_envelope.duration_ms
 são MILISSEGUNDOS; validation[].timeout_seconds é em SEGUNDOS; tokens são
 tokens; changed_files é número de arquivos. "expected" nunca excede "maximum".
@@ -979,6 +985,7 @@ export function buildPlannerPrompt(invocation: PlanningWorkerInvocation): string
           'O draft anterior foi rejeitado pelos gates determinísticos abaixo:',
           JSON.stringify(invocation.revision, null, 2),
           'Produza um draft completo de substituição. Não envie patch, merge parcial ou instruções de correção.',
+          'Repita o contrato de saída INTEIRO em cada task, inclusive o metadado fixo "schema_version":1.',
           'Todos os gates determinísticos serão executados novamente e não haverá terceira tentativa.',
         ];
   return [

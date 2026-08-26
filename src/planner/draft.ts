@@ -335,7 +335,42 @@ export type DraftNormalizationResult =
   | { readonly outcome: 'NORMALIZED'; readonly tasks: readonly PlannedTask[] }
   | { readonly outcome: 'INVALID_DRAFT'; readonly issues: readonly DraftIssue[] };
 
-/** Parse estrito, sem defaults e sem reparo: qualquer divergencia e devolvida como rejeicao. */
+/**
+ * Canonicalizacao de METADADO DE PROTOCOLO — nao e reparo de schema.
+ *
+ * `schema_version` e a unica coisa dentro de uma task que nao e decisao de
+ * planejamento: e a versao do protocolo, e ela JA foi validada no envelope
+ * externo do draft (`UntrustedPlanDraft.schema_version`). Exigir que um
+ * provider a repita, identica, dentro de cada task nao acrescenta informacao
+ * nenhuma — so cria um ponto de falha probabilistico. Foi exatamente assim que
+ * uma revisao real morreu em SCHEMA_NORMALIZATION: o outer trazia
+ * `schema_version: 1`, as 14 tasks omitiam o campo repetido, e nenhum executor
+ * chegou a ser lancado.
+ *
+ * A regra e deliberadamente estreita:
+ * - campo AUSENTE num candidato objeto -> propaga a versao externa ja validada;
+ * - campo PRESENTE -> passa intacto, e um valor incompativel (`2`, `"1"`)
+ *   continua sendo rejeitado por `PlannedTask`.
+ *
+ * Nenhum outro campo recebe default, alias, coercao ou adivinhacao, e o
+ * candidato nunca e mutado: a evidencia crua do provider permanece byte a byte
+ * o que ele devolveu.
+ */
+function canonicalizeTaskProtocolVersion(candidate: unknown, schemaVersion: 1): unknown {
+  if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) {
+    return candidate;
+  }
+  if (Object.hasOwn(candidate, 'schema_version')) return candidate;
+  return { ...candidate, schema_version: schemaVersion };
+}
+
+/**
+ * Parse estrito, sem defaults e sem reparo: qualquer divergencia e devolvida
+ * como rejeicao. A unica excecao e a propagacao deterministica do
+ * `schema_version` externo ja validado para uma task que o omite
+ * (`canonicalizeTaskProtocolVersion`) — controle de protocolo, nunca conteudo
+ * de planejamento.
+ */
 export function normalizeUntrustedPlanDraft(input: unknown): DraftNormalizationResult {
   const outer = UntrustedPlanDraft.safeParse(input);
   if (!outer.success) {
@@ -348,7 +383,9 @@ export function normalizeUntrustedPlanDraft(input: unknown): DraftNormalizationR
   const tasks: PlannedTask[] = [];
   const issues: DraftIssue[] = [];
   for (const [index, candidate] of outer.data.tasks.entries()) {
-    const parsed = PlannedTask.safeParse(candidate);
+    const parsed = PlannedTask.safeParse(
+      canonicalizeTaskProtocolVersion(candidate, outer.data.schema_version),
+    );
     if (parsed.success) {
       tasks.push(parsed.data);
     } else {

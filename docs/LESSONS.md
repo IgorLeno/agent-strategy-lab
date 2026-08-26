@@ -865,3 +865,22 @@ vez da raiz genérica do runtime. A camada pura não ganha caminho de
 filesystem para isso: ela emite um record e o adapter de runtime persiste.
 Corolário: nunca "conserte" o schema com coerção, default ou reparo
 heurístico antes de ter o draft cru em mãos.
+
+[2026-08-26] Context: com o draft cru finalmente preservado, o postmortem do
+run real ficou trivial: o envelope externo trazia `schema_version: 1`, e as 14
+tasks da revisão de substituição OMITIAM o mesmo campo repetido. O plano em si
+estava correto — o planner tinha entendido o protocolo v1 no draft inicial e
+respondido à rejeição de AVC decompondo 9 tasks em 14.
+Mistake: exigir que um provider não confiável reproduza, dentro de cada objeto
+aninhado, uma versão de protocolo que o control plane JÁ validou no envelope
+externo. Isso não acrescenta informação nenhuma e transforma metadado de
+control plane num ponto de falha probabilístico, que derruba um plano inteiro
+por um motivo que não é de planejamento.
+Rule: separe METADADO DE PROTOCOLO de DECISÃO SUBSTANTIVA na fronteira não
+confiável. Metadado de protocolo já validado no envelope pode ser propagado
+deterministicamente para um filho que o OMITE, antes do parse estrito; tudo o
+que é decisão (objective, taxonomy, risk, acceptance, validation, envelope)
+continua estrito, sem default, alias, coerção ou reparo heurístico. A regra é
+de sentido único: campo PRESENTE nunca é reescrito, então uma versão explícita
+incompatível continua rejeitando. Canonicalização nunca muta o candidato — a
+evidência crua do provider tem que continuar mostrando o que ele devolveu.
