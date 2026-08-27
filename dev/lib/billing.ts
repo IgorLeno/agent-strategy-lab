@@ -1,5 +1,13 @@
 import { spawn } from 'node:child_process';
+import { providerContractOf, type UpstreamProvider } from '../../src/providers/index.js';
 import type { BillingRecord } from './schemas.js';
+
+/**
+ * Espelha `LauncherProfile['agent']`. Declarado aqui, e não importado, porque
+ * `profile.ts` já importa este módulo: a dependência é de cobrança para perfil,
+ * nunca de volta.
+ */
+export type LauncherAgent = 'claude' | 'codex' | 'opencode' | 'fake';
 
 /**
  * Política de cobrança do laboratório.
@@ -82,9 +90,24 @@ export function assertNoApiCredentials(context: string, env: NodeJS.ProcessEnv):
 // Prova da fonte da credencial — comandos LOCAIS e não pagos
 // ---------------------------------------------------------------------------
 
+/**
+ * FONTE DA CREDENCIAL provada por um probe local e gratuito.
+ *
+ * Note que `opencode_go_subscription_key` NÃO é `api`. A distinção é o ponto:
+ * `api` aqui significa "cobrança por uso contra uma chave", e a chave do
+ * OpenCode Go autentica uma ASSINATURA de valor fixo. Colapsar as duas faria a
+ * proteção de cobrança recusar uma assinatura legítima — ou, pior, tratar
+ * cobrança por uso como assinatura.
+ */
 export type CredentialSource =
   | 'claude_subscription_oauth'
   | 'chatgpt_subscription'
+  /** OAuth ChatGPT observado pelo OpenCode: MESMO pool do Codex. */
+  | 'opencode_chatgpt_subscription'
+  /** Chave que autentica a assinatura OpenCode Go. Não é cobrança por uso. */
+  | 'opencode_go_subscription_key'
+  /** Chave do OpenRouter: cobrança POR USO contra saldo pré-pago. */
+  | 'openrouter_metered_key'
   | 'api'
   | 'unknown'
   | 'not_applicable';
@@ -221,7 +244,9 @@ async function probeCodex(
 }
 
 export interface ProbeInput {
-  readonly agent: 'claude' | 'codex' | 'fake';
+  readonly agent: LauncherAgent;
+  /** Upstream declarado; obrigatório para `opencode`, que fala com três. */
+  readonly provider?: UpstreamProvider | undefined;
   /** Binário do PERFIL: prova a credencial do mesmo executável que vai rodar. */
   readonly binary: string;
   /** Ambiente do worker: a prova precisa valer para o processo que vai nascer. */
@@ -229,24 +254,144 @@ export interface ProbeInput {
   readonly runner?: CommandRunner;
 }
 
-export async function probeCredentialSource(input: ProbeInput): Promise<CredentialProbe> {
-  const runner = input.runner ?? spawnRunner;
-  if (input.agent === 'fake') {
-    return {
-      source: 'not_applicable',
-      detail: 'worker falso não fala com provider nenhum',
-      verified: false,
-      command: '(nenhum)',
-    };
-  }
-  return input.agent === 'claude'
-    ? probeClaude(input.binary, input.env, runner)
-    : probeCodex(input.binary, input.env, runner);
+/** Remove sequências ANSI antes de reconhecer texto de CLI decorada. */
+function stripAnsi(text: string): string {
+  // eslint-disable-next-line no-control-regex
+  return text.replace(/\u001b\[[0-9;]*[A-Za-z]/g, '').replace(/\[\d+m/g, '');
 }
 
-/** Fonte de credencial que a política aceita para cada agente. */
-export function expectedSubscriptionSource(agent: 'claude' | 'codex'): CredentialSource {
-  return agent === 'claude' ? 'claude_subscription_oauth' : 'chatgpt_subscription';
+/**
+ * Nome de exibição do provider no `opencode providers list` -> upstream do Lab.
+ * Reconhecer o rótulo é o que permite provar a credencial do upstream CERTO:
+ * ter credencial de OpenRouter não prova credencial de OpenCode Go.
+ */
+const OPENCODE_CREDENTIAL_LABEL: Readonly<Record<UpstreamProvider, string | null>> = {
+  openai: 'OpenAI',
+  opencode_go: 'OpenCode Go',
+  openrouter: 'OpenRouter',
+  anthropic: null,
+  none: null,
+};
+
+/** Fonte de credencial esperada por upstream, quando falada pelo OpenCode. */
+const OPENCODE_CREDENTIAL_SOURCE: Readonly<Partial<Record<UpstreamProvider, CredentialSource>>> = {
+  openai: 'opencode_chatgpt_subscription',
+  opencode_go: 'opencode_go_subscription_key',
+  openrouter: 'openrouter_metered_key',
+};
+
+/**
+ * `opencode providers list` é local e gratuito: lê o auth store já configurado
+ * e não faz turno de modelo. A saída traz NOME e TIPO de credencial, nunca a
+ * credencial — e mesmo assim o texto bruto não é repassado adiante.
+ *
+ * O tipo é conferido contra o contrato do upstream: OAuth para OpenAI (uma
+ * chave ali seria outra cobrança), chave para OpenCode Go e OpenRouter. É
+ * exatamente por isso que "chave" não decide sozinha o modo de cobrança — quem
+ * decide é qual upstream a chave autentica.
+ */
+async function probeOpenCode(
+  binary: string,
+  provider: UpstreamProvider | undefined,
+  env: NodeJS.ProcessEnv,
+  runner: CommandRunner,
+): Promise<CredentialProbe> {
+  const command = `${binary} providers list`;
+  if (provider === undefined) {
+    return {
+      source: 'unknown',
+      detail: 'perfil opencode sem upstream declarado: não há credencial específica a provar',
+      verified: false,
+      command,
+    };
+  }
+  const label = OPENCODE_CREDENTIAL_LABEL[provider];
+  const expected = OPENCODE_CREDENTIAL_SOURCE[provider];
+  if (label === null || expected === undefined) {
+    return {
+      source: 'unknown',
+      detail: `OpenCode não fala com ${provider}`,
+      verified: false,
+      command,
+    };
+  }
+
+  const { output } = await runner(binary, ['providers', 'list'], env);
+  const line = stripAnsi(output)
+    .split(/\r?\n/)
+    .map((entry) => entry.trim())
+    .find((entry) => new RegExp(`(^|\\s)${label}\\s`, 'i').test(entry));
+  if (line === undefined) {
+    return {
+      source: 'unknown',
+      detail: `credencial de ${label} não está configurada no OpenCode`,
+      verified: false,
+      command,
+    };
+  }
+
+  const wantsOauth = providerContractOf(provider).auth_method === 'chatgpt_oauth';
+  const declaredOauth = /\boauth\b/i.test(line);
+  const declaredApiKey = /\bapi\b/i.test(line);
+  if (wantsOauth && !declaredOauth) {
+    return {
+      source: declaredApiKey ? 'api' : 'unknown',
+      detail: `${label} não está autenticado por OAuth: assinatura não é comprovável por chave`,
+      verified: declaredApiKey,
+      command,
+    };
+  }
+  if (!wantsOauth && !declaredApiKey) {
+    return {
+      source: 'unknown',
+      detail: `${label} não apresenta credencial de chave`,
+      verified: false,
+      command,
+    };
+  }
+  return {
+    source: expected,
+    detail: `providers list reconhece ${label} (${wantsOauth ? 'oauth' : 'api'})`,
+    verified: true,
+    command,
+  };
+}
+
+export async function probeCredentialSource(input: ProbeInput): Promise<CredentialProbe> {
+  const runner = input.runner ?? spawnRunner;
+  switch (input.agent) {
+    case 'fake':
+      return {
+        source: 'not_applicable',
+        detail: 'worker falso não fala com provider nenhum',
+        verified: false,
+        command: '(nenhum)',
+      };
+    case 'claude':
+      return probeClaude(input.binary, input.env, runner);
+    case 'codex':
+      return probeCodex(input.binary, input.env, runner);
+    case 'opencode':
+      return probeOpenCode(input.binary, input.provider, input.env, runner);
+  }
+}
+
+/**
+ * Fonte de credencial que a política aceita para um lançamento.
+ *
+ * Depende do UPSTREAM, não só do scaffold: `opencode` fala com três, e cada um
+ * prova a credencial de um jeito. Um perfil legado sem upstream declarado
+ * continua resolvendo pelo scaffold, como sempre resolveu.
+ */
+export function expectedSubscriptionSource(
+  agent: 'claude' | 'codex' | 'opencode',
+  provider?: UpstreamProvider | undefined,
+): CredentialSource {
+  if (agent === 'claude') return 'claude_subscription_oauth';
+  if (agent === 'codex') return 'chatgpt_subscription';
+  return provider === undefined
+    ? 'unknown'
+    : (OPENCODE_CREDENTIAL_SOURCE[provider] ?? 'unknown');
 }
 
 // ---------------------------------------------------------------------------
@@ -262,7 +407,8 @@ export const API_BILLING_AUTHORIZATION_VARIABLE = 'AGENTLAB_ALLOW_API_BILLING';
 export const API_BILLING_AUTHORIZATION_VALUE = 'eu-autorizo-cobranca-por-api';
 
 export interface PreflightInput {
-  readonly agent: 'claude' | 'codex' | 'fake';
+  readonly agent: LauncherAgent;
+  readonly provider?: UpstreamProvider | undefined;
   readonly billingMode: 'subscription_only' | 'api' | 'not_applicable';
   readonly binary: string;
   /** Ambiente FINAL do worker, já filtrado pela allowlist do perfil. */
@@ -337,13 +483,16 @@ export async function runBillingPreflight(input: PreflightInput): Promise<Prefli
 
   const credential = await probeCredentialSource({
     agent: input.agent,
+    // O upstream ATRAVESSA: sem ele o probe do OpenCode não sabe qual das três
+    // credenciais provar, e cai em `unknown` mesmo com a credencial presente.
+    provider: input.provider,
     binary: input.binary,
     env: input.env,
     ...(input.runner ? { runner: input.runner } : {}),
   });
 
   if (input.billingMode === 'subscription_only') {
-    const expected = expectedSubscriptionSource(input.agent);
+    const expected = expectedSubscriptionSource(input.agent, input.provider);
     if (credential.source === 'api') {
       return {
         ok: false,

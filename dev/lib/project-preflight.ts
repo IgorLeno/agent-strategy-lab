@@ -32,6 +32,7 @@
 import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 
+import { CapacityStatus } from '../../src/quota/index.js';
 import type { EscalationCandidatePreflight, QuotaHeadroom } from '../../src/routing/index.js';
 import {
   assertNoApiCredentials,
@@ -41,7 +42,7 @@ import {
 } from './billing.js';
 import type { HarnessPaths } from './paths.js';
 import { buildEnvironment, type LauncherProfile } from './profile.js';
-import { LaunchRecord, type RateLimitObservation } from './schemas.js';
+import { LaunchRecord, type PoolCapacityRecord, type RateLimitObservation } from './schemas.js';
 
 /**
  * Fato tri-state com proveniência. `true` e `false` são observações; `null` é
@@ -112,7 +113,7 @@ function credentialFactOf(
   }
   const probe = billing.credential;
   const detail = `${probe.command}: ${probe.source} — ${probe.detail}`;
-  if (probe.verified && probe.source === expectedSubscriptionSource(profile.agent)) {
+  if (probe.verified && probe.source === expectedSubscriptionSource(profile.agent, profile.provider)) {
     return { availability: true, provenance: detail };
   }
   if (probe.verified && probe.source === 'api') {
@@ -187,27 +188,85 @@ async function launchRecordsOf(paths: HarnessPaths): Promise<DatedLaunchRecord[]
  * assinatura permanece `UNKNOWN` COM MOTIVO: ausência de instrumento nunca
  * vira "quota livre" nem "quota esgotada".
  */
-export async function quotaHeadroomByProvider(
+export async function quotaHeadroomByPool(
   paths: HarnessPaths,
-  providerOf: (profileId: string) => string | null,
+  quotaPoolOf: (profileId: string) => string | null,
 ): Promise<Record<string, QuotaHeadroom>> {
   const headroom: Record<string, QuotaHeadroom> = {};
   // `launchRecordsOf` devolve do mais recente para o mais antigo: o primeiro
-  // record utilizável de cada provider é a observação mais nova.
+  // record utilizável de cada POOL é a observação mais nova. Indexar por pool,
+  // e não por executável, é o que impede que Codex e OpenCode contra a mesma
+  // conta OpenAI apareçam como duas franquias.
   for (const { record, file } of await launchRecordsOf(paths)) {
-    const provider = providerOf(record.profile_id);
-    if (provider === null || headroom[provider] !== undefined) continue;
+    const pool = quotaPoolOf(record.profile_id);
+    if (pool === null || headroom[pool] !== undefined) continue;
+
+    // Observação normalizada de capacidade, quando o launch a gravou. Ela é a
+    // fonte para os pools novos (OpenAI, OpenCode Go, OpenRouter).
+    const capacity = record.pool_capacity?.after ?? null;
+    if (capacity !== null) {
+      const observed = headroomFromCapacity(capacity, file);
+      if (observed !== null) {
+        headroom[pool] = observed;
+        continue;
+      }
+    }
+
+    // Caminho histórico do Claude, preservado: records antigos só têm
+    // `subscription_usage`, e reescrevê-los não é opção.
     const usage = record.subscription_usage;
     if (usage === null || !usage.probe_contract.after.available) continue;
     const used = usage.five_hour.after_used_pct;
     if (used === null || !Number.isFinite(used)) continue;
-    headroom[provider] = {
+    headroom[pool] = {
       status: 'OBSERVED',
       remaining_pct: Math.min(100, Math.max(0, 100 - used)),
       provenance: `${file}: subscription_usage.five_hour.after_used_pct=${used}`,
     };
   }
   return headroom;
+}
+
+/**
+ * Observação normalizada -> folga de routing.
+ *
+ * Só duas coisas atravessam: uma folga OBSERVADA (a menor entre as janelas —
+ * a mais crítica manda) e um esgotamento DECLARADO pelo provider. `UNKNOWN` e
+ * `AVAILABLE_WITHOUT_METER` não produzem folga nenhuma: sem medidor não há
+ * número, e inventar um faria a comparação entre pools mentir.
+ */
+function headroomFromCapacity(
+  capacity: NonNullable<PoolCapacityRecord['after']>,
+  file: string,
+): QuotaHeadroom | null {
+  if (capacity.status === CapacityStatus.EXHAUSTED) {
+    return {
+      status: 'EXHAUSTED',
+      provenance: `${file}: provider declarou esgotamento — ${capacity.reason} (${capacity.source})`,
+    };
+  }
+  if (capacity.status !== CapacityStatus.KNOWN) return null;
+
+  // O snapshot é lido como record gravado (passthrough), então as janelas são
+  // conferidas em vez de presumidas: um record de uma versão futura do contrato
+  // continua legível, e um campo ausente vira "sem folga observável".
+  const windows = Array.isArray(capacity['windows']) ? (capacity['windows'] as unknown[]) : [];
+  const remainders = windows
+    .map((window) =>
+      typeof window === 'object' && window !== null
+        ? (window as Record<string, unknown>)['remaining_percent']
+        : null,
+    )
+    .filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
+  if (remainders.length === 0) return null;
+  // A janela mais apertada é a que manda: janelas distintas nunca são somadas
+  // nem promediadas, porque têm denominadores e políticas diferentes.
+  const remaining = Math.min(...remainders);
+  return {
+    status: 'OBSERVED',
+    remaining_pct: Math.min(100, Math.max(0, remaining)),
+    provenance: `${file}: pool_capacity.after menor folga observada=${remaining}% (${capacity.source})`,
+  };
 }
 
 /**
@@ -297,6 +356,7 @@ export async function collectProjectLaunchFacts(
   assertNoApiCredentials(`preflight de launch de ${profile.id}`, env);
   const billing = await runBillingPreflight({
     agent: profile.agent,
+    provider: profile.provider,
     billingMode: profile.billing_mode,
     binary: profile.argv[0] as string,
     env,

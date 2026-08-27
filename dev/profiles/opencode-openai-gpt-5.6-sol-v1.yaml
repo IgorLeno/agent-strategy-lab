@@ -1,0 +1,77 @@
+# Worker OpenCode sobre a assinatura ChatGPT — MESMO pool do Codex.
+#
+# SCAFFOLD  OpenCode 1.18.23 (`opencode run`)
+# UPSTREAM  OpenAI, pela assinatura ChatGPT já existente do usuário
+# MODELO    openai/gpt-5.6-sol
+# AUTH      OAuth ChatGPT ("Sign in with ChatGPT")
+# COBRANÇA  assinatura ChatGPT
+# POOL      openai_chatgpt_subscription
+#
+# As seis linhas acima são dimensões SEPARADAS. Ler qualquer uma a partir de
+# outra é o erro que este catálogo existe para tornar impossível: `agent` diz
+# só qual executável roda.
+#
+# FRONTEIRA DE ROLE — estrutural, não pedida no prompt. O launcher escreve o
+# objeto COMPLETO de permissão do Lab em OPENCODE_PERMISSION
+# (dev/lib/opencode-scaffold.ts). A CLI levanta DeniedError ANTES de publicar o
+# pedido de permissão, então `--auto` não teria o que responder — e ela é
+# proibida no argv de qualquer forma. Planner e reviewer perdem edit/write/
+# patch/apply_patch/bash; o implementer edita e roda comando, mas
+# external_directory=deny o confina ao worktree e `git commit`/`git push`
+# continuam negados porque o commit pertence ao orquestrador.
+#
+# A configuração global do OpenCode do usuário NÃO é lida como garantia e NÃO é
+# modificada. O objeto é escrito por inteiro justamente porque a mescla é por
+# chave: uma chave omitida herdaria o que o usuário tiver configurado.
+id: opencode-openai-gpt-5.6-sol-v1
+agent: opencode
+provider: openai
+billing_mode: subscription_only
+environment_mode: real-world
+commit_owner: orchestrator
+official_validation_owner: orchestrator
+worker_validation_policy: targeted
+argv:
+  - opencode
+  - run
+  - --format
+  - json
+  - --model
+  - openai/gpt-5.6-sol
+prompt_delivery: argv
+capability_prior:
+  tier: intermediate
+  model_cost_rank: 3
+  effort_cost_rank: 0
+  rationale: 'mesmo modelo que o perfil Codex Sol já usa; prior intermediate herdado da classificação histórica desse modelo'
+forbidden_flags:
+  - --continue
+  - -c
+  - --session
+  - -s
+  - --fork
+  # Delegaria ao auto-approve da CLI toda permissão que o Lab deixou como `ask`.
+  - --auto
+  - --share
+env_allowlist:
+  - PATH
+  - HOME
+  - LANG
+  - LC_ALL
+  - TERM
+  - USER
+  - SHELL
+env_extra:
+  CI: '1'
+control_markers:
+  model_pinned: --model
+  machine_readable_output: --format
+notes:
+  - 'Papel inicial pretendido: provar o scaffold OpenCode contra a assinatura OpenAI já existente'
+  - 'Prior de capacidade CONSERVADOR e de partida — mesmo modelo que o perfil Codex Sol já usa; prior intermediate herdado da classificação histórica desse modelo. Não é benchmark — o perfil entra subamostrado e a história observada decide.'
+  - 'Cobrança: assinatura ChatGPT. Pool: openai_chatgpt_subscription.'
+  - 'Scaffold != provider: contar este perfil como capacidade independente de outro do MESMO pool descreveria franquia que não existe.'
+  - 'O worker edita o patch e pode validar de forma direcionada; commit e validação oficial pertencem ao orquestrador.'
+  - 'MESMO POOL QUE O CODEX. Este perfil e os perfis codex-* consomem `openai_chatgpt_subscription`; provado experimentalmente pelo probe wham/usage reagindo ao consumo do Codex CLI.'
+  - 'Nunca contar este perfil como capacidade OpenAI adicional, e nunca tratar Codex -> OpenCode como troca de provider: é o mesmo upstream, o mesmo modelo e a mesma franquia com outro processo em volta.'
+  - 'Sem fallback por chave de API: OAuth de assinatura não pode virar cobrança por chave.'

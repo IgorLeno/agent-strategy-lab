@@ -1,0 +1,76 @@
+# Worker OpenCode sobre opencode-go/minimax-m3, pago pela ASSINATURA OpenCode Go.
+#
+# SCAFFOLD  OpenCode 1.18.23 (`opencode run`)
+# UPSTREAM  OpenCode Go (revenda de modelos por assinatura)
+# MODELO    opencode-go/minimax-m3
+# AUTH      chave de API — que autentica uma ASSINATURA de valor fixo, NÃO cobrança por uso
+# COBRANÇA  assinatura OpenCode Go
+# POOL      opencode_go_subscription
+#
+# As seis linhas acima são dimensões SEPARADAS. Ler qualquer uma a partir de
+# outra é o erro que este catálogo existe para tornar impossível: `agent` diz
+# só qual executável roda.
+#
+# FRONTEIRA DE ROLE — estrutural, não pedida no prompt. O launcher escreve o
+# objeto COMPLETO de permissão do Lab em OPENCODE_PERMISSION
+# (dev/lib/opencode-scaffold.ts). A CLI levanta DeniedError ANTES de publicar o
+# pedido de permissão, então `--auto` não teria o que responder — e ela é
+# proibida no argv de qualquer forma. Planner e reviewer perdem edit/write/
+# patch/apply_patch/bash; o implementer edita e roda comando, mas
+# external_directory=deny o confina ao worktree e `git commit`/`git push`
+# continuam negados porque o commit pertence ao orquestrador.
+#
+# A configuração global do OpenCode do usuário NÃO é lida como garantia e NÃO é
+# modificada. O objeto é escrito por inteiro justamente porque a mescla é por
+# chave: uma chave omitida herdaria o que o usuário tiver configurado.
+id: opencode-go-minimax-m3-v1
+agent: opencode
+provider: opencode_go
+billing_mode: subscription_only
+environment_mode: real-world
+commit_owner: orchestrator
+official_validation_owner: orchestrator
+worker_validation_policy: targeted
+argv:
+  - opencode
+  - run
+  - --format
+  - json
+  - --model
+  - opencode-go/minimax-m3
+prompt_delivery: argv
+capability_prior:
+  tier: intermediate
+  model_cost_rank: 2
+  effort_cost_rank: 0
+  rationale: 'modelo posicionado para uso agêntico; prior intermediate por ausência de evidência local'
+forbidden_flags:
+  - --continue
+  - -c
+  - --session
+  - -s
+  - --fork
+  # Delegaria ao auto-approve da CLI toda permissão que o Lab deixou como `ask`.
+  - --auto
+  - --share
+env_allowlist:
+  - PATH
+  - HOME
+  - LANG
+  - LC_ALL
+  - TERM
+  - USER
+  - SHELL
+env_extra:
+  CI: '1'
+control_markers:
+  model_pinned: --model
+  machine_readable_output: --format
+notes:
+  - 'Papel inicial pretendido: candidato de codificação agêntica'
+  - 'Prior de capacidade CONSERVADOR e de partida — modelo posicionado para uso agêntico; prior intermediate por ausência de evidência local. Não é benchmark — o perfil entra subamostrado e a história observada decide.'
+  - 'Cobrança: assinatura OpenCode Go. Pool: opencode_go_subscription.'
+  - 'Scaffold != provider: contar este perfil como capacidade independente de outro do MESMO pool descreveria franquia que não existe.'
+  - 'O worker edita o patch e pode validar de forma direcionada; commit e validação oficial pertencem ao orquestrador.'
+  - 'Overage do OpenCode Go (''usar saldo após o limite'') fica como o usuário o deixou: o Lab não habilita nem modifica essa configuração.'
+  - 'Quota esgotada reportada pelo provider torna o perfil indisponível ATÉ O RESET; folga baixa não torna.'

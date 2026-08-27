@@ -17,6 +17,13 @@
 import path from 'node:path';
 
 import { PLAN_FILE_VALIDATION_TIMEOUT_CEILING_SECONDS } from '../../src/planner/generate.js';
+import {
+  mutationStructurallyDenied,
+  openCodePermissionEnv,
+  openCodePermissionFor,
+  OPENCODE_PERMISSION_VARIABLE,
+  type OpenCodePermissionConfig,
+} from './opencode-scaffold.js';
 import { assertNoForbiddenFlags, type LauncherProfile } from './profile.js';
 
 export const PROJECT_WORKER_ROLES = ['planner', 'implementer', 'reviewer'] as const;
@@ -56,6 +63,19 @@ export const FAKE_READ_ONLY_MECHANISM =
 export const CLAUDE_READ_ONLY_MECHANISM =
   `argv Claude: --settings passa a apontar para ${CLAUDE_READ_ONLY_SETTINGS_FILE} (deny de Edit/Write/NotebookEdit e de todo comando de mutação) e --permission-mode passa a ${CLAUDE_READ_ONLY_PERMISSION_MODE}, com --setting-sources project excluindo settings pessoais`;
 
+/**
+ * O mecanismo do OpenCode NÃO está no argv: está em `OPENCODE_PERMISSION`, que
+ * a CLI mescla por último sobre a configuração global e a de projeto. A CLI
+ * levanta `DeniedError` antes de publicar o pedido de permissão, então `--auto`
+ * — que só responde pedidos publicados — não tem o que responder, e a
+ * ferramenta negada sequer aparece no toolset do modelo.
+ */
+export const OPENCODE_READ_ONLY_MECHANISM =
+  `env ${OPENCODE_PERMISSION_VARIABLE}: objeto de permissão COMPLETO do Lab nega edit/write/patch/apply_patch/bash e external_directory; a CLI recusa antes de perguntar, e o toolset visível perde as ferramentas negadas`;
+
+export const OPENCODE_IMPLEMENTER_MECHANISM =
+  `env ${OPENCODE_PERMISSION_VARIABLE}: mutação concedida e LIMITADA ao worktree por external_directory=deny; git commit/push negados porque o commit pertence ao orquestrador`;
+
 export const IMPLEMENTER_MUTATION_MECHANISM =
   'argv do profile inalterado; a mutação fica contida no workspace autorizado passado como cwd do launcher';
 
@@ -75,6 +95,12 @@ export interface RoleArgvOverlay {
   readonly role: ProjectWorkerRole;
   readonly profile_id: string;
   readonly argv: readonly string[];
+  /**
+   * Variáveis que o LANÇAMENTO precisa somar ao ambiente para que a fronteira
+   * exista. Vazio nos scaffolds cuja fronteira é argv; para OpenCode é AQUI que
+   * a fronteira mora, e ignorar este campo lançaria um role sem restrição.
+   */
+  readonly env: Readonly<Record<string, string>>;
   readonly workspace_access: RoleWorkspaceAccess;
   /** Mecanismo estrutural que sustenta `workspace_access`; nunca "o prompt pede". */
   readonly mechanism: string;
@@ -162,8 +188,10 @@ export function buildRoleArgv(
       role: input.role,
       profile_id: profile.id,
       argv,
+      env: profile.agent === 'opencode' ? openCodePermissionEnv('implementer') : {},
       workspace_access: 'MUTATION_IN_AUTHORIZED_WORKSPACE',
-      mechanism: IMPLEMENTER_MUTATION_MECHANISM,
+      mechanism:
+        profile.agent === 'opencode' ? OPENCODE_IMPLEMENTER_MECHANISM : IMPLEMENTER_MUTATION_MECHANISM,
     };
   }
 
@@ -177,6 +205,13 @@ export function buildRoleArgv(
     case 'claude':
       applyClaudeReadOnly(input.role, argv);
       mechanism = CLAUDE_READ_ONLY_MECHANISM;
+      break;
+    case 'opencode':
+      // Nada a alterar no argv: a fronteira do OpenCode é a permissão, e ela
+      // entra pelo ambiente. Provar aqui que o objeto realmente nega mutação
+      // impede que uma futura mudança na tabela de permissão passe silenciosa.
+      assertOpenCodeReadOnlyPermission(input.role);
+      mechanism = OPENCODE_READ_ONLY_MECHANISM;
       break;
     case 'fake':
       applyFakeReadOnly(input.role, argv);
@@ -194,9 +229,27 @@ export function buildRoleArgv(
     role: input.role,
     profile_id: profile.id,
     argv,
+    env: profile.agent === 'opencode' ? openCodePermissionEnv(input.role) : {},
     workspace_access: 'READ_ONLY',
     mechanism,
   };
+}
+
+/**
+ * A permissão que o Lab vai escrever nega mutação DE FATO?
+ *
+ * A checagem resolve cada ferramenta pela mesma regra da CLI (`findLast` sobre
+ * as chaves) em vez de conferir presença de chave: uma tabela onde um curinga
+ * posterior reabrisse `edit` passaria numa checagem ingênua e falha aqui.
+ */
+function assertOpenCodeReadOnlyPermission(role: ProjectWorkerRole): void {
+  const permission = openCodePermissionFor(role as 'planner' | 'reviewer');
+  if (!mutationStructurallyDenied(permission)) {
+    throw new RoleOverlayError(
+      role,
+      'a permissão OpenCode do Lab não nega toda ferramenta de mutação: o role não seria read-only',
+    );
+  }
 }
 
 /**
@@ -207,6 +260,12 @@ export function assertReadOnlyArgv(
   role: ProjectWorkerRole,
   agent: LauncherProfile['agent'],
   argv: readonly string[],
+  /**
+   * Ambiente EFETIVO do lançamento. Obrigatório para OpenCode, cuja fronteira
+   * não está no argv: provar read-only ali sem olhar o ambiente aprovaria um
+   * lançamento sem restrição nenhuma.
+   */
+  env: Readonly<Record<string, string | undefined>> = {},
 ): void {
   if (agent === 'codex') {
     const index = singleFlagIndex(argv, '--sandbox');
@@ -225,6 +284,31 @@ export function assertReadOnlyArgv(
       argv[permissionIndex + 1] !== CLAUDE_READ_ONLY_PERMISSION_MODE
     ) {
       throw new RoleOverlayError(role, 'argv lançado não prova overlay read-only Claude');
+    }
+    return;
+  }
+  if (agent === 'opencode') {
+    const raw = env[OPENCODE_PERMISSION_VARIABLE];
+    if (raw === undefined) {
+      throw new RoleOverlayError(
+        role,
+        `ambiente lançado não define ${OPENCODE_PERMISSION_VARIABLE}: sem ele a CLI cai no default e o role não é read-only`,
+      );
+    }
+    let permission: OpenCodePermissionConfig;
+    try {
+      permission = JSON.parse(raw) as OpenCodePermissionConfig;
+    } catch {
+      throw new RoleOverlayError(role, `${OPENCODE_PERMISSION_VARIABLE} não é JSON: a CLI o descartaria com um aviso`);
+    }
+    if (!mutationStructurallyDenied(permission)) {
+      throw new RoleOverlayError(
+        role,
+        `${OPENCODE_PERMISSION_VARIABLE} lançado não nega toda ferramenta de mutação`,
+      );
+    }
+    if (argv.some((token) => token === '--auto' || token.startsWith('--auto='))) {
+      throw new RoleOverlayError(role, 'argv lançado carrega --auto: autorização do Lab não é delegada à CLI');
     }
     return;
   }

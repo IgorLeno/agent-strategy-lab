@@ -269,6 +269,8 @@ fronteira.
 | `adapters` | CLI de provider → interface interna | EXECUTION CONTRACT | M25, M26 |
 | `billing` | autorização provider-neutral anterior ao launch real | EXECUTION CONTRACT | M54 |
 | `credentials` | prova sanitizada e provider-neutral da fonte da credencial | EXECUTION CONTRACT | M55 |
+| `providers` | identidade normalizada: scaffold, upstream, modelo, auth, cobrança e pool de quota como dimensões SEPARADAS | EXECUTION CONTRACT | Provider Expansion v1 |
+| `quota` | observação de capacidade por pool (KNOWN / AVAILABLE_WITHOUT_METER / EXHAUSTED / UNKNOWN) e probes read-only | EXECUTION CONTRACT | Provider Expansion v1 |
 | `strategies` | carga e validação das receitas em `strategies/` | EXPERIMENT PLANE | M05 |
 | `experiment` | congelamento/hash de `ExperimentSpec` (arms, corpus, repetitions, seed, ordering, strategy, environment, billing policy) | EXPERIMENT PLANE | M64 |
 | `evaluator` | workspace do evaluator, graders, orquestração da avaliação | EXECUTION CONTRACT | M27A–M28 |
@@ -505,6 +507,7 @@ A escolha do driver de SQLite e o risco de addon nativo estão em
 - [LESSONS.md](LESSONS.md) — correções que viraram regra
 - [HARNESS.md](HARNESS.md) — runtime de execução e sessões descartáveis (`dev/`)
 - [BILLING.md](BILLING.md) — política de cobrança dos workers
+- [PROVIDERS.md](PROVIDERS.md) — scaffold vs provider vs modelo vs pool de quota, segurança de role do OpenCode e observação de capacidade
 - [adr/ADR-0001-stack.md](adr/ADR-0001-stack.md) — stack e driver de SQLite
 - [adr/ADR-0002-evidence-kernel.md](adr/ADR-0002-evidence-kernel.md) — Evidence
   Kernel, critérios de inclusão, execution contract

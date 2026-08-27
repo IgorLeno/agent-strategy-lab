@@ -10,7 +10,7 @@ import {
   type HumanGatedCapability,
 } from '../intake/index.js';
 import { AttemptRole } from '../performance/attempt-facts.js';
-import { CapabilityRegistry, ProfileCapability } from './capability.js';
+import { CapabilityRegistry, ProfileCapability, providerFactsOf } from './capability.js';
 import {
   FailureDiagnosis,
   FailureInterventionDecision,
@@ -75,7 +75,13 @@ export const EscalationExecutionPolicy = z
     schema_version: z.literal(1),
     authorization_scope: ExecutionAuthorizationScope,
     allowed_profile_ids: z.array(profileId).min(1),
-    allowed_providers: z.array(z.enum(['claude', 'codex', 'fake'])).min(1),
+    /**
+     * SCAFFOLDS autorizados. Uma autorização já gravada que lista apenas
+     * `claude`/`codex` continua significando exatamente isso: acrescentar
+     * `opencode` ao conjunto de valores POSSÍVEIS não amplia nenhuma
+     * autorização existente — só permite que uma run NOVA o declare.
+     */
+    allowed_providers: z.array(z.enum(['claude', 'codex', 'opencode', 'fake'])).min(1),
     authorized_billing_modes: z.array(nonEmpty).min(1),
     evidence_paths: z.array(nonEmpty).min(1),
     provenance: z.literal('project_execution_policy'),
@@ -121,9 +127,27 @@ export const EscalationAuthorization = z
     step_index: z.number().int().positive(),
     from_profile_id: profileId,
     to_profile_id: profileId,
-    from_provider: z.enum(['claude', 'codex', 'fake']),
-    to_provider: z.enum(['claude', 'codex', 'fake']),
+    /** SCAFFOLD de origem/destino. Fato do experimento, NÃO base da diversidade. */
+    from_provider: z.enum(['claude', 'codex', 'opencode', 'fake']),
+    to_provider: z.enum(['claude', 'codex', 'opencode', 'fake']),
+    /**
+     * UPSTREAM de origem/destino — a dimensão que decide se houve diversidade
+     * real. `null` quando o perfil não tem identidade normalizada; ali a
+     * comparação degrada para o scaffold, com o motivo em `cross_provider_basis`.
+     */
+    from_upstream: nonEmpty.nullable().default(null),
+    to_upstream: nonEmpty.nullable().default(null),
+    /**
+     * `true` só quando os UPSTREAMS diferem. Trocar de executável contra o
+     * mesmo provider (Codex -> OpenCode, ambos na conta ChatGPT) não é uma
+     * segunda opinião independente: é o mesmo modelo, o mesmo provider e a
+     * mesma franquia, com outro processo em volta.
+     */
     cross_provider: z.boolean(),
+    /** `true` quando origem e destino consomem a MESMA franquia. */
+    shares_quota_pool: z.boolean().default(false),
+    /** Como `cross_provider` foi decidido: upstream normalizado ou scaffold degradado. */
+    cross_provider_basis: nonEmpty.default('legado: comparação por scaffold'),
     decision_owner: z.literal('agent_strategy_lab_harness'),
     scope_capabilities: z
       .array(
@@ -171,7 +195,7 @@ export const DiscardedEscalationStep = z
   .object({
     step_index: z.number().int().positive(),
     profile_id: profileId,
-    provider: z.enum(['claude', 'codex', 'fake']),
+    provider: z.enum(['claude', 'codex', 'opencode', 'fake']),
     reason_codes: z.array(EscalationDiscardReason).min(1),
     reasons: z.array(nonEmpty).min(1),
     capability_failure: z.literal(false),
@@ -682,6 +706,20 @@ export function decideEscalation(input: EscalationDecisionInput): EscalationDeci
     ...sequence.data.repair.evidence_paths,
     ...policy.evidence_paths,
   ]);
+  // DIVERSIDADE É DE UPSTREAM, NÃO DE EXECUTÁVEL. Comparar `agent` faria
+  // Codex -> OpenCode/openai passar por troca de provider quando os dois falam
+  // com a mesma conta ChatGPT, consomem a mesma franquia e usam o mesmo modelo.
+  const currentFacts = providerFactsOf(current);
+  const nextFacts = providerFactsOf(next.profile);
+  const crossProvider = currentFacts.provider !== nextFacts.provider;
+  const crossProviderBasis =
+    current.provider_identity !== null && next.profile.provider_identity !== null
+      ? `upstream normalizado: ${currentFacts.provider} -> ${nextFacts.provider}` +
+        (currentFacts.quota_pool === nextFacts.quota_pool
+          ? ` (MESMO pool ${currentFacts.quota_pool}: não é capacidade independente)`
+          : ` (pools distintos: ${currentFacts.quota_pool} -> ${nextFacts.quota_pool})`)
+      : `identidade upstream ausente em ao menos um degrau; comparação degradou para o scaffold: ${currentFacts.provenance}`;
+
   const authorization: EscalationAuthorization = {
     decision: 'ALLOWED',
     capability: 'CAPABILITY_ESCALATION_WITHIN_LADDER',
@@ -691,15 +729,18 @@ export function decideEscalation(input: EscalationDecisionInput): EscalationDeci
     to_profile_id: next.profile_id,
     from_provider: current.agent,
     to_provider: next.profile.agent,
-    cross_provider: current.agent !== next.profile.agent,
+    from_upstream: currentFacts.provider,
+    to_upstream: nextFacts.provider,
+    cross_provider: crossProvider,
+    shares_quota_pool: currentFacts.quota_pool === nextFacts.quota_pool,
+    cross_provider_basis: crossProviderBasis,
     decision_owner: 'agent_strategy_lab_harness',
-    scope_capabilities:
-      current.agent === next.profile.agent
-        ? ['CAPABILITY_ESCALATION_WITHIN_LADDER']
-        : [
-            'CAPABILITY_ESCALATION_WITHIN_LADDER',
-            'CROSS_PROVIDER_WITHIN_ALLOWED_SUBSCRIPTION_PROFILES',
-          ],
+    scope_capabilities: crossProvider
+      ? [
+          'CAPABILITY_ESCALATION_WITHIN_LADDER',
+          'CROSS_PROVIDER_WITHIN_ALLOWED_SUBSCRIPTION_PROFILES',
+        ]
+      : ['CAPABILITY_ESCALATION_WITHIN_LADDER'],
     evidence_paths: evidencePaths,
     preflight_provenance: [...selectedPreflightProvenance],
     provenance: 'project_execution_policy',

@@ -318,6 +318,7 @@ async function runAgentProcess(
   assertNoApiCredentials(`ambiente do ${input.role}`, env);
   const billing = await runBillingPreflight({
     agent: profile.agent,
+    provider: profile.provider,
     billingMode: profile.billing_mode,
     binary: profile.argv[0] as string,
     env,

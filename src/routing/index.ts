@@ -5,10 +5,12 @@
  * derivações de `dev/lib/doctor.ts`. Nenhuma decisão de routing mora aqui.
  */
 export {
+  CapabilityPrior,
   CapabilityRegistry,
   DuplicateCapabilityError,
   ProfileCapability,
   capabilityOf,
+  providerFactsOf,
   type Agent,
   type Determinable,
   type DiversityFacts,

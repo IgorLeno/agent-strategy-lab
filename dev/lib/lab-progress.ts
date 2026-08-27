@@ -56,15 +56,40 @@ export interface LabProgressPlan {
  * campo: um provider que não expõe medidor de assinatura nunca vira "0% usado".
  * Percentual só aparece quando o próprio provider o reportou.
  */
+/**
+ * Capacidade de um pool, como a interface a exibe.
+ *
+ * `UNKNOWN` é um estado de primeira classe e é IMPRESSO como UNKNOWN: nunca
+ * como 0%. Uma interface que mostra zero onde não houve observação faz o
+ * operador ler "franquia intacta" a partir de "não medimos".
+ *
+ * `EXHAUSTED` é o provider tendo declarado esgotamento — não é folga baixa.
+ * `precision` acompanha cada janela porque medidores diferentes têm resoluções
+ * diferentes, e o `0` de um endpoint de percentual inteiro não é o mesmo `0`
+ * de um medidor fracionário.
+ */
+export type LabProgressQuotaWindow = {
+  readonly window_id: string;
+  readonly used_pct: number | null;
+  readonly remaining_pct?: number | null;
+  readonly consumed_pp: number | null;
+  readonly precision?: 'COARSE_INTEGER_PERCENT' | 'FRACTIONAL_PERCENT' | null;
+  readonly resets_at?: string | null;
+};
+
+export type LabProgressQuotaBalance = {
+  readonly remaining: number;
+  readonly currency: string;
+};
+
 export type LabProgressQuota =
   | { readonly status: 'UNKNOWN'; readonly reason: string }
+  | { readonly status: 'EXHAUSTED'; readonly reason: string }
   | {
       readonly status: 'OBSERVED';
-      readonly windows: readonly {
-        readonly window_id: string;
-        readonly used_pct: number | null;
-        readonly consumed_pp: number | null;
-      }[];
+      readonly windows: readonly LabProgressQuotaWindow[];
+      readonly balance?: LabProgressQuotaBalance | null;
+      readonly source?: string | null;
     };
 
 /**
@@ -84,6 +109,12 @@ export interface LabProgressTask {
   readonly escalated_from_profile_id?: string | null;
   readonly duration_ms?: number | null;
   readonly quota?: LabProgressQuota;
+  /**
+   * POOL de quota consumido. Separado de `provider` porque é a chave de
+   * capacidade: perfis que compartilham pool compartilham a franquia, e
+   * exibi-los como duas linhas sugeriria duas reservas.
+   */
+  readonly quota_pool?: string;
 }
 
 /** Um turno de deliberação de plano, projetado como evidência já selada. */

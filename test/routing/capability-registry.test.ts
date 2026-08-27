@@ -2,6 +2,7 @@ import { readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { diagnose, type DoctorReport } from '../../dev/lib/doctor.js';
+import { providerIdentityOf } from '../../src/providers/index.js';
 import { REPO_ROOT } from '../dev/helpers.js';
 import {
   CapabilityRegistry,
@@ -21,6 +22,10 @@ function inputFrom(report: DoctorReport): ProfileCapabilityInput {
   return {
     profile_id: report.profile_id,
     agent: report.agent as ProfileCapabilityInput['agent'],
+    // O doctor é quem deriva a identidade upstream; o registry a consome em
+    // vez de rederivar e divergir.
+    provider_identity: report.provider_identity,
+    capability_prior: report.capability_prior,
     model: report.model,
     reasoning_effort: report.reasoning_effort,
     reasoning_effort_source: report.reasoning_effort_source,
@@ -68,6 +73,15 @@ async function capabilityFor(profileId: string): Promise<ProfileCapability> {
   return capabilityOf(inputFrom(report));
 }
 
+/**
+ * Estes testes rodam `diagnose()` de verdade contra CADA profile versionado, e
+ * `diagnose` inicia processos (`command -v`, `--help`, `opencode models`).
+ * Com o catálogo OpenCode o número de profiles mais que dobrou, e o default de
+ * 30s do vitest passou a cortar a varredura no meio. O teto maior é do TESTE,
+ * não do produto: nada aqui é deadline de execução.
+ */
+const REAL_PROFILE_SCAN_TIMEOUT_MS = 180_000;
+
 describe('capabilityOf — deriva de todos os profiles reais de dev/profiles', () => {
   it('produz um ProfileCapability válido para cada profile versionado', async () => {
     const ids = await realProfileIds();
@@ -78,7 +92,7 @@ describe('capabilityOf — deriva de todos os profiles reais de dev/profiles', (
       expect(capability.profile_id).toBe(id);
       expect(capability.schema_version).toBe(1);
     }
-  });
+  }, REAL_PROFILE_SCAN_TIMEOUT_MS);
 
   it('session isolation é sempre fresh_process, resume_forbidden e com mecanismo explícito', async () => {
     const ids = await realProfileIds();
@@ -88,7 +102,7 @@ describe('capabilityOf — deriva de todos os profiles reais de dev/profiles', (
       expect(capability.session_isolation.resume_forbidden).toBe(true);
       expect(capability.session_isolation.mechanism.length).toBeGreaterThan(0);
     }
-  });
+  }, REAL_PROFILE_SCAN_TIMEOUT_MS);
 
   it('valor não determinável de mutation_capability sempre vem com motivo (nunca chute)', async () => {
     const ids = await realProfileIds();
@@ -98,7 +112,7 @@ describe('capabilityOf — deriva de todos os profiles reais de dev/profiles', (
         expect(capability.mutation_capability.provenance.length).toBeGreaterThan(0);
       }
     }
-  });
+  }, REAL_PROFILE_SCAN_TIMEOUT_MS);
 
   it('codex build-worker com sandbox workspace-write pode mutar e é reviewer-compatível via overlay read-only', async () => {
     const capability = await capabilityFor('codex-build-worker-subscription-high-v1');
@@ -136,7 +150,7 @@ describe('capabilityOf — deriva de todos os profiles reais de dev/profiles', (
       expect(capability.role_compatibility).toHaveProperty('implementer');
       expect(capability.role_compatibility).toHaveProperty('reviewer');
     }
-  });
+  }, REAL_PROFILE_SCAN_TIMEOUT_MS);
 });
 
 describe('CapabilityRegistry', () => {
@@ -150,21 +164,27 @@ describe('CapabilityRegistry', () => {
 
     const duplicate = await capabilityFor(ids[0] as string);
     expect(() => registry.add(duplicate)).toThrow(DuplicateCapabilityError);
-  });
+  }, REAL_PROFILE_SCAN_TIMEOUT_MS);
 
   it('get devolve undefined para profile_id desconhecido', () => {
     const registry = new CapabilityRegistry();
     expect(registry.get('nao-existe')).toBeUndefined();
   });
 
-  it('expõe facts de diversidade (provider/model/effort/environment) sem decidir nada', async () => {
+  it('expõe facts de diversidade pelo UPSTREAM, não pelo executável', async () => {
     const capability = await capabilityFor('claude-build-worker-subscription-v1');
     const registry = new CapabilityRegistry([capability]);
     expect(registry.diversityFacts(capability.profile_id)).toEqual({
-      provider: capability.agent,
+      // Executável e upstream continuam ambos disponíveis, e SEPARADOS: o
+      // primeiro é fato do experimento, o segundo é a dimensão em que
+      // "diversidade de provider" significa alguma coisa.
+      provider: 'anthropic',
+      quota_pool: 'anthropic_subscription',
+      execution_scaffold: capability.agent,
       model: capability.model,
       reasoning_effort: capability.reasoning_effort,
       environment_mode: capability.environment_mode,
+      provenance: expect.stringContaining('ProviderIdentity'),
     });
     expect(registry.diversityFacts('nao-existe')).toBeUndefined();
   });
@@ -185,10 +205,13 @@ describe('CapabilityRegistry', () => {
       expect(capability.reasoning_effort_source).toBe('codex_config_override');
     }
     expect(registry.diversityFacts(explicit.profile_id)).toEqual({
-      provider: 'codex',
+      provider: 'openai',
+      quota_pool: 'openai_chatgpt_subscription',
+      execution_scaffold: 'codex',
       model: 'gpt-5.6-sol',
       reasoning_effort: 'high',
       environment_mode: 'real-world',
+      provenance: expect.stringContaining('ProviderIdentity'),
     });
   });
 
@@ -198,6 +221,14 @@ describe('CapabilityRegistry', () => {
         profile_id: 'codex-build-worker-subscription-luna-medium-v2',
         agent: 'codex',
         model: 'gpt-5.6-sol',
+        provider_identity: providerIdentityOf({
+          execution_scaffold: 'codex_cli',
+          provider: 'openai',
+          model: 'gpt-5.6-sol',
+          provenance: 'fixture',
+        }),
+        provider_identity_reason: null,
+        capability_prior: null,
         output_format: 'json',
         reasoning_effort: 'high',
         reasoning_effort_source: 'codex_config_override',
@@ -221,11 +252,17 @@ describe('CapabilityRegistry', () => {
     expect(capability.profile_id).toMatch(/luna-medium/);
     expect(capability.model).toBe('gpt-5.6-sol');
     expect(capability.reasoning_effort).toBe('high');
+    // DIVERSIDADE É DE UPSTREAM: o profile roda pelo scaffold `codex`, mas o
+    // provider que responde é `openai`, e a franquia consumida é a assinatura
+    // ChatGPT — a mesma que um profile OpenCode/openai consumiria.
     expect(registry.diversityFacts(capability.profile_id)).toEqual({
-      provider: 'codex',
+      provider: 'openai',
+      quota_pool: 'openai_chatgpt_subscription',
+      execution_scaffold: 'codex',
       model: 'gpt-5.6-sol',
       reasoning_effort: 'high',
       environment_mode: 'real-world',
+      provenance: expect.stringContaining('ProviderIdentity'),
     });
   });
 });

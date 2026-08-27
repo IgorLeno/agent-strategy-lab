@@ -33,7 +33,7 @@ import { z } from 'zod';
 
 import { ProjectInspection } from '../inspection/index.js';
 import { ExecutionAssessment, PlannedTask } from '../planner/index.js';
-import { CapabilityRegistry, ProfileCapability } from './capability.js';
+import { CapabilityRegistry, ProfileCapability, providerFactsOf } from './capability.js';
 
 const nonEmpty = z.string().trim().min(1);
 const identifier = z
@@ -114,9 +114,18 @@ export const RoutingSelectionPolicy = z.enum(['static_cost', 'evidence_balanced'
 export type RoutingSelectionPolicy = z.infer<typeof RoutingSelectionPolicy>;
 
 /**
- * Folga de quota do provider. `UNKNOWN` é estado de primeira classe COM
- * motivo: um provider sem medidor de assinatura nunca vira "100% livre" nem
- * "0% livre", e a dimensão simplesmente não participa da comparação.
+ * Folga de um POOL de quota.
+ *
+ * `UNKNOWN` é estado de primeira classe COM motivo: um pool sem medidor nunca
+ * vira "100% livre" nem "0% livre", e a dimensão simplesmente não participa da
+ * comparação. UNKNOWN JAMAIS é lido como esgotado.
+ *
+ * `EXHAUSTED` é a ÚNICA folga que remove um profile do routing, e só existe
+ * quando o PROVIDER declarou esgotamento — limite atingido, saldo zerado,
+ * credencial inválida. Folga baixa não é EXHAUSTED: ela permanece `OBSERVED`
+ * com um número pequeno, influencia a preferência e não proíbe nada. Um
+ * `remaining_pct` baixo virar recusa seria inventar um limite que o provider
+ * não impôs, e o Lab é orquestrador, não governador de recurso.
  */
 export const QuotaHeadroom = z.discriminatedUnion('status', [
   z.object({ status: z.literal('UNKNOWN'), reason: nonEmpty }).strict(),
@@ -124,6 +133,13 @@ export const QuotaHeadroom = z.discriminatedUnion('status', [
     .object({
       status: z.literal('OBSERVED'),
       remaining_pct: z.number().min(0).max(100),
+      provenance: nonEmpty,
+    })
+    .strict(),
+  z
+    .object({
+      status: z.literal('EXHAUSTED'),
+      /** O que o PROVIDER declarou. Nunca uma dedução a partir de percentual. */
       provenance: nonEmpty,
     })
     .strict(),
@@ -140,9 +156,20 @@ export type QuotaHeadroom = z.infer<typeof QuotaHeadroom>;
 export const EvidenceBalanceFacts = z
   .object({
     profile_sample_sizes: z.record(z.number().int().nonnegative()),
+    /**
+     * Amostragem por UPSTREAM, não por executável. Rodar Codex e OpenCode
+     * contra a mesma conta OpenAI produz duas amostras do MESMO provider, e
+     * contá-las como dois providers faria a exploração acreditar que já
+     * conhece uma alternativa que nunca experimentou.
+     */
     provider_sample_sizes: z.record(z.number().int().nonnegative()),
     run_launches_by_provider: z.record(z.number().int().nonnegative()),
-    quota_headroom_by_provider: z.record(QuotaHeadroom),
+    /**
+     * Folga por POOL DE QUOTA — a chave certa para capacidade. Perfis que
+     * compartilham pool compartilham a MESMA folga, e somá-los descreveria
+     * franquia que não existe.
+     */
+    quota_headroom_by_pool: z.record(QuotaHeadroom),
     provenance: z.array(nonEmpty).min(1),
   })
   .strict();
@@ -151,7 +178,10 @@ export type EvidenceBalanceFacts = z.infer<typeof EvidenceBalanceFacts>;
 export const BalancedCandidate = z
   .object({
     profile_id: identifier,
+    /** UPSTREAM, não executável: a dimensão em que diversidade significa algo. */
     provider: nonEmpty,
+    /** Franquia consumida. Perfis que a compartilham não somam capacidade. */
+    quota_pool: nonEmpty,
     capability_tier: CapabilityTier,
     profile_sample_size: z.number().int().nonnegative(),
     provider_sample_size: z.number().int().nonnegative(),
@@ -185,6 +215,12 @@ export const CandidateRejectionCode = z.enum([
   'ROLE_INCOMPATIBLE',
   'CAPABILITY_UNCLASSIFIED',
   'CAPABILITY_INSUFFICIENT',
+  /**
+   * O PROVIDER declarou o pool esgotado. É recusa por recurso externo REAL, e
+   * nunca por folga baixa: nenhum percentual, por menor que seja, produz este
+   * código. É também temporária — o profile volta a ser elegível no reset.
+   */
+  'QUOTA_POOL_EXHAUSTED',
 ]);
 export type CandidateRejectionCode = z.infer<typeof CandidateRejectionCode>;
 
@@ -288,6 +324,11 @@ const TIER_ORDER: Readonly<Record<CapabilityTier, number>> = {
   advanced: 2,
 };
 
+/**
+ * Classificação HISTÓRICA por padrão de nome de modelo. Preservada verbatim
+ * como fallback dos perfis que não declaram `capability_prior`; um provider
+ * novo NÃO entra aqui — ele declara o prior no próprio perfil.
+ */
 const MODEL_TIER_PATTERNS: readonly (readonly [RegExp, CapabilityTier])[] = [
   [/luna/i, 'economy'],
   [/(terra|sonnet)/i, 'intermediate'],
@@ -311,7 +352,21 @@ const EFFORT_COST: Readonly<Record<string, number>> = {
   max: 5,
 };
 
+/**
+ * Tier suficiente de um profile.
+ *
+ * O PRIOR DECLARADO vence quando existe: é ele que permite acrescentar um
+ * provider escrevendo um arquivo de perfil, em vez de editar a tabela abaixo.
+ * Sem prior, a classificação histórica por padrões de modelo continua valendo
+ * exatamente como antes — nenhum profile já existente muda de tier.
+ *
+ * O prior decide ELEGIBILIDADE, nunca preferência: qual dos elegíveis roda
+ * continua sendo decidido por evidência observada, e um perfil novo entra
+ * subamostrado.
+ */
 function capabilityTierOf(capability: ProfileCapability): CapabilityTier | null {
+  if (capability.capability_prior !== null) return capability.capability_prior.tier;
+
   const modelTier = MODEL_TIER_PATTERNS.find(([pattern]) => pattern.test(capability.model))?.[1];
   if (modelTier === undefined) return null;
 
@@ -321,7 +376,17 @@ function capabilityTierOf(capability: ProfileCapability): CapabilityTier | null 
   return modelTier;
 }
 
+/**
+ * Custo estático (modelo, effort). É o ÚLTIMO desempate antes do `profile_id`,
+ * e não uma medida de dinheiro: ranks só são comparáveis como ordem.
+ */
 function capabilityCostOf(capability: ProfileCapability): readonly [number, number] {
+  if (capability.capability_prior !== null) {
+    return [
+      capability.capability_prior.model_cost_rank,
+      capability.capability_prior.effort_cost_rank,
+    ];
+  }
   const modelCost = MODEL_COST_PATTERNS.find(([pattern]) => pattern.test(capability.model))?.[1] ?? Number.MAX_SAFE_INTEGER;
   const effortCost = EFFORT_COST[capability.reasoning_effort.toLowerCase()] ?? Number.MAX_SAFE_INTEGER;
   return [modelCost, effortCost];
@@ -482,21 +547,30 @@ function balancedSelection(
 ): { readonly ordered: readonly EligibleEntry[]; readonly evidence: SelectionEvidence } | null {
   if (policy !== 'evidence_balanced' || facts === null || balanceable.length === 0) return null;
 
-  const keyed: BalanceKeys[] = balanceable.map((entry) => ({
-    entry,
-    candidate: BalancedCandidate.parse({
-      profile_id: entry.candidate.profile_id,
-      provider: entry.capability.agent,
-      capability_tier: entry.tier,
-      profile_sample_size: facts.profile_sample_sizes[entry.candidate.profile_id] ?? 0,
-      provider_sample_size: facts.provider_sample_sizes[entry.capability.agent] ?? 0,
-      run_launches: facts.run_launches_by_provider[entry.capability.agent] ?? 0,
-      quota_headroom: facts.quota_headroom_by_provider[entry.capability.agent] ?? UNKNOWN_HEADROOM,
-    }),
-  }));
+  const keyed: BalanceKeys[] = balanceable.map((entry) => {
+    // Amostragem, concentração e folga são indexadas pelo UPSTREAM e pelo
+    // POOL, nunca pelo executável: Codex e OpenCode contra a mesma conta
+    // OpenAI são um provider só e uma franquia só.
+    const providerFacts = providerFactsOf(entry.capability);
+    return {
+      entry,
+      candidate: BalancedCandidate.parse({
+        profile_id: entry.candidate.profile_id,
+        provider: providerFacts.provider,
+        quota_pool: providerFacts.quota_pool,
+        capability_tier: entry.tier,
+        profile_sample_size: facts.profile_sample_sizes[entry.candidate.profile_id] ?? 0,
+        provider_sample_size: facts.provider_sample_sizes[providerFacts.provider] ?? 0,
+        run_launches: facts.run_launches_by_provider[providerFacts.provider] ?? 0,
+        quota_headroom: facts.quota_headroom_by_pool[providerFacts.quota_pool] ?? UNKNOWN_HEADROOM,
+      }),
+    };
+  });
 
   // Quota só entra na comparação quando é conhecida para TODOS: comparar um
-  // percentual observado contra um UNKNOWN inventaria o lado ausente.
+  // percentual observado contra um UNKNOWN inventaria o lado ausente. Um pool
+  // EXHAUSTED nunca chega aqui — ele foi recusado antes, por indisponibilidade
+  // real, e não por comparação de folga.
   const quotaConsidered = keyed.every((item) => item.candidate.quota_headroom.status === 'OBSERVED');
   const headroomOf = (item: BalanceKeys): number =>
     item.candidate.quota_headroom.status === 'OBSERVED' ? item.candidate.quota_headroom.remaining_pct : 0;
@@ -656,6 +730,23 @@ export function routeInitialProfile(input: InitialRoutingInput): InitialRoutingR
           capabilityTierOf(capability),
           'ROLE_INCOMPATIBLE',
           `role=${role} incompatível ou indeterminável: ${compatibility.provenance}`,
+        ),
+      );
+      continue;
+    }
+    // ESGOTAMENTO REAL do pool, declarado pelo provider. É a única condição de
+    // quota que recusa um profile — folga baixa nunca chega aqui. Também é
+    // temporária: no reset da janela o mesmo profile volta a ser elegível, e é
+    // por isso que isto não é HUMAN_REQUIRED enquanto houver alternativa.
+    const poolHeadroom =
+      input.evidence_balance?.quota_headroom_by_pool?.[providerFactsOf(capability).quota_pool];
+    if (poolHeadroom?.status === 'EXHAUSTED') {
+      considered.push(
+        rejected(
+          candidate,
+          capabilityTierOf(capability),
+          'QUOTA_POOL_EXHAUSTED',
+          `pool ${providerFactsOf(capability).quota_pool} declarado esgotado pelo provider: ${poolHeadroom.provenance}`,
         ),
       );
       continue;

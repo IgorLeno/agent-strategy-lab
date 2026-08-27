@@ -42,6 +42,7 @@ import { assessExecution } from '../../src/planner/assess.js';
 import { PlannedTask, type TaskRisk } from '../../src/planner/task.js';
 import { evaluatePlanWorkflow } from '../../src/planner/validate.js';
 import { resolveDataDir } from '../../src/project/index.js';
+import { resolveProfileIdentity } from '../../src/providers/index.js';
 import { AttemptRole } from '../../src/performance/attempt-facts.js';
 import { InterventionType, type InterventionRecord } from '../../src/schemas/index.js';
 import type { PerformanceHistoryQueryResultV2 } from '../../src/performance/query.js';
@@ -50,6 +51,7 @@ import {
   capabilityOf,
   decideEscalation,
   EvidenceBalanceFacts,
+  providerFactsOf,
   routeInitialProfileWithHistory,
   type EscalationAuthorization,
   type EscalationCandidatePreflight,
@@ -87,7 +89,7 @@ import {
   collectProjectLaunchFacts,
   escalationPreflightOf,
   evidenceOf,
-  quotaHeadroomByProvider,
+  quotaHeadroomByPool,
   type LaunchFact,
   type LaunchFactEvidence,
   type ProjectLaunchFacts,
@@ -175,6 +177,9 @@ export function capabilityInputOf(profile: LauncherProfile): ProfileCapabilityIn
     return {
       profile_id: profile.id,
       agent: double.agent,
+      // Um worker falso não tem upstream: nenhuma identidade é fabricada para
+      // ele, e o routing o vê degradar para o próprio scaffold declarado.
+      provider_identity: null,
       model: double.model,
       reasoning_effort: double.reasoning_effort,
       reasoning_effort_source:
@@ -191,9 +196,21 @@ export function capabilityInputOf(profile: LauncherProfile): ProfileCapabilityIn
     };
   }
   const facts = experimentFactsOf(profile);
+  // Identidade upstream normalizada. Um perfil legado cuja combinação não tem
+  // contrato declarado permanece `null` — a semântica antiga continua valendo
+  // para ele, e nenhuma autorização de cobrança é remapeada por inferência.
+  const resolution = resolveProfileIdentity({
+    profile_id: profile.id,
+    agent: profile.agent,
+    billing_mode: profile.billing_mode,
+    model: facts.model,
+    declared_provider: profile.provider,
+  });
   return {
     profile_id: profile.id,
     agent: profile.agent,
+    provider_identity: resolution.outcome === 'IDENTIFIED' ? resolution.identity : null,
+    capability_prior: profile.capability_prior ?? null,
     model: facts.model,
     reasoning_effort: facts.reasoning_effort,
     reasoning_effort_source: facts.reasoning_effort_source,
@@ -946,8 +963,21 @@ export async function createProjectControlPlane(
   }
 
   /** Provider (agent) de um profile da policy; `null` fora dela. */
+  /**
+   * UPSTREAM de um profile, não o executável. `providerFactsOf` degrada para
+   * `scaffold:<agent>` quando o profile não tem identidade normalizada — o que
+   * preserva o comportamento histórico dos perfis legados sem nunca agrupar
+   * dois scaffolds distintos por engano.
+   */
   function providerOf(profileId: string): string | null {
-    return registry.get(profileId)?.agent ?? null;
+    const capability = registry.get(profileId);
+    return capability === undefined ? null : providerFactsOf(capability).provider;
+  }
+
+  /** POOL de quota de um profile: a chave de capacidade, não de diversidade. */
+  function quotaPoolOf(profileId: string): string | null {
+    const capability = registry.get(profileId);
+    return capability === undefined ? null : providerFactsOf(capability).quota_pool;
   }
 
   /**
@@ -984,11 +1014,11 @@ export async function createProjectControlPlane(
       profile_sample_sizes: profileSamples,
       provider_sample_sizes: providerSamples,
       run_launches_by_provider: runLaunches,
-      quota_headroom_by_provider: await quotaHeadroomByProvider(paths, providerOf),
+      quota_headroom_by_pool: await quotaHeadroomByPool(paths, quotaPoolOf),
       provenance: [
         'PerformanceHistoryQueryResultV2.series[].routing_aggregations.trials.sample_size',
         'launches já decididos por este control plane nesta run',
-        'LaunchRecord.subscription_usage do probe já pago pelos launches anteriores',
+        'observação de capacidade por POOL a partir da evidência já gravada pelos launches anteriores',
       ],
     });
   }

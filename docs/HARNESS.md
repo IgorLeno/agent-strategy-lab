@@ -512,7 +512,9 @@ perceber. O git guarda o histórico.
 
 ## Cobrança: assinatura, nunca API
 
-Detalhes em [BILLING.md](BILLING.md). O resumo operacional:
+Detalhes em [BILLING.md](BILLING.md); a separação entre scaffold, upstream,
+cobrança e pool de quota está em [PROVIDERS.md](PROVIDERS.md). O resumo
+operacional:
 
 - perfil de agente real declara `billing_mode` (`subscription_only` | `api`) e
   `environment_mode` (`real-world` | `controlled`) — cobrança e ambiente são
@@ -522,8 +524,12 @@ Detalhes em [BILLING.md](BILLING.md). O resumo operacional:
   `--with-access-token`);
 - `dev-doctor` e o preflight de CADA lançamento provam a fonte da credencial
   com comando local e gratuito (`claude auth status --json`,
-  `codex login status`). Ausência de chave não é prova de assinatura: sem
-  resposta reconhecível, `FAIL: credential source could not be verified`;
+  `codex login status`, `opencode providers list`). Ausência de chave não é
+  prova de assinatura: sem resposta reconhecível,
+  `FAIL: credential source could not be verified`;
+- **chave de API não implica cobrança por uso**: a chave do OpenCode Go
+  autentica uma assinatura de valor fixo, e quem decide o modo de cobrança é o
+  UPSTREAM declarado pelo perfil, não o formato da credencial;
 - a recusa acontece antes do spawn e classifica `INFRA_ERROR` — nunca `FAIL`,
   porque não é veredito sobre o worker;
 - o `total_cost_usd` que a CLI emite é **equivalência estimada em preço de

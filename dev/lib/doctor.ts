@@ -17,6 +17,13 @@ import {
 } from './claude-stream.js';
 import type { LoadedPlan } from './plan.js';
 import { executionPolicyOf } from './execution-policy.js';
+import { resolveProfileIdentity, type ProviderIdentity } from '../../src/providers/index.js';
+import type { CapabilityPrior } from '../../src/routing/index.js';
+import {
+  mutationStructurallyDenied,
+  openCodePermissionFor,
+  resolveAction,
+} from './opencode-scaffold.js';
 import {
   assertNoForbiddenFlags,
   buildEnvironment,
@@ -81,13 +88,30 @@ export const CLAUDE_REASONING_EFFORTS: readonly string[] = [
 export type ReasoningEffortSource =
   | 'codex_config_override'
   | 'claude_effort_flag'
+  /** `--variant` do OpenCode: o effort é fixado no argv versionado. */
+  | 'opencode_variant_flag'
   | 'unpinned'
   | 'unknown'
   | 'not_applicable';
 
 export interface DoctorReport {
   readonly profile_id: string;
+  /** SCAFFOLD de execução — qual executável roda. Não é o upstream. */
   readonly agent: string;
+  /**
+   * Identidade upstream normalizada (provider, auth, cobrança, pool). `null`
+   * num perfil legado cuja combinação não tem contrato declarado: ali a
+   * semântica antiga continua governando e nada é inferido.
+   *
+   * O doctor é o único lugar que deriva os fatos de um perfil, então é aqui
+   * que a identidade nasce — quem precisa dela lê o relatório em vez de
+   * derivar de novo e divergir.
+   */
+  readonly provider_identity: ProviderIdentity | null;
+  /** Por que a identidade é `null`, quando é. */
+  readonly provider_identity_reason: string | null;
+  /** Prior de capacidade declarado pelo perfil; `null` mantém a classificação histórica. */
+  readonly capability_prior: CapabilityPrior | null;
   readonly model: string;
   /** Transporte do stdout do worker — `json`, `stream-json`, ou o que veio. */
   readonly output_format: string;
@@ -179,6 +203,101 @@ async function checkFlags(profile: LauncherProfile, env: NodeJS.ProcessEnv): Pro
   ];
   if (version) checks.push(check('versão da CLI', 'PASS', `--help menciona ${version}`));
   return checks;
+}
+
+/**
+ * O catálogo local é o MESMO para todos os profiles do mesmo binário: lê-lo
+ * uma vez por processo, e não uma vez por profile, é a diferença entre um
+ * diagnóstico de segundos e um de quase um minuto num catálogo de dez perfis
+ * OpenCode. A leitura custa ~4,6s, e nada nela depende do profile.
+ */
+const OPENCODE_CATALOG = new Map<string, Promise<{ code: number | null; out: string }>>();
+
+function openCodeCatalog(
+  binary: string,
+  env: NodeJS.ProcessEnv,
+): Promise<{ code: number | null; out: string }> {
+  const cached = OPENCODE_CATALOG.get(binary);
+  if (cached !== undefined) return cached;
+  // Sem `--refresh`: a leitura é do catálogo LOCAL. Forçar rede aqui colocaria
+  // uma chamada externa no caminho de todo diagnóstico.
+  const pending = run(binary, ['models'], env);
+  OPENCODE_CATALOG.set(binary, pending);
+  return pending;
+}
+
+/**
+ * O modelo pedido existe no catálogo que a CLI já conhece?
+ *
+ * `opencode models` lê o catálogo LOCAL: não faz inferência e não gasta nada.
+ * O refresh de rede NÃO é forçado — um catálogo local desatualizado vira SKIP,
+ * não FAIL, porque ausência de listagem não prova que o modelo não existe, e
+ * transformar isso em obrigatoriedade de rede colocaria uma chamada externa no
+ * caminho de todo lançamento.
+ */
+async function checkOpenCodeModelCatalog(
+  profile: LauncherProfile,
+  model: string,
+  env: NodeJS.ProcessEnv,
+): Promise<Check> {
+  if (profile.agent !== 'opencode') {
+    return check('catálogo de modelos', 'SKIP', `não se aplica ao scaffold ${profile.agent}`);
+  }
+  if (model === 'unknown') {
+    return check('catálogo de modelos', 'FAIL', 'modelo não pinado de forma única no argv');
+  }
+  const listed = await openCodeCatalog(profile.argv[0] as string, env);
+  if (listed.code !== 0 || listed.out.trim() === '') {
+    return check(
+      'catálogo de modelos',
+      'SKIP',
+      'catálogo local não pôde ser lido; refresh de rede não é obrigatório para lançar',
+    );
+  }
+  return listed.out.split(/\r?\n/).some((line) => line.trim() === model)
+    ? check('catálogo de modelos', 'PASS', `${model} presente no catálogo local`)
+    : check(
+        'catálogo de modelos',
+        'FAIL',
+        `${model} ausente do catálogo local; rode \`opencode models --refresh\` se o modelo é novo`,
+      );
+}
+
+/**
+ * As permissões que o Lab vai escrever negam mutação nos roles read-only e
+ * limitam o implementer ao workspace? A prova é sobre o OBJETO que vai ser
+ * enviado, resolvido pela mesma regra da CLI — não sobre a presença de chaves.
+ */
+function checkOpenCodeRoleBoundary(profile: LauncherProfile): Check {
+  if (profile.agent !== 'opencode') {
+    return check('fronteira de role', 'SKIP', `não se aplica ao scaffold ${profile.agent}`);
+  }
+  const failures: string[] = [];
+  for (const role of ['planner', 'reviewer'] as const) {
+    if (!mutationStructurallyDenied(openCodePermissionFor(role))) {
+      failures.push(`${role} não nega toda ferramenta de mutação`);
+    }
+  }
+  const implementer = openCodePermissionFor('implementer');
+  if (resolveAction(implementer, 'external_directory') !== 'deny') {
+    failures.push('implementer não confina mutação ao workspace (external_directory != deny)');
+  }
+  if (resolveAction(implementer, 'bash', 'git commit -m x') !== 'deny') {
+    failures.push('implementer poderia commitar: o commit pertence ao orquestrador');
+  }
+  if (resolveAction(implementer, 'bash', 'git push') !== 'deny') {
+    failures.push('implementer poderia dar push');
+  }
+  if (resolveAction(implementer, 'edit') !== 'allow') {
+    failures.push('implementer não consegue editar: o role ficaria inútil');
+  }
+  return failures.length === 0
+    ? check(
+        'fronteira de role',
+        'PASS',
+        'planner/reviewer negam mutação; implementer edita só dentro do workspace e não commita',
+      )
+    : check('fronteira de role', 'FAIL', failures.join('; '));
 }
 
 function checkForbidden(profile: LauncherProfile): Check {
@@ -412,7 +531,7 @@ function checkExecutionPolicy(profile: LauncherProfile): Check {
 
 function modelOf(profile: LauncherProfile): string {
   if (profile.agent === 'fake') return 'not_applicable';
-  const values = optionValues(profile.argv, '--model');
+  const values = [...optionValues(profile.argv, '--model'), ...optionValues(profile.argv, '-m')];
   return values.length === 1 ? (values[0] as string) : 'unknown';
 }
 
@@ -507,6 +626,17 @@ function reasoningEffortFactsOf(profile: LauncherProfile): ReasoningEffortFacts 
     return evidence.pinning === 'unpinned'
       ? { effort: 'unpinned', source: 'unpinned', claude: evidence }
       : { effort: 'unknown', source: 'unknown', claude: evidence };
+  }
+  if (profile.agent === 'opencode') {
+    // `--variant` é a forma do OpenCode para reasoning effort. Sem ele o effort
+    // é `unpinned`, exatamente como no Claude sem `--effort`: não pinado não é
+    // o mesmo que baixo, e o router recusa classificar o que não é evidência.
+    const values = optionValues(profile.argv, '--variant');
+    const occurrences = flagOccurrences(profile.argv, '--variant');
+    if (occurrences === 0) return { effort: 'unpinned', source: 'unpinned', claude: null };
+    return occurrences === 1 && values.length === 1
+      ? { effort: values[0] as string, source: 'opencode_variant_flag', claude: null }
+      : { effort: 'unknown', source: 'unknown', claude: null };
   }
   return { effort: 'not_applicable', source: 'not_applicable', claude: null };
 }
@@ -811,11 +941,12 @@ async function checkCredentialSource(
   }
   const probe = await probeCredentialSource({
     agent: profile.agent,
+    provider: profile.provider,
     binary: profile.argv[0] as string,
     env: workerEnv,
     ...(runner ? { runner } : {}),
   });
-  const expected = expectedSubscriptionSource(profile.agent);
+  const expected = expectedSubscriptionSource(profile.agent, profile.provider);
 
   if (probe.source === 'api') {
     return {
@@ -890,6 +1021,8 @@ export async function diagnose(input: DoctorInput): Promise<DoctorReport> {
     checkInstructionHome(profile, workerEnv, environmentError, sanitizedHome),
     await checkGitIdentity(input.repoRoot, profile, workerEnv),
     checkModelPinned(profile, model),
+    await checkOpenCodeModelCatalog(profile, model, workerEnv ?? env),
+    checkOpenCodeRoleBoundary(profile),
     checkOutputFormat(profile, outputFormat),
     checkReasoningEffort(profile, reasoning),
     await checkPolicy(catalogRoot, profile),
@@ -900,9 +1033,20 @@ export async function diagnose(input: DoctorInput): Promise<DoctorReport> {
     credential.check,
   ];
 
+  const identity = resolveProfileIdentity({
+    profile_id: profile.id,
+    agent: profile.agent,
+    billing_mode: profile.billing_mode,
+    model,
+    declared_provider: profile.provider,
+  });
+
   return {
     profile_id: profile.id,
     agent: profile.agent,
+    provider_identity: identity.outcome === 'IDENTIFIED' ? identity.identity : null,
+    provider_identity_reason: identity.outcome === 'IDENTIFIED' ? null : identity.reason,
+    capability_prior: profile.capability_prior ?? null,
     model,
     output_format: outputFormat,
     reasoning_effort: reasoning.effort,
