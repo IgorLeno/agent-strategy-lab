@@ -72,8 +72,21 @@ outside scope.
 
 ## Outcome
 
-Lifecycle audit confirmed the production gap: `assessWorkUnit` builds
-`EvidenceBalanceFacts` exclusively from prior launch records, while
-`launchTask` calls `launchWorker` without its optional capacity probe. Existing
-quota probes, pool identity, delta schema, router exhaustion semantics, and TUI
-projection are suitable and will be reused.
+Lifecycle audit confirmed the production gap: `assessWorkUnit` built
+`EvidenceBalanceFacts` exclusively from prior launch records, while `launchTask`
+called `launchWorker` without its optional capacity probe, so every normal
+launch persisted `pool_capacity: null`.
+
+Correction landed as `7a03d80` on `fix/production-pool-capacity-observation`,
+opened as PR #6 (not merged). Routing now observes unique eligible POOLS once
+per assessment, prefers fresh successful observations over history, passes the
+routing snapshot to the selected launch as its BEFORE observation, and probes
+once more after the worker. Planner, deliberator and reviewer reuse the same
+observer. `quotaFactOf`/`authorizeProjectLaunch` rationale corrected.
+
+Gates: `pnpm typecheck` clean, `pnpm test` 175 files / 2478 tests passed,
+`pnpm build` clean, `git diff --check` clean. Wiring proven by mutation, not
+only by assertion. Real read-only probes returned OpenAI EXHAUSTED, OpenCode Go
+KNOWN (0/1/0), OpenRouter KNOWN USD 9.610967 — no inference, no secrets.
+
+Semi-Imperium runtime untouched and resumable unchanged.
