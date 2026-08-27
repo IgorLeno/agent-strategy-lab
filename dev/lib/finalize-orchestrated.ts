@@ -51,6 +51,7 @@ import {
   CompletionRecord,
   DEV_SCHEMA_VERSION,
   OrchestratedFinalizationRecord,
+  measureProtocolArtifacts,
   parseHandoffDraft,
   sealHandoff,
   type AgentCompletionReport as AgentCompletionReportType,
@@ -561,6 +562,7 @@ async function finishFail(
     report_matches_evidence: differences.length === 0,
     discrepancies: differences,
     finalization_mode: 'normal',
+    protocol_artifact_bytes: measureProtocolArtifacts(source.packet, source.handoff),
     closed_at: timestamp,
   };
 
@@ -695,6 +697,7 @@ function deterministicCompletion(
     commit_origin: 'orchestrator',
     orchestrated_finalization_attempt: record.attempt,
     orchestrated_finalization_record_sha256: canonicalSha256(record),
+    protocol_artifact_bytes: measureProtocolArtifacts(source.packet, source.handoff),
     closed_at: record.finalized_at,
   };
 }

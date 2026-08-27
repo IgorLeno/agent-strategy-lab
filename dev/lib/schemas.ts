@@ -1,8 +1,8 @@
 import { z } from 'zod';
 import {
-  MAXIMUM_HANDOFF_DRAFT_BYTES,
-  MAXIMUM_TASK_PACKET_BYTES,
-  assertByteBudget,
+  ADVISORY_HANDOFF_DRAFT_BYTES,
+  ADVISORY_TASK_PACKET_BYTES,
+  artifactSizeAdvisory,
   byteSize,
 } from './budget.js';
 import { ExecutionPolicy, LEGACY_EXECUTION_POLICY } from './execution-policy.js';
@@ -208,9 +208,11 @@ export const PlanFile = z
 export type PlanFile = z.infer<typeof PlanFile>;
 
 // ---------------------------------------------------------------------------
-// Handoff — draft do worker (≤ 4 KiB), record selado pelo orquestrador.
-// O record NÃO herda o teto do draft: ele cresce com fato autoritativo que o
-// worker não escreveu. Ver `MAXIMUM_HANDOFF_DRAFT_BYTES`.
+// Handoff — draft do worker, record selado pelo orquestrador. Ambos são
+// validados por schema ESTRITO e nenhum dos dois tem teto de bytes: o record
+// cresce com fato autoritativo que o worker não escreveu, e o draft descreve
+// trabalho cujo tamanho o Lab não tem autoridade para limitar. Ver
+// `ADVISORY_HANDOFF_DRAFT_BYTES` em `budget.ts`.
 //
 // O handoff versiona SOZINHO. `DEV_SCHEMA_VERSION` continua descrevendo
 // PlanFile, TaskPacket e os demais records: subir aquele número para evoluir
@@ -535,7 +537,9 @@ export function sealHandoff(draft: HandoffDraft, facts: SealedHandoffFacts): Han
 }
 
 // ---------------------------------------------------------------------------
-// TaskPacket — a ÚNICA entrada do worker. ≤ 12 KiB.
+// TaskPacket — a ÚNICA entrada do worker. A fronteira é a ESTRUTURA (campos
+// declarados, sem transcript, sem estado de conversa, sem credencial), não uma
+// contagem de bytes: ver `ADVISORY_TASK_PACKET_BYTES` em `budget.ts`.
 // ---------------------------------------------------------------------------
 
 /**
@@ -1172,6 +1176,29 @@ export type OrchestratorEvidence = z.infer<typeof OrchestratorEvidence>;
 export const ClosedStatus = z.enum(['PASS', 'FAIL']);
 export type ClosedStatus = z.infer<typeof ClosedStatus>;
 
+/**
+ * Tamanho OBSERVADO dos artifacts estruturados do protocolo neste fechamento.
+ *
+ * Telemetria pura: existe para que "os handoffs estão crescendo" seja uma
+ * pergunta respondível com dado, e não para decidir nada. Nenhum consumidor
+ * pode derivar PASS/FAIL, parada, HUMAN_REQUIRED, routing ou cobrança daqui —
+ * a autoridade sobre o artifact é o schema estrito, não a régua.
+ *
+ * Campo OPCIONAL: ausente significa "não medido neste record" (todo record
+ * histórico), nunca "zero bytes". Nada é reescrito para preenchê-lo.
+ */
+export const ProtocolArtifactBytes = z
+  .object({
+    task_packet_bytes: z.number().int().nonnegative(),
+    /** `null` quando não havia draft utilizável — ausência, não tamanho zero. */
+    handoff_draft_bytes: z.number().int().nonnegative().nullable(),
+    advisory_task_packet_threshold_bytes: z.number().int().positive(),
+    advisory_handoff_draft_threshold_bytes: z.number().int().positive(),
+    advisory_threshold_exceeded: z.boolean(),
+  })
+  .strict();
+export type ProtocolArtifactBytes = z.infer<typeof ProtocolArtifactBytes>;
+
 export const CompletionRecord = z
   .object({
     schema_version: z.literal(DEV_SCHEMA_VERSION),
@@ -1193,6 +1220,8 @@ export const CompletionRecord = z
     revalidation_attempt: z.number().int().positive().optional(),
     revalidation_sequence: z.number().int().positive().optional(),
     revalidation_record_sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+    /** Telemetria advisória de tamanho — sem autoridade sobre nada. */
+    protocol_artifact_bytes: ProtocolArtifactBytes.optional(),
     closed_at: z.string().datetime(),
   })
   .strict()
@@ -2746,33 +2775,71 @@ export const ProtocolInvalidAttemptRecord = z
 export type ProtocolInvalidAttemptRecord = z.infer<typeof ProtocolInvalidAttemptRecord>;
 
 // ---------------------------------------------------------------------------
-// Parsers com budget — schema válido mas acima do budget também é rejeição.
+// Parsers dos artifacts do protocolo — a FRONTEIRA é o schema estrito.
+//
+// Nenhum destes parsers cobra teto de bytes, e é deliberado. Campo inventado,
+// campo ausente e campo malformado continuam invalidando o arquivo inteiro; o
+// que NÃO invalida mais nada é o artifact ser grande. Tamanho é telemetria
+// advisória (`artifactSizeAdvisory`), nunca veredito — ver `budget.ts`.
 // ---------------------------------------------------------------------------
 
 export function parseTaskPacket(input: unknown): TaskPacket {
-  const packet = TaskPacket.parse(input);
-  assertByteBudget('TaskPacket', packet, MAXIMUM_TASK_PACKET_BYTES);
-  return packet;
-}
-
-/** Payload do worker: o teto de 4 KiB é dele, e continua cobrado aqui. */
-export function parseHandoffDraft(input: unknown): HandoffDraft {
-  const draft = HandoffDraft.parse(input);
-  assertByteBudget('HandoffDraft', draft, MAXIMUM_HANDOFF_DRAFT_BYTES);
-  return draft;
+  return TaskPacket.parse(input);
 }
 
 /**
- * Record selado: schema estrito, SEM teto de bytes.
+ * Payload do worker: schema ESTRITO, sem teto de bytes.
+ *
+ * Um draft honesto que descreve trabalho grande é grande. Recusá-lo por
+ * tamanho não deixa o protocolo mais seguro — deixa o worker com dois
+ * caminhos, truncar fato ou perder a tarefa, e ambos são piores que o
+ * artifact extenso. O que o protocolo de fato precisa negar continua negado
+ * pelo schema: campo não declarado (inclusive transcript/conversa), campo
+ * ausente, tipo errado.
+ */
+export function parseHandoffDraft(input: unknown): HandoffDraft {
+  return HandoffDraft.parse(input);
+}
+
+/**
+ * Record selado: schema estrito, sem teto de bytes.
  *
  * `sealHandoff` troca `changed_files`/`validations` pelos valores
  * autoritativos e acrescenta `accepted_commit` e `sealed_at`, então o record
- * pode passar do teto do draft por crescimento que o worker não originou —
- * cobrá-lo aqui rejeitaria trabalho válido já aceito e commitado. O contexto
- * que de fato chega no próximo worker continua limitado pelo TaskPacket.
+ * cresce por fato que o worker não originou. Cobrá-lo por tamanho rejeitaria
+ * trabalho válido já aceito e commitado.
  */
 export function parseHandoffRecord(input: unknown): HandoffRecord {
   return HandoffRecord.parse(input);
 }
 
-export { MAXIMUM_HANDOFF_DRAFT_BYTES, MAXIMUM_TASK_PACKET_BYTES, byteSize };
+/**
+ * Telemetria de tamanho para o CompletionRecord. Mede, rotula e devolve — não
+ * lança, não rejeita e não tem caminho de erro: um artifact acima do alvo
+ * advisório produz `advisory_threshold_exceeded: true` e fecha a tarefa
+ * exatamente como um abaixo dele.
+ */
+export function measureProtocolArtifacts(
+  packet: TaskPacket,
+  draft: HandoffDraft | null,
+): ProtocolArtifactBytes {
+  const packetSize = artifactSizeAdvisory(packet, ADVISORY_TASK_PACKET_BYTES);
+  const draftSize =
+    draft === null ? null : artifactSizeAdvisory(draft, ADVISORY_HANDOFF_DRAFT_BYTES);
+  return {
+    task_packet_bytes: packetSize.bytes,
+    handoff_draft_bytes: draftSize === null ? null : draftSize.bytes,
+    advisory_task_packet_threshold_bytes: ADVISORY_TASK_PACKET_BYTES,
+    advisory_handoff_draft_threshold_bytes: ADVISORY_HANDOFF_DRAFT_BYTES,
+    advisory_threshold_exceeded:
+      packetSize.advisory_threshold_exceeded ||
+      (draftSize !== null && draftSize.advisory_threshold_exceeded),
+  };
+}
+
+export {
+  ADVISORY_HANDOFF_DRAFT_BYTES,
+  ADVISORY_TASK_PACKET_BYTES,
+  artifactSizeAdvisory,
+  byteSize,
+};

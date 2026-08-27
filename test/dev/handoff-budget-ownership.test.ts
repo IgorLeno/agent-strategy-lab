@@ -3,8 +3,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
-  MAXIMUM_HANDOFF_DRAFT_BYTES,
-  MAXIMUM_TASK_PACKET_BYTES,
+  ADVISORY_HANDOFF_DRAFT_BYTES,
+  ADVISORY_TASK_PACKET_BYTES,
   byteSize,
   isHandoffRecordV2,
   parseHandoffDraft,
@@ -12,7 +12,6 @@ import {
   parseTaskPacket,
   sealHandoff,
 } from '../../dev/lib/schemas.js';
-import { BudgetExceededError } from '../../dev/lib/budget.js';
 import { readHandoff, writeHandoff } from '../../dev/lib/records.js';
 import { resolveHarnessPaths, type HarnessPaths } from '../../dev/lib/paths.js';
 import { ensureRuntimeDirs } from '../../dev/lib/state.js';
@@ -23,12 +22,16 @@ import { ensureRuntimeDirs } from '../../dev/lib/state.js';
  * 4318 bytes, e `BudgetExceededError` escapando no control plane DEPOIS que o
  * worker já tinha entregue trabalho válido e commitado.
  *
- * A fronteira que estes testes fixam é de PROPRIEDADE, não de tamanho:
- *   - o draft é payload do worker  -> teto de 4 KiB continua valendo;
- *   - o record é selado pelo orquestrador -> cresce com fato autoritativo e
- *     não pode ser rejeitado por isso;
- *   - o packet é o que de fato trafega para o próximo worker -> 12 KiB é a
- *     autoridade sobre o contexto transmitido, e continua intocada.
+ * A fronteira que estes testes fixam é de PROPRIEDADE, não de tamanho: o draft
+ * é payload do worker e o record é selado pelo orquestrador, que substitui
+ * `changed_files`/`validations` por fato autoritativo e acrescenta
+ * `accepted_commit`/`sealed_at`. O record cresce por conta do selo, e nenhum
+ * dos dois é rejeitado por isso.
+ *
+ * Os 4 KiB e os 12 KiB citados aqui são ALVOS ADVISÓRIOS — telemetria, não
+ * gate. Um segundo incidente real (task 04, `crest_selection_workflow`)
+ * provou que o teto sobrevivente no draft também era bottleneck artificial;
+ * a semântica nova vive em `artifact-size-advisory.test.ts`.
  */
 
 const SEALED_AT = '2026-08-26T14:18:39.204Z';
@@ -164,7 +167,7 @@ describe('propriedade do budget de handoff (regressão semi-imperium-real-01)', 
   it('um draft válido abaixo de 4 KiB sela num record acima de 4 KiB, e isso é legítimo', () => {
     const draft = parseHandoffDraft(realDraft());
     // O worker cumpriu o contrato dele.
-    expect(byteSize(draft)).toBeLessThanOrEqual(MAXIMUM_HANDOFF_DRAFT_BYTES);
+    expect(byteSize(draft)).toBeLessThanOrEqual(ADVISORY_HANDOFF_DRAFT_BYTES);
 
     expect(byteSize(draft)).toBe(4002); // o número exato da run real
 
@@ -173,7 +176,7 @@ describe('propriedade do budget de handoff (regressão semi-imperium-real-01)', 
     // ...e mesmo assim o record selado passa do teto do worker, com o tamanho
     // exato que apareceu na mensagem de erro da run real.
     expect(byteSize(record)).toBe(4318);
-    expect(byteSize(record)).toBeGreaterThan(MAXIMUM_HANDOFF_DRAFT_BYTES);
+    expect(byteSize(record)).toBeGreaterThan(ADVISORY_HANDOFF_DRAFT_BYTES);
 
     // O control plane precisa aceitá-lo: era exatamente aqui que a run real
     // morria com BudgetExceededError.
@@ -205,8 +208,8 @@ describe('propriedade do budget de handoff (regressão semi-imperium-real-01)', 
 
     // E o draft, sozinho, nunca passou do teto: o worker não contribuiu com
     // um byte do excesso.
-    expect(draftBytes).toBeLessThanOrEqual(MAXIMUM_HANDOFF_DRAFT_BYTES);
-    expect(byteSize(sealed)).toBeGreaterThan(MAXIMUM_HANDOFF_DRAFT_BYTES);
+    expect(draftBytes).toBeLessThanOrEqual(ADVISORY_HANDOFF_DRAFT_BYTES);
+    expect(byteSize(sealed)).toBeGreaterThan(ADVISORY_HANDOFF_DRAFT_BYTES);
   });
 
   it('nenhum campo de evidência é truncado no selo', () => {
@@ -230,13 +233,13 @@ describe('propriedade do budget de handoff (regressão semi-imperium-real-01)', 
   });
 });
 
-describe('o teto do worker continua valendo no draft', () => {
-  it('draft acima de 4 KiB ainda é rejeitado', () => {
+describe('o draft do worker é validado por schema, não por tamanho', () => {
+  it('draft acima do alvo advisório de 4 KiB é aceito', () => {
     const inflated = realDraft({
       decisions: Array.from({ length: 5 }, () => 'decisão deliberadamente longa '.repeat(30)),
     });
-    expect(byteSize(inflated)).toBeGreaterThan(MAXIMUM_HANDOFF_DRAFT_BYTES);
-    expect(() => parseHandoffDraft(inflated)).toThrow(BudgetExceededError);
+    expect(byteSize(inflated)).toBeGreaterThan(ADVISORY_HANDOFF_DRAFT_BYTES);
+    expect(parseHandoffDraft(inflated).result).toBe('PASS');
   });
 
   it('draft v1 abaixo do budget continua aceito', () => {
@@ -250,15 +253,15 @@ describe('o teto do worker continua valendo no draft', () => {
       lessons: [],
       next_relevant_files: ['src/core/index.ts'],
     };
-    expect(byteSize(v1)).toBeLessThanOrEqual(MAXIMUM_HANDOFF_DRAFT_BYTES);
+    expect(byteSize(v1)).toBeLessThanOrEqual(ADVISORY_HANDOFF_DRAFT_BYTES);
     const parsed = parseHandoffDraft(v1);
     expect(parsed.schema_version).toBe(1);
     // Draft v1 sela record v1 — compatibilidade histórica intacta.
     expect(sealHandoff(parsed, SEALING_FACTS).schema_version).toBe(1);
   });
 
-  it('draft v2 realista continua abaixo do budget', () => {
-    expect(byteSize(realDraft())).toBeLessThanOrEqual(MAXIMUM_HANDOFF_DRAFT_BYTES);
+  it('draft v2 realista continua abaixo do alvo advisório', () => {
+    expect(byteSize(realDraft())).toBeLessThanOrEqual(ADVISORY_HANDOFF_DRAFT_BYTES);
   });
 });
 
@@ -300,7 +303,7 @@ describe('remover o teto do record não afrouxa o schema', () => {
   });
 });
 
-describe('o TaskPacket continua sendo a autoridade sobre o contexto transmitido', () => {
+describe('o TaskPacket é a entrada estruturada do worker, e a estrutura é a fronteira', () => {
   function packetWith(previousHandoff: unknown) {
     return {
       schema_version: 1,
@@ -323,12 +326,12 @@ describe('o TaskPacket continua sendo a autoridade sobre o contexto transmitido'
     };
   }
 
-  it('um packet com o handoff selado real continua cabendo em 12 KiB', () => {
+  it('um packet com o handoff selado real continua cabendo no alvo advisório', () => {
     const packet = parseTaskPacket(packetWith(sealedRecordForPacket()));
-    expect(byteSize(packet)).toBeLessThanOrEqual(MAXIMUM_TASK_PACKET_BYTES);
+    expect(byteSize(packet)).toBeLessThanOrEqual(ADVISORY_TASK_PACKET_BYTES);
   });
 
-  it('um packet cujo previous_handoff estoura 12 KiB ainda é rejeitado', () => {
+  it('um packet cujo previous_handoff passa de 12 KiB é aceito', () => {
     // Handoff durável legítimo, porém grande: 50 arquivos e 20 validações
     // oficiais — tudo dentro do schema, tudo fato do orquestrador.
     const huge = sealHandoff(parseHandoffDraft(realDraft()), {
@@ -347,17 +350,31 @@ describe('o TaskPacket continua sendo a autoridade sobre o contexto transmitido'
 
     // O record em si é válido — é maior que o teto do worker e isso é legítimo.
     expect(() => parseHandoffRecord(huge)).not.toThrow();
-    expect(byteSize(huge)).toBeGreaterThan(MAXIMUM_HANDOFF_DRAFT_BYTES);
+    expect(byteSize(huge)).toBeGreaterThan(ADVISORY_HANDOFF_DRAFT_BYTES);
 
     // O mesmo packet sem o handoff cabe — logo é o previous_handoff, e só
     // ele, que estoura o teto.
     expect(() => parseTaskPacket(packetWith(null))).not.toThrow();
 
-    // Mas o packet que o carregaria, não: a fronteira do contexto transmitido
-    // continua fechada, e fecha na construção do packet.
+    // E o packet que o carrega também: o previous_handoff é fato autoritativo
+    // do orquestrador sobre a tarefa anterior, e passar do alvo advisório não
+    // é motivo para o Lab recusar o contexto que ele mesmo produziu.
     const packet = packetWith(huge);
-    expect(byteSize(packet)).toBeGreaterThan(MAXIMUM_TASK_PACKET_BYTES);
-    expect(() => parseTaskPacket(packet)).toThrow(BudgetExceededError);
+    expect(byteSize(packet)).toBeGreaterThan(ADVISORY_TASK_PACKET_BYTES);
+    expect(parseTaskPacket(packet).task_id).toBe('M02');
+  });
+
+  it('packet grande continua rejeitando campo não declarado', () => {
+    const huge = sealHandoff(parseHandoffDraft(realDraft()), {
+      ...SEALING_FACTS,
+      changed_files: Array.from(
+        { length: 50 },
+        (_, index) => `src/semi_imperium/dominio/modulo-com-nome-bastante-longo-${index}.py`,
+      ),
+    });
+    expect(() =>
+      parseTaskPacket({ ...packetWith(huge), transcript: 'conversa anterior' }),
+    ).toThrow();
   });
 
   function sealedRecordForPacket() {
@@ -365,7 +382,7 @@ describe('o TaskPacket continua sendo a autoridade sobre o contexto transmitido'
   }
 });
 
-describe('o record selado acima do teto do draft é persistível', () => {
+describe('o record selado acima do alvo advisório do draft é persistível', () => {
   let root: string;
   let paths: HarnessPaths;
 
@@ -383,7 +400,7 @@ describe('o record selado acima do teto do draft é persistível', () => {
     // `writeHandoff` revalida antes de gravar e `readHandoff` revalida ao ler:
     // era num desses dois pontos que a run real morria.
     const sealed = sealHandoff(parseHandoffDraft(realDraft()), SEALING_FACTS);
-    expect(byteSize(sealed)).toBeGreaterThan(MAXIMUM_HANDOFF_DRAFT_BYTES);
+    expect(byteSize(sealed)).toBeGreaterThan(ADVISORY_HANDOFF_DRAFT_BYTES);
 
     await writeHandoff(paths, sealed);
     const roundTripped = await readHandoff(paths, SEALING_FACTS.task_id);

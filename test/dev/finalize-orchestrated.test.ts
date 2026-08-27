@@ -41,7 +41,7 @@ import type {
 } from '../../dev/lib/schemas.js';
 import {
   CommitMessage,
-  MAXIMUM_TASK_PACKET_BYTES,
+  ADVISORY_TASK_PACKET_BYTES,
   MAX_COMMIT_MESSAGE_BYTES,
   byteSize,
   isHandoffRecordV2,
@@ -1022,7 +1022,7 @@ describe('handoff v2 na finalização orquestrada', () => {
     expect(carried.evidence).toHaveLength(2);
     // O record selado não responde ao teto do draft; quem limita o contexto
     // transmitido é o packet.
-    expect(byteSize(packet)).toBeLessThanOrEqual(MAXIMUM_TASK_PACKET_BYTES);
+    expect(byteSize(packet)).toBeLessThanOrEqual(ADVISORY_TASK_PACKET_BYTES);
 
     // O mesmo packet aceita um handoff histórico v1 sem migração nenhuma.
     const legacy = parseHandoffRecord({
