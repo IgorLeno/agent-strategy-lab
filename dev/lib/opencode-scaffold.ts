@@ -281,3 +281,90 @@ export function declaredProviderAgrees(
           `${identity.provider}: cobrança e pool seriam os do upstream errado`,
       };
 }
+
+
+// ---------------------------------------------------------------------------
+// Telemetria por run, lida da saída MÁQUINA do `--format json`
+// ---------------------------------------------------------------------------
+
+/**
+ * Consumo que o PRÓPRIO OpenCode reportou sobre este run.
+ *
+ * A fonte é o evento `step_finish` do `opencode run --format json`, que traz
+ * `tokens` e `cost` por passo. Não é `opencode stats`: aquele é um agregado
+ * LOCAL de todas as sessões do OpenCode na máquina, e não sabe distinguir este
+ * run dos outros — usá-lo para atribuir consumo a uma task inventaria a
+ * atribuição.
+ *
+ * Os campos são somados entre passos do MESMO run, que é a granularidade que a
+ * saída oferece. Ausência permanece `null`: um run sem evento de passo não
+ * consumiu "zero", ele não reportou.
+ */
+export interface OpenCodeRunUsage {
+  readonly total_tokens: number | null;
+  readonly input_tokens: number | null;
+  readonly output_tokens: number | null;
+  readonly reasoning_tokens: number | null;
+  readonly cache_read_tokens: number | null;
+  readonly cache_write_tokens: number | null;
+  /** Equivalência em preço de API reportada pela CLI. NÃO é cobrança. */
+  readonly reported_cost_usd: number | null;
+}
+
+const EMPTY_RUN_USAGE: OpenCodeRunUsage = {
+  total_tokens: null,
+  input_tokens: null,
+  output_tokens: null,
+  reasoning_tokens: null,
+  cache_read_tokens: null,
+  cache_write_tokens: null,
+  reported_cost_usd: null,
+};
+
+function finiteNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+/** Soma que preserva a ausência: `null + null` continua `null`, não vira 0. */
+function addObserved(left: number | null, right: number | null): number | null {
+  if (left === null) return right;
+  if (right === null) return left;
+  return left + right;
+}
+
+export function openCodeRunUsageOf(stdout: string): OpenCodeRunUsage {
+  let usage = EMPTY_RUN_USAGE;
+  for (const line of stdout.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('{')) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      // Linha que não é JSON não é erro: a saída pode misturar formatos.
+      continue;
+    }
+    const event = asRecord(parsed);
+    if (event?.['type'] !== 'step_finish') continue;
+    const part = asRecord(event['part']);
+    if (part === null) continue;
+    const tokens = asRecord(part['tokens']);
+    const cache = tokens === null ? null : asRecord(tokens['cache']);
+    usage = {
+      total_tokens: addObserved(usage.total_tokens, finiteNumber(tokens?.['total'])),
+      input_tokens: addObserved(usage.input_tokens, finiteNumber(tokens?.['input'])),
+      output_tokens: addObserved(usage.output_tokens, finiteNumber(tokens?.['output'])),
+      reasoning_tokens: addObserved(usage.reasoning_tokens, finiteNumber(tokens?.['reasoning'])),
+      cache_read_tokens: addObserved(usage.cache_read_tokens, finiteNumber(cache?.['read'])),
+      cache_write_tokens: addObserved(usage.cache_write_tokens, finiteNumber(cache?.['write'])),
+      reported_cost_usd: addObserved(usage.reported_cost_usd, finiteNumber(part['cost'])),
+    };
+  }
+  return usage;
+}

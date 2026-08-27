@@ -61,7 +61,7 @@ import {
   windowDeltas,
   type PoolCapacityObservation,
 } from '../../src/quota/index.js';
-import { openCodePermissionEnv } from './opencode-scaffold.js';
+import { openCodePermissionEnv, openCodeRunUsageOf } from './opencode-scaffold.js';
 import { OPENCODE_IMPLEMENTER_MECHANISM } from './project-roles.js';
 import { buildWorkerPrompt } from './prompt.js';
 import { observedWorkerTokens } from './worker-token-usage.js';
@@ -642,7 +642,10 @@ function openCodeTelemetryOf(
 ): OpenCodeLaunchTelemetry | null {
   if (profile.agent !== 'opencode' || profile.provider === undefined) return null;
   const contract = providerContractOf(profile.provider);
-  const estimate = extractUsageEstimate(stdout);
+  // Evidência do PRÓPRIO run, do evento `step_finish` do `--format json`.
+  // `opencode stats` NÃO é usado aqui: ele agrega todas as sessões locais do
+  // OpenCode e não sabe qual delas foi esta task.
+  const usage = openCodeRunUsageOf(stdout);
   return OpenCodeLaunchTelemetry.parse({
     schema: 'OPENCODE_LAUNCH_V1',
     execution_scaffold: 'opencode',
@@ -655,7 +658,7 @@ function openCodeTelemetryOf(
     auth_class: contract.auth_method,
     role: 'implementer',
     role_boundary_mechanism: OPENCODE_IMPLEMENTER_MECHANISM,
-    reported_cost_usd: estimate.estimated_api_equivalent_usd,
+    reported_cost_usd: usage.reported_cost_usd,
   });
 }
 

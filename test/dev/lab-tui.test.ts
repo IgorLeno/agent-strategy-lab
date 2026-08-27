@@ -232,7 +232,13 @@ describe('projeção read-only do lifecycle', () => {
     expect(codex?.worker_time_ms).toBe(581_000);
     expect(codex?.quota.status).toBe('UNKNOWN');
     const frame = renderLabFrame(snapshot, { title: 'demo' }).join('\n');
-    expect(frame).toMatch(/codex: launches=1 · worker time 09m41s · quota UNKNOWN/);
+    // Origem do trabalho e capacidade são seções separadas: um provider pode
+    // dividir franquia com outro, e uma linha por provider descreveria duas
+    // reservas onde existe uma.
+    expect(frame).toMatch(/codex: launches=1 · worker time 09m41s/);
+    expect(frame).toMatch(/QUOTA POOLS/);
+    expect(frame).toMatch(/codex: quota UNKNOWN/);
+    // A regra que importa: o que não foi medido é impresso como UNKNOWN.
     expect(frame).not.toMatch(/codex:.*\d+% used/);
   });
 

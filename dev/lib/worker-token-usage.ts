@@ -12,6 +12,8 @@
  * devolve `null`, e `null` continua sendo UNKNOWN em todo consumidor.
  */
 
+import { openCodeRunUsageOf } from './opencode-scaffold.js';
+
 export interface ObservedWorkerTokens {
   /** Soma reportada pelo provider; sempre > 0 quando o objeto existe. */
   readonly total: number;
@@ -110,8 +112,27 @@ export interface ObservedWorkerTokensInput {
   readonly streamResult?: unknown;
 }
 
+/**
+ * Tokens que o OpenCode reportou sobre ESTE run, do evento `step_finish` do
+ * `--format json`. Ausência permanece `null` — `opencode stats` agrega todas as
+ * sessões locais e não serve para atribuir consumo a uma task.
+ */
+function openCodeObservedTokens(stdout: string): ObservedWorkerTokens | null {
+  const usage = openCodeRunUsageOf(stdout);
+  if (usage.total_tokens === null || usage.total_tokens <= 0) return null;
+  return {
+    total: usage.total_tokens,
+    input: usage.input_tokens,
+    cached_input: usage.cache_read_tokens,
+    output: usage.output_tokens,
+    reasoning: usage.reasoning_tokens,
+    provenance: 'opencode_run_json:step_finish.part.tokens',
+  };
+}
+
 export function observedWorkerTokens(input: ObservedWorkerTokensInput): ObservedWorkerTokens | null {
   if (input.agent === 'codex') return codexObservedTokens(input.stdout);
+  if (input.agent === 'opencode') return openCodeObservedTokens(input.stdout);
   if (input.agent === 'claude') {
     const fromStream = claudeObservedTokens(input.streamResult ?? null);
     if (fromStream !== null) return fromStream;
