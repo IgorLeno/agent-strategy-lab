@@ -6,6 +6,7 @@ import { canonicalJson, sha256Hex } from './canonical.js';
 import {
   currentFileContent,
   pathsPresentIn,
+  removeFilesFromIndex,
   restoreFilesFrom,
   scopedPatch,
   treeEntries,
@@ -260,6 +261,7 @@ export async function resetFilesToBase(input: ResetFilesToBaseInput): Promise<Re
   const removed = files.filter((file) => !inBase.has(file));
 
   if (restored.length > 0) await restoreFilesFrom(input.repoRoot, input.baseSha, restored);
+  if (removed.length > 0) await removeFilesFromIndex(input.repoRoot, removed);
   for (const file of removed) {
     await rm(path.join(input.repoRoot, file), { force: true, recursive: false });
   }

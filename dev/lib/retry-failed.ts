@@ -2,6 +2,10 @@ import { readFile, rm } from 'node:fs/promises';
 import { writeFileOnce } from './atomic.js';
 import { canonicalJson, sha256Hex } from './canonical.js';
 import {
+  finalizationFingerprint,
+  lookupCandidateReview,
+} from './candidate-review.js';
+import {
   preserveFailedAttemptBundle,
   resetFilesToBase,
   type PreservedBundle,
@@ -12,7 +16,9 @@ import {
 } from './failed-attempt-source.js';
 import {
   headSha,
+  gitOrThrow,
   isWorkingTreeClean,
+  parentSha,
   patchFingerprint,
   stagedFiles,
   workingTreeFiles,
@@ -36,10 +42,15 @@ import {
   readInfraFailedAttempt,
   readAttemptAbandonment,
   readProtocolInvalidAttempt,
+  readReviewRejectedAttempt,
+  readReviewRejectionClassification,
+  readOrchestratedFinalization,
   readValidationFailedAttempt,
+  reviewRejectedAttemptPath,
   sourceBindingPath,
   validationFailedAttemptPath,
   writeValidationFailedAttempt,
+  writeReviewRejectedAttempt,
 } from './records.js';
 import { isForbiddenRevalidationPath } from './revalidate.js';
 import {
@@ -48,12 +59,14 @@ import {
   DEV_SCHEMA_VERSION,
   LaunchRecord,
   RevalidationSourceBinding,
+  ReviewRejectedAttemptRecord,
   ValidationFailedAttemptReasonCode,
   ValidationFailedAttemptRecord,
   parseHandoffDraft,
   type PreviousAttemptDiagnostics,
   type PreviousAttemptFailedValidation,
   type ValidationFailedAttemptRecord as ValidationFailedAttemptRecordType,
+  type ReviewRejectedAttemptRecord as ReviewRejectedAttemptRecordType,
 } from './schemas.js';
 import { getTaskState, readState, withTaskState, writeState } from './state.js';
 
@@ -135,6 +148,29 @@ export interface RetryFailedAttemptResult {
    * compatibilidade com um FAIL anterior à selagem automática.
    */
   readonly bindingRecovered: boolean;
+}
+
+export interface RetryReviewRejectedAttemptInput {
+  readonly paths: HarnessPaths;
+  readonly taskId: string;
+  readonly reason: string;
+  readonly now?: () => string;
+  readonly inboxReleaseHooks?: InboxReleaseHooks;
+  readonly afterRecordWritten?: (record: ReviewRejectedAttemptRecordType) => Promise<void>;
+  readonly afterHeadMoved?: (record: ReviewRejectedAttemptRecordType) => Promise<void>;
+  readonly afterPatchReset?: (record: ReviewRejectedAttemptRecordType) => Promise<void>;
+}
+
+export interface RetryReviewRejectedAttemptResult {
+  readonly record: ReviewRejectedAttemptRecordType;
+  readonly recordPath: string;
+  readonly bundle: PreservedBundle | null;
+  readonly restored: readonly string[];
+  readonly removed: readonly string[];
+  readonly alreadyArchived: boolean;
+  readonly reportArchivePath: string;
+  readonly handoffArchivePath: string;
+  readonly releasedCurrentInbox: boolean;
 }
 
 /** Nota do worker malformada vira `null`, do mesmo jeito que nota ausente. */
@@ -806,6 +842,251 @@ export async function retryFailedAttempt(
   };
 }
 
+function canonicalFingerprint(value: unknown): string {
+  return sha256Hex(Buffer.from(canonicalJson(value), 'utf8'));
+}
+
+/**
+ * Arquiva um candidate validado e REJEITADO por review como fonte do mesmo
+ * bounded-repair lifecycle. Não fabrica CompletionRecord FAIL: validation
+ * continua PASS, review continua REJECT e ambos ficam ligados no record.
+ */
+export async function retryReviewRejectedAttempt(
+  input: RetryReviewRejectedAttemptInput,
+): Promise<RetryReviewRejectedAttemptResult> {
+  if (input.reason.trim() === '') throw new RetryFailedAttemptError('reason é obrigatório');
+  const { paths, taskId } = input;
+  const now = input.now ?? (() => new Date().toISOString());
+  const state = await readState(paths);
+  const task = getTaskState(state, taskId);
+  if (task.status !== 'RUNNING' || task.phase !== 'FINALIZING' || task.attempts < 1) {
+    throw new RetryFailedAttemptError(
+      `review repair exige RUNNING/FINALIZING com attempt, encontrado ${task.status}/${task.phase ?? 'null'}`,
+    );
+  }
+  if (task.base_sha === null || state.authorized_head_sha === null) {
+    throw new RetryFailedAttemptError('base_sha/authorized_head_sha ausente');
+  }
+  if (task.base_sha !== state.authorized_head_sha) {
+    throw new RetryFailedAttemptError('base_sha diverge do authorized_head_sha');
+  }
+  if (task.accepted_commit !== null) {
+    throw new RetryFailedAttemptError('candidate rejeitado não pode ter accepted_commit');
+  }
+  const otherRunning = state.tasks.find(
+    (candidate) => candidate.id !== taskId && candidate.status === 'RUNNING',
+  );
+  if (otherRunning !== undefined) {
+    throw new RetryFailedAttemptError(`outra tarefa RUNNING: ${otherRunning.id}`);
+  }
+
+  const attempt = task.attempts;
+  const finalization = await readOrchestratedFinalization(paths, taskId, attempt);
+  if (finalization === null) throw new RetryFailedAttemptError('finalization do candidate ausente');
+  if (
+    finalization.task_id !== taskId ||
+    finalization.attempt !== attempt ||
+    finalization.base_sha !== task.base_sha
+  ) {
+    throw new RetryFailedAttemptError('finalization diverge de task/attempt/base');
+  }
+  if (finalization.report_sha256 === undefined || finalization.handoff_draft_sha256 === undefined) {
+    throw new RetryFailedAttemptError('finalization não sela report/handoff do worker');
+  }
+  if (
+    finalization.validation_results.some(
+      (result) => result.exit_code !== 0 || result.timed_out,
+    )
+  ) {
+    throw new RetryFailedAttemptError('review repair exige validation oficial PASS');
+  }
+  const lookup = await lookupCandidateReview(paths, finalization);
+  if (lookup.status !== 'REJECTED' || lookup.record === null) {
+    throw new RetryFailedAttemptError(`candidate não tem REJECT durável válido: ${lookup.status}`);
+  }
+  const review = lookup.record;
+
+  let disposition = review.rejection_disposition;
+  let classificationFingerprint: string;
+  if (disposition === undefined) {
+    const classification = await readReviewRejectionClassification(paths, taskId, attempt);
+    if (classification === null) {
+      throw new RetryFailedAttemptError('REJECT legado ainda não tem classificação estruturada');
+    }
+    if (
+      classification.candidate_sha !== finalization.candidate_commit ||
+      classification.review_record_sha256 !== canonicalFingerprint(review)
+    ) {
+      throw new RetryFailedAttemptError('classificação legada diverge do candidate/review');
+    }
+    disposition = classification.disposition;
+    classificationFingerprint = canonicalFingerprint(classification);
+  } else {
+    classificationFingerprint = canonicalFingerprint(review);
+  }
+  if (disposition !== 'IMPLEMENTATION_DEFECT') {
+    throw new RetryFailedAttemptError(
+      `review disposition ${disposition} não autoriza reparo de implementação`,
+    );
+  }
+
+  const existing = await readReviewRejectedAttempt(paths, taskId, attempt);
+  const currentHead = await headSha(paths.repoRoot);
+  if (existing === null && currentHead !== finalization.candidate_commit) {
+    throw new RetryFailedAttemptError(
+      `HEAD ${currentHead} diverge do candidate rejeitado ${finalization.candidate_commit}`,
+    );
+  }
+  if ((await parentSha(paths.repoRoot, finalization.candidate_commit)) !== task.base_sha) {
+    throw new RetryFailedAttemptError('candidate rejeitado não é filho direto da base autorizada');
+  }
+  const files = [...new Set(finalization.changed_files)].sort();
+  const dirtyFiles = await workingTreeFiles(paths.repoRoot);
+  const staged = await stagedFiles(paths.repoRoot);
+  const resumingAfterHeadMove = existing !== null && currentHead === task.base_sha;
+  if (
+    dirtyFiles.length > 0 &&
+    (!resumingAfterHeadMove || dirtyFiles.some((file) => !files.includes(file)))
+  ) {
+    throw new RetryFailedAttemptError('working tree contém mudanças fora do candidate rejeitado');
+  }
+  if (staged.length > 0 && (!resumingAfterHeadMove || staged.some((file) => !files.includes(file)))) {
+    throw new RetryFailedAttemptError('index contém mudanças fora do candidate rejeitado');
+  }
+  const bundle =
+    existing === null
+      ? await preserveFailedAttemptBundle({
+          paths,
+          taskId,
+          attempt,
+          baseSha: task.base_sha,
+          files,
+          patchFingerprint: finalization.patch_fingerprint,
+          now,
+        })
+      : null;
+  const record =
+    existing ??
+    ReviewRejectedAttemptRecord.parse({
+      schema_version: DEV_SCHEMA_VERSION,
+      task_id: taskId,
+      attempt,
+      source_base_sha: task.base_sha,
+      profile_id: finalization.profile_id,
+      candidate_sha: finalization.candidate_commit,
+      finalization_record_sha256: finalizationFingerprint(finalization),
+      review_record_sha256: canonicalFingerprint(review),
+      rejection_classification_sha256: classificationFingerprint,
+      rejection_disposition: disposition,
+      review_reason: review.reason,
+      changed_files: files,
+      original_validation_results: finalization.validation_results,
+      ...(finalization.validation_evidence === undefined
+        ? {}
+        : { original_validation_evidence: finalization.validation_evidence }),
+      patch_fingerprint: finalization.patch_fingerprint,
+      change_bundle: bundle?.ref,
+      archived_at: now(),
+    });
+  if (existing === null) await writeReviewRejectedAttempt(paths, record);
+  await input.afterRecordWritten?.(record);
+
+  const currentInbox = await readCurrentInboxArtifacts(paths, taskId);
+  let inboxBytes: InboxArtifactPair;
+  if (currentInbox.report !== null && currentInbox.handoff !== null) {
+    inboxBytes = { report: currentInbox.report, handoff: currentInbox.handoff };
+  } else {
+    const archived = await readArchivedInboxArtifacts(paths, taskId, attempt, {
+      reportSha256: finalization.report_sha256,
+      handoffDraftSha256: finalization.handoff_draft_sha256,
+    });
+    if (archived === null) {
+      throw new RetryFailedAttemptError('output do worker ausente no inbox e no archive');
+    }
+    inboxBytes = archived;
+  }
+  const archivedInbox = await archiveInboxArtifacts({
+    paths,
+    taskId,
+    attempt,
+    bytes: inboxBytes,
+    expected: {
+      reportSha256: finalization.report_sha256,
+      handoffDraftSha256: finalization.handoff_draft_sha256,
+    },
+  });
+  const released = await releaseCurrentInboxArtifacts(
+    paths,
+    taskId,
+    {
+      attempt,
+      hashes: {
+        reportSha256: finalization.report_sha256,
+        handoffDraftSha256: finalization.handoff_draft_sha256,
+      },
+    },
+    input.inboxReleaseHooks,
+  );
+
+  if (currentHead === finalization.candidate_commit) {
+    // Move somente a ref corrente, com compare-and-swap. O commit rejeitado já
+    // está preservado por SHA + bundle; index/worktree são limpos abaixo por
+    // pathspec, sem reset/clean globais.
+    await gitOrThrow(paths.repoRoot, [
+      'update-ref',
+      'HEAD',
+      task.base_sha,
+      finalization.candidate_commit,
+    ]);
+    await input.afterHeadMoved?.(record);
+  }
+  const reset = await resetFilesToBase({
+    repoRoot: paths.repoRoot,
+    baseSha: task.base_sha,
+    files,
+  });
+  if (!(await isWorkingTreeClean(paths.repoRoot))) {
+    throw new RetryFailedAttemptError('working tree não ficou limpa após retirar candidate');
+  }
+  if ((await stagedFiles(paths.repoRoot)).length > 0) {
+    throw new RetryFailedAttemptError('index não ficou limpo após retirar candidate');
+  }
+  if ((await headSha(paths.repoRoot)) !== task.base_sha) {
+    throw new RetryFailedAttemptError('HEAD não voltou à base autorizada');
+  }
+  await input.afterPatchReset?.(record);
+
+  const latest = await readState(paths);
+  const latestTask = getTaskState(latest, taskId);
+  if (latestTask.status !== 'READY') {
+    await writeState(
+      paths,
+      withTaskState(latest, taskId, {
+        status: 'READY',
+        phase: null,
+        process: null,
+        candidate_commit: null,
+        accepted_commit: null,
+        diagnostics:
+          `attempt ${attempt} arquivado (REPAIRABLE_REVIEW_REJECTION) — ` +
+          'aguardando bounded repair',
+        finished_at: null,
+      }),
+    );
+  }
+  return {
+    record,
+    recordPath: reviewRejectedAttemptPath(paths, taskId, attempt),
+    bundle,
+    restored: reset.restored,
+    removed: reset.removed,
+    alreadyArchived: existing !== null,
+    reportArchivePath: archivedInbox.reportPath,
+    handoffArchivePath: archivedInbox.handoffPath,
+    releasedCurrentInbox: released.report || released.handoff,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Feedback para o attempt de reparo
 // ---------------------------------------------------------------------------
@@ -848,6 +1129,25 @@ export function previousAttemptDiagnosticsFrom(
   };
 }
 
+export function previousReviewRejectionDiagnosticsFrom(
+  record: ReviewRejectedAttemptRecordType,
+): PreviousAttemptDiagnostics {
+  return {
+    attempt: record.attempt,
+    profile_id: record.profile_id,
+    worker_self_reported_result: 'SUCCESS',
+    reason_code: 'REJECTED_BY_INDEPENDENT_REVIEW',
+    reason: record.review_reason,
+    failed_validations: [],
+    review_rejection: {
+      disposition: record.rejection_disposition,
+      candidate_sha: record.candidate_sha,
+      reason: record.review_reason,
+    },
+    changed_files: [...record.changed_files],
+  };
+}
+
 /**
  * Diagnóstico do último ValidationFailedAttemptRecord alcançável a partir de
  * `attempts`. INFRA_ERROR é capability-neutral: a travessia só continua enquanto
@@ -870,8 +1170,10 @@ export async function readPreviousAttemptDiagnostics(
     const infra = await readInfraFailedAttempt(paths, taskId, current);
     const protocolInvalid = await readProtocolInvalidAttempt(paths, taskId, current);
     const abandonment = await readAttemptAbandonment(paths, taskId, current);
+    const reviewRejected = await readReviewRejectedAttempt(paths, taskId, current);
     const recordNames = [
       validation === null ? null : 'ValidationFailedAttemptRecord',
+      reviewRejected === null ? null : 'ReviewRejectedAttemptRecord',
       infra === null ? null : 'InfraFailedAttemptRecord',
       protocolInvalid === null ? null : 'ProtocolInvalidAttemptRecord',
       abandonment === null ? null : 'AttemptAbandonmentRecord',
@@ -883,6 +1185,7 @@ export async function readPreviousAttemptDiagnostics(
     }
     if (abandonment !== null) return null;
     if (validation !== null) return previousAttemptDiagnosticsFrom(validation);
+    if (reviewRejected !== null) return previousReviewRejectionDiagnosticsFrom(reviewRejected);
     if (infra !== null || protocolInvalid !== null) {
       current -= 1;
       continue;

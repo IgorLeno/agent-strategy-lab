@@ -745,6 +745,15 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
     // esquecê-lo — e faz um ACCEPT já publicado ser promovido sem repetir
     // implementer nem reviewer.
     if (acceptance !== undefined) {
+      const reviewReconciliation = await controlPlane!.reconcilePendingReviewRejection();
+      if (reviewReconciliation.status === 'HUMAN_REQUIRED') {
+        humanRequired = reviewReconciliation.human_required;
+        stop = {
+          status: 'HUMAN_REQUIRED',
+          reason: reviewReconciliation.human_required.why_automation_stopped,
+        };
+        return;
+      }
       const resumed = await resumePendingAcceptance({ paths, loaded, acceptance });
       if (resumed.status === 'BLOCKED') {
         humanRequired = controlPlane?.snapshot().human_gate ?? null;
@@ -1004,6 +1013,7 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
       } else {
         iterations.push(executed.iteration);
       }
+      let reviewRepairReady = false;
       if (controlPlane !== undefined) {
         const followUp = await controlPlane.afterWorkUnit({
           taskId: executed.iteration.taskId,
@@ -1021,13 +1031,14 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
           };
           break;
         }
+        reviewRepairReady = followUp.status === 'REPAIR_READY';
       }
       if (executed.closeKind === 'PASS') {
         stop = { status: 'ALL_DONE', reason: 'nenhuma tarefa pendente' };
         exhausted = cycle >= maxIterations;
         continue;
       }
-      if (executed.closeKind !== 'FAIL' || executed.stop === null) {
+      if (!reviewRepairReady && (executed.closeKind !== 'FAIL' || executed.stop === null)) {
         stop = executed.stop ?? { status: executed.closeKind ?? 'FAIL', reason: executed.iteration.reason };
         break;
       }
@@ -1049,7 +1060,10 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
         break;
       }
       if (rec.decision.action !== 'REPAIR_ALLOWED') {
-        stop = executed.stop;
+        stop = executed.stop ?? {
+          status: 'REVIEW_REPAIR_NOT_AUTHORIZED',
+          reason: executed.iteration.reason,
+        };
         break;
       }
 
@@ -1108,6 +1122,7 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
       } else {
         iterations.push(repair.iteration);
       }
+      let repairReviewReady = false;
       if (controlPlane !== undefined) {
         const followUp = await controlPlane.afterWorkUnit({
           taskId: repair.iteration.taskId,
@@ -1125,18 +1140,19 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
           };
           break;
         }
+        repairReviewReady = followUp.status === 'REPAIR_READY';
       }
       if (repair.closeKind === 'PASS') {
         stop = { status: 'ALL_DONE', reason: 'nenhuma tarefa pendente' };
         exhausted = cycle >= maxIterations;
         continue;
       }
-      if (repair.closeKind === 'FAIL') {
+      if (repair.closeKind === 'FAIL' || repairReviewReady) {
         const repairDecision = await decideAutomaticRepair(paths, repair.iteration.taskId);
         const repairHalt =
           haltFromAutomaticRepair(repairDecision) ??
           repair.stop ?? {
-            status: repair.closeKind,
+            status: repair.closeKind ?? 'REVIEW_REPAIR_EXHAUSTED',
             reason: repair.iteration.reason,
           };
         // Repair esgotado: o control plane pode autorizar o degrau seguinte da

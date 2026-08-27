@@ -325,6 +325,15 @@ export async function restoreFilesFrom(
   await gitOrThrow(repoRoot, ['restore', '--source', treeish, '--staged', '--worktree', '--', ...files]);
 }
 
+/** Remove somente os pathspecs indicados do índice; não toca o worktree. */
+export async function removeFilesFromIndex(
+  repoRoot: string,
+  files: readonly string[],
+): Promise<void> {
+  if (files.length === 0) return;
+  await gitOrThrow(repoRoot, ['update-index', '--force-remove', '--', ...files]);
+}
+
 export async function stageFiles(repoRoot: string, files: readonly string[]): Promise<void> {
   const tracked = nulSeparated(await gitOrThrow(repoRoot, ['ls-files', '-z', '--', ...files]));
   const trackedSet = new Set(tracked);

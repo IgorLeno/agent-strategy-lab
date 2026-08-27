@@ -17,6 +17,8 @@ import {
   PlannedWorkAdoptionRecord,
   PreservedChangeBundleManifest,
   ProtocolInvalidAttemptRecord,
+  ReviewRejectedAttemptRecord,
+  ReviewRejectionClassificationRecord,
   RevalidationCheckpoint,
   RevalidationSourceBinding,
   RecoveredFinalizationRecord,
@@ -157,6 +159,19 @@ export function candidateReviewPath(
   return path.join(paths.reviewsDir, taskId, `attempt-${attempt}`, 'review.json');
 }
 
+export function reviewRejectionClassificationPath(
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+): string {
+  return path.join(
+    paths.reviewsDir,
+    taskId,
+    `attempt-${attempt}`,
+    'rejection-classification.json',
+  );
+}
+
 export function revalidationAttemptDir(
   paths: HarnessPaths,
   taskId: string,
@@ -211,6 +226,14 @@ export function validationFailedAttemptPath(
   attempt: number,
 ): string {
   return path.join(failedAttemptDir(paths, taskId, attempt), 'validation-failed-attempt.json');
+}
+
+export function reviewRejectedAttemptPath(
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+): string {
+  return path.join(failedAttemptDir(paths, taskId, attempt), 'review-rejected-attempt.json');
 }
 
 /**
@@ -565,6 +588,24 @@ export const writeCandidateReview = (
     CandidateReviewRecord.parse(record),
   );
 
+export const readReviewRejectionClassification = (
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+): Promise<ReviewRejectionClassificationRecord | null> =>
+  readOptional(reviewRejectionClassificationPath(paths, taskId, attempt), (input) =>
+    ReviewRejectionClassificationRecord.parse(input),
+  );
+
+export const writeReviewRejectionClassification = (
+  paths: HarnessPaths,
+  record: ReviewRejectionClassificationRecord,
+): Promise<void> =>
+  writeJsonOnce(
+    reviewRejectionClassificationPath(paths, record.task_id, record.attempt),
+    ReviewRejectionClassificationRecord.parse(record),
+  );
+
 export const readRevalidationSourceBinding = (
   paths: HarnessPaths,
   taskId: string,
@@ -642,6 +683,24 @@ export const writeValidationFailedAttempt = (
   writeJsonOnce(
     validationFailedAttemptPath(paths, record.task_id, record.attempt),
     ValidationFailedAttemptRecord.parse(record),
+  );
+
+export const readReviewRejectedAttempt = (
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+): Promise<ReviewRejectedAttemptRecord | null> =>
+  readOptional(reviewRejectedAttemptPath(paths, taskId, attempt), (input) =>
+    ReviewRejectedAttemptRecord.parse(input),
+  );
+
+export const writeReviewRejectedAttempt = (
+  paths: HarnessPaths,
+  record: ReviewRejectedAttemptRecord,
+): Promise<void> =>
+  writeJsonOnce(
+    reviewRejectedAttemptPath(paths, record.task_id, record.attempt),
+    ReviewRejectedAttemptRecord.parse(record),
   );
 
 export const readInfraFailedAttempt = (

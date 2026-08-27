@@ -77,7 +77,9 @@ import {
 import { PlannedTask, type TaskRisk } from '../../src/planner/task.js';
 import {
   CandidateReviewCoverage,
+  ReviewRejectionDisposition,
   type HandoffConfidenceLevel,
+  type ReviewRejectionDisposition as ReviewRejectionDispositionType,
 } from './schemas.js';
 import {
   evaluatePlanWorkflow,
@@ -1533,6 +1535,8 @@ export interface ProjectReviewPacket {
     readonly statement: string | null;
     readonly level: HandoffConfidenceLevel;
   } | null;
+  /** REJECT legado a classificar; presente, o reviewer não pode substituí-lo. */
+  readonly prior_rejection_reason?: string;
 }
 
 export function buildReviewerPrompt(packet: ProjectReviewPacket): string {
@@ -1545,7 +1549,9 @@ export function buildReviewerPrompt(packet: ProjectReviewPacket): string {
     JSON.stringify(packet, null, 2),
     '',
     'Responda SOMENTE com um único JSON:',
-    '{"decision":"ACCEPT|REJECT","reason":"...","coverage":{',
+    '{"decision":"ACCEPT|REJECT","rejection_disposition":',
+    ' "IMPLEMENTATION_DEFECT|REQUIREMENT_OR_SCOPE_DECISION|SAFETY_OR_AUTHORIZATION_DECISION|INSUFFICIENT_EVIDENCE",',
+    ' "reason":"...","coverage":{',
     ' "files":[<arquivos do candidate que você auditou>],',
     ' "validations":[[<argv da validação oficial que você leu>]],',
     ' "behaviors":[<aspectos comportamentais auditados, frases curtas>],',
@@ -1558,6 +1564,16 @@ export function buildReviewerPrompt(packet: ProjectReviewPacket): string {
     '"revisado" e "tudo coberto" não endereçam nada.',
     'implementer_confidence é opinião, não fato: confiança baixa ou ambígua não',
     'reprova sozinha, mas o risco correspondente precisa aparecer na coverage.',
+    'Em ACCEPT, omita rejection_disposition. Em REJECT, ela é obrigatória:',
+    'IMPLEMENTATION_DEFECT significa violação concreta de acceptance/constraints já',
+    'definidos; as demais categorias significam decisão humana ou evidência insuficiente.',
+    ...(packet.prior_rejection_reason === undefined
+      ? []
+      : [
+          'Este packet contém prior_rejection_reason de um REJECT append-only legado.',
+          'Não redecida ACCEPT/REJECT: responda REJECT e classifique somente a natureza',
+          'da rejeição anterior em rejection_disposition, usando a evidência atual.',
+        ]),
   ].join('\n');
 }
 
@@ -1595,6 +1611,9 @@ export interface ProjectReviewerLaunchOptions {
 
 interface ProjectReviewVerdict<Outcome extends 'ACCEPT' | 'REJECT'> {
   readonly outcome: Outcome;
+  readonly rejection_disposition: Outcome extends 'REJECT'
+    ? ReviewRejectionDispositionType
+    : null;
   readonly reason: string;
   /**
    * Cobertura DECLARADA pelo reviewer, do jeito que ele a escreveu. Não é
@@ -1725,14 +1744,34 @@ export async function launchProjectReviewer(
       }
     }
     const parsed = extracted.value as
-      | { decision?: unknown; reason?: unknown; coverage?: unknown }
+      | {
+          decision?: unknown;
+          rejection_disposition?: unknown;
+          reason?: unknown;
+          coverage?: unknown;
+        }
       | null;
     const decision = parsed?.decision;
+    const rejectionDisposition = ReviewRejectionDisposition.safeParse(
+      parsed?.rejection_disposition,
+    );
     const reason = parsed?.reason;
     if ((decision !== 'ACCEPT' && decision !== 'REJECT') || typeof reason !== 'string' || reason.trim() === '') {
       return reviewUnavailable(
         'REVIEW_VERDICT_NOT_PARSEABLE',
         'saída do reviewer não contém um único JSON {"decision":"ACCEPT|REJECT","reason":"..."}',
+      );
+    }
+    if (decision === 'REJECT' && !rejectionDisposition.success) {
+      return reviewUnavailable(
+        'REVIEW_VERDICT_NOT_PARSEABLE',
+        'REJECT exige rejection_disposition estruturada reconhecida',
+      );
+    }
+    if (decision === 'ACCEPT' && parsed?.rejection_disposition !== undefined) {
+      return reviewUnavailable(
+        'REVIEW_VERDICT_NOT_PARSEABLE',
+        'ACCEPT não pode declarar rejection_disposition',
       );
     }
 
@@ -1744,8 +1783,7 @@ export async function launchProjectReviewer(
       );
       continue;
     }
-    return {
-      outcome: decision,
+    const commonVerdict = {
       reason: reason.trim(),
       // Evidência malformada não é completada pelo adapter. Depois da única
       // repetição, null continua chegando ao schema append-only e falha fechado.
@@ -1755,6 +1793,13 @@ export async function launchProjectReviewer(
       workspace_access: overlay.workspace_access,
       read_only_mechanism: overlay.mechanism,
     };
+    return decision === 'REJECT'
+      ? {
+          ...commonVerdict,
+          outcome: 'REJECT',
+          rejection_disposition: rejectionDisposition.data!,
+        }
+      : { ...commonVerdict, outcome: 'ACCEPT', rejection_disposition: null };
   }
 
   throw new Error('unreachable: reviewer coverage correction exceeded its bound');

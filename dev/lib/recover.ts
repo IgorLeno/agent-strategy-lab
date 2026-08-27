@@ -29,6 +29,7 @@ import {
   listOrchestratedRevalidations,
   readOrchestratedFinalization,
   readRecoveredFinalization,
+  readReviewRejectedAttempt,
   readOrchestratedRevalidation,
 } from './records.js';
 import {
@@ -564,6 +565,24 @@ async function reconcileTask(
     let orchestratedReadError: unknown = null;
     try {
       orchestrated = await readOrchestratedFinalization(paths, before.id, before.attempts);
+      const reviewRejected = await readReviewRejectedAttempt(paths, before.id, before.attempts);
+      if (orchestrated !== null && reviewRejected !== null) {
+        if (
+          reviewRejected.finalization_record_sha256 !== canonicalSha256(orchestrated) ||
+          reviewRejected.candidate_sha !== orchestrated.candidate_commit
+        ) {
+          throw new Error('ReviewRejectedAttemptRecord diverge da finalization preservada');
+        }
+        if (before.status !== 'READY') {
+          throw new Error(
+            `ReviewRejectedAttemptRecord exige task READY, encontrada ${before.status}`,
+          );
+        }
+        // Evidência append-only de um candidate definitivamente rejeitado.
+        // O finalization continua auditável, mas não é mais candidate pendente
+        // que o recovery possa promover.
+        orchestrated = null;
+      }
     } catch (error) {
       orchestratedReadError = error;
     }

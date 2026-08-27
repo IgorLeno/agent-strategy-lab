@@ -10,9 +10,14 @@ import {
   readInfraFailedAttempt,
   readLaunchRecord,
   readProtocolInvalidAttempt,
+  readReviewRejectedAttempt,
   readValidationFailedAttempt,
 } from './records.js';
-import type { CompletionRecord, ValidationFailedAttemptRecord } from './schemas.js';
+import type {
+  CompletionRecord,
+  ReviewRejectedAttemptRecord,
+  ValidationFailedAttemptRecord,
+} from './schemas.js';
 import { getTaskState, readState } from './state.js';
 
 /**
@@ -56,8 +61,10 @@ export type AutomaticRepairDecision =
       readonly reason: string;
     };
 
+type CapabilityFailureRecord = ValidationFailedAttemptRecord | ReviewRejectedAttemptRecord;
+
 type HistoryWalk =
-  | { readonly status: 'ok'; readonly records: readonly ValidationFailedAttemptRecord[] }
+  | { readonly status: 'ok'; readonly records: readonly CapabilityFailureRecord[] }
   | { readonly status: 'inconsistent'; readonly attempt: number; readonly reason: string }
   | { readonly status: 'gap'; readonly attempt: number; readonly reason: string }
   | { readonly status: 'invalid'; readonly attempt: number; readonly reason: string };
@@ -67,7 +74,7 @@ function blocked(code: AutomaticRepairBlockCode, reason: string): AutomaticRepai
 }
 
 function exhausted(
-  records: readonly ValidationFailedAttemptRecord[],
+  records: readonly CapabilityFailureRecord[],
   failCount = records.length,
 ): AutomaticRepairDecision {
   const first = records[0];
@@ -76,7 +83,7 @@ function exhausted(
     source_attempt: first?.attempt ?? 1,
     validation_fail_count: failCount,
     reason:
-      `${AUTOMATIC_REPAIR_EXHAUSTED}: ${failCount} falha(s) de validation oficial ` +
+      `${AUTOMATIC_REPAIR_EXHAUSTED}: ${failCount} rejeição(ões) capability-bearing ` +
       'já registradas — o único reparo automático bounded foi consumido; intervenção humana é necessária',
   };
 }
@@ -97,17 +104,19 @@ async function walkValidationFails(
   fromAttempt: number,
 ): Promise<HistoryWalk> {
   if (fromAttempt < 1) return { status: 'ok', records: [] };
-  const found: ValidationFailedAttemptRecord[] = [];
+  const found: CapabilityFailureRecord[] = [];
   for (let current = fromAttempt; current >= 1; current -= 1) {
     let validation: ValidationFailedAttemptRecord | null;
     let infra;
     let abandonment;
     let protocolInvalid;
+    let reviewRejected: ReviewRejectedAttemptRecord | null;
     try {
       validation = await readValidationFailedAttempt(paths, taskId, current);
       infra = await readInfraFailedAttempt(paths, taskId, current);
       abandonment = await readAttemptAbandonment(paths, taskId, current);
       protocolInvalid = await readProtocolInvalidAttempt(paths, taskId, current);
+      reviewRejected = await readReviewRejectedAttempt(paths, taskId, current);
     } catch (error) {
       return {
         status: 'invalid',
@@ -115,7 +124,7 @@ async function walkValidationFails(
         reason: `attempt ${current} de ${taskId} tem record ilegível: ${errorMessage(error)}`,
       };
     }
-    const recordCount = [validation, infra, abandonment, protocolInvalid].filter(
+    const recordCount = [validation, reviewRejected, infra, abandonment, protocolInvalid].filter(
       (record) => record !== null,
     ).length;
     if (recordCount > 1) {
@@ -128,6 +137,10 @@ async function walkValidationFails(
     if (abandonment !== null) return { status: 'ok', records: found.reverse() };
     if (validation !== null) {
       found.push(validation);
+      continue;
+    }
+    if (reviewRejected !== null) {
+      found.push(reviewRejected);
       continue;
     }
     if (infra !== null || protocolInvalid !== null) continue;
@@ -177,7 +190,7 @@ async function readCurrentCompletion(
 }
 
 function allowedFromRecords(
-  records: readonly ValidationFailedAttemptRecord[],
+  records: readonly CapabilityFailureRecord[],
   needsArchival: boolean,
 ): AutomaticRepairDecision {
   if (records.length >= 2) return exhausted(records);
@@ -302,6 +315,12 @@ export async function decideAutomaticRepair(
   const history = await walkValidationFails(paths, taskId, task.attempts);
   if (history.status !== 'ok') {
     return fromWalk(history) ?? { action: 'NOT_APPLICABLE' };
+  }
+  if (
+    history.records.length >= 2 &&
+    history.records.some((record) => 'rejection_disposition' in record)
+  ) {
+    return exhausted(history.records);
   }
   if (history.records.length >= 2) return { action: 'NOT_APPLICABLE' };
   return allowedFromRecords(history.records, false);

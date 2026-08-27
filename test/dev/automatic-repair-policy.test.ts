@@ -12,6 +12,7 @@ import {
   writeInfraFailedAttempt,
   writeLaunchRecord,
   writeProtocolInvalidAttempt,
+  writeReviewRejectedAttempt,
   writeValidationFailedAttempt,
 } from '../../dev/lib/records.js';
 import {
@@ -91,6 +92,35 @@ function validationFailed(attempt: number, profileId = PROFILE) {
     },
     reason_code: 'OFFICIAL_VALIDATION_FAILURE' as const,
     reason: `attempt ${attempt} reprovado pela validation oficial`,
+    archived_at: NOW,
+  };
+}
+
+function reviewRejected(attempt: number, profileId = PROFILE) {
+  return {
+    schema_version: 1 as const,
+    task_id: TASK,
+    attempt,
+    source_base_sha: baseSha,
+    profile_id: profileId,
+    candidate_sha: 'b'.repeat(40),
+    finalization_record_sha256: hex64(`finalization-${attempt}`),
+    review_record_sha256: hex64(`review-${attempt}`),
+    rejection_classification_sha256: hex64(`classification-${attempt}`),
+    rejection_disposition: 'IMPLEMENTATION_DEFECT' as const,
+    review_reason: 'defeito concreto contra acceptance existente',
+    changed_files: ['src/t1.txt'],
+    original_validation_results: [
+      { argv: ['true'], exit_code: 0, timed_out: false, duration_ms: 1 },
+    ],
+    patch_fingerprint: hex64(`review-patch-${attempt}`),
+    change_bundle: {
+      manifest_path: `failed-attempts/${TASK}/attempt-${attempt}/changes-manifest.json`,
+      manifest_sha256: hex64(`review-manifest-${attempt}`),
+      patch_path: `failed-attempts/${TASK}/attempt-${attempt}/changes.patch`,
+      patch_sha256: hex64(`review-patch-bytes-${attempt}`),
+      patch_size_bytes: 12,
+    },
     archived_at: NOW,
   };
 }
@@ -561,6 +591,44 @@ describe('decideAutomaticRepair — autorização por ValidationFailedAttemptRec
     await setTask('READY', 3);
 
     expect(await decideAutomaticRepair(paths, TASK)).toEqual({ action: 'NOT_APPLICABLE' });
+  });
+});
+
+describe('decideAutomaticRepair — rejeição de implementation defect', () => {
+  it('autoriza o mesmo bounded repair após um ReviewRejectedAttemptRecord', async () => {
+    await writeReviewRejectedAttempt(paths, reviewRejected(1));
+    await setTask('READY', 1);
+
+    expect(await decideAutomaticRepair(paths, TASK)).toMatchObject({
+      action: 'REPAIR_ALLOWED',
+      source_attempt: 1,
+      profile_id: PROFILE,
+      needs_archival: false,
+    });
+  });
+
+  it('uma rejeição de review mais um FAIL oficial consomem o único repair', async () => {
+    await writeReviewRejectedAttempt(paths, reviewRejected(1));
+    await writeValidationFailedAttempt(paths, validationFailed(2));
+    await setTask('FAIL', 2);
+
+    expect(await decideAutomaticRepair(paths, TASK)).toMatchObject({
+      action: 'REPAIR_EXHAUSTED',
+      source_attempt: 1,
+      validation_fail_count: 2,
+    });
+  });
+
+  it('duas rejeições de review estruturadas param mesmo com a task já reaberta', async () => {
+    await writeReviewRejectedAttempt(paths, reviewRejected(1));
+    await writeReviewRejectedAttempt(paths, reviewRejected(2));
+    await setTask('READY', 2);
+
+    expect(await decideAutomaticRepair(paths, TASK)).toMatchObject({
+      action: 'REPAIR_EXHAUSTED',
+      source_attempt: 1,
+      validation_fail_count: 2,
+    });
   });
 });
 

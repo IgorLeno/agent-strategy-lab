@@ -31,6 +31,7 @@ import { createHash } from 'node:crypto';
 import { ZodError } from 'zod';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
+import { canonicalSha256 } from './canonical.js';
 
 import {
   ProjectIntakeRequest,
@@ -107,6 +108,7 @@ import {
   type EnvironmentReadinessGate,
   type ProjectLifecyclePathName,
   type ProjectReviewResult,
+  type ProviderRoleInvocationPort,
 } from './project-orchestrate.js';
 import type { LabProgressListener } from './lab-progress.js';
 import { machineSafetyCeiling } from './machine-safety.js';
@@ -134,17 +136,20 @@ import {
   readOrchestratedFinalization,
   readPacket,
   readProjectHistoryBinding,
+  readReviewRejectionClassification,
+  readReviewRejectedAttempt,
   readValidationFailedAttempt,
   reportPath,
   validationFailedAttemptPath,
   writeCandidateReview,
+  writeReviewRejectionClassification,
 } from './records.js';
 import type {
   CandidateReviewRequirement,
   OrchestratedFinalizationRecord,
 } from './schemas.js';
 import { isHandoffDraftV2, readHandoffConfidence } from './schemas.js';
-import { retryFailedAttempt } from './retry-failed.js';
+import { retryFailedAttempt, retryReviewRejectedAttempt } from './retry-failed.js';
 import type { HumanRequiredOutput } from './routine-autonomy.js';
 import { getTaskState, readState } from './state.js';
 
@@ -442,6 +447,7 @@ export interface WorkUnitObservation {
 
 export type WorkUnitFollowUp =
   | { readonly status: 'CONTINUE' }
+  | { readonly status: 'REPAIR_READY'; readonly task_id: string; readonly source_attempt: number }
   | { readonly status: 'HUMAN_REQUIRED'; readonly human_required: HumanRequiredOutput };
 
 /**
@@ -451,6 +457,7 @@ export type WorkUnitFollowUp =
  */
 export type CandidateAcceptanceDecision =
   | { readonly status: 'ACCEPTED'; readonly reason: string }
+  | { readonly status: 'REPAIRABLE'; readonly reason: string }
   | {
       readonly status: 'HUMAN_REQUIRED';
       readonly code: string;
@@ -482,6 +489,7 @@ export interface ProjectControlPlane {
     readonly attemptKind?: 'FIRST_PASS' | 'REPAIR';
   }): Promise<ProjectWorkUnitPreview>;
   afterWorkUnit(observation: WorkUnitObservation): Promise<WorkUnitFollowUp>;
+  reconcilePendingReviewRejection(): Promise<WorkUnitFollowUp>;
   onRepairExhausted(input: {
     readonly taskId: string;
     readonly reason: string;
@@ -813,6 +821,8 @@ export interface CreateProjectControlPlaneInput {
   readonly now?: () => Date;
   /** Data root do control plane; injetável para isolar testes. */
   readonly historyLabRoot?: string;
+  /** Porta read-only do reviewer; injetável para integração determinística. */
+  readonly reviewerPort?: ProviderRoleInvocationPort;
   /**
    * Projeção read-only do lifecycle. O control plane EMITE; o listener não
    * devolve nada e não tem porta de volta para decisão, state ou provider.
@@ -1513,6 +1523,33 @@ export async function createProjectControlPlane(
       const lookup: CandidateReviewLookup = pending.review;
       const accepted = lookup.status === 'ACCEPTED' || lookup.status === 'NOT_REQUIRED';
       if (!accepted) {
+        if (lookup.status === 'REJECTED' && lookup.record?.rejection_disposition === undefined) {
+          return {
+            status: 'HUMAN_REQUIRED',
+            task_id: pending.taskId,
+            blocked_by: 'REVIEW_REJECTION_CLASSIFICATION_REQUIRED',
+            reason:
+              'REJECT legado exige classificação read-only fresca; dry-run não chama provider nem presume disposição',
+            candidate_commit: pending.candidateCommit,
+            evidence_paths: [lookup.evidence_path],
+            work_unit: null,
+          };
+        }
+        if (
+          lookup.status === 'REJECTED' &&
+          lookup.record?.rejection_disposition === 'IMPLEMENTATION_DEFECT' &&
+          authorization.autonomous_execution_boundary.includes('BOUNDED_REPAIR')
+        ) {
+          return {
+            status: 'READY',
+            task_id: pending.taskId,
+            blocked_by: 'REVIEW_REPAIR_READY',
+            reason: 'próxima ação segura é arquivar o REJECT e abrir o bounded repair',
+            candidate_commit: pending.candidateCommit,
+            evidence_paths: [lookup.evidence_path],
+            work_unit: null,
+          };
+        }
         return {
           status: 'HUMAN_REQUIRED',
           task_id: pending.taskId,
@@ -1590,6 +1627,12 @@ export async function createProjectControlPlane(
     for (let attempt = episodeFirstAttempt; attempt < observation.attempt; attempt += 1) {
       const review = await readCandidateReview(paths, observation.taskId, attempt);
       if (review === null || review.decision !== 'REJECT') continue;
+      const automaticReviewRepair = await readReviewRejectedAttempt(
+        paths,
+        observation.taskId,
+        attempt,
+      );
+      if (automaticReviewRepair !== null) continue;
       humanReleases.push({
         intervention_id: `human-release:${observation.taskId}:attempt-${attempt}`,
         type: InterventionType.DESIGN_DECISION,
@@ -1781,6 +1824,50 @@ export async function createProjectControlPlane(
       paths.validationLogsDir,
     ];
     const lookup = await lookupCandidateReview(paths, record);
+    const legacyRejectedReview =
+      lookup.status === 'REJECTED' && lookup.record?.rejection_disposition === undefined
+        ? lookup.record
+        : null;
+    if (legacyRejectedReview !== null) {
+      const existingClassification = await readReviewRejectionClassification(
+        paths,
+        taskId,
+        record.attempt,
+      );
+      if (existingClassification !== null) {
+        if (
+          existingClassification.candidate_sha !== record.candidate_commit ||
+          existingClassification.review_record_sha256 !== canonicalSha256(legacyRejectedReview)
+        ) {
+          return reviewBlocked(
+            taskId,
+            'LEGACY_REJECTION_CLASSIFICATION_DIVERGENT',
+            'REVIEW_EVIDENCE_DIVERGENT',
+            'classificação persistida não corresponde ao candidate/REJECT legado',
+            'reconciliar manualmente a classificação e o REJECT preservados',
+            ['inspecionar os records append-only ligados por hash'],
+            evidencePaths,
+          );
+        }
+        if (existingClassification.disposition === 'IMPLEMENTATION_DEFECT') {
+          return {
+            status: 'REPAIRABLE',
+            reason:
+              `REJECT legado já classificado como defeito de implementação: ` +
+              existingClassification.reason,
+          };
+        }
+        return reviewBlocked(
+          taskId,
+          'REVIEW_REJECTED_HUMAN_DECISION',
+          'REJECT',
+          `REJECT legado classificado como ${existingClassification.disposition}: ${existingClassification.reason}`,
+          'resolver a decisão humana indicada pela classificação estruturada',
+          ['inspecionar o REJECT e a classificação preservados'],
+          evidencePaths,
+        );
+      }
+    }
     if (lookup.status === 'NOT_REQUIRED' || lookup.status === 'ACCEPTED') {
       const report = reportFor(taskId);
       if (report !== undefined) {
@@ -1792,7 +1879,17 @@ export async function createProjectControlPlane(
       }
       return { status: 'ACCEPTED', reason: lookup.reason };
     }
-    if (lookup.status === 'REJECTED') {
+    if (lookup.status === 'REJECTED' && legacyRejectedReview === null) {
+      if (lookup.record?.rejection_disposition === 'IMPLEMENTATION_DEFECT') {
+        const report = reportFor(taskId);
+        if (report !== undefined) {
+          report.review = { ...report.review, outcome: 'REJECT', reason: lookup.reason };
+        }
+        return {
+          status: 'REPAIRABLE',
+          reason: `review independente classificou defeito de implementação: ${lookup.reason}`,
+        };
+      }
       return reviewBlocked(
         taskId,
         'REVIEW_REJECTED',
@@ -1898,7 +1995,11 @@ export async function createProjectControlPlane(
         evidence_paths: [paths.validationLogsDir],
         implementer_gaps: implementerGaps,
         implementer_confidence: implementerConfidence,
+        ...(legacyRejectedReview === null
+          ? {}
+          : { prior_rejection_reason: legacyRejectedReview.reason }),
       },
+      ...(input.reviewerPort === undefined ? {} : { port: input.reviewerPort }),
     });
 
     if (verdict.outcome === 'REVIEW_UNAVAILABLE') {
@@ -1912,6 +2013,54 @@ export async function createProjectControlPlane(
         `review independente não pôde ser concluída: ${verdict.reason}`,
         'tornar a review independente executável ou decidir manualmente',
         ['corrigir a configuração do reviewer', 'inspecionar o candidate preparado'],
+        evidencePaths,
+      );
+    }
+
+    if (legacyRejectedReview !== null) {
+      if (verdict.outcome !== 'REJECT') {
+        return reviewBlocked(
+          taskId,
+          'LEGACY_REJECTION_CLASSIFICATION_INVALID',
+          'UNAVAILABLE',
+          'classificador tentou substituir o REJECT legado em vez de classificá-lo',
+          'classificar a natureza do REJECT legado sem redecidir o veredito',
+          ['inspecionar o REJECT preservado', 'executar classificador read-only fresco'],
+          evidencePaths,
+        );
+      }
+      await writeReviewRejectionClassification(paths, {
+        schema_version: 1,
+        task_id: taskId,
+        attempt: record.attempt,
+        candidate_sha: record.candidate_commit,
+        review_record_sha256: canonicalSha256(legacyRejectedReview),
+        classifier_profile_id: reviewerProfile.id,
+        classifier_invocation: {
+          role: 'reviewer',
+          workspace_access: verdict.workspace_access as 'READ_ONLY',
+          read_only_mechanism: verdict.read_only_mechanism,
+          argv: [...verdict.argv],
+          diversity_requirement: requirement.diversity_requirement,
+          fresh_context: true,
+        },
+        disposition: verdict.rejection_disposition,
+        reason: verdict.reason,
+        classified_at: (input.now?.() ?? new Date()).toISOString(),
+      });
+      if (verdict.rejection_disposition === 'IMPLEMENTATION_DEFECT') {
+        return {
+          status: 'REPAIRABLE',
+          reason: `REJECT legado classificado como defeito de implementação: ${verdict.reason}`,
+        };
+      }
+      return reviewBlocked(
+        taskId,
+        'REVIEW_REJECTED_HUMAN_DECISION',
+        'REJECT',
+        `REJECT legado classificado como ${verdict.rejection_disposition}: ${verdict.reason}`,
+        'resolver a decisão humana indicada pela classificação estruturada',
+        ['inspecionar o REJECT e a classificação preservados'],
         evidencePaths,
       );
     }
@@ -1939,6 +2088,9 @@ export async function createProjectControlPlane(
         ...(implementerGaps === null ? {} : { implementer_gaps: implementerGaps }),
         ...(verdict.coverage === null ? {} : { coverage: verdict.coverage }),
         decision: verdict.outcome,
+        ...(verdict.outcome === 'REJECT'
+          ? { rejection_disposition: verdict.rejection_disposition }
+          : {}),
         reason: verdict.reason,
         decided_at: new Date().toISOString(),
       });
@@ -1964,6 +2116,16 @@ export async function createProjectControlPlane(
       }
       return { status: 'ACCEPTED', reason: verdict.reason };
     }
+    if (verdict.rejection_disposition === 'IMPLEMENTATION_DEFECT') {
+      const report = reportFor(taskId);
+      if (report !== undefined) {
+        report.review = { ...report.review, outcome: 'REJECT', reason: verdict.reason };
+      }
+      return {
+        status: 'REPAIRABLE',
+        reason: `review independente classificou defeito de implementação: ${verdict.reason}`,
+      };
+    }
     return reviewBlocked(
       taskId,
       'REVIEW_REJECTED',
@@ -1983,11 +2145,54 @@ export async function createProjectControlPlane(
         ? { outcome: 'ACCEPT', reason: decision.reason }
         : {
             outcome: 'BLOCKED',
-            code: decision.code,
-            reason: decision.human_required.why_automation_stopped,
+            code: decision.status === 'REPAIRABLE' ? 'REVIEW_REPAIRABLE' : decision.code,
+            reason:
+              decision.status === 'REPAIRABLE'
+                ? decision.reason
+                : decision.human_required.why_automation_stopped,
           };
     },
   };
+
+  async function reconcilePendingReviewRejection(): Promise<WorkUnitFollowUp> {
+    const pending = await inspectPendingAcceptance({ paths, loaded });
+    if (pending.status === 'NONE' || pending.review.status !== 'REJECTED') {
+      return { status: 'CONTINUE' };
+    }
+    const disposition = pending.review.record?.rejection_disposition;
+    if (disposition !== 'IMPLEMENTATION_DEFECT') {
+      const decision = await reviewValidatedCandidate({
+        taskId: pending.taskId,
+        record: pending.record,
+      });
+      if (decision.status === 'HUMAN_REQUIRED') {
+        return { status: 'HUMAN_REQUIRED', human_required: decision.human_required };
+      }
+      if (decision.status !== 'REPAIRABLE') return { status: 'CONTINUE' };
+    }
+    if (!authorization.autonomous_execution_boundary.includes('BOUNDED_REPAIR')) {
+      const output = humanRequired(
+        `project:${pending.taskId}:review-repair-authorization`,
+        'autorizar explicitamente BOUNDED_REPAIR ou decidir manualmente',
+        'review encontrou defeito de implementação, mas a run não autoriza bounded repair',
+        ['adicionar BOUNDED_REPAIR ao autonomous_execution_boundary', 'inspecionar o candidate'],
+        [input.authorizationFile, pending.review.evidence_path],
+      );
+      blockedReview = output;
+      return { status: 'HUMAN_REQUIRED', human_required: output };
+    }
+    await retryReviewRejectedAttempt({
+      paths,
+      taskId: pending.taskId,
+      reason: 'bounded repair autorizado para implementation defect rejeitado pela review',
+      ...(input.now === undefined ? {} : { now: () => input.now!().toISOString() }),
+    });
+    return {
+      status: 'REPAIR_READY',
+      task_id: pending.taskId,
+      source_attempt: pending.attempt,
+    };
+  }
 
   /**
    * OPERATIONAL PLANE: fatos que o control plane já tem em mãos, gravados
@@ -2075,6 +2280,8 @@ export async function createProjectControlPlane(
     if (blockedReview !== null) {
       return { status: 'HUMAN_REQUIRED', human_required: blockedReview };
     }
+    const reviewRepair = await reconcilePendingReviewRejection();
+    if (reviewRepair.status !== 'CONTINUE') return reviewRepair;
     if (observation.closeKind === 'PASS' && !report.review.required) {
       report.review = {
         ...report.review,
@@ -2254,6 +2461,7 @@ export async function createProjectControlPlane(
     beforeWorkUnit,
     previewNextAction,
     afterWorkUnit,
+    reconcilePendingReviewRejection,
     onRepairExhausted,
     acceptance,
     snapshot(): ProjectLifecycleReport {
