@@ -3,8 +3,8 @@ import {
   CompletionRecord,
   DEV_SCHEMA_VERSION,
   LaunchRecord,
-  MAXIMUM_HANDOFF_DRAFT_BYTES,
-  MAXIMUM_TASK_PACKET_BYTES,
+  ADVISORY_HANDOFF_DRAFT_BYTES,
+  ADVISORY_TASK_PACKET_BYTES,
   OrchestratedRevalidationRecord,
   REVALIDATION_REASON_CODES,
   RevalidationCheckpoint,
@@ -14,6 +14,7 @@ import {
   OrchestratedFinalizationRecord,
   ValidationEvidence,
   ValidationResult,
+  artifactSizeAdvisory,
   byteSize,
   HANDOFF_SCHEMA_VERSION,
   HANDOFF_SCHEMA_VERSION_V1,
@@ -26,7 +27,6 @@ import {
   parseTaskPacket,
   readHandoffConfidence,
 } from '../../dev/lib/schemas.js';
-import { BudgetExceededError } from '../../dev/lib/budget.js';
 import { canonicalJson, canonicalSha256 } from '../../dev/lib/canonical.js';
 
 const SHA = 'a'.repeat(40);
@@ -159,12 +159,28 @@ describe('TaskPacket', () => {
     expect(() => parseTaskPacket(validPacket({ validation: [{ argv: [], timeout_seconds: 1 }] }))).toThrow();
   });
 
-  it('rejeita packet acima de 12 KiB mesmo sendo válido em schema', () => {
+  it('aceita packet válido acima do alvo advisório de 12 KiB', () => {
     const inflated = validPacket({
       constraints: Array.from({ length: 400 }, (_, index) => `restrição inflada número ${index} `.repeat(3)),
     });
-    expect(byteSize(inflated)).toBeGreaterThan(MAXIMUM_TASK_PACKET_BYTES);
-    expect(() => parseTaskPacket(inflated)).toThrow(BudgetExceededError);
+    expect(byteSize(inflated)).toBeGreaterThan(ADVISORY_TASK_PACKET_BYTES);
+    expect(parseTaskPacket(inflated).task_id).toBe('M01');
+  });
+
+  it('não tem teto substituto: packet MUITO maior continua aceito', () => {
+    const enormous = validPacket({
+      constraints: Array.from({ length: 4_000 }, (_, index) => `restrição inflada número ${index} `.repeat(3)),
+    });
+    expect(byteSize(enormous)).toBeGreaterThan(ADVISORY_TASK_PACKET_BYTES * 20);
+    expect(parseTaskPacket(enormous).task_id).toBe('M01');
+  });
+
+  it('packet enorme continua rejeitando campo não declarado', () => {
+    const enormous = validPacket({
+      constraints: Array.from({ length: 4_000 }, (_, index) => `restrição inflada número ${index} `.repeat(3)),
+      transcript: 'conversa anterior',
+    });
+    expect(() => parseTaskPacket(enormous)).toThrow();
   });
 });
 
@@ -394,13 +410,13 @@ describe('Handoff', () => {
     expect(sealed.accepted_commit).toBe(SHA);
   });
 
-  it('rejeita handoff acima de 4 KiB', () => {
+  it('aceita handoff válido acima do alvo advisório de 4 KiB', () => {
     const inflated = validDraft({
       changed_files: Array.from({ length: 50 }, (_, index) => `src/muito/fundo/arquivo-${index}-com-nome-longo.ts`),
       decisions: Array.from({ length: 5 }, () => 'decisão longa '.repeat(30)),
     });
-    expect(byteSize(inflated)).toBeGreaterThan(MAXIMUM_HANDOFF_DRAFT_BYTES);
-    expect(() => parseHandoffDraft(inflated)).toThrow(BudgetExceededError);
+    expect(byteSize(inflated)).toBeGreaterThan(ADVISORY_HANDOFF_DRAFT_BYTES);
+    expect(parseHandoffDraft(inflated).task_id).toBe('M01');
   });
 
   it('limita decisões a 5 e lessons a 3', () => {
@@ -511,7 +527,7 @@ describe('Handoff v2', () => {
     expect(() => parseHandoffDraft(validDraftV2({ accepted_commit: SHA }))).toThrow();
   });
 
-  it('mantém o budget de 4 KiB para v2', () => {
+  it('aceita draft v2 acima do alvo advisório de 4 KiB', () => {
     const inflated = validDraftV2({
       what_i_did_not_check: Array.from({ length: 5 }, () => 'lacuna reconhecida '.repeat(12)),
       open_questions: Array.from({ length: 5 }, () => 'pergunta em aberto '.repeat(12)),
@@ -522,12 +538,18 @@ describe('Handoff v2', () => {
         claim: 'referência com claim longa '.repeat(5),
       })),
     });
-    expect(byteSize(inflated)).toBeGreaterThan(MAXIMUM_HANDOFF_DRAFT_BYTES);
-    expect(() => parseHandoffDraft(inflated)).toThrow(BudgetExceededError);
+    expect(byteSize(inflated)).toBeGreaterThan(ADVISORY_HANDOFF_DRAFT_BYTES);
+    const parsed = parseHandoffDraft(inflated);
+    expect(parsed.task_id).toBe('M01');
   });
 
-  it('respeita o budget num v2 realista', () => {
-    expect(byteSize(validDraftV2())).toBeLessThanOrEqual(MAXIMUM_HANDOFF_DRAFT_BYTES);
+  it('mede tamanho como telemetria advisória, sem decidir nada', () => {
+    const measurement = artifactSizeAdvisory(validDraftV2(), ADVISORY_HANDOFF_DRAFT_BYTES);
+    expect(measurement.bytes).toBe(byteSize(validDraftV2()));
+    expect(measurement.advisory_threshold_bytes).toBe(ADVISORY_HANDOFF_DRAFT_BYTES);
+    expect(measurement.advisory_threshold_exceeded).toBe(
+      byteSize(validDraftV2()) > ADVISORY_HANDOFF_DRAFT_BYTES,
+    );
   });
 });
 

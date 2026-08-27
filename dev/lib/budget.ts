@@ -1,43 +1,59 @@
 import { canonicalJson } from './canonical.js';
 
-/** Budgets determinísticos do protocolo de sessões descartáveis. */
-export const MAXIMUM_TASK_PACKET_BYTES = 12_288; // 12 KiB
-
 /**
- * Teto do payload que o WORKER escreve. Vale para o `HandoffDraft` e só para
- * ele: é o worker que decide o tamanho de decisões, lições e lacunas, e é dele
- * que o protocolo precisa se defender.
+ * TAMANHO É OBSERVAÇÃO, NÃO AUTORIDADE.
  *
- * Não existe teto equivalente para o `HandoffRecord`, e é deliberado. O record
- * não é o draft com um carimbo: `sealHandoff` substitui `changed_files` e
- * `validations` pelos valores AUTORITATIVOS e acrescenta `accepted_commit` e
- * `sealed_at`. Um draft honesto de 4002 bytes vira um record de 4318 sem que o
- * worker tenha escrito um byte a mais — foi assim que a run real
- * `semi-imperium-real-01` morreu com trabalho válido já commitado. Cobrar do
- * record um teto que o orquestrador é quem estoura torna o contrato
- * insatisfazível, e a saída seria truncar fato — que é pior que o problema.
+ * Estes números são ALVOS ADVISÓRIOS de concisão para os artifacts estruturados
+ * do protocolo. Nenhum deles interrompe lifecycle: um TaskPacket ou um
+ * HandoffDraft que passa do alvo continua VÁLIDO, continua sendo parseado e
+ * continua fechando a tarefa. O que rejeita artifact é o schema estrito — campo
+ * inventado, campo ausente, campo malformado —, nunca a contagem de bytes.
  *
- * A fronteira do contexto que de fato trafega para a próxima sessão continua
- * sendo `MAXIMUM_TASK_PACKET_BYTES`, cobrada na construção do TaskPacket.
+ * A regra existe porque a run real `semi-imperium-real-01` morreu duas vezes
+ * pelo mesmo erro de categoria. Primeiro o HandoffRecord selado (4318 bytes)
+ * foi cobrado do teto do draft. Depois, com trabalho de ~19 min já validado e
+ * já commitado em `be5ff5a`, a task 04 morreu em
+ * `BudgetExceededError: HandoffDraft excede o budget: 4438 bytes > 4096 bytes`.
+ * Em nenhum dos dois casos havia limite REAL do lado de fora: nem quota de
+ * provider, nem janela de contexto, nem memória de máquina. Era o Lab
+ * estrangulando trabalho válido com um número que ele mesmo inventou.
+ *
+ * É a mesma correção já aplicada à previsão de runtime — forecast ≠ deadline.
+ * Aqui: alvo advisório de tamanho ≠ gate de execução.
+ *
+ * Limite REAL de provider (janela de contexto de fato recusada pelo provider) é
+ * outra coisa, é do ambiente, e se trata onde ele acontece — jamais por um
+ * proxy interno de 4 KiB ou 12 KiB fingindo representá-lo.
  */
-export const MAXIMUM_HANDOFF_DRAFT_BYTES = 4_096; // 4 KiB
-
-export class BudgetExceededError extends Error {
-  constructor(
-    readonly kind: string,
-    readonly actualBytes: number,
-    readonly maximumBytes: number,
-  ) {
-    super(`${kind} excede o budget: ${actualBytes} bytes > ${maximumBytes} bytes`);
-    this.name = 'BudgetExceededError';
-  }
-}
+export const ADVISORY_TASK_PACKET_BYTES = 12_288; // 12 KiB
+export const ADVISORY_HANDOFF_DRAFT_BYTES = 4_096; // 4 KiB
 
 export function byteSize(value: unknown): number {
   return Buffer.byteLength(canonicalJson(value), 'utf8');
 }
 
-export function assertByteBudget(kind: string, value: unknown, maximumBytes: number): void {
-  const actual = byteSize(value);
-  if (actual > maximumBytes) throw new BudgetExceededError(kind, actual, maximumBytes);
+/**
+ * Medição de tamanho de artifact — telemetria pura, sem efeito.
+ *
+ * `advisory_threshold_exceeded` é rótulo de observabilidade: pode alimentar
+ * relatório e histórico, e NÃO pode decidir PASS/FAIL, parar execução, criar
+ * HUMAN_REQUIRED, mudar routing ou mudar cobrança. Nenhum caller tem
+ * autorização para tratá-lo como veredito.
+ */
+export interface ArtifactSizeAdvisory {
+  readonly bytes: number;
+  readonly advisory_threshold_bytes: number;
+  readonly advisory_threshold_exceeded: boolean;
+}
+
+export function artifactSizeAdvisory(
+  value: unknown,
+  advisoryThresholdBytes: number,
+): ArtifactSizeAdvisory {
+  const bytes = byteSize(value);
+  return {
+    bytes,
+    advisory_threshold_bytes: advisoryThresholdBytes,
+    advisory_threshold_exceeded: bytes > advisoryThresholdBytes,
+  };
 }

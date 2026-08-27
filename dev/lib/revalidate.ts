@@ -49,6 +49,7 @@ import {
   RevalidationCheckpoint,
   RevalidationReasonCode,
   RevalidationSourceBinding,
+  measureProtocolArtifacts,
   parseHandoffDraft,
   sealHandoff,
   type CompletionRecord as CompletionRecordType,
@@ -536,6 +537,7 @@ function completionFrom(
     revalidation_attempt: record.attempt,
     revalidation_sequence: record.sequence,
     revalidation_record_sha256: canonicalSha256(record),
+    protocol_artifact_bytes: measureProtocolArtifacts(source.packet, source.handoff),
     closed_at: record.revalidated_at,
   });
 }

@@ -10,6 +10,7 @@ import type { HarnessPaths } from './paths.js';
 import type { LoadedPlan } from './plan.js';
 import {
   DEV_SCHEMA_VERSION,
+  measureProtocolArtifacts,
   sealHandoff,
   type AgentCompletionReport,
   type CompletionRecord,
@@ -17,6 +18,7 @@ import {
   type HandoffRecord,
   type LaunchRecord,
   type OrchestratorEvidence,
+  type ProtocolArtifactBytes,
   type TaskPacket,
   type ValidationEvidence,
   type ValidationResult,
@@ -175,6 +177,7 @@ export async function closeTask(input: CloseInput): Promise<CloseOutcome> {
       report,
       evidence,
       discrepancies,
+      measureProtocolArtifacts(packet, draft),
       now,
     );
   }
@@ -214,6 +217,7 @@ export async function closeTask(input: CloseInput): Promise<CloseOutcome> {
       report,
       evidence,
       discrepancies,
+      measureProtocolArtifacts(packet, draft),
       now,
     );
   }
@@ -241,6 +245,7 @@ export async function closeTask(input: CloseInput): Promise<CloseOutcome> {
     discrepancies: [...discrepancies],
     finalization_mode: 'normal',
     commit_origin: 'worker',
+    protocol_artifact_bytes: measureProtocolArtifacts(packet, draft),
     closed_at: timestamp,
   };
   // Selado campo a campo, nunca por spread do draft: tudo que o orquestrador
@@ -315,6 +320,7 @@ async function finishFail(
   report: AgentCompletionReport,
   evidence: OrchestratorEvidence,
   discrepancies: readonly string[],
+  protocolArtifactBytes: ProtocolArtifactBytes,
   now: () => string,
 ): Promise<CloseOutcome> {
   const timestamp = now();
@@ -328,6 +334,7 @@ async function finishFail(
     discrepancies: [...discrepancies],
     finalization_mode: 'normal',
     commit_origin: 'worker',
+    protocol_artifact_bytes: protocolArtifactBytes,
     closed_at: timestamp,
   };
   await writeCompletion(paths, completion);

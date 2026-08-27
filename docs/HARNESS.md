@@ -345,26 +345,60 @@ O worker nunca escreve `accepted_commit` — ele não sabe se o commit foi aceit
 Divergência entre relato e evidência é registrada em `discrepancies`; a
 evidência derivada é a autoridade.
 
-## Budgets
+## Tamanho de artifact: advisório, não gate
 
-Budget é uma questão de PROPRIEDADE: cada teto cobra de quem escreve os bytes.
+> **AGENT LAB É ORQUESTRADOR, NÃO GOVERNADOR ARTIFICIAL DE RECURSO.**
 
-- `HandoffDraft` ≤ **4 KiB** UTF-8 — payload **do worker**. É ele que decide o
-  tamanho de decisões, lições e lacunas, e é dele que o protocolo se defende.
-- `HandoffRecord` — **sem teto de bytes**, schema estrito. O record não é o
-  draft carimbado: `sealHandoff` troca `changed_files` e `validations` pelos
-  valores autoritativos e acrescenta `accepted_commit` e `sealed_at`. Um draft
-  honesto dentro do teto vira um record acima dele sem que o worker tenha
-  escrito um byte a mais — cobrar do record um teto que o orquestrador é quem
-  estoura tornaria o contrato insatisfazível, e a única saída seria truncar
-  fato. Um record selado NUNCA é truncado.
-- `TaskPacket` ≤ **12 KiB** UTF-8 — o contexto que de fato trafega para a
-  próxima sessão, `previous_handoff` incluído. É aqui que um handoff durável
-  grande demais para ser transmitido é barrado, e não no selo.
-- Preâmbulo do prompt ≤ 5 KiB.
+Nenhum artifact estruturado do lifecycle é rejeitado por tamanho. A fronteira
+de todos eles é o **schema estrito** — campo declarado, tipo certo, nada
+inventado. A régua só observa.
 
-Medidos em bytes sobre JSON canônico: schema válido acima de um budget que
-exista continua sendo rejeição.
+| Artifact | Fronteira que decide | Alvo advisório |
+| --- | --- | --- |
+| `TaskPacket` | schema estrito (campos declarados, sem transcript, sem estado de conversa, sem credencial) | 12 KiB |
+| `HandoffDraft` | schema estrito (v1/v2, `what_i_did_not_check` obrigatório em v2) | 4 KiB |
+| `HandoffRecord` | schema estrito + selo autoritativo | — |
+
+Os alvos advisórios são medidos sobre JSON canônico e viram telemetria em
+`CompletionRecord.protocol_artifact_bytes` (`task_packet_bytes`,
+`handoff_draft_bytes`, `advisory_threshold_exceeded`). Essa telemetria **não
+pode** decidir PASS/FAIL, parar execução, criar `HUMAN_REQUIRED`, alterar
+routing nem alterar cobrança.
+
+O `HandoffRecord` continua sem qualquer teto, e por razão própria: `sealHandoff`
+troca `changed_files` e `validations` pelos valores autoritativos e acrescenta
+`accepted_commit` e `sealed_at`, então ele cresce por fato que o worker não
+escreveu. Um record selado NUNCA é truncado.
+
+**Por que a regra existe.** A run real `semi-imperium-real-01` morreu duas vezes
+pelo mesmo erro de categoria. Primeiro o record selado (4318 bytes) foi cobrado
+do teto do draft. Depois, com a task 04 (`crest_selection_workflow`) já
+validada e já commitada em `be5ff5a` após ~19 min de trabalho, o lifecycle
+abortou em `BudgetExceededError: HandoffDraft excede o budget: 4438 bytes >
+4096 bytes`. Em nenhum dos dois casos existia limite REAL do lado de fora — nem
+quota, nem janela de contexto, nem memória. É a mesma correção já aplicada à
+previsão de duração (`forecast ≠ deadline`), agora aplicada ao tamanho:
+**alvo advisório ≠ gate de execução**.
+
+Limite REAL de provider — uma janela de contexto que o provider de fato recusa —
+é do ambiente, é tratado onde acontece, e nunca é representado por um proxy
+interno de 4 KiB ou 12 KiB.
+
+O preâmbulo do prompt continua com teto de 5 KiB, e é de outra natureza: ele
+cobra texto que o PRÓPRIO orquestrador gera a partir de um template fixo. É
+guarda de regressão contra o prompt reintroduzir contexto pela porta dos
+fundos, não um limite sobre o trabalho do worker.
+
+### O que pode e o que não pode parar trabalho
+
+O Lab PODE parar trabalho por: fronteira de autorização; fronteira de
+segurança; capacidade de provider de fato indisponível; restrição de
+billing/credencial; falha determinística de correção com reparo bounded
+esgotado; decisão `HUMAN_REQUIRED` genuína.
+
+O Lab NÃO pode parar trabalho porque: uma estimativa advisória foi excedida; um
+alvo interno de bytes foi excedido; uma duração prevista foi excedida; a
+informação de quota é `UNKNOWN`.
 
 ## Escopo de um commit
 

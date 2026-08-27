@@ -23,7 +23,10 @@ const HANDOFF_DRAFT_CONTRACT = `{"schema_version":2,"task_id":"<id do packet>","
    reconhece NÃO ter verificado. [] é uma afirmação positiva — você olhou e não
    identificou nenhum — e NÃO significa campo ignorado; omitir o campo invalida
    o arquivo inteiro. evidence APONTA para a evidência (caminho+linhas ou
-   comando): nunca conteúdo de arquivo, diff, stdout, stderr ou transcript.`
+   comando): nunca conteúdo de arquivo, diff, stdout, stderr ou transcript.
+   Seja conciso e relevante: uma frase por item, fato que o próximo worker
+   precisa. NÃO existe teto de bytes — trabalho grande produz draft grande, e
+   truncar fato para caber em número nenhum é pior que o arquivo extenso.`
 
 export interface PromptIo {
   readonly repoRoot: string;
@@ -92,7 +95,7 @@ ${io.reportPath}
    "timed_out":<bool>,"duration_ms":<int≥0>}] (≤20),
  "decisions":[<≤5>],"lessons":[<≤3>],"relevant_files":[<≤5>]}
 
-${io.handoffDraftPath} (máx. 4 KiB)
+${io.handoffDraftPath}
 ${HANDOFF_DRAFT_CONTRACT}
 
    Você NÃO decide se o commit foi aceito: não escreva accepted_commit.
@@ -131,7 +134,7 @@ ${io.reportPath}
    NÃO inclua reportPath, handoffDraftPath, .dev, .dev-inbox ou qualquer arquivo de protocolo.
    validations contém somente comandos que realmente executou.
 
-${io.handoffDraftPath} (máx. 4 KiB)
+${io.handoffDraftPath}
 ${HANDOFF_DRAFT_CONTRACT}
 
    No HandoffDraft, PASS significa patch pronto para validação; FAIL significa

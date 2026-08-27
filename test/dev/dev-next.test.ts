@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { checkProgressionBase } from '../../dev/lib/base-guard.js';
 import { resolveHarnessPaths } from '../../dev/lib/paths.js';
 import {
-  MAXIMUM_TASK_PACKET_BYTES,
+  ADVISORY_TASK_PACKET_BYTES,
   byteSize,
   parseHandoffRecord,
   parseTaskPacket,
@@ -122,7 +122,7 @@ describe('dev-next', () => {
       validation: [{ argv: ['true'], timeout_seconds: 30 }],
     });
     expect(packet.previous_handoff).toBeNull();
-    expect(byteSize(packet)).toBeLessThanOrEqual(MAXIMUM_TASK_PACKET_BYTES);
+    expect(byteSize(packet)).toBeLessThanOrEqual(ADVISORY_TASK_PACKET_BYTES);
   });
 
   it('resume repair como próximo attempt e preserva diagnósticos no verbose', async () => {
@@ -383,7 +383,7 @@ describe('dev-next', () => {
         previousHandoff,
         now: '2026-08-05T12:00:00.000Z',
       });
-      expect(byteSize(packet), task.id).toBeLessThanOrEqual(MAXIMUM_TASK_PACKET_BYTES);
+      expect(byteSize(packet), task.id).toBeLessThanOrEqual(ADVISORY_TASK_PACKET_BYTES);
     }
   });
 

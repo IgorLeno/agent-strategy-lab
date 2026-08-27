@@ -951,3 +951,21 @@ Rule: ao clonar um lifecycle para prova/recovery, derive todos os artifact roots
 pela mesma primitive de paths usada pelo runtime e copie cada raiz sem
 hardlinks. Antes de mutar a cópia, confira os hashes cruzados entre finalization,
 inbox e records; ausência nunca é substituída por reconstrução ou inferência.
+
+[2026-08-27] Context: a mesma run `semi-imperium-real-01` morreu de novo, agora
+na task 04 (`crest_selection_workflow`): ~19 min de Opus 5 high, validação
+oficial PASS, candidate já commitado em `be5ff5a`, e então
+`BudgetExceededError: HandoffDraft excede o budget: 4438 bytes > 4096 bytes`.
+A correção anterior tinha separado a PROPRIEDADE do budget (draft do worker vs.
+record do orquestrador) mas manteve o teto do draft como autoridade.
+Mistake: aceitar que um número interno inventado — sem contraparte em quota,
+janela de contexto de provider, memória de máquina ou efeito externo — pudesse
+encerrar lifecycle. Corrigir a atribuição do teto sem perguntar se o teto
+deveria existir deixou o mesmo bottleneck vivo em outro artifact.
+Rule: um limite só tem autoridade de execução se corresponder a uma restrição
+REAL — autorização, segurança, capacidade de provider de fato recusada,
+billing/credencial, correção determinística com reparo esgotado. Estimativa,
+previsão e alvo de tamanho são telemetria: podem ser medidos e rotulados, e
+nunca podem decidir PASS/FAIL, parar execução, criar HUMAN_REQUIRED, alterar
+routing ou alterar cobrança. Ao encontrar um limite que para trabalho válido,
+classifique-o antes de ajustá-lo: subir o número mantém o bug de categoria.
