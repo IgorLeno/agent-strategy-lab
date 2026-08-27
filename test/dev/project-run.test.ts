@@ -340,7 +340,7 @@ describe('proveniência de credencial e quota', () => {
     });
     expect(facts.quota.availability).toBeNull();
     expect(evidenceOf(facts.quota)).toBe('UNKNOWN');
-    expect(facts.quota.provenance).toContain('não é probada antes do launch');
+    expect(facts.quota.provenance).toContain('nenhuma observação fresca de capacidade');
   });
 
   it('D — quota PROVEN FALSE com recusa observada e janela ainda aberta', async () => {

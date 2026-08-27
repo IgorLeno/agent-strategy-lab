@@ -58,6 +58,7 @@ import {
 } from './profile.js';
 import { providerContractOf } from '../../src/providers/index.js';
 import {
+  unknownCapacity,
   windowDeltas,
   type PoolCapacityObservation,
 } from '../../src/quota/index.js';
@@ -109,6 +110,8 @@ export interface LaunchInput {
   readonly poolCapacityProbe?: (
     profile: LauncherProfile,
   ) => Promise<PoolCapacityObservation | null>;
+  /** Snapshot fresco já obtido pelo routing; evita repetir o mesmo read. */
+  readonly poolCapacityBefore?: PoolCapacityObservation | null;
 }
 
 export interface LaunchOutcome {
@@ -258,27 +261,33 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
   });
   if (!preflight.ok) throw new BillingPreflightError(preflight.refusal ?? 'motivo não informado');
 
-  // Baseline da quota da assinatura, DEPOIS do preflight e ANTES do spawn. Um
-  // probe que não prova inferência zero pode ter gastado franquia: nesse caso o
-  // worker não nasce, e o valor não é registrado como baseline válido.
-  const measuresUsage = usesSubscriptionUsageProbe(profile);
-  const usageBefore = measuresUsage
-    ? await probeClaudeUsage({
-        binary: profile.argv[0] as string,
-        env,
-        cwd: paths.repoRoot,
-        ...(input.usageRunner ? { runner: input.usageRunner } : {}),
-      })
-    : NOT_RUN_OUTCOME;
-  if (usageBefore.unsafe) {
-    throw new UsageMeasurementSafetyError(usageBefore.probe.reason ?? 'motivo não informado');
-  }
-
   // Baseline de capacidade do POOL. É observação, não gate: um probe que falha
   // grava UNKNOWN e o launch segue. Recusar o worker porque o medidor está fora
   // do ar transformaria a instrumentação em autoridade sobre o trabalho.
   const capacityBefore =
-    input.poolCapacityProbe === undefined ? null : await input.poolCapacityProbe(profile);
+    'poolCapacityBefore' in input
+      ? (input.poolCapacityBefore ?? null)
+      : input.poolCapacityProbe === undefined
+        ? null
+        : await safeCapacityObservation(input.poolCapacityProbe, profile, null);
+
+  // Compatibilidade Claude: quando o snapshot normalizado veio do MESMO
+  // `/usage` já verificado como zero-inference, ele também alimenta o record
+  // histórico `subscription_usage`. Não se lê o endpoint duas vezes.
+  const measuresUsage = usesSubscriptionUsageProbe(profile);
+  const normalizedUsageBefore = claudeUsageOutcomeOfCapacity(capacityBefore);
+  const usageBefore = measuresUsage
+    ? normalizedUsageBefore ??
+      (await probeClaudeUsage({
+        binary: profile.argv[0] as string,
+        env,
+        cwd: paths.repoRoot,
+        ...(input.usageRunner ? { runner: input.usageRunner } : {}),
+      }))
+    : NOT_RUN_OUTCOME;
+  if (usageBefore.unsafe) {
+    throw new UsageMeasurementSafetyError(usageBefore.probe.reason ?? 'motivo não informado');
+  }
 
   // O argv é o do AGENTE, sem wrapper de deadline. Enquanto `timeout <N>s ...`
   // estava aqui, o número que encerrava o worker vinha da previsão da task —
@@ -405,6 +414,7 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
     termination_cause: null,
     termination_request: null,
     activity: null,
+    pool_capacity: poolCapacityRecordOf(profile, capacityBefore, null),
   });
   await input.onStarted?.(identity);
 
@@ -428,16 +438,24 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
   // conta é o consumo da execução Claude, não o tempo de validação oficial ou
   // de qualquer passo local que venha depois. Falha aqui é OBSERVACIONAL —
   // nunca rerroda o provider e nunca transforma run bom em veredito ruim.
+  const capacityAfter =
+    input.poolCapacityProbe === undefined
+      ? null
+      : await safeCapacityObservation(
+          input.poolCapacityProbe,
+          profile,
+          capacityBefore?.quota_pool ?? null,
+        );
+  const normalizedUsageAfter = claudeUsageOutcomeOfCapacity(capacityAfter);
   const usageAfter: ClaudeUsageProbeOutcome = measuresUsage
-    ? await probeClaudeUsage({
+    ? normalizedUsageAfter ??
+      (await probeClaudeUsage({
         binary: profile.argv[0] as string,
         env,
         cwd: paths.repoRoot,
         ...(input.usageRunner ? { runner: input.usageRunner } : {}),
-      })
+      }))
     : NOT_RUN_OUTCOME;
-  const capacityAfter =
-    input.poolCapacityProbe === undefined ? null : await input.poolCapacityProbe(profile);
 
   // `timed_out` deixou de significar "a task estourou o tempo previsto": não
   // existe mais tempo previsto com autoridade. Ele agora significa "uma
@@ -609,6 +627,72 @@ export function classifyTermination(facts: TerminationFacts): {
  * entre before e after produz `consumed_pp: null` e `window_reset: true`, e
  * não um consumo negativo.
  */
+function claudeUsageOutcomeOfCapacity(
+  capacity: PoolCapacityObservation | null,
+): ClaudeUsageProbeOutcome | null {
+  if (
+    capacity?.quota_pool !== 'anthropic_subscription' ||
+    capacity.status !== 'KNOWN' ||
+    capacity.source !== 'claude_print_usage_v1'
+  ) {
+    return null;
+  }
+  const byId = new Map(capacity.windows.map((window) => [window.window_id, window]));
+  const fiveHour = byId.get('five_hour');
+  const sevenDay = byId.get('seven_day_all_models');
+  if (
+    fiveHour?.used_percent === null ||
+    fiveHour?.used_percent === undefined ||
+    !fiveHour.window_instance ||
+    sevenDay?.used_percent === null ||
+    sevenDay?.used_percent === undefined ||
+    !sevenDay.window_instance
+  ) {
+    return null;
+  }
+  return {
+    probe: {
+      available: true,
+      zero_inference_verified: true,
+      reason_code: 'OK',
+      reason: 'snapshot normalizado reutilizado do probe Claude /usage zero-inference',
+      result_text_sha256: null,
+      command: 'claude /usage',
+      exit_code: 0,
+    },
+    reading: {
+      five_hour: {
+        used_pct: fiveHour.used_percent,
+        reset_label: fiveHour.window_instance,
+      },
+      seven_day_all_models: {
+        used_pct: sevenDay.used_percent,
+        reset_label: sevenDay.window_instance,
+      },
+    },
+    unsafe: false,
+  };
+}
+
+async function safeCapacityObservation(
+  probe: NonNullable<LaunchInput['poolCapacityProbe']>,
+  profile: LauncherProfile,
+  expectedPool: string | null,
+): Promise<PoolCapacityObservation | null> {
+  try {
+    return await probe(profile);
+  } catch {
+    return expectedPool === null
+      ? null
+      : unknownCapacity({
+          quota_pool: expectedPool,
+          reason: 'probe pós-launch falhou; causa sensível omitida',
+          source: 'agentlab:launch-capacity-observer',
+          observed_at: new Date().toISOString(),
+        });
+  }
+}
+
 function poolCapacityRecordOf(
   profile: LauncherProfile,
   before: PoolCapacityObservation | null,

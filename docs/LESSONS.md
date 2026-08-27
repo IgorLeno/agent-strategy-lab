@@ -1005,3 +1005,22 @@ que o consome.
 Rule: ao acrescentar um campo que atravessa camadas, seguir o valor até o último
 consumidor antes de dar por feito — o typecheck não pega parâmetro opcional
 omitido.
+
+[2026-08-27] Context: Provider Expansion v1 entregou probes read-only, schema de
+capacidade e `LaunchRecord.pool_capacity`, mas `launchTask` chamava
+`launchWorker` sem o `poolCapacityProbe` opcional e o routing lia só evidência
+já persistida. Todo launch de produção gravava `pool_capacity: null`.
+Mistake: a primitive foi dada por entregue porque tinha teste; o teste injetava
+o probe à mão, então provava a primitive e não a chamada de produção.
+Rule: capacidade opcional só está entregue quando um caller de PRODUÇÃO a
+fornece. Teste de fiação exercita o caminho real (`runOrchestrate`/`launchTask`,
+não `launchWorker` com probe injetado) e conta as chamadas — se remover a fiação
+não quebra o teste, o teste não prova fiação nenhuma.
+
+[2026-08-27] Context: `quotaFactOf` documentava que quota não era probada antes
+do launch porque medi-la custaria o recurso medido. Os endpoints de capacidade
+da v1 são read-only e não fazem inferência: a premissa virou falsa.
+Mistake: a justificativa sobreviveu ao fato que a sustentava e continuaria
+ensinando a próxima pessoa a não medir.
+Rule: comentário que justifica uma AUSÊNCIA é revalidado junto com a mudança que
+remove o motivo da ausência. Racional obsoleto é dívida, não histórico.

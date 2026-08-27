@@ -21,7 +21,13 @@ import {
   runReviewedPath,
   type ReviewedPathDeliberation,
 } from './project-orchestrate.js';
-import { collectProjectLaunchFacts } from './project-preflight.js';
+import { collectProjectLaunchFacts, quotaHeadroomByPool } from './project-preflight.js';
+import {
+  createProductionPoolCapacityProbe,
+  observeEligiblePoolCapacities,
+  quotaPoolOfProfile,
+  type PoolCapacityProbe,
+} from './pool-capacity-observer.js';
 import { loadProfileFromCatalog, type LauncherProfile } from './profile.js';
 import { loadPlan } from './plan.js';
 import { PlanSetupError, runPlan, type PlanRunResult } from './run-plan.js';
@@ -358,6 +364,8 @@ export interface ProjectRunInput {
   readonly machineSafetyCeilingOverride?: string;
   readonly verbose?: boolean;
   readonly onProgress?: LabProgressListener;
+  /** Injetável somente para testes determinísticos dos roles read-only. */
+  readonly poolCapacityProbe?: PoolCapacityProbe;
 }
 
 /** Glue de release: planeja/persiste uma vez e delega ao executor existente. */
@@ -373,6 +381,36 @@ export async function runProject(input: ProjectRunInput): Promise<PlanRunResult>
   const authorization = loadedAuthorization.file;
   const authorizationScope = executionScopeOf(authorization);
   const plannerProfileId = plannerProfileIdOf(authorization, input.plannerProfileId);
+  const capacityProbe =
+    input.poolCapacityProbe ?? createProductionPoolCapacityProbe({ paths: input.paths });
+  const roleProfiles = new Map<string, LauncherProfile>();
+  for (const entry of authorization.profile_policy.profiles) {
+    const profile = await loadProfileFromCatalog(input.paths.profileCatalogRoot, entry.id).catch(
+      () => null,
+    );
+    if (profile !== null) roleProfiles.set(profile.id, profile);
+  }
+  const quotaPoolOf = (profileId: string): string | null => {
+    const profile = roleProfiles.get(profileId);
+    return profile === undefined ? null : quotaPoolOfProfile(profile);
+  };
+  async function roleLaunchFacts(profile: LauncherProfile, homeNamespace: string) {
+    const pool = quotaPoolOf(profile.id);
+    const [fresh, historical] = await Promise.all([
+      observeEligiblePoolCapacities([profile], capacityProbe),
+      quotaHeadroomByPool(input.paths, quotaPoolOf),
+    ]);
+    const observation = pool === null ? undefined : fresh.get(pool);
+    return collectProjectLaunchFacts({
+      paths: input.paths,
+      profile,
+      homeNamespace,
+      ...(observation === undefined ? {} : { capacityObservation: observation }),
+      ...(pool === null || historical[pool] === undefined
+        ? {}
+        : { historicalHeadroom: historical[pool] }),
+    });
+  }
 
   const deliberationRequest = input.deliberation;
   const ensured = await ensureGeneratedProjectPlan({
@@ -389,15 +427,10 @@ export async function runProject(input: ProjectRunInput): Promise<PlanRunResult>
               input.paths,
               authorization,
             );
-            // Uma porta por profile: cada turno é processo NOVO, read-only,
-            // com o preflight de credencial e cobrança do próprio profile.
-            const ports = new Map<string, Awaited<ReturnType<typeof buildDeliberationPort>>>();
+            // Cada turno é processo NOVO, read-only, com observação fresca do
+            // pool e preflight de credencial/cobrança do próprio profile.
             async function buildDeliberationPort(profile: LauncherProfile) {
-              const facts = await collectProjectLaunchFacts({
-                paths: input.paths,
-                profile,
-                homeNamespace: 'deliberator-homes',
-              });
+              const facts = await roleLaunchFacts(profile, 'deliberator-homes');
               return createLaunchedDeliberationWorker({
                 paths: input.paths,
                 profile,
@@ -429,11 +462,9 @@ export async function runProject(input: ProjectRunInput): Promise<PlanRunResult>
                       },
                     };
                   }
-                  let worker = ports.get(profile.id);
-                  if (worker === undefined) {
-                    worker = await buildDeliberationPort(profile);
-                    ports.set(profile.id, worker);
-                  }
+                  // Cada turno reobserva o pool: uma leitura anterior não vira
+                  // TTL implícito durante a deliberação.
+                  const worker = await buildDeliberationPort(profile);
                   return worker.invoke(invocation);
                 },
               },
@@ -442,11 +473,7 @@ export async function runProject(input: ProjectRunInput): Promise<PlanRunResult>
         }),
     planningWorker: async () => {
       const profile = await loadPlannerProfile(input.paths, authorization, plannerProfileId);
-      const facts = await collectProjectLaunchFacts({
-        paths: input.paths,
-        profile,
-        homeNamespace: 'planner-homes',
-      });
+      const facts = await roleLaunchFacts(profile, 'planner-homes');
       input.onProgress?.({ stage: 'PLANNER_RUNNING', detail: profile.id });
       return createLaunchedPlanningWorker({
         paths: input.paths,

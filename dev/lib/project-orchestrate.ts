@@ -228,12 +228,11 @@ export function authorizeProjectLaunch(context: ProjectLaunchContext): ProjectLa
   }
   checks.push({ name: 'billing', decision: 'ALLOWED', reason: `billing_mode=${context.billing_mode}` });
 
-  // POLICY DE QUOTA DESCONHECIDA. Quota só é medida chamando o provider, e
-  // medi-la antes de cada launch cobraria o experimento pelo direito de saber.
-  // Desconhecida NÃO significa suficiente e NÃO significa insuficiente: o
-  // launch segue, porque o provider é quem impõe rate limit e o fará no
-  // próprio launch, mas o relatório nunca diz "quota disponível". Só evidência
-  // POSITIVA de recusa por limite bloqueia aqui.
+  // POLICY DE QUOTA DESCONHECIDA. O lifecycle agora consulta endpoints
+  // read-only de capacidade quando o pool possui um observer autorizado.
+  // Desconhecida ainda NÃO significa suficiente nem insuficiente: falha do
+  // instrumento não pode bloquear trabalho. Só evidência POSITIVA de
+  // esgotamento real bloqueia aqui.
   if (context.quota.availability === false) {
     return deny(
       'quota',
@@ -247,7 +246,7 @@ export function authorizeProjectLaunch(context: ProjectLaunchContext): ProjectLa
     reason:
       context.quota.availability === true
         ? 'quota observada como suficiente'
-        : 'quota não observada antes do launch; desconhecida não é suficiente nem insuficiente',
+        : 'quota desconhecida; desconhecida não é suficiente nem insuficiente',
     evidence: evidenceOf(context.quota),
     provenance: context.quota.provenance,
   });

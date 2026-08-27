@@ -43,6 +43,7 @@ import { PlannedTask, type TaskRisk } from '../../src/planner/task.js';
 import { evaluatePlanWorkflow } from '../../src/planner/validate.js';
 import { resolveDataDir } from '../../src/project/index.js';
 import { resolveProfileIdentity } from '../../src/providers/index.js';
+import type { PoolCapacityObservation } from '../../src/quota/index.js';
 import { AttemptRole } from '../../src/performance/attempt-facts.js';
 import { InterventionType, type InterventionRecord } from '../../src/schemas/index.js';
 import type { PerformanceHistoryQueryResultV2 } from '../../src/performance/query.js';
@@ -59,6 +60,7 @@ import {
   type EscalationLadder,
   type HistoryInformedRoutingResult,
   type ProfileCapabilityInput,
+  type QuotaHeadroom,
   type RoutingCandidate,
   type SelectionEvidence,
 } from '../../src/routing/index.js';
@@ -87,6 +89,7 @@ import {
 } from './profile.js';
 import {
   collectProjectLaunchFacts,
+  effectiveQuotaHeadroomByPool,
   escalationPreflightOf,
   evidenceOf,
   quotaHeadroomByPool,
@@ -94,6 +97,12 @@ import {
   type LaunchFactEvidence,
   type ProjectLaunchFacts,
 } from './project-preflight.js';
+import {
+  createProductionPoolCapacityProbe,
+  observeEligiblePoolCapacities,
+  type PoolCapacityLaunchContext,
+  type PoolCapacityProbe,
+} from './pool-capacity-observer.js';
 import {
   classificationFor,
   ProjectAuthorizationError,
@@ -112,7 +121,7 @@ import {
   type ProjectReviewResult,
   type ProviderRoleInvocationPort,
 } from './project-orchestrate.js';
-import type { LabProgressListener } from './lab-progress.js';
+import type { LabProgressListener, LabProgressQuota } from './lab-progress.js';
 import { machineSafetyCeiling } from './machine-safety.js';
 import {
   OPERATIONAL_ATTEMPT_SCHEMA_VERSION,
@@ -284,6 +293,31 @@ function factReportOf(fact: LaunchFact): ProjectLaunchFactReport {
   };
 }
 
+function progressQuotaOf(capacity: PoolCapacityObservation | null): LabProgressQuota {
+  if (capacity === null) {
+    return { status: 'UNKNOWN', reason: 'pool sem observação de capacidade neste assessment' };
+  }
+  if (capacity.status === 'UNKNOWN') {
+    return { status: 'UNKNOWN', reason: `${capacity.reason} (${capacity.source})` };
+  }
+  if (capacity.status === 'EXHAUSTED') {
+    return { status: 'EXHAUSTED', reason: `${capacity.reason} (${capacity.source})` };
+  }
+  return {
+    status: 'OBSERVED',
+    windows: capacity.windows.map((window) => ({
+      window_id: window.window_id,
+      used_pct: window.used_percent,
+      remaining_pct: window.remaining_percent,
+      consumed_pp: null,
+      precision: window.precision === 'CURRENCY' ? null : window.precision,
+      resets_at: window.resets_at,
+    })),
+    balance: capacity.balance,
+    source: capacity.source,
+  };
+}
+
 function historyStatusOf(
   routed: HistoryInformedRoutingResult,
 ): ProjectRoutingReport['history_status'] {
@@ -396,6 +430,8 @@ export type WorkUnitDecision =
   | {
       readonly outcome: 'LAUNCH';
       readonly profile_id: string;
+      /** Snapshot do assessment e observer pós-execução do mesmo pool. */
+      readonly pool_capacity: PoolCapacityLaunchContext;
     }
   | { readonly outcome: 'HUMAN_REQUIRED'; readonly human_required: HumanRequiredOutput };
 
@@ -415,6 +451,7 @@ interface WorkUnitAssessment {
   /** `null` quando a avaliação parou antes de existir uma work unit avaliada. */
   readonly report: ProjectWorkUnitReport | null;
   readonly selectedProfileId: string | null;
+  readonly selectedCapacity: PoolCapacityObservation | null;
   readonly reviewRequirement: CandidateReviewRequirement | null;
   readonly history: PerformanceHistoryQueryResultV2 | null;
   readonly materialization: WorkUnitMaterializationContext | null;
@@ -835,6 +872,8 @@ export interface CreateProjectControlPlaneInput {
    * dele — o default continua sendo o probe LOCAL e gratuito do harness.
    */
   readonly credentialRunner?: CommandRunner;
+  /** Injetável nos testes; produção usa o factory read-only normalizado. */
+  readonly poolCapacityProbe?: PoolCapacityProbe;
   readonly now?: () => Date;
   /** Data root do control plane; injetável para isolar testes. */
   readonly historyLabRoot?: string;
@@ -861,6 +900,12 @@ export async function createProjectControlPlane(
   const { paths, loaded, authorization } = input;
   const inspect = input.inspect ?? ((repoRoot: string) => inspectRepository({ repoRoot }));
   const historyLabRoot = input.historyLabRoot ?? resolveHarnessInstallationRoot();
+  const poolCapacityProbe =
+    input.poolCapacityProbe ??
+    createProductionPoolCapacityProbe({
+      paths,
+      ...(input.now === undefined ? {} : { now: input.now }),
+    });
 
   const profiles = new Map<string, LauncherProfile>();
   const provenances = new Map<string, ProfileProvenance>();
@@ -953,10 +998,28 @@ export async function createProjectControlPlane(
    * lugar produz credencial e quota, e nenhum deles pode afirmar mais do que
    * os outros sobre a mesma máquina.
    */
-  function launchFactsFor(profile: LauncherProfile): Promise<ProjectLaunchFacts> {
+  async function launchFactsFor(
+    profile: LauncherProfile,
+    context?: {
+      readonly fresh?: PoolCapacityObservation | null;
+      readonly historical?: Readonly<Record<string, QuotaHeadroom>>;
+    },
+  ): Promise<ProjectLaunchFacts> {
+    const pool = quotaPoolOf(profile.id);
+    const historical = context?.historical ?? (await quotaHeadroomByPool(paths, quotaPoolOf));
+    const fresh =
+      context?.fresh !== undefined
+        ? context.fresh
+        : pool === null
+          ? null
+          : (await observeEligiblePoolCapacities([profile], poolCapacityProbe, (item) => quotaPoolOf(item.id))).get(pool) ?? null;
     return collectProjectLaunchFacts({
       paths,
       profile,
+      capacityObservation: fresh,
+      ...(pool === null || historical[pool] === undefined
+        ? {}
+        : { historicalHeadroom: historical[pool] }),
       ...(input.credentialRunner === undefined ? {} : { runner: input.credentialRunner }),
       ...(input.now === undefined ? {} : { now: input.now }),
     });
@@ -989,6 +1052,7 @@ export async function createProjectControlPlane(
   async function evidenceBalanceFactsOf(
     eligible: readonly string[],
     history: PerformanceHistoryQueryResultV2,
+    quotaHeadroom: Readonly<Record<string, QuotaHeadroom>>,
   ): Promise<EvidenceBalanceFacts> {
     const profileSamples: Record<string, number> = Object.fromEntries(
       eligible.map((profileId) => [profileId, 0]),
@@ -1014,11 +1078,11 @@ export async function createProjectControlPlane(
       profile_sample_sizes: profileSamples,
       provider_sample_sizes: providerSamples,
       run_launches_by_provider: runLaunches,
-      quota_headroom_by_pool: await quotaHeadroomByPool(paths, quotaPoolOf),
+      quota_headroom_by_pool: quotaHeadroom,
       provenance: [
         'PerformanceHistoryQueryResultV2.series[].routing_aggregations.trials.sample_size',
         'launches já decididos por este control plane nesta run',
-        'observação de capacidade por POOL a partir da evidência já gravada pelos launches anteriores',
+        'observação read-only fresca por POOL com fallback para LaunchRecords históricos',
       ],
     });
   }
@@ -1074,6 +1138,7 @@ export async function createProjectControlPlane(
       gate,
       report: null,
       selectedProfileId: null,
+      selectedCapacity: null,
       reviewRequirement: null,
       history: null,
       materialization: null,
@@ -1183,15 +1248,29 @@ export async function createProjectControlPlane(
           });
         },
       ));
-    // FATOS de aquisição de evidência. Nenhum deles é inventado: amostragem
-    // sai da história canônica já consultada, concentração sai dos launches
-    // que ESTE processo já fez, e headroom sai do probe de assinatura que os
-    // launches anteriores já pagaram. Nenhuma chamada nova ao provider.
+    // Snapshot por POOL e por ASSESSMENT. Perfis que compartilham pool entram
+    // uma vez, e a próxima work unit observa de novo — sem TTL global capaz de
+    // esconder consumo feito fora do Agent Lab.
+    const historicalCapacityByPool = await quotaHeadroomByPool(paths, quotaPoolOf);
+    const freshCapacityByPool = await observeEligiblePoolCapacities(
+      eligible.map((profileId) => profiles.get(profileId) as LauncherProfile),
+      poolCapacityProbe,
+      (profile) => quotaPoolOf(profile.id),
+    );
+    const effectiveCapacityByPool = effectiveQuotaHeadroomByPool(
+      historicalCapacityByPool,
+      freshCapacityByPool,
+    );
+
+    // FATOS de aquisição de evidência. Amostragem sai da história canônica,
+    // concentração sai dos launches desta run e headroom prefere o snapshot
+    // fresco read-only. O histórico só substitui probe fresco UNKNOWN.
     const selectionPolicy = authorization.profile_policy.selection_policy;
-    const evidenceBalance =
-      selectionPolicy === 'evidence_balanced'
-        ? await evidenceBalanceFactsOf(eligible, history)
-        : null;
+    const evidenceBalance = await evidenceBalanceFactsOf(
+      eligible,
+      history,
+      effectiveCapacityByPool,
+    );
     const routed = routeInitialProfileWithHistory({
       work_unit: {
         source: 'direct_task_normalization',
@@ -1203,7 +1282,7 @@ export async function createProjectControlPlane(
       capability_registry: registry,
       candidates: candidatesFor(eligible),
       selection_policy: selectionPolicy,
-      ...(evidenceBalance === null ? {} : { evidence_balance: evidenceBalance }),
+      evidence_balance: evidenceBalance,
       history,
       profile_fingerprints_sha256: Object.fromEntries(
         eligible.map((profileId) => [profileId, projectProfileFingerprint(profiles.get(profileId) as LauncherProfile)]),
@@ -1251,7 +1330,13 @@ export async function createProjectControlPlane(
     // do gate. Nenhum é afirmado por conveniência: o que não puder ser sabido
     // sem chamar provider permanece UNKNOWN, e a policy de UNKNOWN vive em
     // `authorizeProjectLaunch`, não aqui.
-    const facts = await launchFactsFor(profile);
+    const selectedPool = quotaPoolOf(selectedProfileId);
+    const selectedCapacity =
+      selectedPool === null ? null : (freshCapacityByPool.get(selectedPool) ?? null);
+    const facts = await launchFactsFor(profile, {
+      fresh: selectedCapacity,
+      historical: historicalCapacityByPool,
+    });
     const launchAuthorization = authorizeProjectLaunch({
       scope,
       capability: request.attemptKind === 'REPAIR' ? 'BOUNDED_REPAIR' : 'CONFIGURED_SUBSCRIPTION_WORKER',
@@ -1320,6 +1405,14 @@ export async function createProjectControlPlane(
         rationale: [
           ...routed.rationale,
           ...(routed.fallback?.outcome === 'ROUTED' ? routed.fallback.rationale : []),
+          ...(routed.fallback?.outcome === 'ROUTED'
+            ? routed.fallback.candidates_considered
+                .filter((candidate) => candidate.outcome === 'REJECTED')
+                .map(
+                  (candidate) =>
+                    `${candidate.profile_id}: ${candidate.rejection_code ?? 'REJECTED'} — ${candidate.reason}`,
+                )
+            : []),
         ],
         ...(historyDegraded === null ? {} : { history_unreadable_reason: historyDegraded }),
       },
@@ -1386,6 +1479,7 @@ export async function createProjectControlPlane(
       gate,
       report,
       selectedProfileId,
+      selectedCapacity,
       reviewRequirement,
       history,
       materialization: {
@@ -1501,6 +1595,7 @@ export async function createProjectControlPlane(
 
     const selectedProfileId = assessment.selectedProfileId as string;
     const capability = registry.get(selectedProfileId);
+    const selectedQuotaPool = quotaPoolOf(selectedProfileId);
     if (capability !== undefined) {
       launchesByProvider.set(capability.agent, (launchesByProvider.get(capability.agent) ?? 0) + 1);
     }
@@ -1525,7 +1620,9 @@ export async function createProjectControlPlane(
               provider: capability.agent,
               model: capability.model,
               reasoning_effort: capability.reasoning_effort,
+              ...(selectedQuotaPool === null ? {} : { quota_pool: selectedQuotaPool }),
             }),
+        quota: progressQuotaOf(assessment.selectedCapacity),
         escalated_from_profile_id: assessment.report.escalation,
       },
     });
@@ -1533,6 +1630,10 @@ export async function createProjectControlPlane(
     return {
       outcome: 'LAUNCH',
       profile_id: selectedProfileId,
+      pool_capacity: {
+        before: assessment.selectedCapacity,
+        probe: poolCapacityProbe,
+      },
     };
   }
 

@@ -12,6 +12,10 @@ import {
 import { buildTaskPacket } from './packet.js';
 import type { HarnessPaths } from './paths.js';
 import type { LoadedPlan } from './plan.js';
+import {
+  createProductionPoolCapacityProbe,
+  type PoolCapacityLaunchContext,
+} from './pool-capacity-observer.js';
 import { loadProfile } from './profile.js';
 import { readHandoff, writePacket } from './records.js';
 import { readPreviousAttemptDiagnostics } from './retry-failed.js';
@@ -107,6 +111,8 @@ export async function launchTask(
    * deadline de task: nenhuma previsão de duração chega até aqui.
    */
   machineSafetyCeilingSecondsOverride?: number,
+  /** Contexto do routing; ausente usa o observer de produção diretamente. */
+  poolCapacity?: PoolCapacityLaunchContext,
 ): Promise<LaunchStepResult> {
   const taskId = packet.task_id;
   const profile = await loadProfile(paths.repoRoot, profileId, {
@@ -128,6 +134,11 @@ export async function launchTask(
     );
   }
   const startedAt = new Date().toISOString();
+  const capacity =
+    poolCapacity ?? {
+      before: undefined,
+      probe: createProductionPoolCapacityProbe({ paths }),
+    };
 
   let outcome: LaunchOutcome;
   try {
@@ -135,6 +146,10 @@ export async function launchTask(
       paths,
       profile,
       packet,
+      ...('before' in capacity && capacity.before !== undefined
+        ? { poolCapacityBefore: capacity.before }
+        : {}),
+      poolCapacityProbe: capacity.probe,
       ...(machineSafetyCeilingSecondsOverride === undefined
         ? {}
         : { machineSafetyCeilingSecondsOverride }),
