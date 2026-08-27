@@ -1,7 +1,7 @@
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
-  MAXIMUM_HANDOFF_BYTES,
+  MAXIMUM_HANDOFF_DRAFT_BYTES,
   MAXIMUM_TASK_PACKET_BYTES,
   byteSize,
   isHandoffRecordV2,
@@ -169,13 +169,19 @@ describe('protocolo de sessões descartáveis — duas tarefas em sequência', (
     }
   }, 60_000);
 
-  it('respeita os budgets de packet e handoff', async () => {
+  it('respeita os budgets de packet e de draft', async () => {
     await orchestrate('success');
     for (const taskId of ['T1', 'T2']) {
       expect(byteSize(await readPacket(paths, taskId))).toBeLessThanOrEqual(
         MAXIMUM_TASK_PACKET_BYTES,
       );
-      expect(byteSize(await readHandoff(paths, taskId))).toBeLessThanOrEqual(MAXIMUM_HANDOFF_BYTES);
+      // O teto de 4 KiB é do payload que o worker escreve. O record selado
+      // cresce com fato do orquestrador e não responde a ele.
+      const draft: unknown = JSON.parse(
+        await readFile(`${sandbox.root}/.dev-inbox/${taskId}/handoff-draft.json`, 'utf8'),
+      );
+      expect(byteSize(draft)).toBeLessThanOrEqual(MAXIMUM_HANDOFF_DRAFT_BYTES);
+      expect(await readHandoff(paths, taskId)).not.toBeNull();
     }
   }, 60_000);
 
@@ -413,7 +419,7 @@ describe('handoff v2 no protocolo real do worker', () => {
     // [] sobrevive como afirmação positiva, e a opinião do worker fica no record.
     expect(handoff.what_i_did_not_check).toEqual([]);
     expect(readHandoffConfidence(handoff.confidence).level).toBe('HIGH');
-    expect(byteSize(handoff)).toBeLessThanOrEqual(MAXIMUM_HANDOFF_BYTES);
+    expect(byteSize(draft)).toBeLessThanOrEqual(MAXIMUM_HANDOFF_DRAFT_BYTES);
   }, 60_000);
 
   // Sem what_i_did_not_check o draft v2 nem chega a ser um handoff: a
