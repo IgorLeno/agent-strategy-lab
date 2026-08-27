@@ -916,3 +916,17 @@ qualquer provider ou runtime.
 Rule: reproduza uma Run Directive somente a partir do `lab/run-directive.txt`
 persistido da execução fonte e prove o diff byte a byte. Nunca reconstrua ou
 substitua essa entrada por um documento que apenas a descreve.
+
+[2026-08-26] Context: um handoff draft válido de 4002 bytes virou um
+HandoffRecord de 4318 bytes ao ser selado, e o mesmo teto de 4 KiB que
+protegia o payload do worker foi cobrado do record — matando a run real
+`semi-imperium-real-01` depois de trabalho válido, validado e commitado.
+Mistake: reutilizar uma constante de budget entre um artefato escrito pelo
+worker e outro construído pelo orquestrador. O contrato ficou insatisfazível:
+o worker não tinha como prever nem evitar o crescimento que o selo introduz.
+Rule: todo budget de bytes pertence a quem AUTORA os bytes. Antes de aplicar
+um teto, pergunte quem pode ficar abaixo dele por escolha própria; se o
+artefato cresce por fato que outra camada acrescenta, o teto pertence à
+fronteira onde esse artefato é transmitido, nunca ao ponto onde é selado.
+Truncar fato autoritativo para caber num teto herdado é sempre pior que o
+problema que o teto resolvia.

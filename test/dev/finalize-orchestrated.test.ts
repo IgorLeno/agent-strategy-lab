@@ -41,7 +41,6 @@ import type {
 } from '../../dev/lib/schemas.js';
 import {
   CommitMessage,
-  MAXIMUM_HANDOFF_BYTES,
   MAXIMUM_TASK_PACKET_BYTES,
   MAX_COMMIT_MESSAGE_BYTES,
   byteSize,
@@ -1021,7 +1020,8 @@ describe('handoff v2 na finalização orquestrada', () => {
     expect(carried.what_i_did_not_check).toEqual(['comportamento sob concorrência']);
     expect(carried.open_questions).toEqual(['revisar o nome do campo?']);
     expect(carried.evidence).toHaveLength(2);
-    expect(byteSize(carried)).toBeLessThanOrEqual(MAXIMUM_HANDOFF_BYTES);
+    // O record selado não responde ao teto do draft; quem limita o contexto
+    // transmitido é o packet.
     expect(byteSize(packet)).toBeLessThanOrEqual(MAXIMUM_TASK_PACKET_BYTES);
 
     // O mesmo packet aceita um handoff histórico v1 sem migração nenhuma.

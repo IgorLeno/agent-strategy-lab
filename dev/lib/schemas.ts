@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import {
-  MAXIMUM_HANDOFF_BYTES,
+  MAXIMUM_HANDOFF_DRAFT_BYTES,
   MAXIMUM_TASK_PACKET_BYTES,
   assertByteBudget,
   byteSize,
@@ -208,7 +208,9 @@ export const PlanFile = z
 export type PlanFile = z.infer<typeof PlanFile>;
 
 // ---------------------------------------------------------------------------
-// Handoff — draft do worker, record selado pelo orquestrador. Ambos ≤ 4 KiB.
+// Handoff — draft do worker (≤ 4 KiB), record selado pelo orquestrador.
+// O record NÃO herda o teto do draft: ele cresce com fato autoritativo que o
+// worker não escreveu. Ver `MAXIMUM_HANDOFF_DRAFT_BYTES`.
 //
 // O handoff versiona SOZINHO. `DEV_SCHEMA_VERSION` continua descrevendo
 // PlanFile, TaskPacket e os demais records: subir aquele número para evoluir
@@ -2626,16 +2628,24 @@ export function parseTaskPacket(input: unknown): TaskPacket {
   return packet;
 }
 
+/** Payload do worker: o teto de 4 KiB é dele, e continua cobrado aqui. */
 export function parseHandoffDraft(input: unknown): HandoffDraft {
   const draft = HandoffDraft.parse(input);
-  assertByteBudget('HandoffDraft', draft, MAXIMUM_HANDOFF_BYTES);
+  assertByteBudget('HandoffDraft', draft, MAXIMUM_HANDOFF_DRAFT_BYTES);
   return draft;
 }
 
+/**
+ * Record selado: schema estrito, SEM teto de bytes.
+ *
+ * `sealHandoff` troca `changed_files`/`validations` pelos valores
+ * autoritativos e acrescenta `accepted_commit` e `sealed_at`, então o record
+ * pode passar do teto do draft por crescimento que o worker não originou —
+ * cobrá-lo aqui rejeitaria trabalho válido já aceito e commitado. O contexto
+ * que de fato chega no próximo worker continua limitado pelo TaskPacket.
+ */
 export function parseHandoffRecord(input: unknown): HandoffRecord {
-  const record = HandoffRecord.parse(input);
-  assertByteBudget('HandoffRecord', record, MAXIMUM_HANDOFF_BYTES);
-  return record;
+  return HandoffRecord.parse(input);
 }
 
-export { MAXIMUM_HANDOFF_BYTES, MAXIMUM_TASK_PACKET_BYTES, byteSize };
+export { MAXIMUM_HANDOFF_DRAFT_BYTES, MAXIMUM_TASK_PACKET_BYTES, byteSize };

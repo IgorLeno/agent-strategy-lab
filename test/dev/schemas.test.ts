@@ -3,7 +3,7 @@ import {
   CompletionRecord,
   DEV_SCHEMA_VERSION,
   LaunchRecord,
-  MAXIMUM_HANDOFF_BYTES,
+  MAXIMUM_HANDOFF_DRAFT_BYTES,
   MAXIMUM_TASK_PACKET_BYTES,
   OrchestratedRevalidationRecord,
   REVALIDATION_REASON_CODES,
@@ -399,7 +399,7 @@ describe('Handoff', () => {
       changed_files: Array.from({ length: 50 }, (_, index) => `src/muito/fundo/arquivo-${index}-com-nome-longo.ts`),
       decisions: Array.from({ length: 5 }, () => 'decisão longa '.repeat(30)),
     });
-    expect(byteSize(inflated)).toBeGreaterThan(MAXIMUM_HANDOFF_BYTES);
+    expect(byteSize(inflated)).toBeGreaterThan(MAXIMUM_HANDOFF_DRAFT_BYTES);
     expect(() => parseHandoffDraft(inflated)).toThrow(BudgetExceededError);
   });
 
@@ -522,12 +522,12 @@ describe('Handoff v2', () => {
         claim: 'referência com claim longa '.repeat(5),
       })),
     });
-    expect(byteSize(inflated)).toBeGreaterThan(MAXIMUM_HANDOFF_BYTES);
+    expect(byteSize(inflated)).toBeGreaterThan(MAXIMUM_HANDOFF_DRAFT_BYTES);
     expect(() => parseHandoffDraft(inflated)).toThrow(BudgetExceededError);
   });
 
   it('respeita o budget num v2 realista', () => {
-    expect(byteSize(validDraftV2())).toBeLessThanOrEqual(MAXIMUM_HANDOFF_BYTES);
+    expect(byteSize(validDraftV2())).toBeLessThanOrEqual(MAXIMUM_HANDOFF_DRAFT_BYTES);
   });
 });
 

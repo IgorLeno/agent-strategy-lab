@@ -347,13 +347,24 @@ evidência derivada é a autoridade.
 
 ## Budgets
 
-- `TaskPacket` ≤ **12 KiB** UTF-8 — impede critérios e restrições de inflarem
-  o prompt de volta.
-- `HandoffRecord` / `HandoffDraft` ≤ **4 KiB** UTF-8.
+Budget é uma questão de PROPRIEDADE: cada teto cobra de quem escreve os bytes.
+
+- `HandoffDraft` ≤ **4 KiB** UTF-8 — payload **do worker**. É ele que decide o
+  tamanho de decisões, lições e lacunas, e é dele que o protocolo se defende.
+- `HandoffRecord` — **sem teto de bytes**, schema estrito. O record não é o
+  draft carimbado: `sealHandoff` troca `changed_files` e `validations` pelos
+  valores autoritativos e acrescenta `accepted_commit` e `sealed_at`. Um draft
+  honesto dentro do teto vira um record acima dele sem que o worker tenha
+  escrito um byte a mais — cobrar do record um teto que o orquestrador é quem
+  estoura tornaria o contrato insatisfazível, e a única saída seria truncar
+  fato. Um record selado NUNCA é truncado.
+- `TaskPacket` ≤ **12 KiB** UTF-8 — o contexto que de fato trafega para a
+  próxima sessão, `previous_handoff` incluído. É aqui que um handoff durável
+  grande demais para ser transmitido é barrado, e não no selo.
 - Preâmbulo do prompt ≤ 5 KiB.
 
-Medidos em bytes sobre JSON canônico: schema válido acima do budget continua
-sendo rejeição.
+Medidos em bytes sobre JSON canônico: schema válido acima de um budget que
+exista continua sendo rejeição.
 
 ## Escopo de um commit
 
