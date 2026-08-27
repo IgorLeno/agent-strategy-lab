@@ -46,3 +46,33 @@ capacidade independente.
 - OpenRouter exige autorização explícita de run; credencial não é autorização.
 - Nenhum segredo em record, log, teste ou git.
 - Runtime `semi-imperium-real-01` não é tocado.
+
+## Resultado
+
+Suíte completa: **174 arquivos, 2464 testes, 0 falhas**. `pnpm typecheck`,
+`pnpm build` e `git diff --check` limpos.
+
+Probes reais, todos read-only e sem inferência:
+
+| pool | resultado |
+| --- | --- |
+| OpenAI ChatGPT | HTTP 200 · plano `plus` · primary 3% usado (5h) · secondary 0% (semanal) |
+| OpenCode Go | HTTP 200 · rolling 0% · weekly 1% · monthly 0% |
+| OpenRouter | HTTP 200 · saldo USD 9,61 restante (13 comprados − 3,389 usados) |
+
+Um único smoke test real do launcher, descartável, em repositório git em
+`/tmp`, com `opencode-go/deepseek-v4-flash` (assinatura; zero crédito de
+OpenRouter). Ele prova pela NEGATIVA: o worker rodou como `reviewer`, recebeu
+instrução explícita para criar um arquivo, LEU o README com sucesso e o arquivo
+NÃO foi criado. Exit 0, 12,6s, saída JSON estruturada com
+`tokens{total,input,output,reasoning,cache}` e `cost`.
+
+`dev-doctor` nos perfis novos e nos legados: OpenCode Go OK
+(`opencode_go_subscription_key`), OpenCode/OpenAI OK
+(`opencode_chatgpt_subscription`), OpenRouter recusado sem autorização manual,
+Claude e Codex inalterados.
+
+Runtime `semi-imperium-real-01`: intocado (nenhum arquivo modificado; sua
+`authorization.yaml` continua com `allowed_providers: [codex, claude]` e
+`allowed_billing_modes: [subscription_only]`, e o valor novo no enum não lhe
+concede nada).

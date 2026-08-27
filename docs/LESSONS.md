@@ -969,3 +969,39 @@ previsão e alvo de tamanho são telemetria: podem ser medidos e rotulados, e
 nunca podem decidir PASS/FAIL, parar execução, criar HUMAN_REQUIRED, alterar
 routing ou alterar cobrança. Ao encontrar um limite que para trabalho válido,
 classifique-o antes de ajustá-lo: subir o número mantém o bug de categoria.
+
+[2026-08-27] Context: Provider Expansion v1 — OpenCode como terceiro scaffold.
+Mistake: o campo `agent` significava scaffold, upstream, cobrança e pool ao
+mesmo tempo. Enquanto só existiam Claude e Codex as quatro respostas coincidiam
+e a coincidência passava por design; `cross_provider` comparava nome de
+executável, e Codex -> OpenCode/openai teria contado como troca de provider
+sendo a MESMA conta, o MESMO modelo e a MESMA franquia.
+Rule: toda dimensão que pode divergir tem campo próprio. Antes de acrescentar
+provider, perguntar quais das sete dimensões (scaffold, upstream, modelo, auth,
+cobrança, pool, capability) o novo caso separa — e separar no schema, não no
+comentário.
+
+[2026-08-27] Context: a chave de API do OpenCode Go autentica uma assinatura.
+Mistake: a regra `chave => cobrança por API` tornava a combinação
+irrepresentável, e a saída fácil seria afrouxar a proteção de cobrança para
+caber.
+Rule: quando um caso novo não cabe na regra, refinar o modelo, nunca enfraquecer
+a proteção. `AuthMethod` e `BillingMode` são enums separados ligados por uma
+tabela de contratos comerciais; quem decide a cobrança é o upstream, não o
+formato da credencial.
+
+[2026-08-27] Context: `opencode models` custa ~4,6s e o doctor o chamava por
+profile; com dez perfis OpenCode o teste que varre o catálogo estourou os 30s.
+Mistake: uma leitura que não depende do profile foi colocada no laço por profile.
+Rule: leitura invariante entre profiles é memoizada por processo. Antes de
+acrescentar subprocesso ao doctor, perguntar de que ele depende — se não depende
+do profile, ele roda uma vez.
+
+[2026-08-27] Context: `runBillingPreflight` recebeu `provider` mas não o
+repassou a `probeCredentialSource`; dois testes de preflight OpenCode falharam
+com "sem upstream declarado" apesar de o perfil declarar.
+Mistake: campo novo adicionado à borda de entrada e esquecido no ponto interno
+que o consome.
+Rule: ao acrescentar um campo que atravessa camadas, seguir o valor até o último
+consumidor antes de dar por feito — o typecheck não pega parâmetro opcional
+omitido.
