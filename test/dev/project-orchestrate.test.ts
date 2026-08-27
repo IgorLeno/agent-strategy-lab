@@ -1345,7 +1345,7 @@ describe('G — reviewer não ganha autorização mais fraca que o implementer',
     expect(result).toMatchObject({ outcome: 'ACCEPT', coverage: null });
   });
 
-  it('REJECT sem coverage é definitivo e não consome repetição', async () => {
+  it('REJECT tipado como implementation defect é definitivo e não consome repetição', async () => {
     const profile = await loadProfile(REPO_ROOT, CODEX_PROFILE_ID);
     let invocations = 0;
     const result = await launchProjectReviewer({
@@ -1361,13 +1361,76 @@ describe('G — reviewer não ganha autorização mais fraca que o implementer',
       port: {
         run: async () => {
           invocations += 1;
-          return codexStream({ decision: 'REJECT', reason: 'lacuna real' });
+          return codexStream({
+            decision: 'REJECT',
+            rejection_disposition: 'IMPLEMENTATION_DEFECT',
+            reason: 'lacuna real contra o acceptance existente',
+          });
         },
       },
     });
 
     expect(invocations).toBe(1);
-    expect(result).toMatchObject({ outcome: 'REJECT', coverage: null });
+    expect(result).toMatchObject({
+      outcome: 'REJECT',
+      rejection_disposition: 'IMPLEMENTATION_DEFECT',
+      coverage: null,
+    });
+  });
+
+  it('REJECT de decisão de produto preserva categoria human-gated', async () => {
+    const profile = await loadProfile(REPO_ROOT, CODEX_PROFILE_ID);
+    const result = await launchProjectReviewer({
+      paths,
+      profile,
+      scope: authorizationScope(),
+      implementerProfileId: CLAUDE_PROFILE_ID,
+      diversityRequirement: 'required',
+      risk: 'low',
+      credential: { availability: true, provenance: 'probe local provou a assinatura' },
+      quota: { availability: null, provenance: 'quota não probada antes do launch' },
+      packet: reviewerPacket(),
+      port: {
+        run: async () =>
+          codexStream({
+            decision: 'REJECT',
+            rejection_disposition: 'REQUIREMENT_OR_SCOPE_DECISION',
+            reason: 'o acceptance não define qual comportamento escolher',
+          }),
+      },
+    });
+
+    expect(result).toMatchObject({
+      outcome: 'REJECT',
+      rejection_disposition: 'REQUIREMENT_OR_SCOPE_DECISION',
+    });
+  });
+
+  it('REJECT sem disposição estruturada é inválido e nunca concede autonomia pela prosa', async () => {
+    const profile = await loadProfile(REPO_ROOT, CODEX_PROFILE_ID);
+    const result = await launchProjectReviewer({
+      paths,
+      profile,
+      scope: authorizationScope(),
+      implementerProfileId: CLAUDE_PROFILE_ID,
+      diversityRequirement: 'required',
+      risk: 'low',
+      credential: { availability: true, provenance: 'probe local provou a assinatura' },
+      quota: { availability: null, provenance: 'quota não probada antes do launch' },
+      packet: reviewerPacket(),
+      port: {
+        run: async () =>
+          codexStream({
+            decision: 'REJECT',
+            reason: 'IMPLEMENTATION_DEFECT escrito em prosa não é estrutura',
+          }),
+      },
+    });
+
+    expect(result).toMatchObject({
+      outcome: 'REVIEW_UNAVAILABLE',
+      code: 'REVIEW_VERDICT_NOT_PARSEABLE',
+    });
   });
 });
 

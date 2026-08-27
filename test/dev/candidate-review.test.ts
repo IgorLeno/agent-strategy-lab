@@ -8,9 +8,20 @@ import {
   validationResultsFingerprint,
 } from '../../dev/lib/candidate-review.js';
 import { resolveHarnessPaths, type HarnessPaths } from '../../dev/lib/paths.js';
-import { candidateReviewPath, writeCandidateReview } from '../../dev/lib/records.js';
+import {
+  candidateReviewPath,
+  readReviewRejectedAttempt,
+  readReviewRejectionClassification,
+  reviewRejectedAttemptPath,
+  reviewRejectionClassificationPath,
+  writeCandidateReview,
+  writeReviewRejectedAttempt,
+  writeReviewRejectionClassification,
+} from '../../dev/lib/records.js';
 import {
   CandidateReviewRecord,
+  ReviewRejectedAttemptRecord,
+  ReviewRejectionClassificationRecord,
   type CandidateReviewCoverage,
   type OrchestratedFinalizationRecord,
 } from '../../dev/lib/schemas.js';
@@ -133,6 +144,35 @@ describe('cobertura estrutural da review', () => {
     });
     expect(parsed.decision).toBe('REJECT');
     expect(parsed.coverage).toBeUndefined();
+  });
+
+  it('REJECT novo preserva disposição estruturada independente da prosa', () => {
+    const { coverage: _omitted, ...withoutCoverage } = review();
+    const parsed = CandidateReviewRecord.parse({
+      ...withoutCoverage,
+      decision: 'REJECT',
+      rejection_disposition: 'IMPLEMENTATION_DEFECT',
+      reason: 'o candidate viola o acceptance já declarado',
+    });
+    expect(parsed.rejection_disposition).toBe('IMPLEMENTATION_DEFECT');
+  });
+
+  it('record legado REJECT sem disposição continua legível como UNKNOWN', () => {
+    const { coverage: _omitted, ...withoutCoverage } = review();
+    const parsed = CandidateReviewRecord.parse({
+      ...withoutCoverage,
+      decision: 'REJECT',
+      reason: 'veredito anterior ao contrato de disposição',
+    });
+    expect(parsed.rejection_disposition).toBeUndefined();
+  });
+
+  it('ACCEPT não pode carregar disposição de rejeição', () => {
+    const result = CandidateReviewRecord.safeParse(
+      review({ rejection_disposition: 'IMPLEMENTATION_DEFECT' }),
+    );
+    expect(result.success).toBe(false);
+    expect(JSON.stringify(result)).toMatch(/ACCEPT não pode declarar rejection_disposition/);
   });
 });
 
@@ -269,5 +309,158 @@ describe('lookupCandidateReview com cobertura', () => {
       withoutRequirement as OrchestratedFinalizationRecord,
     );
     expect(lookup.status).toBe('NOT_REQUIRED');
+  });
+});
+
+describe('evidência estruturada da rejeição reparável', () => {
+  it('classificação legada liga a disposição ao review e candidate por hash', () => {
+    const parsed = ReviewRejectionClassificationRecord.parse({
+      schema_version: 1,
+      task_id: 'M94',
+      attempt: 1,
+      candidate_sha: SHA,
+      review_record_sha256: '1'.repeat(64),
+      classifier_profile_id: 'fake-reviewer-v1',
+      classifier_invocation: {
+        role: 'reviewer',
+        workspace_access: 'READ_ONLY',
+        read_only_mechanism: 'argv read-only do classificador',
+        argv: ['node', 'fixtures/fake-worker.mjs', '--agentlab-read-only'],
+        diversity_requirement: 'preferred',
+        fresh_context: true,
+      },
+      disposition: 'IMPLEMENTATION_DEFECT',
+      reason: 'violação concreta do acceptance já definido',
+      classified_at: NOW,
+    });
+    expect(parsed.disposition).toBe('IMPLEMENTATION_DEFECT');
+  });
+
+  it('attempt rejeitado preserva PASS oficial e REJECT sem converter um no outro', () => {
+    const parsed = ReviewRejectedAttemptRecord.parse({
+      schema_version: 1,
+      task_id: 'M94',
+      attempt: 1,
+      source_base_sha: 'b'.repeat(40),
+      profile_id: 'orchestrator-v2',
+      candidate_sha: SHA,
+      finalization_record_sha256: '2'.repeat(64),
+      review_record_sha256: '3'.repeat(64),
+      rejection_classification_sha256: '4'.repeat(64),
+      rejection_disposition: 'IMPLEMENTATION_DEFECT',
+      review_reason: 'candidate viola o acceptance',
+      changed_files: ['dev/lib/schemas.ts'],
+      original_validation_results: [
+        { argv: ['pnpm', 'test'], exit_code: 0, timed_out: false, duration_ms: 1 },
+      ],
+      patch_fingerprint: '5'.repeat(64),
+      change_bundle: {
+        manifest_path: 'failed-attempts/M94/attempt-1/change-bundle/manifest.json',
+        manifest_sha256: '6'.repeat(64),
+        patch_path: 'failed-attempts/M94/attempt-1/change-bundle/changes.patch',
+        patch_sha256: '7'.repeat(64),
+        patch_size_bytes: 42,
+      },
+      archived_at: NOW,
+    });
+    expect(parsed.original_validation_results.every((result) => result.exit_code === 0)).toBe(true);
+    expect(parsed.rejection_disposition).toBe('IMPLEMENTATION_DEFECT');
+  });
+
+  it('attempt de review rejeitada recusa validation FAIL contraditória', () => {
+    const result = ReviewRejectedAttemptRecord.safeParse({
+      schema_version: 1,
+      task_id: 'M94',
+      attempt: 1,
+      source_base_sha: 'b'.repeat(40),
+      profile_id: 'orchestrator-v2',
+      candidate_sha: SHA,
+      finalization_record_sha256: '2'.repeat(64),
+      review_record_sha256: '3'.repeat(64),
+      rejection_classification_sha256: '4'.repeat(64),
+      rejection_disposition: 'IMPLEMENTATION_DEFECT',
+      review_reason: 'candidate viola o acceptance',
+      changed_files: ['dev/lib/schemas.ts'],
+      original_validation_results: [
+        { argv: ['pnpm', 'test'], exit_code: 1, timed_out: false, duration_ms: 1 },
+      ],
+      patch_fingerprint: '5'.repeat(64),
+      change_bundle: {
+        manifest_path: 'manifest.json',
+        manifest_sha256: '6'.repeat(64),
+        patch_path: 'changes.patch',
+        patch_sha256: '7'.repeat(64),
+        patch_size_bytes: 42,
+      },
+      archived_at: NOW,
+    });
+    expect(result.success).toBe(false);
+    expect(JSON.stringify(result)).toMatch(/review rejection exige validation oficial PASS/);
+  });
+
+  it('classificação e archival são append-only por task/attempt', async () => {
+    const classification = ReviewRejectionClassificationRecord.parse({
+      schema_version: 1,
+      task_id: 'M94',
+      attempt: 1,
+      candidate_sha: SHA,
+      review_record_sha256: '1'.repeat(64),
+      classifier_profile_id: 'fake-reviewer-v1',
+      classifier_invocation: {
+        role: 'reviewer',
+        workspace_access: 'READ_ONLY',
+        read_only_mechanism: 'argv read-only do classificador',
+        argv: ['node', 'fixtures/fake-worker.mjs', '--agentlab-read-only'],
+        diversity_requirement: 'preferred',
+        fresh_context: true,
+      },
+      disposition: 'IMPLEMENTATION_DEFECT',
+      reason: 'violação concreta do acceptance já definido',
+      classified_at: NOW,
+    });
+    const rejected = ReviewRejectedAttemptRecord.parse({
+      schema_version: 1,
+      task_id: 'M94',
+      attempt: 1,
+      source_base_sha: 'b'.repeat(40),
+      profile_id: 'orchestrator-v2',
+      candidate_sha: SHA,
+      finalization_record_sha256: '2'.repeat(64),
+      review_record_sha256: '3'.repeat(64),
+      rejection_classification_sha256: '4'.repeat(64),
+      rejection_disposition: 'IMPLEMENTATION_DEFECT',
+      review_reason: 'candidate viola o acceptance',
+      changed_files: ['dev/lib/schemas.ts'],
+      original_validation_results: [
+        { argv: ['pnpm', 'test'], exit_code: 0, timed_out: false, duration_ms: 1 },
+      ],
+      patch_fingerprint: '5'.repeat(64),
+      change_bundle: {
+        manifest_path: 'manifest.json',
+        manifest_sha256: '6'.repeat(64),
+        patch_path: 'changes.patch',
+        patch_sha256: '7'.repeat(64),
+        patch_size_bytes: 42,
+      },
+      archived_at: NOW,
+    });
+
+    await writeReviewRejectionClassification(paths, classification);
+    await writeReviewRejectedAttempt(paths, rejected);
+    expect(await readReviewRejectionClassification(paths, 'M94', 1)).toEqual(classification);
+    expect(await readReviewRejectedAttempt(paths, 'M94', 1)).toEqual(rejected);
+    expect(reviewRejectionClassificationPath(paths, 'M94', 1)).toMatch(
+      /reviews\/M94\/attempt-1\/rejection-classification\.json$/,
+    );
+    expect(reviewRejectedAttemptPath(paths, 'M94', 1)).toMatch(
+      /failed-attempts\/M94\/attempt-1\/review-rejected-attempt\.json$/,
+    );
+
+    await expect(
+      writeReviewRejectionClassification(paths, {
+        ...classification,
+        reason: 'bytes divergentes',
+      }),
+    ).rejects.toThrow(/append-only|diverge|já existe/i);
   });
 });

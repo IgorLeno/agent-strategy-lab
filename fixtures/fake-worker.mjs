@@ -155,12 +155,34 @@ if (process.argv.slice(2).includes('--agentlab-read-only')) {
     console.log('sem veredito estruturado');
     process.exit(0);
   }
-  const decision = requested === 'reject' ? 'REJECT' : 'ACCEPT';
+  const reviewPacket = promptObject('REVIEW PACKET');
+  const priorReviewRepair =
+    requested === 'reject-implementation-once' &&
+    existsSync(
+      path.join(
+        process.cwd(),
+        '.dev',
+        'failed-attempts',
+        reviewPacket?.task_id ?? '',
+        'attempt-1',
+        'review-rejected-attempt.json',
+      ),
+    );
+  const decision =
+    (requested.startsWith('reject') && !priorReviewRepair) ||
+    reviewPacket?.prior_rejection_reason !== undefined
+      ? 'REJECT'
+      : 'ACCEPT';
+  const rejectionDisposition =
+    requested === 'reject-implementation' || requested === 'reject-implementation-once'
+      ? 'IMPLEMENTATION_DEFECT'
+      : requested === 'reject-product'
+        ? 'REQUIREMENT_OR_SCOPE_DECISION'
+        : 'INSUFFICIENT_EVIDENCE';
   // O packet do reviewer chega no prompt (prompt_delivery: argv). A cobertura
   // é derivada dele: arquivos e validações realmente listados, e cada item de
   // implementer_gaps endereçado uma vez. O modo 'no-coverage' omite tudo isso
   // de propósito — é o ACCEPT que o schema do record precisa recusar.
-  const reviewPacket = promptObject('REVIEW PACKET');
   const coverage =
     requested === 'no-coverage'
       ? undefined
@@ -177,6 +199,7 @@ if (process.argv.slice(2).includes('--agentlab-read-only')) {
   console.log(
     JSON.stringify({
       decision,
+      ...(decision === 'REJECT' ? { rejection_disposition: rejectionDisposition } : {}),
       reason: `fake reviewer read-only: ${decision === 'ACCEPT' ? 'evidência consistente com o acceptance declarado' : 'evidência insuficiente para aceitar a mudança'}`,
       ...(coverage === undefined ? {} : { coverage }),
     }),

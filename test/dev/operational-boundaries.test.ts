@@ -13,7 +13,15 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { changedFiles, headSha, workingTreeFiles } from '../../dev/lib/git.js';
 import { resolveHarnessPaths, type HarnessPaths } from '../../dev/lib/paths.js';
 import { loadPlan } from '../../dev/lib/plan.js';
-import { readCompletion, readHandoff, writePacket } from '../../dev/lib/records.js';
+import {
+  candidateReviewPath,
+  readCandidateReview,
+  readCompletion,
+  readHandoff,
+  readReviewRejectedAttempt,
+  readReviewRejectionClassification,
+  writePacket,
+} from '../../dev/lib/records.js';
 import { buildTaskPacket } from '../../dev/lib/packet.js';
 import {
   buildInitialState,
@@ -121,13 +129,13 @@ async function setup(options: { gitignore?: string } = {}): Promise<Fixture> {
       'argv: [node, fixtures/fake-worker.mjs]',
       'prompt_delivery: argv',
       'forbidden_flags: []',
-      'env_allowlist: [PATH, HOME, AGENTLAB_FAKE_MODE]',
+      'env_allowlist: [PATH, HOME, AGENTLAB_FAKE_MODE, AGENTLAB_FAKE_REVIEW]',
       // `capabilityOf` e o router classificam MODELOS; um worker falso não tem
       // modelo. Sem este double, o control plane não consegue rotear nada —
       // nenhum provider real é envolvido por causa dele.
       'test_double_of:',
       '  agent: codex',
-      '  model: gpt-5.6-luna',
+      '  model: gpt-5.6-sol',
       '  reasoning_effort: medium',
       '  sandbox: workspace-write',
     ].join('\n'),
@@ -169,6 +177,295 @@ function orchestrate(fixture: Fixture, mode: string, maxIterations = 1) {
 }
 
 describe('fronteiras operacionais — Onda 1', () => {
+  it('REJECT de implementation defect aciona um único repair e exige nova review', async () => {
+    const fixture = await setup();
+    const loaded = await loadPlan(fixture.paths.planFile);
+    const outside = await mkdtemp(path.join(os.tmpdir(), 'agentlab-review-repair-'));
+    roots.push(outside);
+    const authorizationFile = path.join(outside, 'agentlab-run.yaml');
+    await writeFile(authorizationFile, AUTHORIZATION.replace('risk: low', 'risk: high'), 'utf8');
+    const authorization = await loadProjectRunAuthorization(authorizationFile);
+    let reviewInvocations = 0;
+    const controlPlane = await createProjectControlPlane({
+      paths: fixture.paths,
+      loaded,
+      authorization: authorization.file,
+      authorizationFile: authorization.source_file,
+      historyLabRoot: outside,
+      reviewerPort: {
+        async run() {
+          reviewInvocations += 1;
+          return JSON.stringify(
+            reviewInvocations === 1
+              ? {
+                  decision: 'REJECT',
+                  rejection_disposition: 'IMPLEMENTATION_DEFECT',
+                  reason: 'candidate viola acceptance já definido',
+                }
+              : {
+                  decision: 'ACCEPT',
+                  reason: 'repair satisfaz acceptance',
+                  coverage: {
+                    files: ['src/t1.txt'],
+                    validations: [['test', '-f', 'src/t1.txt']],
+                    behaviors: ['arquivo requerido existe'],
+                    handoff_gaps: [],
+                  },
+                },
+          );
+        },
+      },
+    });
+
+    const previousMode = process.env['AGENTLAB_FAKE_MODE'];
+    const previousReview = process.env['AGENTLAB_FAKE_REVIEW'];
+    process.env['AGENTLAB_FAKE_MODE'] = 'orchestrator-success';
+    process.env['AGENTLAB_FAKE_REVIEW'] = 'reject-implementation-once';
+    let result;
+    try {
+      result = await runOrchestrate({
+        paths: fixture.paths,
+        loaded,
+        profileId: PROFILE,
+        maxIterations: 1,
+        controlPlane,
+      });
+    } finally {
+      if (previousMode === undefined) delete process.env['AGENTLAB_FAKE_MODE'];
+      else process.env['AGENTLAB_FAKE_MODE'] = previousMode;
+      if (previousReview === undefined) delete process.env['AGENTLAB_FAKE_REVIEW'];
+      else process.env['AGENTLAB_FAKE_REVIEW'] = previousReview;
+    }
+
+    expect(result.stop.status, JSON.stringify(result, null, 2)).toBe('ALL_DONE');
+    expect(result.iterationCount).toBe(2);
+    expect(reviewInvocations).toBe(2);
+    expect(await readReviewRejectedAttempt(fixture.paths, 'T1', 1)).toMatchObject({
+      rejection_disposition: 'IMPLEMENTATION_DEFECT',
+      profile_id: PROFILE,
+    });
+    expect((await readState(fixture.paths)).tasks[0]).toMatchObject({
+      status: 'PASS',
+      attempts: 2,
+    });
+  }, 90_000);
+
+  it('REJECT que exige decisão de produto preserva candidate e para para humano', async () => {
+    const fixture = await setup();
+    const loaded = await loadPlan(fixture.paths.planFile);
+    const outside = await mkdtemp(path.join(os.tmpdir(), 'agentlab-review-human-'));
+    roots.push(outside);
+    const authorizationFile = path.join(outside, 'agentlab-run.yaml');
+    await writeFile(authorizationFile, AUTHORIZATION.replace('risk: low', 'risk: high'), 'utf8');
+    const authorization = await loadProjectRunAuthorization(authorizationFile);
+    const controlPlane = await createProjectControlPlane({
+      paths: fixture.paths,
+      loaded,
+      authorization: authorization.file,
+      authorizationFile: authorization.source_file,
+      historyLabRoot: outside,
+      reviewerPort: {
+        async run() {
+          return JSON.stringify({
+            decision: 'REJECT',
+            rejection_disposition: 'REQUIREMENT_OR_SCOPE_DECISION',
+            reason: 'aceite exige escolher uma nova regra de produto',
+          });
+        },
+      },
+    });
+    const previousMode = process.env['AGENTLAB_FAKE_MODE'];
+    process.env['AGENTLAB_FAKE_MODE'] = 'orchestrator-success';
+    let result;
+    try {
+      result = await runOrchestrate({
+        paths: fixture.paths,
+        loaded,
+        profileId: PROFILE,
+        maxIterations: 1,
+        controlPlane,
+      });
+    } finally {
+      if (previousMode === undefined) delete process.env['AGENTLAB_FAKE_MODE'];
+      else process.env['AGENTLAB_FAKE_MODE'] = previousMode;
+    }
+
+    expect(result.stop.status).toBe('HUMAN_REQUIRED');
+    expect(result.stop.reason).toContain('review independente não aceitou');
+    expect(await readReviewRejectedAttempt(fixture.paths, 'T1', 1)).toBeNull();
+    const state = await readState(fixture.paths);
+    expect(state.tasks[0]).toMatchObject({ status: 'RUNNING', phase: 'FINALIZING', attempts: 1 });
+    expect(await headSha(fixture.sandbox.root)).not.toBe(fixture.baseline);
+  }, 90_000);
+
+  it('implementation defect sem autoridade BOUNDED_REPAIR não arquiva nem relança', async () => {
+    const fixture = await setup();
+    const loaded = await loadPlan(fixture.paths.planFile);
+    const outside = await mkdtemp(path.join(os.tmpdir(), 'agentlab-review-no-authority-'));
+    roots.push(outside);
+    const authorizationFile = path.join(outside, 'agentlab-run.yaml');
+    await writeFile(
+      authorizationFile,
+      AUTHORIZATION.replace('risk: low', 'risk: high').replace('  - BOUNDED_REPAIR\n', ''),
+      'utf8',
+    );
+    const authorization = await loadProjectRunAuthorization(authorizationFile);
+    let reviewerCalls = 0;
+    const controlPlane = await createProjectControlPlane({
+      paths: fixture.paths,
+      loaded,
+      authorization: authorization.file,
+      authorizationFile: authorization.source_file,
+      historyLabRoot: outside,
+      reviewerPort: {
+        async run() {
+          reviewerCalls += 1;
+          return JSON.stringify({
+            decision: 'REJECT',
+            rejection_disposition: 'IMPLEMENTATION_DEFECT',
+            reason: 'defeito concreto',
+          });
+        },
+      },
+    });
+    const previousMode = process.env['AGENTLAB_FAKE_MODE'];
+    process.env['AGENTLAB_FAKE_MODE'] = 'orchestrator-success';
+    let result;
+    try {
+      result = await runOrchestrate({
+        paths: fixture.paths,
+        loaded,
+        profileId: PROFILE,
+        maxIterations: 1,
+        controlPlane,
+      });
+    } finally {
+      if (previousMode === undefined) delete process.env['AGENTLAB_FAKE_MODE'];
+      else process.env['AGENTLAB_FAKE_MODE'] = previousMode;
+    }
+
+    expect(result.stop.status).toBe('HUMAN_REQUIRED');
+    expect(result.stop.reason).toContain('não autoriza bounded repair');
+    expect(reviewerCalls).toBe(1);
+    expect(await readReviewRejectedAttempt(fixture.paths, 'T1', 1)).toBeNull();
+    expect((await readState(fixture.paths)).tasks[0]).toMatchObject({ attempts: 1, status: 'RUNNING' });
+  }, 90_000);
+
+  it('REJECT legado recebe classificação read-only fresca antes de qualquer repair', async () => {
+    const fixture = await setup();
+    const loaded = await loadPlan(fixture.paths.planFile);
+    const outside = await mkdtemp(path.join(os.tmpdir(), 'agentlab-review-legacy-'));
+    roots.push(outside);
+    const authorizationFile = path.join(outside, 'agentlab-run.yaml');
+    await writeFile(authorizationFile, AUTHORIZATION.replace('risk: low', 'risk: high'), 'utf8');
+    const authorization = await loadProjectRunAuthorization(authorizationFile);
+    const firstControlPlane = await createProjectControlPlane({
+      paths: fixture.paths,
+      loaded,
+      authorization: authorization.file,
+      authorizationFile: authorization.source_file,
+      historyLabRoot: outside,
+      reviewerPort: {
+        async run() {
+          return JSON.stringify({
+            decision: 'REJECT',
+            rejection_disposition: 'INSUFFICIENT_EVIDENCE',
+            reason: 'review legado a classificar',
+          });
+        },
+      },
+    });
+    const previousMode = process.env['AGENTLAB_FAKE_MODE'];
+    process.env['AGENTLAB_FAKE_MODE'] = 'orchestrator-success';
+    try {
+      const first = await runOrchestrate({
+        paths: fixture.paths,
+        loaded,
+        profileId: PROFILE,
+        maxIterations: 1,
+        controlPlane: firstControlPlane,
+      });
+      expect(first.stop.status).toBe('HUMAN_REQUIRED');
+
+      const published = await readCandidateReview(fixture.paths, 'T1', 1);
+      expect(published).not.toBeNull();
+      const { rejection_disposition: _removed, ...legacy } = published!;
+      await writeFile(
+        candidateReviewPath(fixture.paths, 'T1', 1),
+        `${JSON.stringify(legacy, null, 2)}\n`,
+        'utf8',
+      );
+
+      let freshInvocations = 0;
+      const resumedControlPlane = await createProjectControlPlane({
+        paths: fixture.paths,
+        loaded,
+        authorization: authorization.file,
+        authorizationFile: authorization.source_file,
+        historyLabRoot: outside,
+        reviewerPort: {
+          async run(request) {
+            freshInvocations += 1;
+            if (request.prompt.includes('prior_rejection_reason')) {
+              return JSON.stringify({
+                decision: 'REJECT',
+                rejection_disposition: 'IMPLEMENTATION_DEFECT',
+                reason: 'classificação fresca do REJECT preservado',
+              });
+            }
+            return JSON.stringify({
+              decision: 'ACCEPT',
+              reason: 'repair satisfaz acceptance',
+              coverage: {
+                files: ['src/t1.txt'],
+                validations: [['test', '-f', 'src/t1.txt']],
+                behaviors: ['arquivo requerido existe'],
+                handoff_gaps: [],
+              },
+            });
+          },
+        },
+      });
+      const inbox = path.join(fixture.paths.inboxDir, 'T1');
+      const reportBytes = await readFile(path.join(inbox, 'report.json'));
+      const handoffBytes = await readFile(path.join(inbox, 'handoff-draft.json'));
+      await rm(inbox, { recursive: true, force: true });
+      await expect(
+        runOrchestrate({
+          paths: fixture.paths,
+          loaded,
+          profileId: PROFILE,
+          maxIterations: 1,
+          controlPlane: resumedControlPlane,
+        }),
+      ).rejects.toThrow('output do worker ausente no inbox e no archive');
+      expect(freshInvocations).toBe(1);
+      await mkdir(inbox, { recursive: true });
+      await writeFile(path.join(inbox, 'report.json'), reportBytes);
+      await writeFile(path.join(inbox, 'handoff-draft.json'), handoffBytes);
+
+      const resumed = await runOrchestrate({
+        paths: fixture.paths,
+        loaded,
+        profileId: PROFILE,
+        maxIterations: 1,
+        controlPlane: resumedControlPlane,
+      });
+
+      expect(resumed.stop.status, JSON.stringify(resumed, null, 2)).toBe('ALL_DONE');
+      expect(freshInvocations).toBe(2);
+      expect(await readReviewRejectionClassification(fixture.paths, 'T1', 1)).toMatchObject({
+        disposition: 'IMPLEMENTATION_DEFECT',
+        classifier_profile_id: PROFILE,
+        classifier_invocation: { workspace_access: 'READ_ONLY', fresh_context: true },
+      });
+      expect((await readState(fixture.paths)).tasks[0]).toMatchObject({ status: 'PASS', attempts: 2 });
+    } finally {
+      if (previousMode === undefined) delete process.env['AGENTLAB_FAKE_MODE'];
+      else process.env['AGENTLAB_FAKE_MODE'] = previousMode;
+    }
+  }, 90_000);
+
   /**
    * BLOCKER #6 DO PILOTO, na sua forma exata.
    *

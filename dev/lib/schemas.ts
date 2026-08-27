@@ -564,12 +564,43 @@ export const PreviousAttemptDiagnostics = z
     worker_self_reported_result: z.literal('SUCCESS'),
     reason_code: nonEmpty,
     reason: nonEmpty,
-    failed_validations: z.array(PreviousAttemptFailedValidation).min(1).max(20),
+    failed_validations: z.array(PreviousAttemptFailedValidation).max(20),
+    review_rejection: z
+      .object({
+        disposition: z.literal('IMPLEMENTATION_DEFECT'),
+        candidate_sha: shaHex,
+        reason: nonEmpty,
+      })
+      .strict()
+      .optional(),
     changed_files: z.array(nonEmpty).max(50),
     /** Diretório dos logs oficiais, relativo ao devDir. */
-    validation_logs_dir: nonEmpty,
+    validation_logs_dir: nonEmpty.optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.review_rejection === undefined && value.failed_validations.length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['failed_validations'],
+        message: 'diagnóstico exige validation reprovada ou review_rejection estruturada',
+      });
+    }
+    if (value.review_rejection !== undefined && value.failed_validations.length > 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['failed_validations'],
+        message: 'review rejection com validation PASS não pode declarar validation reprovada',
+      });
+    }
+    if (value.review_rejection === undefined && value.validation_logs_dir === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['validation_logs_dir'],
+        message: 'validation_logs_dir é obrigatório para falha de validation',
+      });
+    }
+  });
 export type PreviousAttemptDiagnostics = z.infer<typeof PreviousAttemptDiagnostics>;
 
 export const TaskPacket = z
@@ -1918,6 +1949,20 @@ export const CandidateReviewCoverage = z
   .strict();
 export type CandidateReviewCoverage = z.infer<typeof CandidateReviewCoverage>;
 
+/**
+ * Por que um reviewer REJEITOU. O texto livre explica; esta categoria decide
+ * lifecycle. Só `IMPLEMENTATION_DEFECT` pode chegar ao bounded repair, e ainda
+ * assim sujeito à autorização e ao budget existentes.
+ */
+export const REVIEW_REJECTION_DISPOSITIONS = [
+  'IMPLEMENTATION_DEFECT',
+  'REQUIREMENT_OR_SCOPE_DECISION',
+  'SAFETY_OR_AUTHORIZATION_DECISION',
+  'INSUFFICIENT_EVIDENCE',
+] as const;
+export const ReviewRejectionDisposition = z.enum(REVIEW_REJECTION_DISPOSITIONS);
+export type ReviewRejectionDisposition = z.infer<typeof ReviewRejectionDisposition>;
+
 export const CandidateReviewRecord = z
   .object({
     schema_version: z.literal(DEV_SCHEMA_VERSION),
@@ -1938,11 +1983,19 @@ export const CandidateReviewRecord = z
     /** Declarada pelo reviewer. OBRIGATÓRIA para um ACCEPT válido. */
     coverage: CandidateReviewCoverage.optional(),
     decision: z.enum(['ACCEPT', 'REJECT']),
+    /** Ausente somente em records legados anteriores a esta classificação. */
+    rejection_disposition: ReviewRejectionDisposition.optional(),
     reason: nonEmpty,
     decided_at: z.string().datetime(),
   })
   .strict()
   .superRefine((record, ctx) => {
+    if (record.decision === 'ACCEPT' && record.rejection_disposition !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'ACCEPT não pode declarar rejection_disposition',
+      });
+    }
     const declared = record.implementer_gaps ?? [];
     const addressed = record.coverage?.handoff_gaps ?? [];
     const addressedGaps = addressed.map((entry) => entry.gap);
@@ -1993,6 +2046,31 @@ export const CandidateReviewRecord = z
     }
   });
 export type CandidateReviewRecord = z.infer<typeof CandidateReviewRecord>;
+
+const reviewSha256Hex = z.string().regex(/^[0-9a-f]{64}$/);
+
+/**
+ * Classificação append-only para um REJECT legado cujo CandidateReviewRecord
+ * antecede `rejection_disposition`. Ela não substitui nem reescreve o review:
+ * liga uma decisão estrutural nova aos bytes históricos por hash.
+ */
+export const ReviewRejectionClassificationRecord = z
+  .object({
+    schema_version: z.literal(DEV_SCHEMA_VERSION),
+    task_id: identifier,
+    attempt: z.number().int().positive(),
+    candidate_sha: shaHex,
+    review_record_sha256: reviewSha256Hex,
+    classifier_profile_id: nonEmpty,
+    classifier_invocation: ReviewerInvocationProvenance,
+    disposition: ReviewRejectionDisposition,
+    reason: nonEmpty,
+    classified_at: z.string().datetime(),
+  })
+  .strict();
+export type ReviewRejectionClassificationRecord = z.infer<
+  typeof ReviewRejectionClassificationRecord
+>;
 
 // ---------------------------------------------------------------------------
 // Revalidação de FAIL por validation oficial
@@ -2428,6 +2506,55 @@ export const ValidationFailedAttemptRecord = z
     }
   });
 export type ValidationFailedAttemptRecord = z.infer<typeof ValidationFailedAttemptRecord>;
+
+/**
+ * Candidate que passou a validação oficial, mas foi rejeitado pela review por
+ * um defeito de implementação contra contrato já definido. É uma fonte de
+ * bounded repair distinta de validation FAIL: os resultados abaixo precisam
+ * ser PASS, e o REJECT permanece ligado pelos hashes do finalization/review.
+ */
+export const ReviewRejectedAttemptRecord = z
+  .object({
+    schema_version: z.literal(DEV_SCHEMA_VERSION),
+    task_id: identifier,
+    attempt: z.number().int().positive(),
+    source_base_sha: shaHex,
+    profile_id: nonEmpty,
+    candidate_sha: shaHex,
+    finalization_record_sha256: sha256Hex,
+    review_record_sha256: sha256Hex,
+    /** Hash do CandidateReviewRecord tipado ou do classification record legado. */
+    rejection_classification_sha256: sha256Hex,
+    rejection_disposition: z.literal('IMPLEMENTATION_DEFECT'),
+    review_reason: nonEmpty,
+    changed_files: z.array(nonEmpty).min(1),
+    original_validation_results: z.array(ValidationResult).min(1),
+    original_validation_evidence: z.array(ValidationEvidence).optional(),
+    patch_fingerprint: sha256Hex,
+    change_bundle: PreservedChangeBundleRef,
+    archived_at: z.string().datetime(),
+  })
+  .strict()
+  .superRefine((record, ctx) => {
+    if (
+      record.original_validation_results.some(
+        (result) => result.exit_code !== 0 || result.timed_out,
+      )
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'review rejection exige validation oficial PASS',
+      });
+    }
+    const sorted = [...new Set(record.changed_files)].sort();
+    if (JSON.stringify(sorted) !== JSON.stringify(record.changed_files)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'changed_files deve ser único e ordenado',
+      });
+    }
+  });
+export type ReviewRejectedAttemptRecord = z.infer<typeof ReviewRejectedAttemptRecord>;
 
 /**
  * Motivos pelos quais um attempt é arquivado SEM solução nenhuma para preservar.

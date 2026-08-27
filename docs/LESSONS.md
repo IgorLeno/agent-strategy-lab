@@ -930,3 +930,24 @@ artefato cresce por fato que outra camada acrescenta, o teto pertence à
 fronteira onde esse artefato é transmitido, nunca ao ponto onde é selado.
 Truncar fato autoritativo para caber num teto herdado é sempre pior que o
 problema que o teto resolvia.
+
+[2026-08-27] Context: a retomada de um REJECT legado publicou uma classificação
+read-only append-only e caiu antes de concluir o archival; a repetição tentou
+chamar outro classificador e colidiu corretamente com o record existente.
+Mistake: tratar artifact append-only como simples saída de uma etapa, sem
+consultá-lo como autoridade antes de repetir o efeito externo que o produziu.
+Rule: toda etapa resumível que publica evidência append-only deve fazer
+read-before-launch, verificar os vínculos canônicos do record e consumir o
+record válido existente. Só ausência autoriza nova invocação; divergência falha
+fechado, e uma repetição nunca recria decisão já persistida.
+
+[2026-08-27] Context: a prova descartável copiou o runtime principal de uma run
+externa, mas omitiu o inbox irmão; o repair preservou record e bundle e então
+parou, corretamente, porque não podia provar os bytes do worker.
+Mistake: considerar `runtimeDir` uma cópia operacional completa quando o
+contrato separa artifacts derivados do orquestrador e artifacts autorados pelo
+worker em raízes irmãs.
+Rule: ao clonar um lifecycle para prova/recovery, derive todos os artifact roots
+pela mesma primitive de paths usada pelo runtime e copie cada raiz sem
+hardlinks. Antes de mutar a cópia, confira os hashes cruzados entre finalization,
+inbox e records; ausência nunca é substituída por reconstrução ou inferência.
