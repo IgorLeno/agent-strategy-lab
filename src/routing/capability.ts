@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+import { ProviderIdentity } from '../providers/index.js';
+
 /**
  * Visão estruturada das capacidades de um profile, para o control plane
  * IMPOR políticas (routing, diversidade, review) sem reimplementar nada que
@@ -23,6 +25,28 @@ function withProvenance<T extends z.ZodTypeAny>(valueSchema: T) {
 
 const Determinable = withProvenance(z.boolean().nullable());
 export type Determinable = z.infer<typeof Determinable>;
+
+/**
+ * PRIOR de capacidade declarado pelo perfil versionado.
+ *
+ * Ele responde "para qual classe de task este modelo é suficiente?" sem que o
+ * router precise conhecer o nome do modelo. É a diferença entre acrescentar um
+ * provider escrevendo um arquivo de perfil e editar uma tabela de regex no
+ * código do router toda vez.
+ *
+ * Prior NÃO é história. Ele decide ELEGIBILIDADE (o modelo é suficiente para
+ * esta task?), nunca preferência entre elegíveis: essa continua sendo decidida
+ * por amostragem observada, e um perfil novo entra subamostrado.
+ */
+export const CapabilityPrior = z
+  .object({
+    tier: z.enum(['economy', 'intermediate', 'advanced']),
+    model_cost_rank: z.number().int().nonnegative(),
+    effort_cost_rank: z.number().int().nonnegative(),
+    rationale: nonEmpty,
+  })
+  .strict();
+export type CapabilityPrior = z.infer<typeof CapabilityPrior>;
 
 const SessionIsolation = z
   .object({
@@ -55,12 +79,18 @@ const RoleCompatibility = z
   })
   .strict();
 
-export type Agent = 'claude' | 'codex' | 'fake';
+/**
+ * SCAFFOLD de execução. O nome do tipo é histórico; a dimensão que ele
+ * representa é qual executável roda, e NÃO com quem ele fala — ver
+ * `ProfileCapability.provider_identity` para a identidade upstream.
+ */
+export type Agent = 'claude' | 'codex' | 'opencode' | 'fake';
 
 /** Espelha `ReasoningEffortSource` de `dev/lib/doctor.ts`. */
 export type ReasoningEffortSource =
   | 'codex_config_override'
   | 'claude_effort_flag'
+  | 'opencode_variant_flag'
   | 'unpinned'
   | 'unknown'
   | 'not_applicable';
@@ -73,6 +103,18 @@ export type ReasoningEffortSource =
 export interface ProfileCapabilityInput {
   readonly profile_id: string;
   readonly agent: Agent;
+  /**
+   * Identidade upstream normalizada. `null` num perfil legado cuja combinação
+   * não tem contrato declarado — ali a semântica antiga continua governando, e
+   * as dimensões de provider degradam para UNKNOWN em vez de serem inventadas.
+   */
+  readonly provider_identity?: ProviderIdentity | null | undefined;
+  /**
+   * Prior declarado. Ausente preserva a classificação histórica por padrões de
+   * modelo, bit a bit — nenhum perfil já existente muda de tier por causa deste
+   * campo.
+   */
+  readonly capability_prior?: CapabilityPrior | null | undefined;
   readonly model: string;
   readonly reasoning_effort: string;
   readonly reasoning_effort_source: ReasoningEffortSource;
@@ -92,13 +134,26 @@ export const ProfileCapability = z
   .object({
     schema_version: z.literal(1),
     profile_id: nonEmpty,
-    /** Dimensão "provider" para uma policy de diversidade: claude | codex | fake. */
-    agent: z.enum(['claude', 'codex', 'fake']),
+    /**
+     * SCAFFOLD de execução. NÃO é a dimensão de diversidade de provider: dois
+     * scaffolds diferentes contra o mesmo upstream não são duas opiniões
+     * independentes. Quem responde por diversidade e por pool é
+     * `provider_identity`.
+     */
+    agent: z.enum(['claude', 'codex', 'opencode', 'fake']),
+    /**
+     * Upstream, cobrança e pool — as dimensões que `agent` confundia. `null`
+     * em perfil legado sem contrato mapeável: ausência permanece ausência.
+     */
+    provider_identity: ProviderIdentity.nullable().default(null),
+    /** Prior declarado; `null` mantém a classificação por padrões de modelo. */
+    capability_prior: CapabilityPrior.nullable().default(null),
     model: nonEmpty,
     reasoning_effort: nonEmpty,
     reasoning_effort_source: z.enum([
       'codex_config_override',
       'claude_effort_flag',
+      'opencode_variant_flag',
       'unpinned',
       'unknown',
       'not_applicable',
@@ -130,6 +185,20 @@ export type ProfileCapability = z.infer<typeof ProfileCapability>;
  * outro caso — inclusive Claude, que por isso fica declarado indisponível até
  * M84 fornecer um mecanismo equivalente.
  */
+/**
+ * Mecanismo estrutural do OpenCode: `openCodePermissionEnv` escreve o objeto
+ * COMPLETO de permissão em `OPENCODE_PERMISSION`, que a CLI mescla por último
+ * sobre a configuração global e a de projeto. `Permission.ask` levanta
+ * `DeniedError` antes de publicar o evento `permission.asked` — o único que
+ * `--auto` responderia —, e `Permission.disabled` remove do toolset visível a
+ * ferramenta cuja regra resolvida é `*` + `deny`.
+ */
+const OPENCODE_READ_ONLY_MECHANISM =
+  'openCodePermissionEnv(role) nega edit/write/patch/apply_patch/bash em OPENCODE_PERMISSION; a CLI recusa antes de perguntar e a ferramenta some do toolset (dev/lib/opencode-scaffold.ts)';
+
+const OPENCODE_IMPLEMENTER_MECHANISM =
+  'mutação concedida pela permissão do Lab e LIMITADA ao workspace autorizado por external_directory=deny; git commit/push permanecem negados porque o commit é do orquestrador';
+
 const CODEX_READ_ONLY_MECHANISM =
   'buildRoutineAgentArgv converte o único --sandbox workspace-write do argv para read-only antes do spawn (dev/lib/routine-autonomy-runtime.ts)';
 
@@ -159,6 +228,12 @@ function mutationCapabilityOf(input: ProfileCapabilityInput): Determinable {
     return {
       value: null,
       provenance: `sandbox não fixado de forma única e explícita no argv (${input.sandbox})`,
+    };
+  }
+  if (input.agent === 'opencode') {
+    return {
+      value: true,
+      provenance: OPENCODE_IMPLEMENTER_MECHANISM,
     };
   }
   return {
@@ -193,6 +268,14 @@ function readOnlyOperabilityOf(input: ProfileCapabilityInput): ReadOnlyOperabili
       value: null,
       provenance: `mecanismo de overlay exige --sandbox workspace-write único como estado de partida; sandbox atual é ${input.sandbox}`,
       mechanism: null,
+    };
+  }
+  if (input.agent === 'opencode') {
+    return {
+      value: true,
+      provenance:
+        'a permissão do Lab nega as ferramentas de mutação ANTES de qualquer pedido; a CLI recusa sem publicar o evento que --auto responderia',
+      mechanism: OPENCODE_READ_ONLY_MECHANISM,
     };
   }
   return {
@@ -238,6 +321,8 @@ export function capabilityOf(input: ProfileCapabilityInput): ProfileCapability {
     schema_version: 1,
     profile_id: input.profile_id,
     agent: input.agent,
+    provider_identity: input.provider_identity ?? null,
+    capability_prior: input.capability_prior ?? null,
     model: input.model,
     reasoning_effort: input.reasoning_effort,
     reasoning_effort_source: input.reasoning_effort_source,
@@ -258,12 +343,54 @@ export function capabilityOf(input: ProfileCapabilityInput): ProfileCapability {
   });
 }
 
-/** Facts mínimos que uma policy de diversidade precisa: nada de decisão aqui. */
+/**
+ * Facts mínimos que uma policy de diversidade precisa: nada de decisão aqui.
+ *
+ * `provider` é o UPSTREAM, não o executável. Dois scaffolds diferentes
+ * autenticados na mesma conta do mesmo provider não são duas opiniões
+ * independentes, e contá-los como tal é o erro que diversidade existe para
+ * evitar. `quota_pool` é a chave de capacidade — perfis que a compartilham
+ * nunca somam franquia.
+ */
 export interface DiversityFacts {
-  readonly provider: Agent;
+  readonly provider: string;
+  readonly quota_pool: string;
+  /** O executável, preservado: ele continua sendo um fato do experimento. */
+  readonly execution_scaffold: Agent;
   readonly model: string;
   readonly reasoning_effort: string;
   readonly environment_mode: string;
+  /** Como provider/pool foram determinados — declarados ou degradados. */
+  readonly provenance: string;
+}
+
+/**
+ * Provider e pool de uma capability.
+ *
+ * Sem identidade normalizada (perfil legado sem contrato), a resposta degrada
+ * para o nome do scaffold COM MOTIVO, em vez de inventar um upstream. Degradar
+ * assim é conservador: um scaffold desconhecido nunca é agrupado com outro.
+ */
+export function providerFactsOf(capability: ProfileCapability): {
+  readonly provider: string;
+  readonly quota_pool: string;
+  readonly provenance: string;
+} {
+  const identity = capability.provider_identity;
+  if (identity === null) {
+    return {
+      provider: `scaffold:${capability.agent}`,
+      quota_pool: `scaffold:${capability.agent}`,
+      provenance:
+        'perfil sem identidade upstream normalizada: provider e pool degradam para o scaffold, ' +
+        'que nunca agrupa perfis distintos por engano',
+    };
+  }
+  return {
+    provider: identity.provider,
+    quota_pool: identity.quota_pool,
+    provenance: `ProviderIdentity: ${identity.provenance}`,
+  };
 }
 
 export class DuplicateCapabilityError extends Error {
@@ -304,11 +431,15 @@ export class CapabilityRegistry {
   diversityFacts(profileId: string): DiversityFacts | undefined {
     const capability = this.byId.get(profileId);
     if (!capability) return undefined;
+    const facts = providerFactsOf(capability);
     return {
-      provider: capability.agent,
+      provider: facts.provider,
+      quota_pool: facts.quota_pool,
+      execution_scaffold: capability.agent,
       model: capability.model,
       reasoning_effort: capability.reasoning_effort,
       environment_mode: capability.environment_mode,
+      provenance: facts.provenance,
     };
   }
 }

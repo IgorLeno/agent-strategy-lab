@@ -91,7 +91,12 @@ export const ProfilePolicy = z
   .object({
     id: identifier,
     profiles: z.array(AuthorizedProfile).min(1),
-    allowed_providers: z.array(z.enum(['claude', 'codex', 'fake'])).min(1),
+    /**
+     * SCAFFOLDS autorizados. Autorização histórica que lista só `claude`/`codex`
+     * permanece com esse significado: um valor novo no enum não é concedido
+     * retroativamente a nenhuma run já autorizada.
+     */
+    allowed_providers: z.array(z.enum(['claude', 'codex', 'opencode', 'fake'])).min(1),
     /**
      * DESEMPATE entre profiles já suficientes — nunca elegibilidade.
      * Ausente preserva `static_cost`, o comportamento histórico. A policy não

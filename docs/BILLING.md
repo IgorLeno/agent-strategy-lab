@@ -6,17 +6,37 @@
 
 Todo run real deste laboratório é pago pelas assinaturas do usuário:
 
-| Agente | Credencial aceita | Como é provada |
-| --- | --- | --- |
-| Claude Code | assinatura Claude Pro (login/OAuth) | `claude auth status --json` → `authMethod=claude.ai` + `apiProvider=firstParty` + `subscriptionType` presente |
-| Codex | assinatura ChatGPT Plus ("Sign in with ChatGPT") | `codex login status` → "Logged in using ChatGPT" |
+| Scaffold | Upstream | Credencial aceita | Como é provada |
+| --- | --- | --- | --- |
+| Claude Code | Anthropic | assinatura Claude Pro (login/OAuth) | `claude auth status --json` → `authMethod=claude.ai` + `apiProvider=firstParty` + `subscriptionType` presente |
+| Codex CLI | OpenAI | assinatura ChatGPT Plus ("Sign in with ChatGPT") | `codex login status` → "Logged in using ChatGPT" |
+| OpenCode | OpenAI | a MESMA assinatura ChatGPT | `opencode providers list` → `OpenAI … oauth` |
+| OpenCode | OpenCode Go | assinatura Go, autenticada por CHAVE | `opencode providers list` → `OpenCode Go … api` |
+| OpenCode | OpenRouter | cobrança POR USO contra saldo pré-pago | `opencode providers list` → `OpenRouter … api` |
 
-Os dois comandos são **locais e gratuitos**: leem a sessão já autenticada e não
-gastam turno de modelo. A saída do Claude traz e-mail e id de organização —
-nada disso entra em relatório, log ou record.
+Todos os comandos são **locais e gratuitos**: leem a sessão/credencial já
+configurada e não gastam turno de modelo. A saída do Claude traz e-mail e id de
+organização, e a do OpenCode traz nomes de provider — nada além da conclusão
+sanitizada entra em relatório, log ou record.
 
-Nenhum run pode usar Anthropic API, OpenAI API, créditos de Console ou cobrança
-por chave.
+Nenhum run pode cair em Anthropic API, OpenAI API, créditos de Console ou
+cobrança por chave por acidente.
+
+## Chave de API não implica cobrança por uso
+
+A regra antiga era `chave => API`. Ela deixou de bastar:
+
+    a chave do OpenCode Go autentica uma ASSINATURA de valor fixo.
+
+Autenticação e cobrança passaram a ser dimensões separadas
+(`src/providers/identity.ts`), e o que decide o modo de cobrança é o UPSTREAM,
+não o formato da credencial. A proteção não foi enfraquecida — foi refinada:
+`opencode_go_subscription_key` é um valor próprio de `CredentialSource`, e
+`openrouter_metered_key` continua sendo cobrança por uso com todas as guardas
+de perfil `api`.
+
+Ver `docs/PROVIDERS.md` para a tabela completa de contratos e para a
+autorização explícita exigida pelo OpenRouter.
 
 ## Onde a política é aplicada
 

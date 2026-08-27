@@ -238,6 +238,18 @@ const CLAUDE_MECHANISM =
 const FAKE_MECHANISM =
   'worker falso: sem sandbox de filesystem do provider; o contrato é representado, não imposto pelo processo';
 
+/**
+ * A fronteira do OpenCode não está no argv: está na permissão que o Lab
+ * escreve em `OPENCODE_PERMISSION`, onde `external_directory: deny` recusa
+ * leitura e escrita fora do worktree. O worktree é escolhido por `--dir`, e é
+ * por isso que os roots auxiliares do contrato entram como diretórios do
+ * processo em vez de como flags de sandbox.
+ */
+const OPENCODE_ADD_DIR_FLAG = '--dir';
+const OPENCODE_MECHANISM =
+  `argv OpenCode: ${OPENCODE_ADD_DIR_FLAG} fixa o worktree; a fronteira é imposta por ` +
+  'external_directory=deny na permissão versionada do Lab, não por flag de sandbox';
+
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
 
 function tomlStringArray(values: readonly string[]): string {
@@ -331,6 +343,20 @@ function parseCodexWritableRoots(raw: string | undefined): readonly string[] {
   }
 }
 
+/** Valores de uma flag que aceita UM argumento; repetições são preservadas. */
+function optionValues(argv: readonly string[], flag: string): readonly string[] {
+  const values: string[] = [];
+  for (const [index, token] of argv.entries()) {
+    if (token === flag) {
+      const value = argv[index + 1];
+      if (value !== undefined && !value.startsWith('-')) values.push(value);
+      continue;
+    }
+    if (token.startsWith(`${flag}=`)) values.push(token.slice(flag.length + 1));
+  }
+  return values;
+}
+
 function claudeAddedDirs(argv: readonly string[]): readonly string[] {
   const index = argv.indexOf(CLAUDE_ADD_DIR_FLAG);
   if (index < 0) return [];
@@ -387,6 +413,24 @@ export function readEffectiveAccess(
         network_restrictable: false,
         mechanism: CLAUDE_MECHANISM,
       };
+    case 'opencode': {
+      const dirs = optionValues(argv, OPENCODE_ADD_DIR_FLAG);
+      return {
+        // A permissão do OpenCode é imposta pelo próprio processo, ANTES da
+        // ferramenta rodar — `external_directory: deny` recusa caminho fora do
+        // worktree. Isso é sandbox de filesystem do provider, e declará-lo como
+        // ausente subestimaria a prova que o preflight consegue fazer.
+        enforcement: 'PROVIDER_FILESYSTEM_SANDBOX',
+        workspace_write: true,
+        writable_roots: dirs,
+        // A conectividade do processo é a do orquestrador; o que o Lab nega é
+        // a FERRAMENTA de rede (webfetch/websearch), não o socket. Declarar
+        // rede restringível aqui seria afirmar prova que o argv não dá.
+        network_access: true,
+        network_restrictable: false,
+        mechanism: OPENCODE_MECHANISM,
+      };
+    }
     case 'fake':
       return {
         enforcement: 'NO_PROVIDER_FILESYSTEM_SANDBOX',
@@ -443,6 +487,30 @@ export function translateAccessContract(
         ...roots,
       ]);
       return { argv: translated, effective: readEffectiveAccess('claude', translated) };
+    }
+    case 'opencode': {
+      if (roots.length === 0) {
+        return { argv: [...argv], effective: readEffectiveAccess('opencode', argv) };
+      }
+      if (argv.includes(OPENCODE_ADD_DIR_FLAG)) {
+        throw new AccessContractError([
+          `argv OpenCode já declara ${OPENCODE_ADD_DIR_FLAG}; a tradução não duplica a fronteira`,
+        ]);
+      }
+      // `--dir` aceita UM diretório. Um contrato com mais de um root auxiliar
+      // não é traduzível para este mecanismo, e inventar uma tradução parcial
+      // concederia acesso que ninguém provou.
+      if (roots.length > 1) {
+        throw new AccessContractError([
+          `contrato pede ${roots.length} roots auxiliares e ${OPENCODE_ADD_DIR_FLAG} declara um só: ` +
+            'a fronteira não é traduzível sem conceder acesso não provado',
+        ]);
+      }
+      const translated = insertAt(argv, accessTokenInsertionIndex('opencode', argv), [
+        OPENCODE_ADD_DIR_FLAG,
+        roots[0] as string,
+      ]);
+      return { argv: translated, effective: readEffectiveAccess('opencode', translated) };
     }
     case 'fake':
       return { argv: [...argv], effective: readEffectiveAccess('fake', argv) };

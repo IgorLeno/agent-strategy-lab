@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { ProjectInspection } from '../../src/inspection/index.js';
 import { assessExecution, type PlannedTask } from '../../src/planner/index.js';
+import { providerIdentityOf } from '../../src/providers/index.js';
 import {
   CapabilityRegistry,
   capabilityOf,
@@ -102,6 +103,13 @@ function workUnit(plannedTask: PlannedTask = task()): StructuredWorkUnit {
   };
 }
 
+/**
+ * Os fixtures carregam identidade upstream normalizada porque é isso que
+ * acontece em produção: `agent: codex` fala com `openai`, `agent: claude` fala
+ * com `anthropic`. Indexar amostragem e folga por essa identidade — e não pelo
+ * nome do executável — é justamente o que faz Codex e OpenCode/openai contarem
+ * como um provider só.
+ */
 function capability(
   profileId: string,
   agent: 'codex' | 'claude',
@@ -111,6 +119,12 @@ function capability(
   return capabilityOf({
     profile_id: profileId,
     agent,
+    provider_identity: providerIdentityOf({
+      execution_scaffold: agent === 'codex' ? 'codex_cli' : 'claude_code',
+      provider: agent === 'codex' ? 'openai' : 'anthropic',
+      model,
+      provenance: 'fixture',
+    }),
     model,
     reasoning_effort: reasoningEffort,
     reasoning_effort_source: agent === 'codex' ? 'codex_config_override' : 'claude_effort_flag',
@@ -146,7 +160,7 @@ function facts(overrides: Partial<EvidenceBalanceFacts> = {}): EvidenceBalanceFa
     profile_sample_sizes: {},
     provider_sample_sizes: {},
     run_launches_by_provider: {},
-    quota_headroom_by_provider: {},
+    quota_headroom_by_pool: {},
     provenance: ['fixture'],
     ...overrides,
   } as EvidenceBalanceFacts;
@@ -215,8 +229,8 @@ describe('evidence_balanced — desempate por aquisição de evidência', () => 
         policy: 'evidence_balanced',
         balance: facts({
           profile_sample_sizes: { 'codex-terra-medium': 3, 'claude-sonnet5-medium': 0 },
-          provider_sample_sizes: { codex: 3, claude: 0 },
-          run_launches_by_provider: { codex: 1, claude: 0 },
+          provider_sample_sizes: { openai: 3, anthropic: 0 },
+          run_launches_by_provider: { openai: 1, anthropic: 0 },
         }),
       }),
     );
@@ -229,8 +243,8 @@ describe('evidence_balanced — desempate por aquisição de evidência', () => 
   it('cold-start com Sol e Opus igualmente elegíveis não escolhe Sol indefinidamente', () => {
     const unit = hardUnit();
     const sampling: Record<string, number> = { 'codex-sol-high': 0, 'claude-opus5-high': 0 };
-    const providerSampling: Record<string, number> = { codex: 0, claude: 0 };
-    const runLaunches: Record<string, number> = { codex: 0, claude: 0 };
+    const providerSampling: Record<string, number> = { openai: 0, anthropic: 0 };
+    const runLaunches: Record<string, number> = { openai: 0, anthropic: 0 };
     const chosen: string[] = [];
 
     for (let round = 0; round < 6; round += 1) {
@@ -250,7 +264,8 @@ describe('evidence_balanced — desempate por aquisição de evidência', () => 
       // A run devolve a evidência que o attempt produziu: é o que faz o
       // desempate seguinte enxergar o profile já amostrado.
       sampling[winner] = (sampling[winner] ?? 0) + 1;
-      const provider = winner.startsWith('codex') ? 'codex' : 'claude';
+      // UPSTREAM, não executável: é essa a chave em que a amostragem conta.
+      const provider = winner.startsWith('codex') ? 'openai' : 'anthropic';
       providerSampling[provider] = (providerSampling[provider] ?? 0) + 1;
       runLaunches[provider] = (runLaunches[provider] ?? 0) + 1;
     }
@@ -276,7 +291,7 @@ describe('evidence_balanced — desempate por aquisição de evidência', () => 
         policy: 'evidence_balanced',
         balance: facts({
           profile_sample_sizes: { 'codex-luna-minimal': 0, 'codex-sol-high': 40, 'claude-opus5-high': 40 },
-          provider_sample_sizes: { codex: 40, claude: 40 },
+          provider_sample_sizes: { openai: 40, anthropic: 40 },
         }),
       }),
     );
@@ -300,11 +315,11 @@ describe('evidence_balanced — desempate por aquisição de evidência', () => 
         policy: 'evidence_balanced',
         balance: facts({
           profile_sample_sizes: { 'codex-sol-high': 5, 'claude-opus5-high': 5 },
-          provider_sample_sizes: { codex: 5, claude: 5 },
-          run_launches_by_provider: { codex: 2, claude: 2 },
-          quota_headroom_by_provider: {
-            codex: { status: 'OBSERVED', remaining_pct: 12, provenance: 'fixture' },
-            claude: { status: 'OBSERVED', remaining_pct: 84, provenance: 'fixture' },
+          provider_sample_sizes: { openai: 5, anthropic: 5 },
+          run_launches_by_provider: { openai: 2, anthropic: 2 },
+          quota_headroom_by_pool: {
+            openai_chatgpt_subscription: { status: 'OBSERVED', remaining_pct: 12, provenance: 'fixture' },
+            anthropic_subscription: { status: 'OBSERVED', remaining_pct: 84, provenance: 'fixture' },
           },
         }),
       }),
@@ -323,12 +338,12 @@ describe('evidence_balanced — desempate por aquisição de evidência', () => 
         policy: 'evidence_balanced',
         balance: facts({
           profile_sample_sizes: { 'codex-sol-high': 5, 'claude-opus5-high': 5 },
-          provider_sample_sizes: { codex: 5, claude: 5 },
-          run_launches_by_provider: { codex: 2, claude: 2 },
+          provider_sample_sizes: { openai: 5, anthropic: 5 },
+          run_launches_by_provider: { openai: 2, anthropic: 2 },
           // Só Claude tem medidor; Codex permanece UNKNOWN.
-          quota_headroom_by_provider: {
-            claude: { status: 'OBSERVED', remaining_pct: 3, provenance: 'fixture' },
-            codex: UNKNOWN_QUOTA,
+          quota_headroom_by_pool: {
+            anthropic_subscription: { status: 'OBSERVED', remaining_pct: 3, provenance: 'fixture' },
+            openai_chatgpt_subscription: UNKNOWN_QUOTA,
           },
         }),
       }),
@@ -339,7 +354,7 @@ describe('evidence_balanced — desempate por aquisição de evidência', () => 
     expect(result.selection_evidence?.quota_considered).toBe(false);
     expect(result.selection_evidence?.tie_break).toContain('custo estático');
     const codex = result.selection_evidence?.balanced_candidates.find(
-      (entry) => entry.provider === 'codex',
+      (entry) => entry.provider === 'openai',
     );
     expect(codex?.quota_headroom.status).toBe('UNKNOWN');
     expect(JSON.stringify(result.selection_evidence)).not.toMatch(/"remaining_pct":\s*0\b/);
@@ -351,7 +366,7 @@ describe('evidence_balanced — desempate por aquisição de evidência', () => 
       policy: 'evidence_balanced',
       balance: facts({
         profile_sample_sizes: { 'codex-sol-high': 2, 'claude-opus5-high': 7 },
-        provider_sample_sizes: { codex: 2, claude: 7 },
+        provider_sample_sizes: { openai: 2, anthropic: 7 },
       }),
     });
     expect(routeInitialProfile(balanced)).toEqual(routeInitialProfile(balanced));
@@ -369,7 +384,7 @@ describe('evidence_balanced — desempate por aquisição de evidência', () => 
   it('nenhum forecast participa da autorização ou da seleção', () => {
     const balance = facts({
       profile_sample_sizes: { 'codex-terra-medium': 0, 'claude-sonnet5-medium': 0 },
-      provider_sample_sizes: { codex: 0, claude: 0 },
+      provider_sample_sizes: { openai: 0, anthropic: 0 },
     });
     const cheapEnvelope = routeInitialProfile(
       input([TERRA, SONNET], { policy: 'evidence_balanced', balance }),

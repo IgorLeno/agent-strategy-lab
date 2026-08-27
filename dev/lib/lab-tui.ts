@@ -12,7 +12,7 @@
  * projeção read-only e um `write` de terminal. Não há caminho daqui para state,
  * plano, provider ou git.
  */
-import type { LabProgressQuota } from './lab-progress.js';
+import type { LabProgressQuota, LabProgressQuotaWindow } from './lab-progress.js';
 import type { LabRunProjection, LabTaskProjection } from './lab-projection.js';
 
 export type LabUiMode = 'auto' | 'tui' | 'plain';
@@ -85,14 +85,30 @@ function workerLineOf(task: LabTaskProjection): string | null {
   return `        ${parts.join(' · ')}`;
 }
 
+/**
+ * Texto de capacidade de um pool.
+ *
+ * `UNKNOWN` é IMPRESSO como UNKNOWN. Um `0%` no lugar faria o operador ler
+ * "franquia intacta" onde não houve medição nenhuma — que é exatamente o erro
+ * que a interface existe para não cometer.
+ *
+ * O sufixo `~` marca a janela cujo medidor só reporta percentual inteiro: ali
+ * `0%` significa "o inteiro reportado é 0", e não "nada foi consumido".
+ */
 function quotaTextOf(quota: LabProgressQuota): string {
   if (quota.status === 'UNKNOWN') return `quota UNKNOWN (${quota.reason})`;
-  const windows = quota.windows.map((window) =>
-    window.used_pct === null
-      ? `${window.window_id}=UNKNOWN`
-      : `${window.window_id}=${window.used_pct}% used`,
-  );
-  return windows.length === 0 ? 'quota UNKNOWN (nenhuma janela observada)' : `quota ${windows.join(' · ')}`;
+  if (quota.status === 'EXHAUSTED') return `quota EXHAUSTED (${quota.reason})`;
+  const windows = quota.windows.map((window: LabProgressQuotaWindow) => {
+    if (window.used_pct === null) return `${window.window_id}=UNKNOWN`;
+    const coarse = window.precision === 'COARSE_INTEGER_PERCENT' ? '~' : '';
+    return `${window.window_id}=${window.used_pct}%${coarse} used`;
+  });
+  const balance =
+    quota.balance == null
+      ? null
+      : `saldo ${quota.balance.currency} ${quota.balance.remaining}`;
+  const parts = [...windows, ...(balance === null ? [] : [balance])];
+  return parts.length === 0 ? 'quota UNKNOWN (nenhuma janela observada)' : `quota ${parts.join(' · ')}`;
 }
 
 function headlineOf(projection: LabRunProjection): string {
@@ -184,8 +200,21 @@ export function renderLabFrame(
     lines.push('PROVIDERS');
     for (const provider of projection.providers) {
       lines.push(
-        `  ${provider.provider}: launches=${provider.launches} · worker time ${formatDuration(provider.worker_time_ms)} · ${quotaTextOf(provider.quota)}`,
+        `  ${provider.provider}: launches=${provider.launches} · worker time ${formatDuration(provider.worker_time_ms)}`,
       );
+    }
+  }
+
+  // POOLS é uma seção separada de PROVIDERS porque são perguntas diferentes:
+  // provider é de quem veio o trabalho, pool é de qual franquia ele saiu. Dois
+  // providers podem dividir um pool, e mostrá-los como duas linhas de
+  // capacidade sugeriria duas reservas onde existe uma.
+  if (projection.pools.length > 0) {
+    lines.push('');
+    lines.push('QUOTA POOLS');
+    for (const pool of projection.pools) {
+      const profiles = pool.profiles.length === 0 ? '' : ` · perfis ${pool.profiles.join(', ')}`;
+      lines.push(`  ${pool.quota_pool}: ${quotaTextOf(pool.quota)}${profiles}`);
     }
   }
 

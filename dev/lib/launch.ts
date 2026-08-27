@@ -56,12 +56,21 @@ import {
   resolveProfileArgv,
   type LauncherProfile,
 } from './profile.js';
+import { providerContractOf } from '../../src/providers/index.js';
+import {
+  windowDeltas,
+  type PoolCapacityObservation,
+} from '../../src/quota/index.js';
+import { openCodePermissionEnv } from './opencode-scaffold.js';
+import { OPENCODE_IMPLEMENTER_MECHANISM } from './project-roles.js';
 import { buildWorkerPrompt } from './prompt.js';
 import { observedWorkerTokens } from './worker-token-usage.js';
 import { ensureTaskInbox, writeLaunchRecord } from './records.js';
 import { WorkerSupervisor, type TerminationCause } from './termination.js';
 import {
   DEV_SCHEMA_VERSION,
+  OpenCodeLaunchTelemetry,
+  PoolCapacityRecord,
   type LaunchRecord,
   type ProcessIdentity,
   type TaskPacket,
@@ -92,6 +101,14 @@ export interface LaunchInput {
   readonly credentialRunner?: CommandRunner;
   /** Injetado pelos testes para medir a quota sem chamar CLI de verdade. */
   readonly usageRunner?: UsageCommandRunner;
+  /**
+   * Observa a capacidade do POOL do profile. Ausente significa "não observado"
+   * e grava `null` — nunca capacidade zero. Injetável para que nenhum teste
+   * toque a rede.
+   */
+  readonly poolCapacityProbe?: (
+    profile: LauncherProfile,
+  ) => Promise<PoolCapacityObservation | null>;
 }
 
 export interface LaunchOutcome {
@@ -189,6 +206,12 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
   const launchId = randomUUID();
   const env: NodeJS.ProcessEnv = {
     ...buildEnvironment(profile, process.env, { sanitizedHome: io.homeDir }),
+    // FRONTEIRA DO IMPLEMENTER, quando o scaffold é OpenCode. A permissão é do
+    // Lab, escrita por inteiro, e a configuração global do usuário não é lida
+    // como garantia nem modificada. `external_directory: deny` é o que limita a
+    // mutação ao workspace autorizado; `git commit`/`git push` continuam negados
+    // porque o commit pertence ao orquestrador.
+    ...(profile.agent === 'opencode' ? openCodePermissionEnv('implementer') : {}),
     AGENTLAB_LAUNCH_ID: launchId,
     AGENTLAB_TASK_ID: packet.task_id,
     AGENTLAB_REPO_ROOT: paths.repoRoot,
@@ -226,6 +249,7 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
   assertNoApiCredentials('ambiente do worker', env);
   const preflight = await runBillingPreflight({
     agent: profile.agent,
+    provider: profile.provider,
     billingMode: profile.billing_mode,
     binary: profile.argv[0] as string,
     env,
@@ -249,6 +273,12 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
   if (usageBefore.unsafe) {
     throw new UsageMeasurementSafetyError(usageBefore.probe.reason ?? 'motivo não informado');
   }
+
+  // Baseline de capacidade do POOL. É observação, não gate: um probe que falha
+  // grava UNKNOWN e o launch segue. Recusar o worker porque o medidor está fora
+  // do ar transformaria a instrumentação em autoridade sobre o trabalho.
+  const capacityBefore =
+    input.poolCapacityProbe === undefined ? null : await input.poolCapacityProbe(profile);
 
   // O argv é o do AGENTE, sem wrapper de deadline. Enquanto `timeout <N>s ...`
   // estava aqui, o número que encerrava o worker vinha da previsão da task —
@@ -329,6 +359,8 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
     | 'billing'
     | 'rate_limit_observations'
     | 'subscription_usage'
+    | 'pool_capacity'
+    | 'opencode_launch'
     | 'observed_tokens'
     | 'provider_failure'
     | 'machine_safety_ceiling'
@@ -404,6 +436,8 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
         ...(input.usageRunner ? { runner: input.usageRunner } : {}),
       })
     : NOT_RUN_OUTCOME;
+  const capacityAfter =
+    input.poolCapacityProbe === undefined ? null : await input.poolCapacityProbe(profile);
 
   // `timed_out` deixou de significar "a task estourou o tempo previsto": não
   // existe mais tempo previsto com autoridade. Ele agora significa "uma
@@ -448,6 +482,12 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
         }
       : null,
     subscription_usage: measuresUsage ? buildSubscriptionUsage(usageBefore, usageAfter) : null,
+    // Capacidade do POOL em volta do run, no contrato normalizado. `deltas`
+    // preserva a identidade da janela: se ela resetou entre as duas leituras,
+    // o consumo fica `null` em vez de virar um número negativo que ninguém
+    // observou.
+    pool_capacity: poolCapacityRecordOf(profile, capacityBefore, capacityAfter),
+    opencode_launch: openCodeTelemetryOf(profile, stdout),
     provider_failure:
       providerFailure === null ? null : { ...providerFailure, signals: [...providerFailure.signals] },
     machine_safety_ceiling: { ...ceiling },
@@ -557,6 +597,76 @@ export function classifyTermination(facts: TerminationFacts): {
     };
   }
   return { classification: 'FINISHED', reason: `worker saiu com exit ${facts.exitCode}` };
+}
+
+
+/**
+ * Junta as duas observações de capacidade num record.
+ *
+ * O delta é calculado por `windowDeltas`, que se recusa a subtrair entre
+ * instâncias de janela diferentes — o mesmo princípio que a medição da
+ * assinatura Claude já seguia, aqui generalizado para os quatro pools. Reset
+ * entre before e after produz `consumed_pp: null` e `window_reset: true`, e
+ * não um consumo negativo.
+ */
+function poolCapacityRecordOf(
+  profile: LauncherProfile,
+  before: PoolCapacityObservation | null,
+  after: PoolCapacityObservation | null,
+): PoolCapacityRecord | null {
+  const observed = after ?? before;
+  if (observed === null) return null;
+  const deltas =
+    before !== null && after !== null && before.quota_pool === after.quota_pool
+      ? windowDeltas(before, after)
+      : [];
+  return PoolCapacityRecord.parse({
+    quota_pool: observed.quota_pool,
+    before,
+    after,
+    deltas,
+  });
+}
+
+/**
+ * Telemetria estruturada de um launch OpenCode.
+ *
+ * `null` para qualquer outro scaffold: um campo preenchido com placeholders
+ * sugeriria que a observação existe. O custo vem do que a CLI reportou e é
+ * EQUIVALÊNCIA em preço de API — numa assinatura ele não corresponde a
+ * cobrança nenhuma, e `null` significa não reportado, nunca gratuito.
+ */
+function openCodeTelemetryOf(
+  profile: LauncherProfile,
+  stdout: string,
+): OpenCodeLaunchTelemetry | null {
+  if (profile.agent !== 'opencode' || profile.provider === undefined) return null;
+  const contract = providerContractOf(profile.provider);
+  const estimate = extractUsageEstimate(stdout);
+  return OpenCodeLaunchTelemetry.parse({
+    schema: 'OPENCODE_LAUNCH_V1',
+    execution_scaffold: 'opencode',
+    provider: profile.provider,
+    model: openCodeModelOf(profile.argv),
+    profile_id: profile.id,
+    billing_mode: contract.billing_mode,
+    quota_pool: contract.quota_pool,
+    // CLASSE de autenticação, nunca a credencial.
+    auth_class: contract.auth_method,
+    role: 'implementer',
+    role_boundary_mechanism: OPENCODE_IMPLEMENTER_MECHANISM,
+    reported_cost_usd: estimate.estimated_api_equivalent_usd,
+  });
+}
+
+function openCodeModelOf(argv: readonly string[]): string {
+  for (const [index, token] of argv.entries()) {
+    if (token === '--model' || token === '-m') {
+      const value = argv[index + 1];
+      if (value !== undefined) return value;
+    }
+  }
+  return 'unknown';
 }
 
 /** Motivo legível sem citar erro específico: o texto do provider entra como veio. */

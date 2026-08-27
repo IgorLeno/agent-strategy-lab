@@ -681,9 +681,18 @@ export type SurvivorProcess = z.infer<typeof SurvivorProcess>;
 export const BillingRecord = z
   .object({
     mode: z.enum(['subscription_only', 'api', 'not_applicable']),
+    /**
+     * Fonte da credencial PROVADA. `opencode_go_subscription_key` existe como
+     * valor próprio porque uma chave que autentica assinatura de valor fixo não
+     * é `api`: colapsar as duas trocaria o significado de cobrança de todos os
+     * records gravados. Valores históricos permanecem válidos e inalterados.
+     */
     credential_source: z.enum([
       'claude_subscription_oauth',
       'chatgpt_subscription',
+      'opencode_chatgpt_subscription',
+      'opencode_go_subscription_key',
+      'openrouter_metered_key',
       'api',
       'unknown',
       'not_applicable',
@@ -983,6 +992,83 @@ export const MachineSafetyCeilingRecord = z
   .strict();
 export type MachineSafetyCeilingRecord = z.infer<typeof MachineSafetyCeilingRecord>;
 
+/**
+ * Observação de capacidade de um pool, gravada como o probe a produziu.
+ *
+ * O objeto é `passthrough` de propósito: ele é validado pelo contrato de
+ * `src/quota` na hora de produzir, e aqui só precisa ser LEGÍVEL — inclusive
+ * para records gravados por uma versão futura do contrato. Um record de
+ * evidência que se recusa a abrir por causa de um campo novo perde o histórico.
+ */
+const PoolCapacitySnapshot = z
+  .object({
+    quota_pool: nonEmpty,
+    status: z.enum(['KNOWN', 'AVAILABLE_WITHOUT_METER', 'EXHAUSTED', 'UNKNOWN']),
+    reason: nonEmpty,
+    source: nonEmpty,
+    observed_at: z.string().datetime(),
+  })
+  .passthrough();
+
+/** Delta por janela. `null` em consumed_pp NUNCA é zero: é incomparável. */
+const PoolCapacityWindowDelta = z
+  .object({
+    window_id: nonEmpty,
+    before_used_percent: z.number().nullable(),
+    after_used_percent: z.number().nullable(),
+    consumed_pp: z.number().nullable(),
+    same_window: z.boolean().nullable(),
+    /** `true` impede que a virada de janela vire consumo negativo. */
+    window_reset: z.boolean(),
+    reason: nonEmpty,
+  })
+  .strict();
+
+export const PoolCapacityRecord = z
+  .object({
+    quota_pool: nonEmpty,
+    before: PoolCapacitySnapshot.nullable(),
+    after: PoolCapacitySnapshot.nullable(),
+    deltas: z.array(PoolCapacityWindowDelta).default([]),
+  })
+  .strict();
+export type PoolCapacityRecord = z.infer<typeof PoolCapacityRecord>;
+
+/**
+ * Telemetria de um lançamento OpenCode.
+ *
+ * As dimensões ficam SEPARADAS porque é exatamente isso que um benchmark
+ * futuro vai precisar cruzar: o mesmo modelo sob dois scaffolds, o mesmo
+ * scaffold contra dois upstreams, dois modelos na mesma franquia. Um campo
+ * combinado tornaria qualquer uma dessas perguntas impossível de responder
+ * sem reparsear prosa.
+ *
+ * `auth_class` é a CLASSE do mecanismo (`api_key`, `chatgpt_oauth`), nunca a
+ * credencial. Nenhum token, chave ou identificador de conta entra aqui.
+ */
+export const OpenCodeLaunchTelemetry = z
+  .object({
+    schema: z.literal('OPENCODE_LAUNCH_V1'),
+    execution_scaffold: z.literal('opencode'),
+    provider: nonEmpty,
+    model: nonEmpty,
+    profile_id: nonEmpty,
+    billing_mode: z.enum(['subscription', 'metered_api', 'not_applicable']),
+    quota_pool: nonEmpty,
+    auth_class: nonEmpty,
+    role: z.enum(['planner', 'implementer', 'reviewer']),
+    /** Mecanismo estrutural que impôs a fronteira deste role. Nunca "o prompt pediu". */
+    role_boundary_mechanism: nonEmpty,
+    /**
+     * Custo equivalente que a CLI reportou. É EQUIVALÊNCIA em preço de API, e
+     * numa assinatura não corresponde a cobrança nenhuma. `null` quando não
+     * reportado — ausência nunca é gratuidade provada.
+     */
+    reported_cost_usd: z.number().nullable().default(null),
+  })
+  .strict();
+export type OpenCodeLaunchTelemetry = z.infer<typeof OpenCodeLaunchTelemetry>;
+
 export const LaunchRecord = z
   .object({
     schema_version: z.literal(DEV_SCHEMA_VERSION),
@@ -1019,6 +1105,26 @@ export const LaunchRecord = z
      * é medição zerada, e nada histórico é reescrito para preenchê-la.
      */
     subscription_usage: SubscriptionUsage.nullable().default(null),
+    /**
+     * CAPACIDADE DO POOL antes e depois do launch, no contrato normalizado que
+     * vale para os quatro upstreams.
+     *
+     * Convive com `subscription_usage` em vez de substituí-lo: aquele campo é
+     * a medição Claude já gravada em centenas de records, e reescrevê-lo
+     * apagaria evidência histórica. Records anteriores a este campo continuam
+     * válidos com `null` — ausência é ausência, nunca capacidade zero.
+     *
+     * `delta` só existe quando as duas observações pertencem à MESMA instância
+     * de janela. Reset entre before e after produz `consumed_pp: null` com
+     * `window_reset: true`, e nunca um consumo negativo inventado.
+     */
+    pool_capacity: PoolCapacityRecord.nullable().default(null),
+    /**
+     * Telemetria do lançamento OpenCode: scaffold, upstream, modelo, pool,
+     * classe de auth (NUNCA a credencial) e o que a CLI reportou do turno.
+     * `null` em todo launch que não é OpenCode e em todo record anterior.
+     */
+    opencode_launch: OpenCodeLaunchTelemetry.nullable().default(null),
     /**
      * `null` quando o `result` não declarou término por falha do provider — o
      * que inclui todo perfil que não fala stream-json. `null` NÃO significa

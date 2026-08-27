@@ -67,6 +67,19 @@ export interface LabProviderProjection {
   readonly quota: LabProgressQuota;
 }
 
+/**
+ * Capacidade por POOL DE QUOTA. Separado de `LabProviderProjection` porque
+ * capacidade e origem do trabalho são perguntas distintas: dois providers
+ * podem consumir a mesma franquia, e uma linha por provider descreveria duas
+ * reservas onde existe uma.
+ */
+export interface LabPoolProjection {
+  readonly quota_pool: string;
+  readonly quota: LabProgressQuota;
+  /** Perfis que consumiram deste pool nesta run — a prova do compartilhamento. */
+  readonly profiles: readonly string[];
+}
+
 export interface LabDeliberationTurnProjection {
   readonly turn: number;
   readonly profile_id: string;
@@ -93,6 +106,7 @@ export interface LabRunProjection {
   readonly forecast: PlanRuntimeForecast | null;
   readonly remaining_estimate_ms: number | null;
   readonly providers: readonly LabProviderProjection[];
+  readonly pools: readonly LabPoolProjection[];
   readonly deliberation: LabDeliberationProjection | null;
   readonly terminal: 'ALL_DONE' | 'HUMAN_REQUIRED' | 'FAILURE' | null;
 }
@@ -122,6 +136,12 @@ interface MutableTask {
    * conta exatamente uma vez, com ou sem control plane presente.
    */
   pending_role: 'repair' | 'escalation' | null;
+}
+
+interface MutablePool {
+  quota_pool: string;
+  quota: LabProgressQuota;
+  profiles: string[];
 }
 
 interface MutableProvider {
@@ -170,6 +190,7 @@ export function createLabProjection(now: () => number = Date.now): LabProjection
   const tasks: MutableTask[] = [];
   const byId = new Map<string, MutableTask>();
   const providers = new Map<string, MutableProvider>();
+  const pools = new Map<string, MutablePool>();
   let forecast: PlanRuntimeForecast | null = null;
   let planOrigin: LabRunProjection['plan_origin'] = null;
   let stage: LabProgressStage = 'PREFLIGHT';
@@ -189,6 +210,18 @@ export function createLabProjection(now: () => number = Date.now): LabProjection
     const created = emptyTask(tasks.length + 1, taskId, taskId, null);
     tasks.push(created);
     byId.set(taskId, created);
+    return created;
+  }
+
+  function poolOf(name: string): MutablePool {
+    const existing = pools.get(name);
+    if (existing !== undefined) return existing;
+    const created: MutablePool = {
+      quota_pool: name,
+      quota: { status: 'UNKNOWN', reason: 'nenhuma observação de capacidade deste pool nesta run' },
+      profiles: [],
+    };
+    pools.set(name, created);
     return created;
   }
 
@@ -324,6 +357,19 @@ export function createLabProjection(now: () => number = Date.now): LabProjection
       if (observed.duration_ms !== undefined && observed.duration_ms !== null) {
         task.duration_ms = observed.duration_ms;
       }
+      // A capacidade é atribuída ao POOL, não ao provider: é o pool que tem
+      // franquia. Quando o emissor não informa o pool, o provider é usado como
+      // chave — degradação honesta, que nunca funde dois providers distintos.
+      if (observed.quota !== undefined) {
+        const poolKey = observed.quota_pool ?? task.provider;
+        if (poolKey !== null && poolKey !== undefined) {
+          const pool = poolOf(poolKey);
+          pool.quota = observed.quota;
+          if (task.profile_id !== null && !pool.profiles.includes(task.profile_id)) {
+            pool.profiles.push(task.profile_id);
+          }
+        }
+      }
       if (task.provider !== null) {
         const provider = providerOf(task.provider);
         if (observed.quota !== undefined) provider.quota = observed.quota;
@@ -377,6 +423,9 @@ export function createLabProjection(now: () => number = Date.now): LabProjection
       providers: [...providers.values()]
         .sort((left, right) => left.provider.localeCompare(right.provider))
         .map((provider) => ({ ...provider })),
+      pools: [...pools.values()]
+        .sort((left, right) => left.quota_pool.localeCompare(right.quota_pool))
+        .map((pool) => ({ ...pool, profiles: [...pool.profiles].sort() })),
       deliberation:
         deliberationTurns.length === 0
           ? null

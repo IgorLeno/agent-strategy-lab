@@ -3,6 +3,8 @@ import path from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { z } from 'zod';
 import { apiCredentialNamesIn } from './billing.js';
+import { declaredProviderAgrees } from './opencode-scaffold.js';
+import { providerContractOf, UpstreamProvider } from '../../src/providers/index.js';
 import {
   CommitOwner,
   ExecutionPolicy,
@@ -35,7 +37,22 @@ const ALWAYS_FORBIDDEN_FLAGS = [
 export const LauncherProfile = z
   .object({
     id: nonEmpty,
-    agent: z.enum(['claude', 'codex', 'fake']),
+    /**
+     * SCAFFOLD DE EXECUÇÃO — qual executável roda. Não é o provider upstream,
+     * não é o pool de quota e não é quem paga: para `opencode`, o mesmo
+     * executável fala com três upstreams de cobrança diferentes. A identidade
+     * comercial vem de `provider` (abaixo) e de `src/providers`.
+     */
+    agent: z.enum(['claude', 'codex', 'opencode', 'fake']),
+    /**
+     * UPSTREAM com quem o scaffold fala. Obrigatório para `opencode`, onde o
+     * scaffold não determina nada; ausente nos perfis legados, onde ele
+     * determina — e onde a normalização deriva o valor sem reescrever o
+     * arquivo. Auth, cobrança e pool NÃO são declarados aqui: eles são
+     * consequência do contrato do upstream, e deixar um perfil redeclará-los
+     * permitiria contradizer o contrato comercial num arquivo YAML.
+     */
+    provider: UpstreamProvider.optional(),
     /**
      * COBRANÇA — separada do ambiente experimental de propósito. Perfil de
      * agente real precisa declarar; ausência não é "provavelmente assinatura".
@@ -72,6 +89,32 @@ export const LauncherProfile = z
     maximum_instruction_bytes: z.number().int().positive().default(8_192),
     /** Marcadores que provam controle real, verificados contra o argv final. */
     control_markers: z.record(nonEmpty).default({}),
+    /**
+     * PRIOR CONSERVADOR de capacidade, declarado pelo perfil.
+     *
+     * Existe para que acrescentar um modelo seja escrever um arquivo de
+     * perfil, e não editar a tabela de regex do router em vários lugares. A
+     * ausência preserva o comportamento histórico VERBATIM: perfis Claude e
+     * Codex continuam classificados pela tabela de padrões do router.
+     *
+     * É PRIOR, não medição. Ele não é resultado de benchmark, não vira
+     * histórico e não vence evidência: um perfil novo entra subamostrado, e é
+     * a história observada que decide depois. Declarar tier alto aqui não
+     * torna o modelo melhor — só o torna elegível para tasks que exigem esse
+     * tier, e o resultado observado é que confirma ou desmente.
+     */
+    capability_prior: z
+      .object({
+        tier: z.enum(['economy', 'intermediate', 'advanced']),
+        /** Ordem de custo estático entre modelos; menor é mais barato. */
+        model_cost_rank: z.number().int().nonnegative(),
+        /** Ordem de custo do effort; menor é mais barato. */
+        effort_cost_rank: z.number().int().nonnegative().default(0),
+        /** Por que este tier, em uma frase. Prior sem justificativa é chute. */
+        rationale: nonEmpty,
+      })
+      .strict()
+      .optional(),
     /**
      * Capability que este perfil FALSO representa nos contratos de routing.
      *
@@ -121,6 +164,65 @@ export const LauncherProfile = z
     if (profile.billing_mode === 'api' && !/(^|-)api(-|$)/.test(profile.id)) {
       // Nome é a única defesa que sobrevive a quem escolhe o perfil no shell.
       reject('perfil de cobrança por API precisa ter `api` no id');
+    }
+
+    // ---- upstream declarado -------------------------------------------------
+    if (profile.agent === 'fake' && profile.provider !== undefined) {
+      reject('worker falso não fala com upstream nenhum; provider não se aplica');
+    }
+    if (profile.agent === 'opencode') {
+      if (profile.provider === undefined) {
+        reject(
+          'perfil opencode precisa declarar provider: o mesmo executável fala com upstreams ' +
+            'de cobrança e pool diferentes, e o scaffold não determina qual',
+        );
+      } else {
+        const contract = providerContractOf(profile.provider);
+        // Um perfil não pode contradizer o contrato comercial do upstream num
+        // arquivo YAML: assinatura não vira cobrança por uso e vice-versa.
+        const expectedLegacy =
+          contract.billing_mode === 'subscription'
+            ? 'subscription_only'
+            : contract.billing_mode === 'metered_api'
+              ? 'api'
+              : 'not_applicable';
+        if (profile.billing_mode !== expectedLegacy) {
+          reject(
+            `provider ${profile.provider} cobra como ${contract.billing_mode}, ` +
+              `logo billing_mode precisa ser ${expectedLegacy} (declarado: ${profile.billing_mode}) — ${contract.rationale}`,
+          );
+        }
+        // Declaração e modelo são duas afirmações independentes sobre o mesmo
+        // upstream; exigir concordância pega o perfil rotulado como assinatura
+        // apontando para um modelo cobrado por uso.
+        const models = profile.argv.flatMap((token, index) =>
+          token === '--model' || token === '-m' ? [profile.argv[index + 1]] : [],
+        );
+        const model = models.length === 1 ? models[0] : undefined;
+        if (model === undefined) {
+          reject('perfil opencode precisa pinar exatamente um --model provider/model no argv');
+        } else {
+          const agreement = declaredProviderAgrees(profile.provider, model);
+          if (!agreement.agrees) reject(agreement.reason);
+        }
+      }
+      if (profile.capability_prior === undefined) {
+        // Sem prior e sem `--variant`, o effort é `unpinned` e o router recusa
+        // classificar o perfil — ele nunca seria roteado. Exigir a declaração
+        // aqui torna a lacuna um erro de perfil, não um perfil silenciosamente
+        // inelegível descoberto no meio de uma run.
+        reject(
+          'perfil opencode precisa declarar capability_prior: sem ele o router não classifica o modelo e o perfil nunca é elegível',
+        );
+      }
+      // `--auto` responde automaticamente a TODO pedido de permissão que não
+      // seja negado. Ele não contorna um `deny` — a CLI recusa antes de
+      // perguntar —, mas transformaria em silêncio todo `ask` que o Lab usa
+      // deliberadamente para não conceder ferramenta que esta versão não
+      // conhece. Autorização do Lab não se delega ao default de uma flag.
+      if (profile.argv.some((token) => token === '--auto' || token.startsWith('--auto='))) {
+        reject('--auto é proibida: a autorização do Lab não é delegada ao auto-approve da CLI');
+      }
     }
 
     if (profile.billing_mode !== 'subscription_only') return;

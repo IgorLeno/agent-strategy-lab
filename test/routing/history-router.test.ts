@@ -383,7 +383,7 @@ function balanceTowardsB(): EvidenceBalanceFacts {
     profile_sample_sizes: { 'profile-a': 99, 'profile-b': 0 },
     provider_sample_sizes: { codex: 99 },
     run_launches_by_provider: { codex: 99 },
-    quota_headroom_by_provider: {},
+    quota_headroom_by_pool: {},
     provenance: ['fixture'],
   };
 }

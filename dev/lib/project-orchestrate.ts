@@ -1064,7 +1064,7 @@ export function createLaunchedPlanningWorker(
         role: 'planner',
         prompt: buildPlannerPrompt(invocation),
       });
-      assertReadOnlyArgv('planner', options.profile.agent, overlay.argv);
+      assertReadOnlyArgv('planner', options.profile.agent, overlay.argv, overlay.env);
       const argv = resolveRoleOverlayArgv(options.paths, overlay.argv);
 
       if (!(options.providerEnabled ?? PROVIDER_PATH_ENABLED_BY_DEFAULT)) {
@@ -1099,10 +1099,14 @@ export function createLaunchedPlanningWorker(
 
       const home = path.join(options.paths.devDir, 'project', 'homes', options.profile.id);
       await mkdir(home, { recursive: true });
-      const env = buildEnvironment(options.profile, process.env, { sanitizedHome: home });
+      // A fronteira do role entra no AMBIENTE, não só no argv: para OpenCode é
+      // `OPENCODE_PERMISSION` que nega mutação, e montar o env sem ela lançaria
+      // um role read-only sem restrição nenhuma.
+      const env = { ...buildEnvironment(options.profile, process.env, { sanitizedHome: home }), ...overlay.env };
       assertNoApiCredentials('ambiente do planning worker', env);
       const billing = await runBillingPreflight({
         agent: options.profile.agent,
+        provider: options.profile.provider,
         billingMode: options.profile.billing_mode,
         binary: options.profile.argv[0] as string,
         env,
@@ -1271,7 +1275,7 @@ export function createLaunchedDeliberationWorker(
       const ceiling = machineSafetyCeiling();
       const prompt = buildDeliberationPrompt(invocation);
       const overlay = buildRoleArgv(options.profile, { role: 'planner', prompt });
-      assertReadOnlyArgv('planner', options.profile.agent, overlay.argv);
+      assertReadOnlyArgv('planner', options.profile.agent, overlay.argv, overlay.env);
       const argv = resolveRoleOverlayArgv(options.paths, overlay.argv);
 
       if (!(options.providerEnabled ?? PROVIDER_PATH_ENABLED_BY_DEFAULT)) {
@@ -1293,10 +1297,14 @@ export function createLaunchedDeliberationWorker(
 
       const home = path.join(options.paths.devDir, 'project', 'homes', options.profile.id);
       await mkdir(home, { recursive: true });
-      const env = buildEnvironment(options.profile, process.env, { sanitizedHome: home });
+      // A fronteira do role entra no AMBIENTE, não só no argv: para OpenCode é
+      // `OPENCODE_PERMISSION` que nega mutação, e montar o env sem ela lançaria
+      // um role read-only sem restrição nenhuma.
+      const env = { ...buildEnvironment(options.profile, process.env, { sanitizedHome: home }), ...overlay.env };
       assertNoApiCredentials('ambiente do deliberador de plano', env);
       const billing = await runBillingPreflight({
         agent: options.profile.agent,
+        provider: options.profile.provider,
         billingMode: options.profile.billing_mode,
         binary: options.profile.argv[0] as string,
         env,
@@ -1680,10 +1688,13 @@ export async function launchProjectReviewer(
 
   const home = path.join(options.paths.devDir, 'project', 'homes', options.profile.id);
   await mkdir(home, { recursive: true });
+  // Ambiente base do reviewer; a permissão do role é somada por lançamento,
+  // dentro do laço, porque é o overlay que a produz.
   const env = buildEnvironment(options.profile, process.env, { sanitizedHome: home });
   assertNoApiCredentials('ambiente do reviewer', env);
   const billing = await runBillingPreflight({
     agent: options.profile.agent,
+    provider: options.profile.provider,
     billingMode: options.profile.billing_mode,
     binary: options.profile.argv[0] as string,
     env,
@@ -1703,8 +1714,12 @@ export async function launchProjectReviewer(
       role: 'reviewer',
       prompt,
     });
-    assertReadOnlyArgv('reviewer', options.profile.agent, overlay.argv);
+    assertReadOnlyArgv('reviewer', options.profile.agent, overlay.argv, overlay.env);
     const argv = resolveRoleOverlayArgv(options.paths, overlay.argv);
+    // A permissão do role vive no ambiente do processo; prová-la no overlay e
+    // depois lançar sem ela seria provar a coisa errada.
+    const roleEnv = { ...env, ...overlay.env };
+    assertReadOnlyArgv('reviewer', options.profile.agent, argv, roleEnv);
 
     let stdout: string;
     try {
@@ -1714,7 +1729,7 @@ export async function launchProjectReviewer(
         argv,
         prompt,
         cwd: options.paths.repoRoot,
-        env,
+        env: roleEnv,
         timeoutSeconds: ceiling.seconds,
       });
     } catch (error) {

@@ -1,0 +1,77 @@
+# Worker OpenCode sobre openrouter/qwen/qwen3-coder, cobrado POR USO pelo OpenRouter.
+#
+# SCAFFOLD  OpenCode 1.18.23 (`opencode run`)
+# UPSTREAM  OpenRouter (gateway com cobrança POR USO)
+# MODELO    openrouter/qwen/qwen3-coder
+# AUTH      chave de API
+# COBRANÇA  cobrança POR USO contra saldo pré-pago — exige autorização explícita de run
+# POOL      openrouter_balance
+#
+# As seis linhas acima são dimensões SEPARADAS. Ler qualquer uma a partir de
+# outra é o erro que este catálogo existe para tornar impossível: `agent` diz
+# só qual executável roda.
+#
+# FRONTEIRA DE ROLE — estrutural, não pedida no prompt. O launcher escreve o
+# objeto COMPLETO de permissão do Lab em OPENCODE_PERMISSION
+# (dev/lib/opencode-scaffold.ts). A CLI levanta DeniedError ANTES de publicar o
+# pedido de permissão, então `--auto` não teria o que responder — e ela é
+# proibida no argv de qualquer forma. Planner e reviewer perdem edit/write/
+# patch/apply_patch/bash; o implementer edita e roda comando, mas
+# external_directory=deny o confina ao worktree e `git commit`/`git push`
+# continuam negados porque o commit pertence ao orquestrador.
+#
+# A configuração global do OpenCode do usuário NÃO é lida como garantia e NÃO é
+# modificada. O objeto é escrito por inteiro justamente porque a mescla é por
+# chave: uma chave omitida herdaria o que o usuário tiver configurado.
+id: opencode-openrouter-qwen3-coder-api-v1
+agent: opencode
+provider: openrouter
+billing_mode: api
+environment_mode: real-world
+commit_owner: orchestrator
+official_validation_owner: orchestrator
+worker_validation_policy: targeted
+argv:
+  - opencode
+  - run
+  - --format
+  - json
+  - --model
+  - openrouter/qwen/qwen3-coder
+prompt_delivery: argv
+capability_prior:
+  tier: intermediate
+  model_cost_rank: 2
+  effort_cost_rank: 0
+  rationale: 'modelo com foco declarado em código; prior intermediate sem evidência local'
+forbidden_flags:
+  - --continue
+  - -c
+  - --session
+  - -s
+  - --fork
+  # Delegaria ao auto-approve da CLI toda permissão que o Lab deixou como `ask`.
+  - --auto
+  - --share
+env_allowlist:
+  - PATH
+  - HOME
+  - LANG
+  - LC_ALL
+  - TERM
+  - USER
+  - SHELL
+env_extra:
+  CI: '1'
+control_markers:
+  model_pinned: --model
+  machine_readable_output: --format
+notes:
+  - 'Papel inicial pretendido: benchmark e fallback de codificação'
+  - 'Prior de capacidade CONSERVADOR e de partida — modelo com foco declarado em código; prior intermediate sem evidência local. Não é benchmark — o perfil entra subamostrado e a história observada decide.'
+  - 'Cobrança: cobrança POR USO contra saldo pré-pago — exige autorização explícita de run. Pool: openrouter_balance.'
+  - 'Scaffold != provider: contar este perfil como capacidade independente de outro do MESMO pool descreveria franquia que não existe.'
+  - 'O worker edita o patch e pode validar de forma direcionada; commit e validação oficial pertencem ao orquestrador.'
+  - 'COBRANÇA POR USO: cada execução gasta dinheiro real. Existir credencial NÃO é autorização — o preflight exige AGENTLAB_ALLOW_API_BILLING no ambiente do ORQUESTRADOR.'
+  - 'A suíte de testes NUNCA lança este perfil: nenhum teste gasta crédito de OpenRouter.'
+  - 'O Lab nunca compra crédito e nunca habilita recarga automática.'

@@ -505,6 +505,7 @@ A escolha do driver de SQLite e o risco de addon nativo estão em
 - [LESSONS.md](LESSONS.md) — correções que viraram regra
 - [HARNESS.md](HARNESS.md) — runtime de execução e sessões descartáveis (`dev/`)
 - [BILLING.md](BILLING.md) — política de cobrança dos workers
+- [PROVIDERS.md](PROVIDERS.md) — scaffold vs provider vs modelo vs pool de quota, segurança de role do OpenCode e observação de capacidade
 - [adr/ADR-0001-stack.md](adr/ADR-0001-stack.md) — stack e driver de SQLite
 - [adr/ADR-0002-evidence-kernel.md](adr/ADR-0002-evidence-kernel.md) — Evidence
   Kernel, critérios de inclusão, execution contract
