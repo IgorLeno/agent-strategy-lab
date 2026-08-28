@@ -338,6 +338,30 @@ describe('roles estruturais', () => {
     });
   }
 
+  it('OpenCode planner em alvo externo preserva o model id e entrega o mesmo argv à porta', async () => {
+    const catalog = REPO_ROOT;
+    const target = await makeTemporaryDir();
+    const paths = resolveHarnessPaths(target, { profileCatalogRoot: catalog });
+    const profile = await loadProfile(catalog, 'opencode-go-deepseek-v4-flash-v1');
+    const overlay = buildRoleArgv(profile, { role: 'planner', prompt: 'packet' });
+    const argv = resolveRoleOverlayArgv(paths, overlay.argv);
+    const model = argv[argv.indexOf('--model') + 1];
+
+    expect(model).toBe('opencode-go/deepseek-v4-flash');
+    expect(model).not.toBe(path.join(catalog, 'opencode-go/deepseek-v4-flash'));
+
+    const captured: { argv: string[] | null } = { argv: null };
+    await {
+      run: async (input: { readonly argv: readonly string[] }) => {
+        captured.argv = [...input.argv];
+        return '{}';
+      },
+    }.run({ argv });
+    expect(captured.argv?.[captured.argv.indexOf('--model') + 1]).toBe(
+      'opencode-go/deepseek-v4-flash',
+    );
+  });
+
   it('prova o argv Claude efetivo somente contra o recurso autoritativo do catálogo', async () => {
     const catalog = REPO_ROOT;
     const target = await makeTemporaryDir();

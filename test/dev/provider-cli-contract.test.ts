@@ -226,4 +226,34 @@ describe('runtime externo — paths reais', () => {
     expect((await stat(settings)).isFile()).toBe(true);
     expect(settings.startsWith(repoRoot)).toBe(false);
   }, 60_000);
+
+  it('identificador --model provider/model do OpenCode não vira path do catálogo', async () => {
+    const root = await temp('agentlab-opencode-model-id-');
+    const repoRoot = path.join(root, 'project');
+    await run('mkdir', ['-p', repoRoot]);
+    const profile = await loadProfileFromCatalog(CATALOG, 'opencode-go-deepseek-v4-flash-v1');
+    const pinned = profile.argv[profile.argv.indexOf('--model') + 1] as string;
+    expect(pinned).toBe('opencode-go/deepseek-v4-flash');
+
+    const resolved = resolveProfileArgv(profile.argv, {
+      catalogRoot: CATALOG,
+      workerCwd: repoRoot,
+    });
+    const model = resolved[resolved.indexOf('--model') + 1];
+    expect(model).toBe(pinned);
+    expect(model).not.toBe(path.join(CATALOG, pinned));
+  });
+
+  it('binário relativo fixtures/*.mjs continua resolvido contra o catálogo', async () => {
+    const root = await temp('agentlab-fixture-resource-');
+    const repoRoot = path.join(root, 'project');
+    await run('mkdir', ['-p', repoRoot]);
+    const profile = await loadProfileFromCatalog(CATALOG, 'fake-worker-v1');
+    const resolved = resolveProfileArgv(profile.argv, {
+      catalogRoot: CATALOG,
+      workerCwd: repoRoot,
+    });
+    expect(resolved[0]).toBe('node');
+    expect(resolved[1]).toBe(path.join(CATALOG, 'fixtures/fake-worker.mjs'));
+  });
 });

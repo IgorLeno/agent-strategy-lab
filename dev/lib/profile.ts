@@ -1,3 +1,4 @@
+import { existsSync, statSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { parse as parseYaml } from 'yaml';
@@ -266,10 +267,36 @@ function isInsideRoot(root: string, candidate: string): boolean {
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
 }
 
+/**
+ * Operandos cuja semântica é IDENTIDADE, nunca filesystem. `--model
+ * opencode-go/deepseek-v4-flash` é um model id; a barra é o separador de
+ * provider/modelo da CLI, não um path relativo ao catálogo.
+ */
+const IDENTITY_OPTION_FLAGS = new Set(['--model', '-m']);
+
+/**
+ * Operandos cuja semântica é um arquivo do catálogo do Lab. Relativos
+ * resolvem contra o catalog root mesmo que o arquivo ainda não exista —
+ * o erro precisa apontar o catálogo, não o repositório alvo.
+ */
+const CATALOG_RESOURCE_OPTION_FLAGS = new Set(['--settings']);
+
+function isOptionToken(token: string): boolean {
+  return token.startsWith('-');
+}
+
 function looksLikeRelativeResourcePath(token: string): boolean {
-  if (path.isAbsolute(token)) return false;
-  if (token.startsWith('-')) return false;
+  if (path.isAbsolute(token) || isOptionToken(token)) return false;
   return token.includes('/') || token.includes('\\');
+}
+
+function catalogFileExists(catalogRoot: string, token: string): boolean {
+  try {
+    const resolved = resolveCatalogResource(catalogRoot, token);
+    return existsSync(resolved) && statSync(resolved).isFile();
+  } catch {
+    return false;
+  }
 }
 
 export function profileCatalogFile(catalogRoot: string, id: string): string {
@@ -296,10 +323,18 @@ export function resolveCatalogResource(catalogRoot: string, token: string): stri
 }
 
 /**
- * Reescreve tokens de argv que são paths relativos do catálogo. Quando o cwd
- * do worker já é o próprio catálogo (uso histórico), o argv permanece igual —
- * a CLI relativa continua válida. Quando o worker roda no repositório alvo, os
- * recursos passam a absolutos no catálogo para não serem lidos no target.
+ * Reescreve tokens de argv que são RECURSOS do catálogo. A classificação é
+ * semântica — pelo flag dono do operando — nunca por sufixo, basename ou
+ * lista de modelos:
+ *
+ * - `--model` / `-m` são identidades e passam intactos, inclusive `provider/model`;
+ * - `--settings` é arquivo do catálogo e resolve mesmo se ainda ausente;
+ * - um posicional só resolve se o arquivo existir de fato no catálogo
+ *   (`fixtures/fake-worker.mjs`).
+ *
+ * Quando o cwd do worker já é o próprio catálogo (uso histórico), o argv
+ * permanece igual. Quando o worker roda no repositório alvo, os recursos
+ * passam a absolutos no catálogo para não serem lidos no target.
  */
 export function resolveProfileArgv(
   argv: readonly string[],
@@ -308,9 +343,18 @@ export function resolveProfileArgv(
   const catalogRoot = path.resolve(options.catalogRoot);
   const workerCwd = path.resolve(options.workerCwd);
   if (catalogRoot === workerCwd) return [...argv];
-  return argv.map((token) =>
-    looksLikeRelativeResourcePath(token) ? resolveCatalogResource(catalogRoot, token) : token,
-  );
+  return argv.map((token, index) => {
+    if (isOptionToken(token) || path.isAbsolute(token)) return token;
+    const owner = argv[index - 1];
+    if (owner !== undefined && IDENTITY_OPTION_FLAGS.has(owner)) return token;
+    if (owner !== undefined && CATALOG_RESOURCE_OPTION_FLAGS.has(owner)) {
+      return resolveCatalogResource(catalogRoot, token);
+    }
+    if (looksLikeRelativeResourcePath(token) && catalogFileExists(catalogRoot, token)) {
+      return resolveCatalogResource(catalogRoot, token);
+    }
+    return token;
+  });
 }
 
 export async function loadProfileFromCatalog(
