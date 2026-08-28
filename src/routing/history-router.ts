@@ -488,6 +488,12 @@ export function routeInitialProfileWithHistory(input: HistoryRoutingInput): Hist
           role: input.role,
           capability_registry: input.capability_registry,
           candidates: [candidate],
+          ...(input.selection_policy === undefined
+            ? {}
+            : { selection_policy: input.selection_policy }),
+          ...(input.evidence_balance === undefined
+            ? {}
+            : { evidence_balance: input.evidence_balance }),
         });
         return isolated.outcome !== 'HUMAN_REQUIRED';
       })
@@ -504,15 +510,24 @@ export function routeInitialProfileWithHistory(input: HistoryRoutingInput): Hist
     const candidate = profileId === null ? undefined : candidates.get(profileId);
     const capability = profileId === null ? undefined : input.capability_registry.get(profileId);
     const compatibility = compatibilityReason(input, series, candidate, capability);
+    const currentlyUnavailable =
+      profileId !== null && !structurallyEligibleProfileIds.has(profileId)
+        ? 'profile histórico não está elegível na observação operacional atual'
+        : null;
     const trialSampleSize = series.aggregations.trials.sample_size;
-    if (compatibility !== null || candidate === undefined || capability === undefined) {
+    if (
+      compatibility !== null ||
+      currentlyUnavailable !== null ||
+      candidate === undefined ||
+      capability === undefined
+    ) {
       considerations.push({
         series_key: series.identity.series_key,
         profile_id: profileId,
         trial_sample_size: trialSampleSize,
         minimum_metric_sample_size: 0,
         status: 'INCOMPATIBLE',
-        reason: compatibility ?? 'profile/candidate ausente',
+        reason: compatibility ?? currentlyUnavailable ?? 'profile/candidate ausente',
         utility: null,
       });
       continue;

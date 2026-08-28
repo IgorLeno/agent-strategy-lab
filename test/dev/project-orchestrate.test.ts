@@ -961,6 +961,31 @@ describe('adapter real da PlanningWorkerPort', () => {
     expect(result.failure.code).toBe('PLANNING_LAUNCH_HUMAN_REQUIRED');
   });
 
+  it('planner não contorna esgotamento real observado para o mesmo pool', async () => {
+    let invoked = false;
+    const port = await worker({
+      quota: {
+        availability: false,
+        provenance: 'pool openai_chatgpt_subscription declarado EXHAUSTED pelo provider',
+      },
+      providerEnabled: true,
+      dryRun: false,
+      port: {
+        run: async () => {
+          invoked = true;
+          return '{}';
+        },
+      },
+    });
+    const result = await port.invoke(invocation());
+
+    expect(result.outcome).toBe('INVOCATION_FAILED');
+    if (result.outcome !== 'INVOCATION_FAILED') return;
+    expect(result.failure.code).toBe('PLANNING_LAUNCH_HUMAN_REQUIRED');
+    expect(result.failure.message).toContain('openai_chatgpt_subscription');
+    expect(invoked).toBe(false);
+  });
+
   /**
    * O gate de budget que existia aqui foi removido: previsão de duração não
    * recusa mais invocação nenhuma. O que continua recusando ANTES de qualquer

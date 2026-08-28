@@ -24,6 +24,8 @@ import {
 import { resolveHarnessInstallationRoot, type HarnessPaths } from './paths.js';
 import { isSameProcessAlive } from './process-identity.js';
 import type { LoadedPlan } from './plan.js';
+import type { PoolCapacityLaunchContext } from './pool-capacity-observer.js';
+import { PoolCapacityObservation } from '../../src/quota/index.js';
 import { loadProfile } from './profile.js';
 import { writePacket } from './records.js';
 import {
@@ -90,6 +92,42 @@ function recordOf(launch: LaunchStepResult) {
  * com motivo legível — nenhum provider sem medidor vira "0% consumido".
  */
 function observedQuotaOf(record: LaunchRecord | null): LabProgressQuota {
+  const capacityRecord = record?.pool_capacity ?? null;
+  const parsedCapacity = PoolCapacityObservation.safeParse(
+    capacityRecord?.after ?? capacityRecord?.before ?? null,
+  );
+  const capacity = parsedCapacity.success ? parsedCapacity.data : null;
+  if (capacity !== null) {
+    if (capacity.status === 'UNKNOWN') {
+      return { status: 'UNKNOWN', reason: `${capacity.reason} (${capacity.source})` };
+    }
+    if (capacity.status === 'EXHAUSTED') {
+      return { status: 'EXHAUSTED', reason: `${capacity.reason} (${capacity.source})` };
+    }
+    if (capacity.status === 'AVAILABLE_WITHOUT_METER') {
+      return {
+        status: 'UNKNOWN',
+        reason: `provider declarou disponibilidade sem medidor: ${capacity.reason} (${capacity.source})`,
+      };
+    }
+    const deltas = new Map(
+      (capacityRecord?.deltas ?? []).map((delta) => [delta.window_id, delta]),
+    );
+    return {
+      status: 'OBSERVED',
+      windows: capacity.windows.map((window) => ({
+        window_id: window.window_id,
+        used_pct: window.used_percent,
+        remaining_pct: window.remaining_percent,
+        consumed_pp: deltas.get(window.window_id)?.consumed_pp ?? null,
+        precision: window.precision === 'CURRENCY' ? null : window.precision,
+        resets_at: window.resets_at,
+      })),
+      balance: capacity.balance,
+      source: capacity.source,
+    };
+  }
+
   const usage = record?.subscription_usage ?? null;
   if (usage === null) {
     return {
@@ -139,6 +177,7 @@ async function executeReadyTask(
   expectedTaskId?: string,
   acceptance?: ValidatedCandidateAcceptancePolicy,
   onProgress?: LabProgressListener,
+  poolCapacity?: PoolCapacityLaunchContext,
 ): Promise<ReadyTaskExecution> {
   let prepared;
   try {
@@ -213,6 +252,7 @@ async function executeReadyTask(
     packet,
     profileId,
     machineSafetyCeilingOverride === undefined ? undefined : Number(machineSafetyCeilingOverride),
+    poolCapacity,
   );
   if (launch.classification === 'PREFLIGHT_BLOCKED') {
     return { empty: true, stop: { status: 'PREFLIGHT_BLOCKED', reason: launch.reason } };
@@ -925,6 +965,7 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
       const selected = selectNextTask(loaded, await readState(paths));
       const subjectId = selected.task?.id ?? null;
       let launchProfile = profileId;
+      let poolCapacity: PoolCapacityLaunchContext | undefined;
       let repairMeta: { automaticRepair: boolean; repairSourceAttempt: number } | null = null;
       if (subjectId) {
         const pendingDecision = await decideAutomaticRepair(paths, subjectId);
@@ -974,6 +1015,7 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
           break;
         }
         launchProfile = decision.profile_id;
+        poolCapacity = decision.pool_capacity;
       }
 
       let executed = await executeReadyTask(
@@ -985,6 +1027,7 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
         undefined,
         acceptance,
         onProgress,
+        poolCapacity,
       );
       if ('empty' in executed) {
         stop = executed.stop;
@@ -1071,6 +1114,7 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
         automaticRepair: true,
         repairSourceAttempt: rec.decision.source_attempt,
       } as const;
+      let repairPoolCapacity: PoolCapacityLaunchContext | undefined;
       if (controlPlane !== undefined) {
         const decision = await controlPlane.beforeWorkUnit({
           taskId: executed.iteration.taskId,
@@ -1085,6 +1129,7 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
           };
           break;
         }
+        repairPoolCapacity = decision.pool_capacity;
       }
       let repair = await executeReadyTask(
         paths,
@@ -1094,6 +1139,8 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
         capabilityRepairMeta,
         undefined,
         acceptance,
+        undefined,
+        repairPoolCapacity,
       );
       if ('empty' in repair) {
         stop = repair.stop;

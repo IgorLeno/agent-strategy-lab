@@ -39,6 +39,9 @@ const nonEmpty = z.string().trim().min(1);
 const identifier = z
   .string()
   .regex(/^[A-Za-z0-9][A-Za-z0-9_-]*$/, 'id deve ser alfanumérico com - ou _');
+const profileIdentifier = z
+  .string()
+  .regex(/^[A-Za-z0-9][A-Za-z0-9_.-]*$/, 'profile id deve ser alfanumérico com - _ ou .');
 
 export const WorkerRole = z.enum(['planner', 'implementer', 'reviewer']);
 export type WorkerRole = z.infer<typeof WorkerRole>;
@@ -88,7 +91,7 @@ const Availability = z
  */
 export const RoutingCandidate = z
   .object({
-    profile_id: identifier,
+    profile_id: profileIdentifier,
     availability: Availability,
   })
   .strict();
@@ -177,7 +180,7 @@ export type EvidenceBalanceFacts = z.infer<typeof EvidenceBalanceFacts>;
 
 export const BalancedCandidate = z
   .object({
-    profile_id: identifier,
+    profile_id: profileIdentifier,
     /** UPSTREAM, não executável: a dimensão em que diversidade significa algo. */
     provider: nonEmpty,
     /** Franquia consumida. Perfis que a compartilham não somam capacidade. */
@@ -226,7 +229,7 @@ export type CandidateRejectionCode = z.infer<typeof CandidateRejectionCode>;
 
 export const CandidateConsideration = z
   .object({
-    profile_id: identifier,
+    profile_id: profileIdentifier,
     capability_tier: CapabilityTier.nullable(),
     /** Previsão ADVISORY registrada para auditoria; nunca motivou rejeição. */
     predicted_runtime_ms: z.number().int().nonnegative().nullable(),

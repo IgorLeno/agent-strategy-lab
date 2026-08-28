@@ -32,7 +32,10 @@
 import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 
-import { CapacityStatus } from '../../src/quota/index.js';
+import {
+  CapacityStatus,
+  type PoolCapacityObservation,
+} from '../../src/quota/index.js';
 import type { EscalationCandidatePreflight, QuotaHeadroom } from '../../src/routing/index.js';
 import {
   assertNoApiCredentials,
@@ -85,6 +88,10 @@ export interface ProjectLaunchFactsInput {
   /** Injetável nos testes: nenhum binário real de provider é executado. */
   readonly runner?: CommandRunner;
   readonly now?: () => Date;
+  /** Snapshot fresco, read-only e já deduplicado pelo assessment atual. */
+  readonly capacityObservation?: PoolCapacityObservation | null;
+  /** Fallback persistido do mesmo pool; nunca sobrepõe um snapshot fresco bem-sucedido. */
+  readonly historicalHeadroom?: QuotaHeadroom;
 }
 
 /**
@@ -235,7 +242,7 @@ export async function quotaHeadroomByPool(
  * `AVAILABLE_WITHOUT_METER` não produzem folga nenhuma: sem medidor não há
  * número, e inventar um faria a comparação entre pools mentir.
  */
-function headroomFromCapacity(
+export function headroomFromCapacity(
   capacity: NonNullable<PoolCapacityRecord['after']>,
   file: string,
 ): QuotaHeadroom | null {
@@ -270,20 +277,116 @@ function headroomFromCapacity(
 }
 
 /**
- * Quota a partir da evidência JÁ GRAVADA pelos launches anteriores deste
- * runtime. Nenhum probe novo é executado aqui de propósito: medir quota antes
- * do launch exigiria uma chamada à CLI do provider, e o preço de saber seria
- * exatamente aquilo que o experimento quer medir.
- *
- * Consequência aceita e explícita: quota NUNCA é PROVEN TRUE antes do launch.
- * Ela é PROVEN FALSE quando o provider recusou por limite numa janela que
- * comprovadamente ainda não resetou, e UNKNOWN em todo o resto.
+ * Combina capacidade atual e histórica sem transformar falha instrumental em
+ * consumo. Um probe fresco bem-sucedido é autoritativo para este assessment;
+ * somente UNKNOWN permite recorrer ao último fato persistido.
+ */
+export function effectiveQuotaHeadroom(
+  fresh: PoolCapacityObservation | null | undefined,
+  historical: QuotaHeadroom | undefined,
+): QuotaHeadroom {
+  if (fresh === undefined || fresh === null) {
+    return historical ?? {
+      status: 'UNKNOWN',
+      reason: 'nenhuma observação fresca ou histórica de capacidade para este pool',
+    };
+  }
+  if (fresh.status === CapacityStatus.UNKNOWN) {
+    if (historical !== undefined) {
+      return historical.status === 'UNKNOWN'
+        ? {
+            status: 'UNKNOWN',
+            reason: `${fresh.reason} (${fresh.source}); fallback histórico também UNKNOWN: ${historical.reason}`,
+          }
+        : {
+            ...historical,
+            provenance: `${fresh.reason} (${fresh.source}); fallback histórico: ${historical.provenance}`,
+          };
+    }
+    return {
+      status: 'UNKNOWN',
+      reason: `${fresh.reason} (${fresh.source})`,
+    };
+  }
+
+  const current = headroomFromCapacity(fresh, `observação fresca ${fresh.observed_at}`);
+  return current ?? {
+    status: 'UNKNOWN',
+    reason:
+      `observação fresca bem-sucedida sem percentual comparável: ` +
+      `${fresh.status} — ${fresh.reason} (${fresh.source})`,
+  };
+}
+
+export function effectiveQuotaHeadroomByPool(
+  historical: Readonly<Record<string, QuotaHeadroom>>,
+  fresh: ReadonlyMap<string, PoolCapacityObservation>,
+): Record<string, QuotaHeadroom> {
+  const effective: Record<string, QuotaHeadroom> = { ...historical };
+  for (const [pool, observation] of fresh) {
+    effective[pool] = effectiveQuotaHeadroom(observation, historical[pool]);
+  }
+  return effective;
+}
+
+/**
+ * Quota do pool no instante do assessment. Os endpoints de capacidade atuais
+ * são read-only e não fazem inferência, portanto o ciclo de produção fornece
+ * `capacityObservation` sempre que o pool possui instrumento autorizado.
+ * História permanece fallback honesto para falha de probe; não é cache atual.
  */
 export async function quotaFactOf(input: {
   readonly paths: HarnessPaths;
   readonly profile: LauncherProfile;
   readonly now?: () => Date;
+  readonly capacityObservation?: PoolCapacityObservation | null;
+  readonly historicalHeadroom?: QuotaHeadroom;
 }): Promise<LaunchFact> {
+  if (input.capacityObservation !== undefined && input.capacityObservation !== null) {
+    const fresh = input.capacityObservation;
+    if (fresh.status === CapacityStatus.EXHAUSTED) {
+      return {
+        availability: false,
+        provenance: `observação fresca do pool ${fresh.quota_pool}: ${fresh.reason} (${fresh.source})`,
+      };
+    }
+    if (fresh.status !== CapacityStatus.UNKNOWN) {
+      return {
+        availability: true,
+        provenance:
+          `observação fresca do pool ${fresh.quota_pool}: ${fresh.status}; ` +
+          `${fresh.reason} (${fresh.source})`,
+      };
+    }
+    if (input.historicalHeadroom?.status === 'EXHAUSTED') {
+      return {
+        availability: false,
+        provenance:
+          `probe fresco UNKNOWN: ${fresh.reason} (${fresh.source}); ` +
+          `fallback histórico: ${input.historicalHeadroom.provenance}`,
+      };
+    }
+    if (input.historicalHeadroom?.status === 'OBSERVED') {
+      return {
+        availability: true,
+        provenance:
+          `probe fresco UNKNOWN: ${fresh.reason} (${fresh.source}); ` +
+          `fallback histórico: ${input.historicalHeadroom.provenance}`,
+      };
+    }
+    return {
+      availability: null,
+      provenance: `probe fresco UNKNOWN: ${fresh.reason} (${fresh.source})`,
+    };
+  }
+
+  if (input.historicalHeadroom?.status === 'EXHAUSTED') {
+    return { availability: false, provenance: input.historicalHeadroom.provenance };
+  }
+  if (input.historicalHeadroom?.status === 'OBSERVED') {
+    return { availability: true, provenance: input.historicalHeadroom.provenance };
+  }
+
   const now = (input.now ?? (() => new Date()))().getTime();
   const records = (await launchRecordsOf(input.paths)).filter(
     (entry) => entry.record.profile_id === input.profile.id,
@@ -294,7 +397,7 @@ export async function quotaFactOf(input: {
       availability: null,
       provenance:
         `nenhuma observação de rate limit para ${input.profile.id} neste runtime; ` +
-        'quota não é probada antes do launch porque medi-la custaria uma chamada ao provider',
+        'nenhuma observação fresca de capacidade foi fornecida a esta coleta isolada',
     };
   }
 
@@ -374,6 +477,12 @@ export async function collectProjectLaunchFacts(
     quota: await quotaFactOf({
       paths,
       profile,
+      ...(input.capacityObservation === undefined
+        ? {}
+        : { capacityObservation: input.capacityObservation }),
+      ...(input.historicalHeadroom === undefined
+        ? {}
+        : { historicalHeadroom: input.historicalHeadroom }),
       ...(input.now === undefined ? {} : { now: input.now }),
     }),
     billing_refusal: billing.refusal,

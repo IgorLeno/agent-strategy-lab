@@ -1,4 +1,4 @@
-import { copyFile, rm, writeFile } from 'node:fs/promises';
+import { copyFile, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { CommandRunner } from '../../dev/lib/billing.js';
@@ -23,6 +23,7 @@ import { loadPlan, type LoadedPlan } from '../../dev/lib/plan.js';
 import type { LauncherProfile } from '../../dev/lib/profile.js';
 import { readLaunchRecord, writePacket } from '../../dev/lib/records.js';
 import { LaunchRecord, SubscriptionUsageWindow } from '../../dev/lib/schemas.js';
+import { anthropicCapacityOf, type PoolCapacityObservation } from '../../src/quota/index.js';
 import { buildInitialState, ensureRuntimeDirs, writeState } from '../../dev/lib/state.js';
 import { REPO_ROOT, makeSandboxRepo, type Sandbox } from './helpers.js';
 
@@ -616,7 +617,14 @@ function fixtureProfile(agent: 'claude' | 'codex'): LauncherProfile {
   };
 }
 
-async function launch(profile: LauncherProfile, usageRunner: UsageCommandRunner) {
+async function launch(
+  profile: LauncherProfile,
+  usageRunner: UsageCommandRunner,
+  capacity?: {
+    readonly before: PoolCapacityObservation;
+    readonly after: PoolCapacityObservation;
+  },
+) {
   const packet = buildTaskPacket({
     task: loaded.byId.get('T1')!,
     baseSha: await headSha(paths.repoRoot),
@@ -629,6 +637,12 @@ async function launch(profile: LauncherProfile, usageRunner: UsageCommandRunner)
     packet,
     credentialRunner: profile.agent === 'claude' ? subscriptionRunner : chatgptRunner,
     usageRunner,
+    ...(capacity === undefined
+      ? {}
+      : {
+          poolCapacityBefore: capacity.before,
+          poolCapacityProbe: async () => capacity.after,
+        }),
   });
 }
 
@@ -641,7 +655,8 @@ describe('launchWorker mede a quota em volta do run', () => {
 
     const outcome = await launch(fixtureProfile('claude'), cli.runner);
 
-    expect(outcome.classification).toBe('FINISHED');
+    const stderr = await readFile(path.join(paths.logsDir, 'T1.stderr.log'), 'utf8');
+    expect(outcome.classification, `${outcome.reason}\n${stderr}`).toBe('FINISHED');
     expect(cli.calls).toHaveLength(2);
     // Um processo NOVO por probe, e nenhum deles reaproveita sessão do worker.
     for (const call of cli.calls) {
@@ -663,6 +678,35 @@ describe('launchWorker mede a quota em volta do run', () => {
     expect(persisted?.subscription_usage?.five_hour.consumed_pp).toBe(6);
   });
 
+  it('snapshot Claude normalizado alimenta os dois records sem duplicar /usage', async () => {
+    const cli = fakeUsageCli();
+    const capacity = (used: number) =>
+      anthropicCapacityOf({
+        readings: [
+          { window_id: 'five_hour', used_percent: used, reset_label: FIVE_HOUR_LABEL },
+          { window_id: 'seven_day_all_models', used_percent: 63, reset_label: SEVEN_DAY_LABEL },
+        ],
+        reason: 'Claude /usage provou zero inferência',
+        source: 'claude_print_usage_v1',
+        observed_at: '2026-08-27T12:00:00.000Z',
+      });
+
+    const outcome = await launch(fixtureProfile('claude'), cli.runner, {
+      before: capacity(41),
+      after: capacity(47),
+    });
+
+    expect(cli.calls).toEqual([]);
+    expect(outcome.record.pool_capacity?.deltas).toEqual(
+      expect.arrayContaining([expect.objectContaining({ window_id: 'five_hour', consumed_pp: 6 })]),
+    );
+    expect(outcome.record.subscription_usage?.five_hour).toMatchObject({
+      before_used_pct: 41,
+      after_used_pct: 47,
+      consumed_pp: 6,
+    });
+  });
+
   it('BEFORE que não prova inferência zero NÃO lança o worker', async () => {
     const cli = fakeUsageCli({ stdout: JSON.stringify(usageResult({ total_cost_usd: 0.5 })) });
 
@@ -679,7 +723,8 @@ describe('launchWorker mede a quota em volta do run', () => {
 
     const outcome = await launch(fixtureProfile('claude'), cli.runner);
 
-    expect(outcome.classification).toBe('FINISHED');
+    const stderr = await readFile(path.join(paths.logsDir, 'T1.stderr.log'), 'utf8');
+    expect(outcome.classification, `${outcome.reason}\n${stderr}`).toBe('FINISHED');
     expect(outcome.record.exit_code).toBe(0);
     expect(cli.calls).toHaveLength(2);
     expect(outcome.record.subscription_usage?.probe_contract.before.reason_code).toBe('OK');
