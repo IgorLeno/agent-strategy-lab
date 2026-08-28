@@ -243,3 +243,20 @@ control plane que nao possa ser tomada com seguranca nesta autorizacao.
 - Decisao humana pendente, com as opcoes que o proprio gate emitiu: ampliar
   `autonomous_execution_boundary` explicitamente, reduzir o risco declarado da
   work unit, ou executar a acao manualmente.
+
+## Lacuna estrutural — nao existe grant para risco critical
+
+Verificado em `dev/cli/lab.ts`: o lifecycle expoe exatamente dois primitives de
+autorizacao humana — `authorize-provider-expansion` (linha 113) e
+`authorize-repair` (linha 128). Nenhum autoriza o launch de uma work unit
+classificada `critical` pelo planner.
+
+Consequencia: `mopac_minimum_workflow` nao tem caminho nativo de desbloqueio. As
+tres opcoes que o proprio gate emitiu exigem, todas, acao fora do lifecycle —
+editar `authorization.yaml`, editar o plano gerado, ou implementar a work unit
+manualmente no target.
+
+Isto e stop (D), decisao de produto/arquitetura, nao um defeito a corrigir aqui:
+criar um terceiro grant simetrico aos existentes decidiria que risco `critical`
+e destravavel por CLI, e essa e exatamente a fronteira de autonomia que o gate
+existe para proteger. Fica registrado para decisao humana, nao implementado.
