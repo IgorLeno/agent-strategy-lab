@@ -447,4 +447,19 @@ describe('Anthropic — mecanismo preservado, formato generalizado', () => {
     });
     expect(observation.status).toBe(CapacityStatus.UNKNOWN);
   });
+
+  it('five_hour remaining 0 é EXHAUSTED: o provider reportou quota restante zero, não folga baixa', () => {
+    const observation = anthropicCapacityOf({
+      readings: [
+        { window_id: 'five_hour', used_percent: 100, reset_label: 'Aug 28, 6:30pm (America/Sao_Paulo)' },
+        { window_id: 'seven_day_all_models', used_percent: 45, reset_label: 'Sep 1, 3am (America/Sao_Paulo)' },
+      ],
+      reason: 'Claude /usage reportou capacidade e provou zero inferência',
+      source: 'claude_print_usage_v1',
+      observed_at: OBSERVED_AT,
+    });
+    expect(observation.windows[0]?.remaining_percent).toBe(0);
+    expect(observation.status).toBe(CapacityStatus.EXHAUSTED);
+    expect(poolUnavailable(observation)).toBe(true);
+  });
 });

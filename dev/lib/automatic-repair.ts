@@ -1,10 +1,11 @@
-import {
-  InconsistentAttemptEvidenceError,
-  retryFailedAttempt,
-  type RetryFailedAttemptResult,
-} from './retry-failed.js';
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
+import { canonicalSha256 } from './canonical.js';
 import type { HarnessPaths } from './paths.js';
 import {
+  additionalRepairConsumptionPath,
+  additionalRepairTaskDir,
+  listAdditionalRepairAuthorizationFiles,
   readAttemptAbandonment,
   readCompletion,
   readInfraFailedAttempt,
@@ -12,12 +13,21 @@ import {
   readProtocolInvalidAttempt,
   readReviewRejectedAttempt,
   readValidationFailedAttempt,
+  writeAdditionalRepairAuthorizationConsumption,
+  writeAdditionalRepairAuthorizationGrant,
 } from './records.js';
-import type {
-  CompletionRecord,
-  ReviewRejectedAttemptRecord,
-  ValidationFailedAttemptRecord,
+import {
+  AdditionalRepairAuthorizationConsumptionRecord,
+  AdditionalRepairAuthorizationRecord,
+  type CompletionRecord,
+  type ReviewRejectedAttemptRecord,
+  type ValidationFailedAttemptRecord,
 } from './schemas.js';
+import {
+  InconsistentAttemptEvidenceError,
+  retryFailedAttempt,
+  type RetryFailedAttemptResult,
+} from './retry-failed.js';
 import { getTaskState, readState } from './state.js';
 
 /**
@@ -48,6 +58,7 @@ export type AutomaticRepairDecision =
       readonly source_attempt: number;
       readonly profile_id: string;
       readonly needs_archival: boolean;
+      readonly additional_authorization_sha256?: string;
     }
   | {
       readonly action: 'REPAIR_EXHAUSTED';
@@ -90,6 +101,237 @@ function exhausted(
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+export class AdditionalRepairAuthorizationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AdditionalRepairAuthorizationError';
+  }
+}
+
+const GRANT_FILE = /^grant-([0-9a-f]{64})\.json$/;
+const CONSUMPTION_FILE = /^consumed-([0-9a-f]{64})-attempt-(\d+)\.json$/;
+
+type UnusedGrantLookup =
+  | { readonly status: 'none' }
+  | { readonly status: 'unused'; readonly sha256: string }
+  | { readonly status: 'invalid'; readonly reason: string };
+
+async function readJsonFile(file: string): Promise<unknown> {
+  return JSON.parse(await readFile(file, 'utf8')) as unknown;
+}
+
+async function readUnusedAdditionalRepairGrant(
+  paths: HarnessPaths,
+  taskId: string,
+): Promise<UnusedGrantLookup> {
+  let names: readonly string[];
+  try {
+    names = await listAdditionalRepairAuthorizationFiles(paths, taskId);
+  } catch (error) {
+    return {
+      status: 'invalid',
+      reason: `autorização adicional ilegível para ${taskId}: ${errorMessage(error)}`,
+    };
+  }
+  const unused: string[] = [];
+  const consumedAttempt = new Map<string, number>();
+  for (const name of names) {
+    const consumption = CONSUMPTION_FILE.exec(name);
+    if (consumption) {
+      const grantSha = consumption[1];
+      const attempt = Number(consumption[2]);
+      const file = path.join(additionalRepairTaskDir(paths, taskId), name);
+      try {
+        const parsed = AdditionalRepairAuthorizationConsumptionRecord.parse(
+          await readJsonFile(file),
+        );
+        if (parsed.task_id !== taskId || parsed.grant_sha256 !== grantSha) {
+          return {
+            status: 'invalid',
+            reason: `recibo de autorização adicional diverge do nome: ${name}`,
+          };
+        }
+        if (parsed.consumed_by_attempt !== attempt) {
+          return {
+            status: 'invalid',
+            reason: `recibo de autorização adicional diverge do attempt: ${name}`,
+          };
+        }
+        consumedAttempt.set(grantSha, parsed.consumed_by_attempt);
+      } catch (error) {
+        return {
+          status: 'invalid',
+          reason: `recibo de autorização adicional ilegível (${name}): ${errorMessage(error)}`,
+        };
+      }
+      continue;
+    }
+    const grant = GRANT_FILE.exec(name);
+    if (!grant) {
+      return {
+        status: 'invalid',
+        reason: `arquivo inesperado em autorização adicional de ${taskId}: ${name}`,
+      };
+    }
+    const grantSha = grant[1];
+    const file = path.join(additionalRepairTaskDir(paths, taskId), name);
+    try {
+      const parsed = AdditionalRepairAuthorizationRecord.parse(await readJsonFile(file));
+      if (parsed.task_id !== taskId || parsed.additional_attempts !== 1) {
+        return {
+          status: 'invalid',
+          reason: `concessão adicional diverge do contrato one-shot: ${name}`,
+        };
+      }
+      if (canonicalSha256(parsed) !== grantSha) {
+        return {
+          status: 'invalid',
+          reason: `hash da concessão adicional diverge do nome: ${name}`,
+        };
+      }
+    } catch (error) {
+      return {
+        status: 'invalid',
+        reason: `concessão adicional ilegível (${name}): ${errorMessage(error)}`,
+      };
+    }
+    unused.push(grantSha);
+  }
+  const task = getTaskState(await readState(paths), taskId);
+  const remaining = unused.filter((sha) => {
+    const spentAt = consumedAttempt.get(sha);
+    return spentAt === undefined || spentAt > task.attempts;
+  });
+  if (remaining.length === 0) return { status: 'none' };
+  if (remaining.length > 1) {
+    return {
+      status: 'invalid',
+      reason: `${taskId} tem mais de uma autorização adicional não consumida`,
+    };
+  }
+  return { status: 'unused', sha256: remaining[0] as string };
+}
+
+async function applyUnusedAdditionalRepairGrant(
+  paths: HarnessPaths,
+  taskId: string,
+  decision: AutomaticRepairDecision,
+): Promise<AutomaticRepairDecision> {
+  if (decision.action !== 'REPAIR_EXHAUSTED') return decision;
+  const lookup = await readUnusedAdditionalRepairGrant(paths, taskId);
+  if (lookup.status === 'invalid') return blocked('INVALID_EVIDENCE', lookup.reason);
+  if (lookup.status === 'none') return decision;
+  const task = getTaskState(await readState(paths), taskId);
+  const history = await walkValidationFails(paths, taskId, task.attempts);
+  if (history.status !== 'ok') {
+    return fromWalk(history) ?? blocked('INVALID_EVIDENCE', 'histórico ilegível na autorização adicional');
+  }
+  const source = history.records.at(-1);
+  if (source === undefined) return decision;
+  return {
+    action: 'REPAIR_ALLOWED',
+    source_attempt: source.attempt,
+    profile_id: source.profile_id,
+    needs_archival: task.status === 'FAIL',
+    additional_authorization_sha256: lookup.sha256,
+  };
+}
+
+export async function grantAdditionalRepairAuthorization(input: {
+  readonly paths: HarnessPaths;
+  readonly taskId: string;
+  readonly reason: string;
+  readonly now?: () => string;
+}): Promise<{
+  readonly record: AdditionalRepairAuthorizationRecord;
+  readonly path: string;
+  readonly sha256: string;
+}> {
+  if (input.reason.trim() === '') {
+    throw new AdditionalRepairAuthorizationError('reason é obrigatório');
+  }
+  const decision = await decideAutomaticRepair(input.paths, input.taskId);
+  if (decision.action === 'BLOCKED') {
+    throw new AdditionalRepairAuthorizationError(decision.reason);
+  }
+  if (decision.action === 'REPAIR_ALLOWED' && decision.additional_authorization_sha256) {
+    throw new AdditionalRepairAuthorizationError(
+      `já existe autorização one-shot não consumida para ${input.taskId}`,
+    );
+  }
+  if (decision.action !== 'REPAIR_EXHAUSTED') {
+    throw new AdditionalRepairAuthorizationError(
+      `autorização adicional exige AUTOMATIC_REPAIR_EXHAUSTED; encontrado ${decision.action}`,
+    );
+  }
+  const record = AdditionalRepairAuthorizationRecord.parse({
+    schema_version: 1,
+    kind: 'ADDITIONAL_REPAIR_AUTHORIZATION',
+    task_id: input.taskId,
+    additional_attempts: 1,
+    reason: input.reason.trim(),
+    granted_at: (input.now ?? (() => new Date().toISOString()))(),
+    provenance: 'human_explicit',
+    blocker: 'AUTOMATIC_REPAIR_EXHAUSTED',
+  });
+  const sha256 = canonicalSha256(record);
+  const file = await writeAdditionalRepairAuthorizationGrant(input.paths, record, sha256);
+  return { record, path: file, sha256 };
+}
+
+export async function consumeAdditionalRepairAuthorization(input: {
+  readonly paths: HarnessPaths;
+  readonly taskId: string;
+  readonly grantSha256: string;
+  readonly attempt: number;
+  readonly now?: () => string;
+}): Promise<string> {
+  const existingPath = additionalRepairConsumptionPath(
+    input.paths,
+    input.taskId,
+    input.grantSha256,
+    input.attempt,
+  );
+  try {
+    const existing = AdditionalRepairAuthorizationConsumptionRecord.parse(
+      JSON.parse(await readFile(existingPath, 'utf8')) as unknown,
+    );
+    if (
+      existing.task_id === input.taskId &&
+      existing.grant_sha256 === input.grantSha256 &&
+      existing.consumed_by_attempt === input.attempt
+    ) {
+      return existingPath;
+    }
+    throw new AdditionalRepairAuthorizationError(
+      `recibo de autorização adicional diverge em ${existingPath}`,
+    );
+  } catch (error) {
+    if (error instanceof AdditionalRepairAuthorizationError) throw error;
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw new AdditionalRepairAuthorizationError(errorMessage(error));
+    }
+  }
+  const lookup = await readUnusedAdditionalRepairGrant(input.paths, input.taskId);
+  if (lookup.status === 'invalid') {
+    throw new AdditionalRepairAuthorizationError(lookup.reason);
+  }
+  if (lookup.status === 'none' || lookup.sha256 !== input.grantSha256) {
+    throw new AdditionalRepairAuthorizationError(
+      `concessão ${input.grantSha256} não está disponível para consumo em ${input.taskId}`,
+    );
+  }
+  const record = AdditionalRepairAuthorizationConsumptionRecord.parse({
+    schema_version: 1,
+    kind: 'ADDITIONAL_REPAIR_AUTHORIZATION_CONSUMPTION',
+    task_id: input.taskId,
+    grant_sha256: input.grantSha256,
+    consumed_by_attempt: input.attempt,
+    consumed_at: (input.now ?? (() => new Date().toISOString()))(),
+  });
+  return writeAdditionalRepairAuthorizationConsumption(input.paths, record);
 }
 
 /**
@@ -251,7 +493,7 @@ async function decideFromUnarchivedFail(
  * Deriva se o próximo capability-bearing attempt desta tarefa pode ser um
  * reparo automático no mesmo profile. Não lança provider e não arquiva.
  */
-export async function decideAutomaticRepair(
+async function decideAutomaticRepairCore(
   paths: HarnessPaths,
   taskId: string,
 ): Promise<AutomaticRepairDecision> {
@@ -326,6 +568,18 @@ export async function decideAutomaticRepair(
   return allowedFromRecords(history.records, false);
 }
 
+/**
+ * Deriva se o próximo capability-bearing attempt desta tarefa pode ser um
+ * reparo automático no mesmo profile. Não lança provider e não arquiva.
+ */
+export async function decideAutomaticRepair(
+  paths: HarnessPaths,
+  taskId: string,
+): Promise<AutomaticRepairDecision> {
+  const decision = await decideAutomaticRepairCore(paths, taskId);
+  return applyUnusedAdditionalRepairGrant(paths, taskId, decision);
+}
+
 export function haltFromAutomaticRepair(
   decision: AutomaticRepairDecision,
 ): { readonly status: string; readonly reason: string } | null {
@@ -368,6 +622,15 @@ export async function reconcileAutomaticRepair(input: {
   readonly taskId: string;
 }): Promise<AutomaticRepairReconciliation> {
   const decision = await decideAutomaticRepair(input.paths, input.taskId);
+  if (decision.action === 'REPAIR_ALLOWED' && decision.additional_authorization_sha256) {
+    const task = getTaskState(await readState(input.paths), input.taskId);
+    await consumeAdditionalRepairAuthorization({
+      paths: input.paths,
+      taskId: input.taskId,
+      grantSha256: decision.additional_authorization_sha256,
+      attempt: task.attempts + 1,
+    });
+  }
   if (decision.action !== 'REPAIR_ALLOWED' || !decision.needs_archival) {
     return { decision, retry: null };
   }

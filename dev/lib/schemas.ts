@@ -1215,6 +1215,11 @@ export const AttemptAbandonmentRecord = z
     handoff_draft_sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
     source_report_result: z.literal('FAILURE').optional(),
     source_base_sha: shaHex.optional(),
+    /** Falha terminal provada depois do fato a partir da evidência crua do attempt. */
+    provider_failure: ProviderTerminalFailure.optional(),
+    provider_failure_source: z.enum(['launch_record', 'stdout_stream', 'stdout_json']).optional(),
+    /** Completion FAIL criado pelo fechamento antigo antes de a falha ser reconhecida. */
+    misclassified_completion_sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
     abandoned_at: z.string().datetime(),
   })
   .strict()
@@ -1235,6 +1240,20 @@ export const AttemptAbandonmentRecord = z
           message: 'output de infraestrutura exige report, handoff e metadados completos',
         });
       }
+    }
+    const providerMetadata = [
+      record.provider_failure,
+      record.provider_failure_source,
+      record.misclassified_completion_sha256,
+    ];
+    if (
+      providerMetadata.some((value) => value !== undefined) &&
+      !providerMetadata.every((value) => value !== undefined)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'provider failure histórica exige falha, provenance e completion hash',
+      });
     }
   });
 export type AttemptAbandonmentRecord = z.infer<typeof AttemptAbandonmentRecord>;
@@ -2747,6 +2766,82 @@ export const ReviewRejectedAttemptRecord = z
     }
   });
 export type ReviewRejectedAttemptRecord = z.infer<typeof ReviewRejectedAttemptRecord>;
+
+/**
+ * Concessão humana explícita de UM repair adicional depois de
+ * AUTOMATIC_REPAIR_EXHAUSTED. Não altera retry_budget global: o record vive no
+ * runtime, na task, e é one-shot.
+ */
+export const AdditionalRepairAuthorizationRecord = z
+  .object({
+    schema_version: z.literal(DEV_SCHEMA_VERSION),
+    kind: z.literal('ADDITIONAL_REPAIR_AUTHORIZATION'),
+    task_id: identifier,
+    additional_attempts: z.literal(1),
+    reason: nonEmpty,
+    granted_at: z.string().datetime(),
+    provenance: z.literal('human_explicit'),
+    blocker: z.literal('AUTOMATIC_REPAIR_EXHAUSTED'),
+  })
+  .strict();
+export type AdditionalRepairAuthorizationRecord = z.infer<
+  typeof AdditionalRepairAuthorizationRecord
+>;
+
+/** Recibo append-only de que a concessão one-shot foi gasta num attempt. */
+export const AdditionalRepairAuthorizationConsumptionRecord = z
+  .object({
+    schema_version: z.literal(DEV_SCHEMA_VERSION),
+    kind: z.literal('ADDITIONAL_REPAIR_AUTHORIZATION_CONSUMPTION'),
+    task_id: identifier,
+    grant_sha256: sha256Hex,
+    consumed_by_attempt: z.number().int().positive(),
+    consumed_at: z.string().datetime(),
+  })
+  .strict();
+export type AdditionalRepairAuthorizationConsumptionRecord = z.infer<
+  typeof AdditionalRepairAuthorizationConsumptionRecord
+>;
+
+/**
+ * Concessão humana explícita para AMPLIAR os providers/profiles permitidos
+ * de um runtime já autorizado, sem editar o snapshot original.
+ *
+ * Só existe para o caso operacional em que os pools originalmente autorizados
+ * estão EXHAUSTED e o humano autoriza um terceiro pool subscription-only.
+ * Não altera billing global nem substitui o histórico Codex/Claude.
+ */
+export const ProviderExpansionAuthorizationRecord = z
+  .object({
+    schema_version: z.literal(DEV_SCHEMA_VERSION),
+    kind: z.literal('PROVIDER_EXPANSION_AUTHORIZATION'),
+    expansion_class: z.literal('OPENCODE_GO_SUBSCRIPTION_ONLY'),
+    added_providers: z.array(z.literal('opencode')).min(1),
+    added_profiles: z
+      .array(
+        z
+          .object({
+            id: z
+              .string()
+              .regex(/^[A-Za-z0-9][A-Za-z0-9_.-]*$/, 'id deve ser alfanumérico com - _ ou .'),
+            capability_rank: z.number().int().nonnegative(),
+            rationale: nonEmpty,
+          })
+          .strict(),
+      )
+      .min(1),
+    original_authorization_sha256: sha256Hex,
+    original_allowed_providers: z.array(nonEmpty).min(1),
+    original_profile_ids: z.array(identifier).min(1),
+    exhausted_pools: z.array(nonEmpty).min(1),
+    reason: nonEmpty,
+    granted_at: z.string().datetime(),
+    provenance: z.literal('human_explicit'),
+  })
+  .strict();
+export type ProviderExpansionAuthorizationRecord = z.infer<
+  typeof ProviderExpansionAuthorizationRecord
+>;
 
 /**
  * Motivos pelos quais um attempt é arquivado SEM solução nenhuma para preservar.

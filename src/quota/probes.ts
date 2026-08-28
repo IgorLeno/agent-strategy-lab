@@ -400,24 +400,28 @@ export function anthropicCapacityOf(input: {
       observed_at: input.observed_at,
     });
   }
+  const windows = input.readings.map((reading) => ({
+    window_id: reading.window_id,
+    used_percent: reading.used_percent,
+    remaining_percent: remainingPercentOf(reading.used_percent),
+    // A CLI do Claude reporta decimal; o rótulo diz isso, e nenhum consumidor
+    // precisa descobrir que a precisão aqui difere da do OpenCode Go.
+    precision: CapacityPrecision.FRACTIONAL_PERCENT,
+    window_seconds: null,
+    window_instance: reading.reset_label,
+    resets_at: null,
+  }));
+  const exhausted = windows.some((window) => window.remaining_percent === 0);
   return PoolCapacityObservation.parse({
     schema_version: 1,
     quota_pool: pool,
-    status: CapacityStatus.KNOWN,
-    windows: input.readings.map((reading) => ({
-      window_id: reading.window_id,
-      used_percent: reading.used_percent,
-      remaining_percent: remainingPercentOf(reading.used_percent),
-      // A CLI do Claude reporta decimal; o rótulo diz isso, e nenhum consumidor
-      // precisa descobrir que a precisão aqui difere da do OpenCode Go.
-      precision: CapacityPrecision.FRACTIONAL_PERCENT,
-      window_seconds: null,
-      window_instance: reading.reset_label,
-      resets_at: null,
-    })),
+    status: exhausted ? CapacityStatus.EXHAUSTED : CapacityStatus.KNOWN,
+    windows,
     balance: null,
     plan: null,
-    reason: input.reason,
+    reason: exhausted
+      ? `${input.reason}; janela com remaining_percent=0 — quota restante zero, não folga baixa`
+      : input.reason,
     source: input.source,
     observed_at: input.observed_at,
   });

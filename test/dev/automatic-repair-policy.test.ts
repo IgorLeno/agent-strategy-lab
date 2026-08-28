@@ -1,7 +1,12 @@
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { decideAutomaticRepair } from '../../dev/lib/automatic-repair.js';
+import {
+  AdditionalRepairAuthorizationError,
+  consumeAdditionalRepairAuthorization,
+  decideAutomaticRepair,
+  grantAdditionalRepairAuthorization,
+} from '../../dev/lib/automatic-repair.js';
 import { headSha } from '../../dev/lib/git.js';
 import { resolveHarnessPaths, type HarnessPaths } from '../../dev/lib/paths.js';
 import { loadPlan, type LoadedPlan } from '../../dev/lib/plan.js';
@@ -628,6 +633,126 @@ describe('decideAutomaticRepair — rejeição de implementation defect', () => 
       action: 'REPAIR_EXHAUSTED',
       source_attempt: 1,
       validation_fail_count: 2,
+    });
+  });
+
+  it('sem autorização humana adicional a exhaustion de review continua bloqueada', async () => {
+    await writeReviewRejectedAttempt(paths, reviewRejected(1));
+    await writeReviewRejectedAttempt(paths, reviewRejected(2));
+    await setTask('READY', 2);
+
+    await expect(
+      grantAdditionalRepairAuthorization({
+        paths,
+        taskId: TASK,
+        reason: '',
+      }),
+    ).rejects.toBeInstanceOf(AdditionalRepairAuthorizationError);
+
+    expect(await decideAutomaticRepair(paths, TASK)).toMatchObject({
+      action: 'REPAIR_EXHAUSTED',
+    });
+  });
+
+  it('autorização humana one-shot libera exatamente um repair adicional', async () => {
+    await writeReviewRejectedAttempt(paths, reviewRejected(1));
+    await writeReviewRejectedAttempt(paths, reviewRejected(2));
+    await setTask('READY', 2);
+
+    const granted = await grantAdditionalRepairAuthorization({
+      paths,
+      taskId: TASK,
+      reason: 'defeitos mecânicos de ruff/black; validação oficial passou',
+    });
+
+    expect(granted.record.additional_attempts).toBe(1);
+    expect(granted.record.task_id).toBe(TASK);
+    expect(await decideAutomaticRepair(paths, TASK)).toMatchObject({
+      action: 'REPAIR_ALLOWED',
+      source_attempt: 2,
+      profile_id: PROFILE,
+      needs_archival: false,
+      additional_authorization_sha256: granted.sha256,
+    });
+
+    await expect(
+      grantAdditionalRepairAuthorization({
+        paths,
+        taskId: TASK,
+        reason: 'não empilha um segundo extra enquanto o primeiro não foi consumido',
+      }),
+    ).rejects.toBeInstanceOf(AdditionalRepairAuthorizationError);
+
+    await consumeAdditionalRepairAuthorization({
+      paths,
+      taskId: TASK,
+      grantSha256: granted.sha256,
+      attempt: 3,
+    });
+
+    expect(await decideAutomaticRepair(paths, TASK)).toMatchObject({
+      action: 'REPAIR_ALLOWED',
+      additional_authorization_sha256: granted.sha256,
+    });
+
+    await writeReviewRejectedAttempt(paths, reviewRejected(3));
+    await setTask('READY', 3);
+
+    expect(await decideAutomaticRepair(paths, TASK)).toMatchObject({
+      action: 'REPAIR_EXHAUSTED',
+      validation_fail_count: 3,
+    });
+  });
+
+  it('segunda tentativa extra exige nova decisão humana', async () => {
+    await writeReviewRejectedAttempt(paths, reviewRejected(1));
+    await writeReviewRejectedAttempt(paths, reviewRejected(2));
+    await setTask('READY', 2);
+
+    const first = await grantAdditionalRepairAuthorization({
+      paths,
+      taskId: TASK,
+      reason: 'primeira autorização one-shot',
+    });
+    await consumeAdditionalRepairAuthorization({
+      paths,
+      taskId: TASK,
+      grantSha256: first.sha256,
+      attempt: 3,
+    });
+    await writeReviewRejectedAttempt(paths, reviewRejected(3));
+    await setTask('READY', 3);
+
+    expect(await decideAutomaticRepair(paths, TASK)).toMatchObject({
+      action: 'REPAIR_EXHAUSTED',
+    });
+
+    const second = await grantAdditionalRepairAuthorization({
+      paths,
+      taskId: TASK,
+      reason: 'nova decisão humana para um segundo extra',
+    });
+    expect(second.sha256).not.toBe(first.sha256);
+    expect(await decideAutomaticRepair(paths, TASK)).toMatchObject({
+      action: 'REPAIR_ALLOWED',
+      additional_authorization_sha256: second.sha256,
+    });
+  });
+
+  it('autorização com provenance inválida falha fechada', async () => {
+    await writeReviewRejectedAttempt(paths, reviewRejected(1));
+    await writeReviewRejectedAttempt(paths, reviewRejected(2));
+    await setTask('READY', 2);
+
+    await mkdir(path.join(paths.additionalRepairAuthorizationsDir, TASK), { recursive: true });
+    await writeFile(
+      path.join(paths.additionalRepairAuthorizationsDir, TASK, 'grant-not-a-record.json'),
+      '{not-json',
+    );
+
+    await expect(decideAutomaticRepair(paths, TASK)).resolves.toMatchObject({
+      action: 'BLOCKED',
+      code: 'INVALID_EVIDENCE',
     });
   });
 });

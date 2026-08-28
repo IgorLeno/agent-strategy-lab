@@ -104,6 +104,10 @@ import {
   type PoolCapacityProbe,
 } from './pool-capacity-observer.js';
 import {
+  isRetryableReviewerInvocationFailure,
+  selectReviewerProfileForFreshCapacity,
+} from './reviewer-capacity.js';
+import {
   classificationFor,
   ProjectAuthorizationError,
   type ProjectRunAuthorizationFile,
@@ -145,6 +149,7 @@ import {
   readHandoffDraft,
   readLaunchRecord,
   readOrchestratedFinalization,
+  listReviewParseFailures,
   readPacket,
   readProjectHistoryBinding,
   readReviewRejectionClassification,
@@ -2096,18 +2101,12 @@ export async function createProjectControlPlane(
     }
 
     const requirement = lookup.requirement as CandidateReviewRequirement;
-    const reviewerProfile = profiles.get(requirement.reviewer_profile_id) ?? null;
-    if (reviewerProfile === null) {
-      return reviewBlocked(
-        taskId,
-        'REVIEW_PROFILE_OUTSIDE_POLICY',
-        'UNAVAILABLE',
-        `a policy exigiu review independente e o reviewer ${requirement.reviewer_profile_id} não pertence à profile policy`,
-        'declarar um reviewer elegível na profile policy',
-        ['declarar review.reviewer_profile_id', 'reduzir o risco declarado'],
-        [input.authorizationFile],
-      );
-    }
+    const pinnedReviewerId = requirement.reviewer_profile_id;
+    const freshCapacityByPool = await observeEligiblePoolCapacities(
+      [...profiles.values()],
+      poolCapacityProbe,
+      (profile) => quotaPoolOf(profile.id),
+    );
     const planTask = loaded.byId.get(taskId);
     if (planTask === undefined) {
       return reviewBlocked(
@@ -2137,47 +2136,87 @@ export async function createProjectControlPlane(
           }
         : null;
 
-    const reviewerFacts = await launchFactsFor(reviewerProfile);
-    const verdict: ProjectReviewResult = await launchProjectReviewer({
-      paths,
-      profile: reviewerProfile,
-      scope,
-      implementerProfileId: record.profile_id,
-      diversityRequirement: requirement.diversity_requirement as never,
-      risk: classificationFor(authorization, taskId).classification.risk,
-      // Os MESMOS fatos honestos do implementer, coletados agora para o
-      // profile do reviewer. Review read-only não ganha autorização mais
-      // fraca — e uma review que não pode ser autorizada vira
-      // `REVIEW_UNAVAILABLE`, nunca ACCEPT.
-      credential: reviewerFacts.credential,
-      quota: reviewerFacts.quota,
-      packet: {
-        task_id: taskId,
-        objective: planTask.objective,
-        acceptance: [...planTask.acceptance],
-        validation: planTask.validation.map((command) => ({ argv: [...command.argv] })),
-        changed_files: [...record.changed_files],
-        // O candidate REVISADO, não um accepted_commit: no instante da review
-        // nada foi aceito ainda.
-        candidate_sha: record.candidate_commit,
-        official_validation_outcome: 'PASS',
-        evidence_paths: [paths.validationLogsDir],
-        implementer_gaps: implementerGaps,
-        implementer_confidence: implementerConfidence,
-        ...(legacyRejectedReview === null
-          ? {}
-          : { prior_rejection_reason: legacyRejectedReview.reason }),
-      },
-      ...(input.reviewerPort === undefined ? {} : { port: input.reviewerPort }),
-    });
+    const excludedProfileIds = [
+      ...new Set(
+        (await listReviewParseFailures(paths, taskId, record.attempt))
+          .filter((entry) => isRetryableReviewerInvocationFailure(entry.code))
+          .map((entry) => entry.profile_id),
+      ),
+    ];
+    const persistedEvidence: string[] = [];
+    let lastSelectionReason = '';
+    let lastInvocationFailureReason: string | null = null;
+    let reviewerProfile: LauncherProfile | null = null;
+    let verdict: ProjectReviewResult | null = null;
+    const policySize = Math.max(1, authorization.profile_policy.profiles.length);
 
-    if (verdict.outcome === 'REVIEW_UNAVAILABLE') {
+    for (let launchIndex = 0; launchIndex < policySize; launchIndex += 1) {
+      const selectedReviewer = selectReviewerProfileForFreshCapacity({
+        pinnedProfileId: pinnedReviewerId,
+        policyProfiles: authorization.profile_policy.profiles,
+        poolOf: quotaPoolOf,
+        capacityByPool: freshCapacityByPool,
+        excludedProfileIds,
+      });
+      lastSelectionReason = selectedReviewer.reason;
+      if (selectedReviewer.profileId === null) {
+        break;
+      }
+      const found = profiles.get(selectedReviewer.profileId) ?? null;
+      if (found === null) {
+        return reviewBlocked(
+          taskId,
+          'REVIEW_PROFILE_OUTSIDE_POLICY',
+          'UNAVAILABLE',
+          `a policy exigiu review independente e o reviewer ${selectedReviewer.profileId} não pertence à profile policy`,
+          'declarar um reviewer elegível na profile policy',
+          ['declarar review.reviewer_profile_id', 'reduzir o risco declarado'],
+          [input.authorizationFile],
+        );
+      }
+      reviewerProfile = found;
+      const reviewerFacts = await launchFactsFor(reviewerProfile, freshCapacityByPool);
+      verdict = await launchProjectReviewer({
+        paths,
+        profile: reviewerProfile,
+        scope,
+        implementerProfileId: record.profile_id,
+        diversityRequirement: requirement.diversity_requirement as never,
+        risk: classificationFor(authorization, taskId).classification.risk,
+        // Os MESMOS fatos honestos do implementer, coletados agora para o
+        // profile do reviewer. Review read-only não ganha autorização mais
+        // fraca — e uma review que não pode ser autorizada vira
+        // `REVIEW_UNAVAILABLE`, nunca ACCEPT.
+        credential: reviewerFacts.credential,
+        quota: reviewerFacts.quota,
+        packet: {
+          task_id: taskId,
+          objective: planTask.objective,
+          acceptance: [...planTask.acceptance],
+          validation: planTask.validation.map((command) => ({ argv: [...command.argv] })),
+          changed_files: [...record.changed_files],
+          // O candidate REVISADO, não um accepted_commit: no instante da review
+          // nada foi aceito ainda.
+          candidate_sha: record.candidate_commit,
+          official_validation_outcome: 'PASS',
+          evidence_paths: [paths.validationLogsDir],
+          implementer_gaps: implementerGaps,
+          implementer_confidence: implementerConfidence,
+          ...(legacyRejectedReview === null
+            ? {}
+            : { prior_rejection_reason: legacyRejectedReview.reason }),
+        },
+        ...(input.reviewerPort === undefined ? {} : { port: input.reviewerPort }),
+      });
+
+      if (verdict.outcome !== 'REVIEW_UNAVAILABLE') {
+        break;
+      }
       // Review exigida que não pôde ser concluída não vira aceite nem vira
       // reprovação permanente. A evidência real da invocação é persistida
       // ANTES do HUMAN_REQUIRED; review.json só existe para um veredito válido.
-      const persisted: string[] = [];
       if (verdict.evidence !== undefined) {
-        persisted.push(
+        persistedEvidence.push(
           await persistUnparseableReviewEvidence({
             taskId,
             attempt: record.attempt,
@@ -2190,6 +2229,11 @@ export async function createProjectControlPlane(
           }),
         );
       }
+      if (isRetryableReviewerInvocationFailure(verdict.code)) {
+        excludedProfileIds.push(reviewerProfile.id);
+        lastInvocationFailureReason = verdict.reason;
+        continue;
+      }
       return reviewBlocked(
         taskId,
         verdict.code,
@@ -2197,7 +2241,34 @@ export async function createProjectControlPlane(
         `review independente não pôde ser concluída: ${verdict.reason}`,
         'tornar a review independente executável ou decidir manualmente',
         ['corrigir a configuração do reviewer', 'inspecionar o candidate preparado'],
-        await existingEvidencePaths([...persisted, paths.validationLogsDir]),
+        await existingEvidencePaths([...persistedEvidence, paths.validationLogsDir]),
+      );
+    }
+
+    if (
+      reviewerProfile === null ||
+      verdict === null ||
+      verdict.outcome === 'REVIEW_UNAVAILABLE'
+    ) {
+      if (lastInvocationFailureReason !== null) {
+        return reviewBlocked(
+          taskId,
+          'REVIEW_INVOCATION_FAILED',
+          'REVIEW_INVOCATION_FAILED',
+          `review independente não pôde ser concluída: ${lastInvocationFailureReason}`,
+          'tornar a review independente executável ou decidir manualmente',
+          ['corrigir a configuração do reviewer', 'inspecionar o candidate preparado'],
+          await existingEvidencePaths([...persistedEvidence, paths.validationLogsDir]),
+        );
+      }
+      return reviewBlocked(
+        taskId,
+        'REVIEW_LAUNCH_HUMAN_REQUIRED',
+        'UNAVAILABLE',
+        lastSelectionReason,
+        'autorizar outro pool subscription-only ou esperar o reset da quota',
+        ['inspecionar a observação fresca de capacidade', 'inspecionar o candidate preparado'],
+        [input.authorizationFile],
       );
     }
 

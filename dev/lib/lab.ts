@@ -3,6 +3,7 @@ import path from 'node:path';
 import { stringify as stringifyYaml } from 'yaml';
 
 import { inspectRepository, type ProjectInspection } from '../../src/inspection/index.js';
+import { CapacityStatus } from '../../src/quota/index.js';
 import {
   authorizeExecutionAction,
   classifyImpliedHumanGatedMatches,
@@ -20,6 +21,16 @@ import {
   type IntakeCompilerPort,
   type ParsedRunDirective,
 } from '../../src/intake/index.js';
+import { grantAdditionalRepairAuthorization } from './automatic-repair.js';
+import {
+  createProductionPoolCapacityProbe,
+  observeEligiblePoolCapacities,
+} from './pool-capacity-observer.js';
+import { loadProfileFromCatalog } from './profile.js';
+import {
+  grantProviderExpansionAuthorization,
+  ProviderExpansionAuthorizationError,
+} from './provider-expansion.js';
 import { headSha, isWorkingTreeClean, repoTopLevel } from './git.js';
 import {
   deriveRuntimeDir,
@@ -50,6 +61,7 @@ import {
   SelfMaintenanceError,
   type SelfTargetIdentity,
 } from './lab-self.js';
+import { withHarnessLock } from './lock.js';
 import { resolveHarnessInstallationRoot } from './paths.js';
 import { PlanSetupError, type PlanRunResult } from './run-plan.js';
 import { runProject, type ProjectDeliberationRequest } from './run-project.js';
@@ -863,6 +875,98 @@ export async function resumeHumanInstruction(
       ...selfReport,
     },
     exitCode: diverged ? 9 : executed.exitCode,
+  };
+}
+
+export async function authorizeAdditionalRepairForRuntime(input: {
+  readonly runtime_dir: string;
+  readonly task_id: string;
+  readonly reason: string;
+}): Promise<{
+  readonly runtime_dir: string;
+  readonly task_id: string;
+  readonly grant_sha256: string;
+  readonly grant_path: string;
+  readonly additional_attempts: 1;
+}> {
+  const runtimeDir = path.resolve(input.runtime_dir);
+  const artifacts = labArtifactPaths(runtimeDir);
+  if (!(await pathExists(artifacts.humanInstruction))) {
+    throw new LabRunError(`runtime sem HumanInstruction persistida: ${artifacts.humanInstruction}`);
+  }
+  if (input.task_id.trim() === '') {
+    throw new LabRunError('--task é obrigatório');
+  }
+  if (input.reason.trim() === '') {
+    throw new LabRunError('--reason é obrigatório');
+  }
+  const instruction = await loadHumanInstruction(artifacts.humanInstruction);
+  const repoRoot = path.resolve(instruction.target.identity);
+  const paths = labHarnessPaths({ repoRoot, runtimeDir });
+  const granted = await withHarnessLock(paths, 'lab-authorize-repair', () =>
+    grantAdditionalRepairAuthorization({
+      paths,
+      taskId: input.task_id,
+      reason: input.reason,
+    }),
+  );
+  return {
+    runtime_dir: runtimeDir,
+    task_id: input.task_id,
+    grant_sha256: granted.sha256,
+    grant_path: granted.path,
+    additional_attempts: 1,
+  };
+}
+
+export async function authorizeProviderExpansionForRuntime(input: {
+  readonly runtime_dir: string;
+  readonly reason: string;
+}): Promise<{
+  readonly runtime_dir: string;
+  readonly grant_sha256: string;
+  readonly grant_path: string;
+  readonly added_providers: readonly string[];
+  readonly added_profile_ids: readonly string[];
+  readonly exhausted_pools: readonly string[];
+}> {
+  const runtimeDir = path.resolve(input.runtime_dir);
+  const artifacts = labArtifactPaths(runtimeDir);
+  if (!(await pathExists(artifacts.humanInstruction))) {
+    throw new LabRunError(`runtime sem HumanInstruction persistida: ${artifacts.humanInstruction}`);
+  }
+  if (input.reason.trim() === '') {
+    throw new LabRunError('--reason é obrigatório');
+  }
+  const instruction = await loadHumanInstruction(artifacts.humanInstruction);
+  const repoRoot = path.resolve(instruction.target.identity);
+  const paths = labHarnessPaths({ repoRoot, runtimeDir });
+  const original = await loadAuthorizationSnapshot(artifacts.authorization);
+  const probe = createProductionPoolCapacityProbe({ paths });
+  const authorizedProfiles = [];
+  for (const entry of original.file.profile_policy.profiles) {
+    authorizedProfiles.push(await loadProfileFromCatalog(paths.profileCatalogRoot, entry.id));
+  }
+  const fresh = await observeEligiblePoolCapacities(authorizedProfiles, probe);
+  const exhaustedPools = [...fresh.entries()]
+    .filter(([, observation]) => observation.status === CapacityStatus.EXHAUSTED)
+    .map(([pool]) => pool);
+  const granted = await withHarnessLock(paths, 'lab-authorize-provider-expansion', () =>
+    grantProviderExpansionAuthorization({
+      paths,
+      catalogRoot: paths.profileCatalogRoot,
+      original,
+      reason: input.reason,
+      exhaustedPools,
+    }),
+  );
+  return {
+    runtime_dir: runtimeDir,
+    grant_sha256: granted.sha256,
+    grant_path: granted.path,
+    added_providers: granted.record.added_providers,
+    added_profile_ids: granted.record.added_profiles.map((entry) => entry.id),
+    exhausted_pools: granted.record.exhausted_pools,
   };
 }
 

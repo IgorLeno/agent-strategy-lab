@@ -3,6 +3,15 @@ import path from 'node:path';
 import { writeFileOnce, writeJsonOnce } from './atomic.js';
 import { canonicalJson, sha256Hex } from './canonical.js';
 import {
+  JSON_OUTPUT_FORMAT,
+  STREAM_JSON_OUTPUT_FORMAT,
+  claudeOutputFormat,
+  providerTerminalFailure,
+  readClaudeJsonResult,
+  readClaudeStream,
+  streamContractViolation,
+} from './claude-stream.js';
+import {
   assertRepoRelativePath,
   preserveFailedAttemptBundle,
   resetFilesToBase,
@@ -32,16 +41,20 @@ import {
   protocolInvalidAttemptPath,
   readAttemptAbandonment,
   readPreservedBundleManifest,
+  sourceBindingPath,
   validationFailedAttemptPath,
 } from './records.js';
 import {
   AttemptAbandonmentRecord,
+  CompletionRecord,
   DEV_SCHEMA_VERSION,
   LaunchRecord,
+  RevalidationSourceBinding,
   type ArchivedEvidenceFile,
   type AttemptAbandonmentRecord as AttemptAbandonmentRecordType,
   type DevelopmentState,
   type LaunchRecord as LaunchRecordType,
+  type ProviderTerminalFailure,
   type TaskState,
 } from './schemas.js';
 import { getTaskState, readState, withTaskState, writeState } from './state.js';
@@ -118,6 +131,12 @@ interface IncompleteSource {
   readonly handoffPresent: boolean;
   readonly reportBytes: Buffer | null;
   readonly handoffBytes: Buffer | null;
+  readonly historicalFailure: {
+    readonly completionBytes: Buffer;
+    readonly completionSha256: string;
+    readonly providerFailure: ProviderTerminalFailure;
+    readonly providerFailureSource: 'launch_record' | 'stdout_stream' | 'stdout_json';
+  } | null;
 }
 
 function relativeToDev(paths: HarnessPaths, file: string): string {
@@ -130,6 +149,15 @@ async function exists(file: string): Promise<boolean> {
     return true;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+async function readIfPresent(file: string): Promise<Buffer | null> {
+  try {
+    return await readFile(file);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
     throw error;
   }
 }
@@ -217,8 +245,9 @@ async function assertNoIncompatibleRecords(
   paths: HarnessPaths,
   taskId: string,
   attempt: number,
+  allowHistoricalCompletion = false,
 ): Promise<void> {
-  if (await exists(completionPath(paths, taskId))) {
+  if (!allowHistoricalCompletion && (await exists(completionPath(paths, taskId)))) {
     throw new IncompleteWorkerOutputRecoveryError('CompletionRecord presente; recovery recusado');
   }
   if (await exists(validationFailedAttemptPath(paths, taskId, attempt))) {
@@ -236,6 +265,101 @@ async function assertNoIncompatibleRecords(
       'ProtocolInvalidAttemptRecord presente; recovery recusado',
     );
   }
+}
+
+async function loadHistoricalFailure(
+  paths: HarnessPaths,
+  taskId: string,
+  task: TaskState,
+  launch: LaunchRecordType,
+): Promise<NonNullable<IncompleteSource['historicalFailure']>> {
+  const completionFile = completionPath(paths, taskId);
+  const completionBytes = await readIfPresent(completionFile);
+  if (completionBytes === null) {
+    throw new IncompleteWorkerOutputRecoveryError('FAIL histórico sem CompletionRecord');
+  }
+  let completion;
+  try {
+    completion = CompletionRecord.parse(JSON.parse(completionBytes.toString('utf8')));
+  } catch (error) {
+    throw new IncompleteWorkerOutputRecoveryError(
+      `CompletionRecord histórico inválido: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (
+    completion.task_id !== taskId ||
+    completion.status !== 'FAIL' ||
+    completion.report !== null ||
+    completion.orchestrator_evidence.candidate_commit !== null ||
+    completion.orchestrator_evidence.accepted_commit !== null
+  ) {
+    throw new IncompleteWorkerOutputRecoveryError(
+      'FAIL histórico não representa fechamento sem report/candidate',
+    );
+  }
+  if (canonicalJson(completion.orchestrator_evidence.process) !== canonicalJson(task.process)) {
+    throw new IncompleteWorkerOutputRecoveryError('processo do CompletionRecord diverge do state');
+  }
+
+  const completionSha256 = sha256Hex(completionBytes);
+  const bindingBytes = await readIfPresent(sourceBindingPath(paths, taskId, task.attempts));
+  if (bindingBytes === null) {
+    throw new IncompleteWorkerOutputRecoveryError('FAIL histórico sem RevalidationSourceBinding');
+  }
+  let binding;
+  try {
+    binding = RevalidationSourceBinding.parse(JSON.parse(bindingBytes.toString('utf8')));
+  } catch (error) {
+    throw new IncompleteWorkerOutputRecoveryError(
+      `RevalidationSourceBinding inválido: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (
+    binding.task_id !== taskId ||
+    binding.attempt !== task.attempts ||
+    binding.source_base_sha !== task.base_sha ||
+    binding.original_completion_sha256 !== completionSha256
+  ) {
+    throw new IncompleteWorkerOutputRecoveryError(
+      'RevalidationSourceBinding diverge do FAIL histórico corrente',
+    );
+  }
+
+  let providerFailure: ProviderTerminalFailure | null = launch.provider_failure;
+  let providerFailureSource: 'launch_record' | 'stdout_stream' | 'stdout_json' = 'launch_record';
+  if (providerFailure === null) {
+    const stdoutBytes = await readIfPresent(path.join(paths.logsDir, `${taskId}.stdout.log`));
+    if (stdoutBytes === null) {
+      throw new IncompleteWorkerOutputRecoveryError('stdout do FAIL histórico ausente');
+    }
+    const stdout = stdoutBytes.toString('utf8');
+    const format = claudeOutputFormat(launch.argv);
+    if (format === JSON_OUTPUT_FORMAT) {
+      const derived = providerTerminalFailure(readClaudeJsonResult(stdout));
+      providerFailure = derived === null ? null : { ...derived, signals: [...derived.signals] };
+      providerFailureSource = 'stdout_json';
+    } else if (format === STREAM_JSON_OUTPUT_FORMAT) {
+      const reading = readClaudeStream(stdout);
+      const violation = streamContractViolation(reading);
+      if (violation !== null) {
+        throw new IncompleteWorkerOutputRecoveryError(`stream histórico inválido: ${violation}`);
+      }
+      const derived = providerTerminalFailure(reading.result);
+      providerFailure = derived === null ? null : { ...derived, signals: [...derived.signals] };
+      providerFailureSource = 'stdout_stream';
+    } else {
+      throw new IncompleteWorkerOutputRecoveryError(
+        'LaunchRecord sem provider failure e transporte sem parser tipado',
+      );
+    }
+  }
+  if (providerFailure === null) {
+    throw new IncompleteWorkerOutputRecoveryError(
+      'FAIL histórico não contém falha terminal tipada do provider',
+    );
+  }
+
+  return { completionBytes, completionSha256, providerFailure, providerFailureSource };
 }
 
 async function loadLaunch(
@@ -291,7 +415,8 @@ async function loadIncompleteSource(
   const { paths, taskId } = input;
   const state = await readState(paths);
   const task = getTaskState(state, taskId);
-  if (task.status !== 'RUNNING' || task.phase !== 'FINALIZING') {
+  const historicalFail = task.status === 'FAIL' && task.phase === null;
+  if (!historicalFail && (task.status !== 'RUNNING' || task.phase !== 'FINALIZING')) {
     throw new IncompleteWorkerOutputRecoveryError(
       `recovery de output incompleto exige RUNNING/FINALIZING, encontrada ${task.status}${
         task.phase === null ? '' : `/${task.phase}`
@@ -299,13 +424,21 @@ async function loadIncompleteSource(
     );
   }
   await assertCommonPreconditions(state, task, paths, taskId);
-  await assertNoIncompatibleRecords(paths, taskId, task.attempts);
+  await assertNoIncompatibleRecords(paths, taskId, task.attempts, historicalFail);
   const launch = await loadLaunch(paths, taskId, task);
+  const historicalFailure = historicalFail
+    ? await loadHistoricalFailure(paths, taskId, task, launch)
+    : null;
 
   const inbox = await readCurrentInboxArtifacts(paths, taskId);
   if (inbox.report !== null && inbox.handoff !== null) {
     throw new IncompleteWorkerOutputRecoveryError(
       'completion artifacts presentes; recovery de output incompleto recusado',
+    );
+  }
+  if (historicalFailure !== null && (inbox.report !== null || inbox.handoff !== null)) {
+    throw new IncompleteWorkerOutputRecoveryError(
+      'FAIL histórico com output parcial no inbox é ambíguo; recovery recusado',
     );
   }
 
@@ -315,7 +448,7 @@ async function loadIncompleteSource(
     if (existingBundle === null) {
       throw new IncompleteWorkerOutputRecoveryError('patch real ausente');
     }
-    return {
+    const result = {
       state,
       task,
       launch,
@@ -326,7 +459,9 @@ async function loadIncompleteSource(
         inbox.handoff !== null || (await exists(failedAttemptHandoffDraftPath(paths, taskId, task.attempts))),
       reportBytes: inbox.report,
       handoffBytes: inbox.handoff,
+      historicalFailure,
     };
+    return result;
   }
 
   const forbidden = files.filter(isForbiddenOrchestratedPath).sort();
@@ -337,6 +472,23 @@ async function loadIncompleteSource(
   }
   for (const file of files) assertRepoRelativePath(file);
   const fingerprint = await patchFingerprint(paths.repoRoot);
+  if (historicalFailure !== null) {
+    const completion = CompletionRecord.parse(
+      JSON.parse(historicalFailure.completionBytes.toString('utf8')),
+    );
+    const binding = RevalidationSourceBinding.parse(
+      JSON.parse(await readFile(sourceBindingPath(paths, taskId, task.attempts), 'utf8')),
+    );
+    if (
+      canonicalJson(completion.orchestrator_evidence.changed_files) !== canonicalJson(files) ||
+      canonicalJson(binding.changed_files) !== canonicalJson(files) ||
+      binding.derived_patch_fingerprint !== fingerprint
+    ) {
+      throw new IncompleteWorkerOutputRecoveryError(
+        'patch corrente diverge do completion/binding do FAIL histórico',
+      );
+    }
+  }
   if (existingBundle !== null && existingBundle.patch_fingerprint !== fingerprint) {
     throw new IncompleteWorkerOutputRecoveryError(
       'bundle preservado diverge do patch atual — a solução arquivada não é esta',
@@ -361,6 +513,7 @@ async function loadIncompleteSource(
     handoffPresent: inbox.handoff !== null,
     reportBytes: inbox.report,
     handoffBytes: inbox.handoff,
+    historicalFailure,
   };
 }
 
@@ -368,6 +521,7 @@ async function archiveLogEvidence(
   paths: HarnessPaths,
   taskId: string,
   attempt: number,
+  source: IncompleteSource,
 ): Promise<ArchivedEvidenceFile[]> {
   const archived: ArchivedEvidenceFile[] = [];
   for (const entry of LOG_EVIDENCE) {
@@ -396,6 +550,21 @@ async function archiveLogEvidence(
       source_path: relativeToDev(paths, source),
       sha256: sha256Hex(bytes),
       size_bytes: bytes.byteLength,
+    });
+  }
+  if (source.historicalFailure !== null) {
+    const destination = infraAttemptEvidencePath(
+      paths,
+      taskId,
+      attempt,
+      'completion.misclassified.json',
+    );
+    await writeFileOnce(destination, source.historicalFailure.completionBytes);
+    archived.push({
+      path: relativeToDev(paths, destination),
+      source_path: relativeToDev(paths, completionPath(paths, taskId)),
+      sha256: source.historicalFailure.completionSha256,
+      size_bytes: source.historicalFailure.completionBytes.byteLength,
     });
   }
   return archived;
@@ -466,6 +635,13 @@ async function evidencePathsFor(
   if (presence.handoffPresent || (await exists(failedAttemptHandoffDraftPath(paths, taskId, attempt)))) {
     listed.push(relativeToDev(paths, failedAttemptHandoffDraftPath(paths, taskId, attempt)));
   }
+  const historicalCompletion = infraAttemptEvidencePath(
+    paths,
+    taskId,
+    attempt,
+    'completion.misclassified.json',
+  );
+  if (await exists(historicalCompletion)) listed.push(relativeToDev(paths, historicalCompletion));
   return listed;
 }
 
@@ -485,7 +661,8 @@ function buildRecord(
     attempt: source.task.attempts,
     base_sha: source.task.base_sha as string,
     process: source.task.process,
-    launch_classification: classifyLaunch(source.launch),
+    launch_classification:
+      source.historicalFailure === null ? classifyLaunch(source.launch) : 'INFRA_ERROR',
     exit_code: source.launch.exit_code,
     started_at: source.launch.started_at,
     finished_at: source.launch.finished_at,
@@ -496,6 +673,13 @@ function buildRecord(
     head_sha: head,
     report_present: false,
     handoff_present: false,
+    ...(source.historicalFailure === null
+      ? {}
+      : {
+          provider_failure: source.historicalFailure.providerFailure,
+          provider_failure_source: source.historicalFailure.providerFailureSource,
+          misclassified_completion_sha256: source.historicalFailure.completionSha256,
+        }),
     abandoned_at: abandonedAt,
   });
 }
@@ -508,7 +692,12 @@ async function reopenTask(
   const state = await readState(paths);
   const task = getTaskState(state, record.task_id);
   if (task.status === 'READY') return state;
-  if (task.status !== 'RUNNING' || task.phase !== 'FINALIZING') {
+  if (
+    !(
+      (task.status === 'RUNNING' && task.phase === 'FINALIZING') ||
+      (task.status === 'FAIL' && task.phase === null)
+    )
+  ) {
     throw new IncompleteWorkerOutputRecoveryError(`tarefa mudou para ${task.status} durante recovery`);
   }
   const reportNote = source.reportPresent ? 'presente' : 'ausente';
@@ -527,6 +716,29 @@ async function reopenTask(
   });
   await writeState(paths, next);
   return readState(paths);
+}
+
+async function releaseHistoricalCompletion(
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+  record: AttemptAbandonmentRecordType,
+): Promise<void> {
+  const expected = record.misclassified_completion_sha256;
+  if (expected === undefined) return;
+  const archived = await readFile(
+    infraAttemptEvidencePath(paths, taskId, attempt, 'completion.misclassified.json'),
+  );
+  if (sha256Hex(archived) !== expected) {
+    throw new IncompleteWorkerOutputRecoveryError('completion histórico arquivado diverge do record');
+  }
+  const current = await readIfPresent(completionPath(paths, taskId));
+  if (current !== null && sha256Hex(current) !== expected) {
+    throw new IncompleteWorkerOutputRecoveryError(
+      'CompletionRecord corrente diverge do histórico arquivado',
+    );
+  }
+  await rm(completionPath(paths, taskId), { force: true });
 }
 
 async function resetAndSeal(
@@ -583,11 +795,13 @@ async function resetAndSeal(
     await writeJsonOnce(attemptAbandonmentPath(paths, record.task_id, record.attempt), record);
   }
   await input.afterRecordWritten?.(record);
+  const state = await reopenTask(paths, record, source);
+  await releaseHistoricalCompletion(paths, record.task_id, record.attempt, record);
   return {
     record,
     restored,
     removed,
-    state: await reopenTask(paths, record, source),
+    state,
   };
 }
 
@@ -614,6 +828,7 @@ export async function recoverIncompleteWorkerOutput(
     if (!(await isWorkingTreeClean(input.paths.repoRoot))) {
       throw new IncompleteWorkerOutputRecoveryError('tarefa READY recuperada exige working tree limpa');
     }
+    await releaseHistoricalCompletion(input.paths, input.taskId, existing.attempt, existing);
     const manifest = await readPreservedBundleManifest(input.paths, input.taskId, existing.attempt);
     if (manifest === null) {
       throw new IncompleteWorkerOutputRecoveryError('bundle preservado ausente na retomada READY');
@@ -670,7 +885,7 @@ export async function recoverIncompleteWorkerOutput(
   }
   await input.afterPatchPreserved?.();
 
-  await archiveLogEvidence(input.paths, input.taskId, source.task.attempts);
+  await archiveLogEvidence(input.paths, input.taskId, source.task.attempts, source);
   await archivePartialInbox(input.paths, input.taskId, source.task.attempts, source);
   await input.afterEvidencePreserved?.();
   await releasePartialInbox(input.paths, input.taskId, source.task.attempts, source);

@@ -4,7 +4,9 @@
 
 **Status:** EM ANDAMENTO
 
-**Branch unica:** `fix/semi-imperium-live-control-plane-recovery`
+**Branch inicial da recuperacao:** `fix/semi-imperium-live-control-plane-recovery`
+
+**Branch ativa:** `fix/additional-repair-authorization-one-shot`
 
 **Baseline Agent Lab:** `852a81cb67e8c4935c6b25847b6d8937aa1350b7`
 
@@ -29,8 +31,9 @@ control plane que nao possa ser tomada com seguranca nesta autorizacao.
   manualmente seus records, state ou autorizacao.
 - [x] Nao modificar manualmente o Grimperium; apenas workers do Agent Lab podem
   implementar ou reparar o target.
-- [x] Preservar a autorizacao historica Claude/Codex subscription-only; nao
-  adicionar OpenCode, OpenRouter, billing API ou novo provider.
+- [x] Preservar a autorizacao historica Claude/Codex subscription-only no
+  snapshot `lab/authorization.yaml`; expansao OpenCode Go so via grant
+  append-only depois de exaustao fresca, sem OpenRouter nem billing API.
 - [x] Preservar quota observada de forma fresca por atividade; UNKNOWN continua
   distinto de zero e de EXHAUSTED.
 - [x] Preservar provas read-only antes e depois da resolucao efetiva do argv.
@@ -108,6 +111,9 @@ control plane que nao possa ser tomada com seguranca nesta autorizacao.
 | 2 | Crest RUNNING/FINALIZING; candidate be5ff5a | REVIEWED | HUMAN_REQUIRED com REVIEW_REPAIRABLE, exit 9 | Reviewer Claude read-only revisou o candidate; implementer nao foi relancado | Novo resume deve consumir o REJECT duravel e abrir bounded repair |
 | 3 | Crest RUNNING/FINALIZING; REJECT IMPLEMENTATION_DEFECT duravel | PLAN_READY | RetryFailedAttemptError, exit 1 | Nenhum provider/target novo | Corrigir compatibilidade do archive com finalization legado de provenance parcial |
 | 5 | Crest RUNNING/FINALIZING attempt 2; candidate c3cd117 | REVIEWED | HUMAN_REQUIRED REVIEW_INVOCATION_FAILED exit 1, stdout descartado | Reviewer Claude opus invocado; exit 1 em 6s; stderr vazio | Preservar stdout/stderr da invocacao falha |
+| 6 | Crest FAIL attempt 3; grant one-shot consumido | WORKER_RUNNING | Claude `json` encerrou com `is_error=true`, `terminal_reason=api_error`, HTTP 429; launcher gravou `provider_failure=null`; validation exit 4 porque o teste nao existia | Worker deixou patch parcial sem report/handoff; HEAD permaneceu 5070358 | Corrigir leitura de falha terminal no transporte `json`, validar e recuperar pelo lifecycle oficial |
+| 7 | Crest RUNNING attempt 4; candidate eb6fe21 no HEAD do target | REVIEWED | HUMAN_REQUIRED REVIEW_VERDICT_NOT_PARSEABLE, exit 9 | Reviewer Claude sonnet5 stream emitiu ACCEPT com coverage completa mas SEM o campo `reason` | Relancar a review em contexto fresco antes de tocar no Lab |
+| 8 | Crest RUNNING attempt 4; mesmo candidate eb6fe21 | ACCEPTED | HUMAN_REQUIRED launch-authorization, exit 9 | Reviewer repetiu em contexto fresco e ACEITOU com reason; crest fechou em PASS | Decisao humana sobre o risco critico de mopac_minimum_workflow |
 
 ## Incidente 2 — archive de review repair com provenance parcial legado
 
@@ -144,15 +150,113 @@ control plane que nao possa ser tomada com seguranca nesta autorizacao.
 - [x] Persistencia append-only reusa o record de invocacao indisponivel.
 - [x] HUMAN_REQUIRED referencia somente paths reais; secrets redigidos.
 
+## Incidente 5 — falha terminal Claude em `json` passa como FINISHED
+
+- [x] Auditar state, LaunchRecord, stdout/stderr, completion, validation logs,
+  grant consumido e working tree do attempt 3.
+- [x] Provar a causa exata do pytest exit 4: arquivo
+  `tests/unit/semi_imperium/test_conformer_selection.py` ausente, sem mudanca de
+  config/layout do pytest.
+- [x] Provar a falha primaria do provider no envelope preservado:
+  `is_error=true`, `terminal_reason=api_error`, `api_error_status=429` e limite
+  de sessao, sem report/handoff.
+- [x] RED no launcher de producao com profile Claude `--output-format json` e
+  envelope terminal valido.
+- [x] Isolar o stdout vazio das fixtures: o mesmo `node` direto produz o stream,
+  mas `child_process.spawn` aninhado no sandbox retorna exit 0 com zero bytes;
+  tratar como bloqueio ambiental e validar esta regressao fora da restricao.
+- [x] Ler o objeto unico `json` com o mesmo `providerTerminalFailure` usado pelo
+  transporte `stream-json`, sem adivinhar por texto de erro.
+- [x] Provar que falha terminal `json` vira `INFRA_ERROR`, entra no LaunchRecord
+  e impede validacao de patch incompleto em attempts futuros.
+- [x] Rodar testes focados e gates do Agent Lab: regressao 1/1, arquivo focado
+  49/49, `pnpm typecheck`, `pnpm build`, `git diff --check` e suite completa
+  175 arquivos/2507 testes; registrar a licao ambiental.
+- [ ] Commitar a correcao do Agent Lab antes de retomar o runtime.
+- [ ] Emitir novo grant one-shot com provenance desta autorizacao continuada e
+  retomar o mesmo runtime sem edicao manual do target.
+
+## Incidente 6 — recovery truthful do FAIL historico causado pelo provider
+
+- [x] Provar que `authorize-repair` recusa sem mutacao enquanto o attempt 3
+  ainda nao e um `AUTOMATIC_REPAIR_EXHAUSTED` arquivado (`NOT_APPLICABLE`).
+- [x] Provar que `resume` pararia em FAIL e que `dev-retry-failed` atribuiria
+  capability/validation a um attempt cujo envelope terminal declara 429 e cujo
+  report/handoff nunca existiu.
+- [x] RED: recovery de output incompleto aceita somente FAIL historico com
+  completion sem report, provider failure tipada derivada do transporte `json`
+  e patch byte-identico ao binding; casos ambiguos continuam fail-closed.
+- [x] Preservar append-only completion, patch, LaunchRecord e stdout/stderr;
+  liberar o slot corrente e resetar somente os paths selados antes de READY.
+- [x] Registrar provider failure e provenance no AttemptAbandonmentRecord sem
+  criar capability fail nem official-validation fail.
+- [x] Rodar gates focados e completos: 14/14 recovery, 115/115 recovery/infra,
+  64/64 policy/lifecycle, typecheck, build e suite 175 arquivos/2510 testes.
+- [x] Commitar, executar a primitive oficial,
+  emitir grant somente se o novo estado realmente exigir e retomar o runtime.
+
+## Incidente — review pinada em pool EXHAUSTED / expansao OpenCode Go
+
+- [x] Worker attempt 4: turn.failed por quota Codex; orquestrador commitou
+  `eb6fe21`, validou 31/31 e parou em REVIEW_LAUNCH_HUMAN_REQUIRED.
+- [x] Observacao fresca: Codex EXHAUSTED; Claude five_hour remaining 0;
+  OpenCode Go KNOWN com folga.
+- [x] RED: remaining 0 vira EXHAUSTED; reviewer pinado EXHAUSTED rerroteia;
+  grant append-only nao edita o snapshot e recusa OpenRouter/openai.
+- [x] Grant oficial no runtime canonico; resume 8 fechou crest em PASS.
+
 ## Auditoria terminal
 
 - [ ] Provar cada uma das sete tasks com estado, attempts, profile/model,
   validation, review, repair/escalation e accepted commit.
-- [ ] Provar recuperacao do candidate Crest sem relaunch incorreto.
+- [x] Provar recuperacao do candidate Crest sem relaunch incorreto.
 - [ ] Provar fresh quota e ausencia de autorizacao/billing ampliados.
 - [ ] Se `ALL_DONE`, executar somente a suite canonica final do target,
   read-only quanto a reparos manuais.
-- [ ] Rodar todos os gates finais do Agent Lab e registrar contagens/exits.
-- [ ] Confirmar arvores, HEADs e ausencia de edicao externa do target.
-- [ ] Push da branch, abrir uma PR, confirmar `NOT MERGED`.
+- [x] Gates finais em `fix/additional-repair-authorization-one-shot`:
+  `pnpm typecheck` exit 0; `pnpm build` exit 0; `git diff --check` exit 0;
+  `pnpm test` 177 arquivos e 2522/2522 testes, exit 0.
+- [x] Target limpo em `eb6fe21`, quatro commits de work unit, nenhuma edicao
+  externa: todo commit veio do lifecycle.
+- [x] Push da branch e uma PR de recuperacao, confirmada `NOT MERGED`.
 - [ ] Entregar relatorio requisito a requisito e verdict terminal exato.
+
+## Estado terminal desta sessao de recuperacao
+
+- Verdict: **HUMAN_REQUIRED genuino** — `project:mopac_minimum_workflow:launch-authorization`,
+  motivo `risco critico ou security-sensitive`, exit 9.
+- 4/7 work units em PASS: `semiimperium_foundation`, `semiimperium_domain_persistence`,
+  `molecule_resolution_validation` e `crest_selection_workflow` (attempt 4,
+  accepted commit `eb6fe21`).
+- Nao e defeito: o planner declarou `risk: critical` somente para
+  `mopac_minimum_workflow` — as outras seis work units sao `high`. A
+  classificacao do planner e autoritativa sobre o default do
+  `authorization.yaml` (`work_units.default.risk: low`, overrides vazios), e
+  `authorizeProjectLaunch` recusa `critical` por desenho
+  (`dev/lib/project-orchestrate.ts:278`). Nenhum provider foi lancado.
+- `mopac_minimum_workflow` bloqueia por dependencia as duas ultimas work units,
+  entao a run inteira depende dessa decisao.
+- Falso alarme descartado: o `REVIEW_VERDICT_NOT_PARSEABLE` do resume 7 era o
+  reviewer omitindo `reason` num ACCEPT bem formado, nao defeito do prompt. O
+  resume 8 relancou a review em contexto fresco e obteve um ACCEPT valido com
+  `reason` — nenhuma correcao no Lab foi necessaria.
+- Decisao humana pendente, com as opcoes que o proprio gate emitiu: ampliar
+  `autonomous_execution_boundary` explicitamente, reduzir o risco declarado da
+  work unit, ou executar a acao manualmente.
+
+## Lacuna estrutural — nao existe grant para risco critical
+
+Verificado em `dev/cli/lab.ts`: o lifecycle expoe exatamente dois primitives de
+autorizacao humana — `authorize-provider-expansion` (linha 113) e
+`authorize-repair` (linha 128). Nenhum autoriza o launch de uma work unit
+classificada `critical` pelo planner.
+
+Consequencia: `mopac_minimum_workflow` nao tem caminho nativo de desbloqueio. As
+tres opcoes que o proprio gate emitiu exigem, todas, acao fora do lifecycle —
+editar `authorization.yaml`, editar o plano gerado, ou implementar a work unit
+manualmente no target.
+
+Isto e stop (D), decisao de produto/arquitetura, nao um defeito a corrigir aqui:
+criar um terceiro grant simetrico aos existentes decidiria que risco `critical`
+e destravavel por CLI, e essa e exatamente a fronteira de autonomia que o gate
+existe para proteger. Fica registrado para decisao humana, nao implementado.

@@ -5,7 +5,62 @@ Regra, não narrativa: cada entrada termina numa restrição aplicável.
 
 ---
 
-[2026-08-28] Context: reviewer devolveu saída não parseável (e depois exit 1)
+[2026-08-28] Context: reviewer OpenCode Go flash lançado após Codex/Claude
+EXHAUSTED retornou UnknownError/server error em ~13s; o loop seguinte tentou
+os outros cinco profiles Go e todos devolveram o mesmo UnknownError.
+Mistake: tratar o HUMAN_REQUIRED de invocação como se ainda houvesse reviewer
+elegível, ou relançar a run na esperança de o mesmo pool se recuperar.
+Rule: falha de invocação INFRA exclui o profile (não o pool) e tenta o próximo
+já autorizado na mesma decisão; o mesmo profile não é relançado neste attempt;
+quando todos os reviewers restantes da policy falham com o mesmo erro de
+servidor do provider, pare — é INFRA de plataforma, não decisão de produto.
+
+---
+
+[2026-08-28] Context: candidate Crest já commitado e validado, review pinada
+no Codex cujo pool fresco estava EXHAUSTED; Claude five_hour remaining 0
+ainda era KNOWN.
+Mistake: tratar remaining 0 como folga baixa e deixar o reviewer pinado
+bloquear a run mesmo com outro pool autorizado (ou autorizável) disponível.
+Rule: remaining_percent=0 numa janela viva é EXHAUSTED, não UNKNOWN nem
+folga baixa; reviewer pinado EXHAUSTED rerroteia dentro da policy; expansão
+OpenCode Go subscription-only é grant append-only, nunca edição do snapshot.
+
+---
+
+[2026-08-28] Context: tentativa de autorizar novo repair depois de um worker
+encerrar por erro terminal do provider, mas o launcher antigo fechar o patch
+parcial como FAIL de validation.
+Mistake: pedir o grant antes de arquivar o attempt pela classificacao factual;
+o lifecycle respondeu NOT_APPLICABLE porque grants so existem diante de
+AUTOMATIC_REPAIR_EXHAUSTED.
+Rule: derive primeiro a classe do attempt da evidencia tipada e use a primitive
+capability-neutral correspondente; nunca converta provider/output incompleto em
+capability fail apenas para tornar um grant elegivel.
+
+---
+
+[2026-08-28] Context: regressao de launcher exercitada por fixture curta que
+gera stdout em um subprocesso Node aninhado.
+Mistake: interpretar stdout vazio no sandbox restrito como defeito do pipe do
+launcher, embora o mesmo fixture direto emitisse JSON e um `spawn` minimo
+tambem perdesse todos os bytes somente naquele ambiente.
+Rule: antes de alterar captura de processo por stdout vazio em teste, reproduza
+com um `child_process.spawn` minimo e rerode o gate fora da restricao; falha
+ambiental de subprocesso nao autoriza mudar o lifecycle de producao.
+
+---
+
+[2026-08-28] Context: HUMAN_REQUIRED por AUTOMATIC_REPAIR_EXHAUSTED após dois
+REJECT de review, com autorização humana explícita para um repair adicional.
+Mistake: o Lab pedia decisão humana mas não tinha primitive oficial para
+consumir uma resposta afirmativa sem editar state/runtime à mão; `dev-retry-failed`
+não se aplica a task já READY com os attempts arquivados.
+Rule: AUTOMATIC_REPAIR_EXHAUSTED só libera um novo attempt via concessão
+humana one-shot, append-only, scoped por runtime+task, consumida no launch;
+nunca altere retry_budget global nem reutilize a mesma concessão.
+
+---
 na run Semi-Imperium.
 Mistake: HUMAN_REQUIRED apontou para review.json que nunca foi escrito e o
 stdout/stderr da invocação foi descartado — inclusive quando o processo saía

@@ -10,6 +10,7 @@ import {
   claudeOutputFormat,
   providerTerminalFailure,
   rateLimitWindowDeltas,
+  readClaudeJsonResult,
   readClaudeStream,
   streamContractViolation,
   usesClaudeStreamJson,
@@ -128,7 +129,18 @@ function streamFixtureProfile(scenario: string): LauncherProfile {
   };
 }
 
-async function launchStream(scenario: string) {
+function jsonFixtureProfile(): LauncherProfile {
+  const stream = streamFixtureProfile('json-api-error');
+  return {
+    ...stream,
+    id: 'claude-json-fixture-v1',
+    argv: stream.argv
+      .filter((token) => token !== '--verbose')
+      .map((token) => (token === 'stream-json' ? 'json' : token)),
+  };
+}
+
+async function launchProfile(profile: LauncherProfile) {
   const packet = buildTaskPacket({
     task: loaded.byId.get('T1')!,
     baseSha: await headSha(paths.repoRoot),
@@ -137,13 +149,17 @@ async function launchStream(scenario: string) {
   await writePacket(paths, packet);
   return launchWorker({
     paths,
-    profile: streamFixtureProfile(scenario),
+    profile,
     packet,
     credentialRunner: subscriptionRunner,
     // Perfil Claude de assinatura mede quota; aqui o /usage entra falso, para
     // que estes testes continuem sem chamar CLI nenhuma.
     usageRunner: usageRunner(),
   });
+}
+
+function launchStream(scenario: string) {
+  return launchProfile(streamFixtureProfile(scenario));
 }
 
 /** `/usage` FALSO: probe local, sem inferência, com os dois cabeçalhos. */
@@ -187,6 +203,16 @@ describe('formato de saída declarado no argv', () => {
     expect(usesClaudeStreamJson('claude', argv)).toBe(true);
     expect(usesClaudeStreamJson('codex', argv)).toBe(false);
     expect(usesClaudeStreamJson('claude', ['claude', '--output-format', 'json'])).toBe(false);
+  });
+
+  it('lê somente um objeto válido do transporte json', () => {
+    expect(readClaudeJsonResult('{"type":"result","is_error":true}')).toMatchObject({
+      type: 'result',
+      is_error: true,
+    });
+    expect(readClaudeJsonResult('')).toBeNull();
+    expect(readClaudeJsonResult('[]')).toBeNull();
+    expect(readClaudeJsonResult('{invalido')).toBeNull();
   });
 });
 
@@ -756,6 +782,19 @@ describe('precedência dos diagnósticos de término', () => {
 });
 
 describe('launchWorker com falha terminal do provider', () => {
+  it('attempt 3 real — api_error no objeto único json vira INFRA_ERROR', async () => {
+    const outcome = await launchProfile(jsonFixtureProfile());
+
+    expect(outcome.classification).toBe('INFRA_ERROR');
+    expect(outcome.record.provider_failure).toMatchObject({
+      is_error: true,
+      terminal_reason: 'api_error',
+      api_error_status: 429,
+      num_turns: 75,
+    });
+    expect(outcome.reason).toMatch(/session limit/);
+  });
+
   it('B/C/D — api_error vira INFRA_ERROR e não pede AgentCompletionReport', async () => {
     const outcome = await launchStream('api-error');
 

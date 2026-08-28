@@ -125,6 +125,95 @@ async function setup(): Promise<Fixture> {
   return { sandbox, paths, baseSha, files: [...PATCH_FILES] };
 }
 
+async function closeAsHistoricalJsonProviderFail(fixture: Fixture): Promise<void> {
+  const launch = await records.readLaunchRecord(fixture.paths, TASK);
+  if (launch === null) throw new Error('LaunchRecord ausente no fixture');
+  const providerResult = {
+    type: 'result',
+    subtype: 'error',
+    is_error: true,
+    terminal_reason: 'api_error',
+    api_error_status: 429,
+    result: "You've hit your session limit",
+    num_turns: 75,
+  };
+  await writeFile(
+    records.launchRecordPath(fixture.paths, TASK),
+    `${JSON.stringify({
+      ...launch,
+      argv: ['claude', '--print', '--output-format', 'json'],
+      exit_code: 1,
+    })}\n`,
+  );
+  await writeFile(
+    path.join(fixture.paths.logsDir, `${TASK}.stdout.log`),
+    `${JSON.stringify(providerResult)}\n`,
+  );
+
+  const state = await readState(fixture.paths);
+  const task = getTaskState(state, TASK);
+  const fingerprint = await patchFingerprint(fixture.sandbox.root);
+  const completion = {
+    schema_version: 1,
+    task_id: TASK,
+    status: 'FAIL',
+    report: null,
+    orchestrator_evidence: {
+      task_id: TASK,
+      base_sha: fixture.baseSha,
+      candidate_commit: null,
+      accepted_commit: null,
+      changed_files: [...PATCH_FILES],
+      working_tree_clean: false,
+      process: task.process,
+      duration_ms: 10,
+      exit_code: 1,
+      timed_out: false,
+      revalidation: [{ argv: ['pytest', 'missing.py'], exit_code: 4, timed_out: false, duration_ms: 1 }],
+      observed_at: NOW,
+    },
+    report_matches_evidence: false,
+    discrepancies: ['AgentCompletionReport ausente', 'HandoffDraft ausente'],
+    finalization_mode: 'normal',
+    protocol_artifact_bytes: {
+      task_packet_bytes: 1,
+      handoff_draft_bytes: null,
+      advisory_task_packet_threshold_bytes: 12288,
+      advisory_handoff_draft_threshold_bytes: 4096,
+      advisory_threshold_exceeded: false,
+    },
+    closed_at: NOW,
+  };
+  const completionBytes = Buffer.from(`${JSON.stringify(completion)}\n`);
+  await writeFile(records.completionPath(fixture.paths, TASK), completionBytes);
+  const bindingFile = records.sourceBindingPath(fixture.paths, TASK, 2);
+  await mkdir(path.dirname(bindingFile), { recursive: true });
+  await writeFile(
+    bindingFile,
+    `${JSON.stringify({
+      schema_version: 1,
+      task_id: TASK,
+      attempt: 2,
+      source_base_sha: fixture.baseSha,
+      original_completion_path: 'original-completion.fail.json',
+      original_completion_sha256: digest(completionBytes),
+      changed_files: [...PATCH_FILES],
+      derived_patch_fingerprint: fingerprint,
+      fingerprint_observed_at: NOW,
+      fingerprint_provenance: 'derived_at_official_validation_failure',
+    })}\n`,
+  );
+  await writeState(
+    fixture.paths,
+    withTaskState(state, TASK, {
+      status: 'FAIL',
+      phase: null,
+      diagnostics: 'validation oficial falhou depois de provider api_error',
+      finished_at: NOW,
+    }),
+  );
+}
+
 async function recover(fixture: Fixture, overrides: Record<string, unknown> = {}) {
   return recoverIncompleteWorkerOutput({
     paths: fixture.paths,
@@ -149,6 +238,58 @@ async function expectNoWriteRefusal(fixture: Fixture, pattern: RegExp): Promise<
 }
 
 describe('recoverIncompleteWorkerOutput', () => {
+  it('recupera FAIL historico com provider 429 json sem fabricar capability fail', async () => {
+    const fixture = await setup();
+    await closeAsHistoricalJsonProviderFail(fixture);
+
+    const result = await recover(fixture);
+
+    expect(result.record).toMatchObject({
+      launch_classification: 'INFRA_ERROR',
+      provider_failure_source: 'stdout_json',
+      provider_failure: {
+        terminal_reason: 'api_error',
+        api_error_status: 429,
+      },
+    });
+    expect(result.capability_fail_recorded).toBe(false);
+    expect(result.official_validation_fail_recorded).toBe(false);
+    expect(getTaskState(await readState(fixture.paths), TASK).status).toBe('READY');
+    expect(await workingTreeFiles(fixture.sandbox.root)).toEqual([]);
+    expect(await exists(records.completionPath(fixture.paths, TASK))).toBe(false);
+    expect(
+      await exists(
+        records.infraAttemptEvidencePath(
+          fixture.paths,
+          TASK,
+          2,
+          'completion.misclassified.json',
+        ),
+      ),
+    ).toBe(true);
+    expect(await records.readValidationFailedAttempt(fixture.paths, TASK, 2)).toBeNull();
+    expect(await records.readInfraFailedAttempt(fixture.paths, TASK, 2)).toBeNull();
+  });
+
+  it('recusa FAIL historico quando o json não prova erro terminal do provider', async () => {
+    const fixture = await setup();
+    await closeAsHistoricalJsonProviderFail(fixture);
+    await writeFile(
+      path.join(fixture.paths.logsDir, `${TASK}.stdout.log`),
+      `${JSON.stringify({ type: 'result', is_error: false, result: 'ok' })}\n`,
+    );
+
+    await expectNoWriteRefusal(fixture, /não contém falha terminal tipada do provider/i);
+  });
+
+  it('recusa FAIL historico quando o patch diverge do binding selado', async () => {
+    const fixture = await setup();
+    await closeAsHistoricalJsonProviderFail(fixture);
+    await write(fixture.sandbox.root, 'src/note.ts', 'patch adulterado\n');
+
+    await expectNoWriteRefusal(fixture, /patch corrente diverge.*binding/i);
+  });
+
   it('preserva patch e logs de processo morto sem report/handoff e reabre READY', async () => {
     const fixture = await setup();
     const fingerprint = await patchFingerprint(fixture.sandbox.root);

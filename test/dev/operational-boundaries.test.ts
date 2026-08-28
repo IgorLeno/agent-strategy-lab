@@ -41,6 +41,7 @@ import { operationalAttemptPath } from '../../dev/lib/operational-attempt.js';
 
 
 const PROFILE = 'fake-orchestrator-boundaries-v1';
+const PROFILE_ALT = 'fake-reviewer-alt-v1';
 
 /** Autorização mínima: fake worker, sem billing, sem review independente. */
 const AUTHORIZATION = [
@@ -115,33 +116,46 @@ interface Fixture {
   readonly baseline: string;
 }
 
-async function setup(options: { gitignore?: string } = {}): Promise<Fixture> {
+function fakeProfileYaml(id: string): string {
+  return [
+    `id: ${id}`,
+    'agent: fake',
+    'commit_owner: orchestrator',
+    'official_validation_owner: orchestrator',
+    'worker_validation_policy: targeted',
+    'argv: [node, fixtures/fake-worker.mjs]',
+    'prompt_delivery: argv',
+    'forbidden_flags: []',
+    'env_allowlist: [PATH, HOME, AGENTLAB_FAKE_MODE, AGENTLAB_FAKE_REVIEW]',
+    // `capabilityOf` e o router classificam MODELOS; um worker falso não tem
+    // modelo. Sem este double, o control plane não consegue rotear nada —
+    // nenhum provider real é envolvido por causa dele.
+    'test_double_of:',
+    '  agent: codex',
+    '  model: gpt-5.6-sol',
+    '  reasoning_effort: medium',
+    '  sandbox: workspace-write',
+  ].join('\n');
+}
+
+async function setup(
+  options: { gitignore?: string; extraProfileIds?: readonly string[] } = {},
+): Promise<Fixture> {
   const sandbox = await makeSandboxRepo(PLAN);
   roots.push(sandbox.root);
   const paths = resolveHarnessPaths(sandbox.root);
   await writeFile(
     path.join(sandbox.root, 'dev', 'profiles', `${PROFILE}.yaml`),
-    [
-      `id: ${PROFILE}`,
-      'agent: fake',
-      'commit_owner: orchestrator',
-      'official_validation_owner: orchestrator',
-      'worker_validation_policy: targeted',
-      'argv: [node, fixtures/fake-worker.mjs]',
-      'prompt_delivery: argv',
-      'forbidden_flags: []',
-      'env_allowlist: [PATH, HOME, AGENTLAB_FAKE_MODE, AGENTLAB_FAKE_REVIEW]',
-      // `capabilityOf` e o router classificam MODELOS; um worker falso não tem
-      // modelo. Sem este double, o control plane não consegue rotear nada —
-      // nenhum provider real é envolvido por causa dele.
-      'test_double_of:',
-      '  agent: codex',
-      '  model: gpt-5.6-sol',
-      '  reasoning_effort: medium',
-      '  sandbox: workspace-write',
-    ].join('\n'),
+    fakeProfileYaml(PROFILE),
     'utf8',
   );
+  for (const extraId of options.extraProfileIds ?? []) {
+    await writeFile(
+      path.join(sandbox.root, 'dev', 'profiles', `${extraId}.yaml`),
+      fakeProfileYaml(extraId),
+      'utf8',
+    );
+  }
   // Stack autoritativa: sem ela a materialização canônica é SKIPPED e o teste
   // de telemetria degradada não exercitaria nada.
   await writeFile(
@@ -469,6 +483,87 @@ describe('fronteiras operacionais — Onda 1', () => {
     expect(diagnostic.stdout).toContain('session limit reached');
     expect(diagnostic.stdout).not.toContain(leakedSecret);
     expect(diagnostic.stdout).toContain('[REDACTED:anthropic-api-key]');
+  }, 90_000);
+
+  it('INFRA do reviewer não é decisão humana: tenta o próximo profile da policy', async () => {
+    const fixture = await setup({ extraProfileIds: [PROFILE_ALT] });
+    const loaded = await loadPlan(fixture.paths.planFile);
+    const outside = await mkdtemp(path.join(os.tmpdir(), 'agentlab-review-infra-next-'));
+    roots.push(outside);
+    const authorizationFile = path.join(outside, 'agentlab-run.yaml');
+    await writeFile(
+      authorizationFile,
+      AUTHORIZATION.replace('risk: low', 'risk: high').replace(
+        `      rationale: degrau único declarado pela policy\n`,
+        [
+          '      rationale: degrau único declarado pela policy',
+          `    - id: ${PROFILE_ALT}`,
+          '      capability_rank: 2',
+          '      rationale: alternativa quando o primeiro reviewer falha por INFRA',
+          '',
+        ].join('\n'),
+      ),
+      'utf8',
+    );
+    const authorization = await loadProjectRunAuthorization(authorizationFile);
+    const launchedReviewers: string[] = [];
+    const controlPlane = await createProjectControlPlane({
+      paths: fixture.paths,
+      loaded,
+      authorization: authorization.file,
+      authorizationFile: authorization.source_file,
+      historyLabRoot: outside,
+      reviewerPort: {
+        async run(input) {
+          launchedReviewers.push(input.profile.id);
+          if (input.profile.id === PROFILE) {
+            throw new ProviderRoleInvocationError({
+              role: 'reviewer',
+              exitCode: 1,
+              stdout:
+                '{"type":"error","error":{"name":"UnknownError","data":{"message":"Unexpected server error"}}}',
+              stderr: '',
+            });
+          }
+          return JSON.stringify({
+            decision: 'ACCEPT',
+            reason: 'alternativa da policy concluiu a review depois do INFRA',
+            coverage: {
+              files: ['src/t1.txt'],
+              validations: [['test', '-f', 'src/t1.txt']],
+              behaviors: ['arquivo requerido existe'],
+              handoff_gaps: [],
+            },
+          });
+        },
+      },
+    });
+    const previousMode = process.env['AGENTLAB_FAKE_MODE'];
+    process.env['AGENTLAB_FAKE_MODE'] = 'orchestrator-success';
+    let result;
+    try {
+      result = await runOrchestrate({
+        paths: fixture.paths,
+        loaded,
+        profileId: PROFILE,
+        maxIterations: 1,
+        controlPlane,
+      });
+    } finally {
+      if (previousMode === undefined) delete process.env['AGENTLAB_FAKE_MODE'];
+      else process.env['AGENTLAB_FAKE_MODE'] = previousMode;
+    }
+
+    expect(result.stop.status, JSON.stringify(result.payload, null, 2)).toBe('ALL_DONE');
+    expect(launchedReviewers).toEqual([PROFILE, PROFILE_ALT]);
+    expect(await readCandidateReview(fixture.paths, 'T1', 1)).toMatchObject({
+      decision: 'ACCEPT',
+      reviewer_profile_id: PROFILE_ALT,
+    });
+    expect((await readState(fixture.paths)).tasks[0]).toMatchObject({
+      status: 'PASS',
+      attempts: 1,
+    });
   }, 90_000);
 
   it('implementation defect sem autoridade BOUNDED_REPAIR não arquiva nem relança', async () => {

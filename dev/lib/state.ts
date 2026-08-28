@@ -109,6 +109,8 @@ export async function ensureRuntimeDirs(paths: HarnessPaths): Promise<void> {
     paths.revalidationsDir,
     paths.reviewsDir,
     paths.failedAttemptsDir,
+    paths.additionalRepairAuthorizationsDir,
+    paths.providerExpansionAuthorizationsDir,
     paths.validationLogsDir,
     paths.plannedWorkAdoptionsDir,
   ]) {

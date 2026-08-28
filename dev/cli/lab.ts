@@ -14,6 +14,8 @@ import {
   runMain,
 } from '../lib/cli.js';
 import {
+  authorizeAdditionalRepairForRuntime,
+  authorizeProviderExpansionForRuntime,
   formatRunSummary,
   LabRunError,
   resumeHumanInstruction,
@@ -21,6 +23,8 @@ import {
 } from '../lib/lab.js';
 import { createLabUi } from '../lib/lab-ui.js';
 import { parseLabUiMode } from '../lib/lab-tui.js';
+import { AdditionalRepairAuthorizationError } from '../lib/automatic-repair.js';
+import { ProviderExpansionAuthorizationError } from '../lib/provider-expansion.js';
 import { PlanSetupError } from '../lib/run-plan.js';
 import { ProjectAuthorizationError } from '../lib/project-authorization.js';
 import { SelfMaintenanceError } from '../lib/lab-self.js';
@@ -69,8 +73,16 @@ function sharedFlags(args: ReturnType<typeof parseArgs>) {
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2), [...BOOLEAN_FLAGS]);
   const subcommand = args.positionals[0];
-  if (subcommand !== undefined && subcommand !== 'run' && subcommand !== 'resume') {
-    fail(`comando desconhecido: ${subcommand}. Use pnpm lab run | pnpm lab resume RUNTIME.`);
+  if (
+    subcommand !== undefined &&
+    subcommand !== 'run' &&
+    subcommand !== 'resume' &&
+    subcommand !== 'authorize-repair' &&
+    subcommand !== 'authorize-provider-expansion'
+  ) {
+    fail(
+      `comando desconhecido: ${subcommand}. Use pnpm lab run | pnpm lab resume RUNTIME | pnpm lab authorize-repair RUNTIME --task ID --reason TEXTO | pnpm lab authorize-provider-expansion RUNTIME --reason TEXTO.`,
+    );
   }
 
   const resumeFromSubcommand = subcommand === 'resume' ? args.positionals[1] : undefined;
@@ -98,6 +110,38 @@ async function main(): Promise<void> {
   };
 
   try {
+    if (subcommand === 'authorize-provider-expansion') {
+      const runtime = args.positionals[1];
+      if (runtime === undefined || runtime.length === 0) {
+        fail('pnpm lab authorize-provider-expansion exige o caminho do runtime.');
+      }
+      const reason = args.options.get('reason') ?? '';
+      const granted = await authorizeProviderExpansionForRuntime({
+        runtime_dir: runtime,
+        reason,
+      });
+      ui.finish();
+      emit({ status: 'GRANTED', ...granted });
+      return;
+    }
+
+    if (subcommand === 'authorize-repair') {
+      const runtime = args.positionals[1];
+      if (runtime === undefined || runtime.length === 0) {
+        fail('pnpm lab authorize-repair exige o caminho do runtime.');
+      }
+      const taskId = args.options.get('task') ?? '';
+      const reason = args.options.get('reason') ?? '';
+      const granted = await authorizeAdditionalRepairForRuntime({
+        runtime_dir: runtime,
+        task_id: taskId,
+        reason,
+      });
+      ui.finish();
+      emit({ status: 'GRANTED', ...granted });
+      return;
+    }
+
     if (subcommand === 'resume' || resumeFromFlag !== undefined) {
       if (resumeRuntime === undefined || resumeRuntime.length === 0) {
         fail('pnpm lab resume exige o caminho do runtime.');
@@ -160,6 +204,8 @@ async function main(): Promise<void> {
   } catch (error) {
     ui.finish();
     if (error instanceof LabRunError) fail(error.message);
+    if (error instanceof AdditionalRepairAuthorizationError) fail(error.message);
+    if (error instanceof ProviderExpansionAuthorizationError) fail(error.message);
     if (error instanceof RunDirectiveError) fail(error.message);
     if (error instanceof PlanSetupError) fail(error.message);
     if (error instanceof ProjectAuthorizationError) fail(error.message);
