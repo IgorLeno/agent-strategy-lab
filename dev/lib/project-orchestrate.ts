@@ -79,6 +79,7 @@ import {
   CandidateReviewCoverage,
   ReviewRejectionDisposition,
   type HandoffConfidenceLevel,
+  type ReviewParseFailureOutcome,
   type ReviewRejectionDisposition as ReviewRejectionDispositionType,
 } from './schemas.js';
 import {
@@ -857,6 +858,33 @@ export interface ProviderRoleInvocationPort {
   run(input: ProviderRoleInvocationInput): Promise<string>;
 }
 
+/**
+ * Falha do subprocesso do role COM os streams. Stdout de Claude/Codex em
+ * exit ≠ 0 costuma carregar o envelope de erro; descartá-lo deixa HUMAN_REQUIRED
+ * sem provenance para diagnosticar cota, sessão ou transporte.
+ */
+export class ProviderRoleInvocationError extends Error {
+  readonly role: ProjectWorkerRole;
+  readonly exitCode: number | null;
+  readonly stdout: string;
+  readonly stderr: string;
+
+  constructor(input: {
+    readonly role: ProjectWorkerRole;
+    readonly exitCode: number | null;
+    readonly stdout: string;
+    readonly stderr: string;
+  }) {
+    const detail = input.stderr.trim() || input.stdout.trim();
+    super(`${input.role} terminou com exit ${input.exitCode}: ${detail}`);
+    this.name = 'ProviderRoleInvocationError';
+    this.role = input.role;
+    this.exitCode = input.exitCode;
+    this.stdout = input.stdout;
+    this.stderr = input.stderr;
+  }
+}
+
 export interface LaunchedPlanningWorkerOptions {
   readonly paths: HarnessPaths;
   readonly profile: LauncherProfile;
@@ -1361,15 +1389,20 @@ export function createProviderRoleInvocationPort(): ProviderRoleInvocationPort {
         child.stderr?.on('data', (chunk: Buffer) => stderr.push(chunk));
         child.on('error', reject);
         child.on('close', (code) => {
+          const capturedStdout = Buffer.concat(stdout).toString('utf8');
+          const capturedStderr = Buffer.concat(stderr).toString('utf8');
           if (code !== 0) {
             reject(
-              new Error(
-                `${input.role} terminou com exit ${code}: ${Buffer.concat(stderr).toString('utf8').trim()}`,
-              ),
+              new ProviderRoleInvocationError({
+                role: input.role,
+                exitCode: code,
+                stdout: capturedStdout,
+                stderr: capturedStderr,
+              }),
             );
             return;
           }
-          resolve(Buffer.concat(stdout).toString('utf8'));
+          resolve(capturedStdout);
         });
         if (input.profile.prompt_delivery === 'stdin') child.stdin?.end(input.prompt, 'utf8');
       });
@@ -1642,10 +1675,33 @@ interface ProjectReviewVerdict<Outcome extends 'ACCEPT' | 'REJECT'> {
 export type ProjectReviewResult =
   | ProjectReviewVerdict<'ACCEPT'>
   | ProjectReviewVerdict<'REJECT'>
-  | { readonly outcome: 'REVIEW_UNAVAILABLE'; readonly code: string; readonly reason: string };
+  | {
+      readonly outcome: 'REVIEW_UNAVAILABLE';
+      readonly code: string;
+      readonly reason: string;
+      readonly evidence?: ProjectReviewUnavailableEvidence;
+    };
 
-function reviewUnavailable(code: string, reason: string): ProjectReviewResult {
-  return { outcome: 'REVIEW_UNAVAILABLE', code, reason };
+export type ReviewParseOutcome = ReviewParseFailureOutcome;
+
+/**
+ * Stdout (e stderr, se houver) da invocação que não produziu veredito.
+ * Quem persiste é o control plane: este adapter não inventa review.json.
+ */
+export interface ProjectReviewUnavailableEvidence {
+  readonly parse_outcome: ReviewParseOutcome;
+  readonly stdout: string;
+  readonly stderr: string | null;
+}
+
+function reviewUnavailable(
+  code: string,
+  reason: string,
+  evidence?: ProjectReviewUnavailableEvidence,
+): ProjectReviewResult {
+  return evidence === undefined
+    ? { outcome: 'REVIEW_UNAVAILABLE', code, reason }
+    : { outcome: 'REVIEW_UNAVAILABLE', code, reason, evidence };
 }
 
 /**
@@ -1735,9 +1791,18 @@ export async function launchProjectReviewer(
         timeoutSeconds: ceiling.seconds,
       });
     } catch (error) {
+      const evidence =
+        error instanceof ProviderRoleInvocationError
+          ? {
+              parse_outcome: 'INVOCATION_FAILED' as const,
+              stdout: error.stdout,
+              stderr: error.stderr,
+            }
+          : undefined;
       return reviewUnavailable(
         'REVIEW_INVOCATION_FAILED',
         error instanceof Error ? error.message : String(error),
+        evidence,
       );
     }
 
@@ -1746,15 +1811,34 @@ export async function launchProjectReviewer(
       argv,
       stdout,
     });
+    const invocationEvidence = (
+      parse_outcome: ReviewParseOutcome,
+    ): ProjectReviewUnavailableEvidence => ({
+      parse_outcome,
+      stdout,
+      stderr: null,
+    });
     switch (extracted.outcome) {
       case 'EXTRACTED':
         break;
       case 'PROVIDER_TERMINAL_FAILURE':
-        return reviewUnavailable('REVIEW_INVOCATION_FAILED', extracted.message);
+        return reviewUnavailable(
+          'REVIEW_INVOCATION_FAILED',
+          extracted.message,
+          invocationEvidence('PROVIDER_TERMINAL_FAILURE'),
+        );
       case 'TRANSPORT_MALFORMED':
-        return reviewUnavailable('REVIEW_INVOCATION_FAILED', extracted.message);
+        return reviewUnavailable(
+          'REVIEW_INVOCATION_FAILED',
+          extracted.message,
+          invocationEvidence('TRANSPORT_MALFORMED'),
+        );
       case 'NOT_PARSEABLE':
-        return reviewUnavailable('REVIEW_VERDICT_NOT_PARSEABLE', extracted.message);
+        return reviewUnavailable(
+          'REVIEW_VERDICT_NOT_PARSEABLE',
+          extracted.message,
+          invocationEvidence('NOT_PARSEABLE'),
+        );
       default: {
         const _exhaustive: never = extracted;
         return _exhaustive;
@@ -1777,18 +1861,21 @@ export async function launchProjectReviewer(
       return reviewUnavailable(
         'REVIEW_VERDICT_NOT_PARSEABLE',
         'saída do reviewer não contém um único JSON {"decision":"ACCEPT|REJECT","reason":"..."}',
+        invocationEvidence('STRUCTURAL'),
       );
     }
     if (decision === 'REJECT' && !rejectionDisposition.success) {
       return reviewUnavailable(
         'REVIEW_VERDICT_NOT_PARSEABLE',
         'REJECT exige rejection_disposition estruturada reconhecida',
+        invocationEvidence('STRUCTURAL'),
       );
     }
     if (decision === 'ACCEPT' && parsed?.rejection_disposition !== undefined) {
       return reviewUnavailable(
         'REVIEW_VERDICT_NOT_PARSEABLE',
         'ACCEPT não pode declarar rejection_disposition',
+        invocationEvidence('STRUCTURAL'),
       );
     }
 

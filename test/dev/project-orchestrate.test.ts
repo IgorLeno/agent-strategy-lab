@@ -11,12 +11,14 @@ import {
   buildPlannerPrompt,
   combineWorkflowAndReview,
   createLaunchedPlanningWorker,
+  createProviderRoleInvocationPort,
   launchProjectReviewer,
   planDirectLifecycle,
   planReviewerInvocation,
   recordComparableRunFacts,
   resolveFailureFollowUp,
   extractRoleModelJson,
+  ProviderRoleInvocationError,
   resolveRoleOverlayArgv,
   runDirectPath,
   runReviewedPath,
@@ -1581,6 +1583,28 @@ describe('G — reviewer não ganha autorização mais fraca que o implementer',
     expect(result).toMatchObject({
       outcome: 'REVIEW_UNAVAILABLE',
       code: 'REVIEW_VERDICT_NOT_PARSEABLE',
+    });
+  });
+
+  it('preserva stdout quando o processo do reviewer sai com código não-zero', async () => {
+    const leakedSecret = 'sk-ant-api03-FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE0123456789AA';
+    const stdout = `{"is_error":true,"result":"session limit ${leakedSecret}"}`;
+    const port = createProviderRoleInvocationPort();
+    await expect(
+      port.run({
+        role: 'reviewer',
+        profile: { prompt_delivery: 'argv' } as LauncherProfile,
+        argv: ['node', '-e', `process.stdout.write(${JSON.stringify(stdout)}); process.exit(1)`],
+        prompt: 'unused',
+        cwd: process.cwd(),
+        env: process.env,
+        timeoutSeconds: 15,
+      }),
+    ).rejects.toMatchObject({
+      name: 'ProviderRoleInvocationError',
+      exitCode: 1,
+      stdout,
+      stderr: '',
     });
   });
 });

@@ -1,6 +1,7 @@
 import { mkdir, readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { writeJsonAtomic, writeJsonOnce } from './atomic.js';
+import { sha256Hex } from './canonical.js';
 import type { HarnessPaths } from './paths.js';
 import {
   AgentCompletionReport,
@@ -17,6 +18,7 @@ import {
   PlannedWorkAdoptionRecord,
   PreservedChangeBundleManifest,
   ProtocolInvalidAttemptRecord,
+  ReviewParseFailureRecord,
   ReviewRejectedAttemptRecord,
   ReviewRejectionClassificationRecord,
   RevalidationCheckpoint,
@@ -157,6 +159,20 @@ export function candidateReviewPath(
   attempt: number,
 ): string {
   return path.join(paths.reviewsDir, taskId, `attempt-${attempt}`, 'review.json');
+}
+
+export function unparseableReviewEvidencePath(
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+  stdoutSha256: string,
+): string {
+  return path.join(
+    paths.reviewsDir,
+    taskId,
+    `attempt-${attempt}`,
+    `unparseable-invocation-${stdoutSha256}.json`,
+  );
 }
 
 export function reviewRejectionClassificationPath(
@@ -605,6 +621,21 @@ export const writeReviewRejectionClassification = (
     reviewRejectionClassificationPath(paths, record.task_id, record.attempt),
     ReviewRejectionClassificationRecord.parse(record),
   );
+
+export const writeReviewParseFailure = async (
+  paths: HarnessPaths,
+  record: ReviewParseFailureRecord,
+): Promise<string> => {
+  const parsed = ReviewParseFailureRecord.parse(record);
+  const file = unparseableReviewEvidencePath(
+    paths,
+    parsed.task_id,
+    parsed.attempt,
+    sha256Hex(parsed.stdout),
+  );
+  await writeJsonOnce(file, parsed);
+  return file;
+};
 
 export const readRevalidationSourceBinding = (
   paths: HarnessPaths,

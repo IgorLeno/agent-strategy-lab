@@ -6,7 +6,7 @@
  * (Augmented Chess, `foundation_app_scaffold`). O que eles provam é sempre a
  * mesma regra: A TECHNICAL PROBLEM IS NOT A HUMAN DECISION.
  */
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -34,6 +34,7 @@ import { commitAll, makeSandboxRepo, runDevCli, type Sandbox } from './helpers.j
 import { readFile } from 'node:fs/promises';
 import { loadProjectRunAuthorization } from '../../dev/lib/project-authorization.js';
 import { createProjectControlPlane } from '../../dev/lib/project-run.js';
+import { ProviderRoleInvocationError } from '../../dev/lib/project-orchestrate.js';
 import { runOrchestrate } from '../../dev/lib/orchestrate.js';
 import { operationalAttemptPath } from '../../dev/lib/operational-attempt.js';
 
@@ -296,6 +297,178 @@ describe('fronteiras operacionais — Onda 1', () => {
     const state = await readState(fixture.paths);
     expect(state.tasks[0]).toMatchObject({ status: 'RUNNING', phase: 'FINALIZING', attempts: 1 });
     expect(await headSha(fixture.sandbox.root)).not.toBe(fixture.baseline);
+  }, 90_000);
+
+  it('saída não parseável do reviewer persiste evidência real e não inventa review.json', async () => {
+    const fixture = await setup();
+    const loaded = await loadPlan(fixture.paths.planFile);
+    const outside = await mkdtemp(path.join(os.tmpdir(), 'agentlab-review-unparseable-'));
+    roots.push(outside);
+    const authorizationFile = path.join(outside, 'agentlab-run.yaml');
+    await writeFile(authorizationFile, AUTHORIZATION.replace('risk: low', 'risk: high'), 'utf8');
+    const authorization = await loadProjectRunAuthorization(authorizationFile);
+    const leakedSecret = 'sk-ant-api03-FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE0123456789AA';
+    const unparseableStdout =
+      `reviewer prose without a verdict object; leaked=${leakedSecret}\n` +
+      'the candidate looks fine overall';
+    const controlPlane = await createProjectControlPlane({
+      paths: fixture.paths,
+      loaded,
+      authorization: authorization.file,
+      authorizationFile: authorization.source_file,
+      historyLabRoot: outside,
+      reviewerPort: {
+        async run() {
+          return unparseableStdout;
+        },
+      },
+    });
+    const previousMode = process.env['AGENTLAB_FAKE_MODE'];
+    process.env['AGENTLAB_FAKE_MODE'] = 'orchestrator-success';
+    let result;
+    try {
+      result = await runOrchestrate({
+        paths: fixture.paths,
+        loaded,
+        profileId: PROFILE,
+        maxIterations: 1,
+        controlPlane,
+      });
+    } finally {
+      if (previousMode === undefined) delete process.env['AGENTLAB_FAKE_MODE'];
+      else process.env['AGENTLAB_FAKE_MODE'] = previousMode;
+    }
+
+    expect(result.stop.status, JSON.stringify(result.payload, null, 2)).toBe('HUMAN_REQUIRED');
+    expect(result.stop.reason).toContain('review independente não pôde ser concluída');
+    expect(result.payload['incident_id']).toEqual(expect.stringContaining('review'));
+
+    const reviewPath = candidateReviewPath(fixture.paths, 'T1', 1);
+    await expect(readCandidateReview(fixture.paths, 'T1', 1)).resolves.toBeNull();
+    await expect(access(reviewPath)).rejects.toMatchObject({ code: 'ENOENT' });
+
+    const evidencePaths = result.payload['evidence_paths'];
+    expect(Array.isArray(evidencePaths) && evidencePaths.length > 0).toBe(true);
+    const existingEvidence = evidencePaths as string[];
+    for (const evidencePath of existingEvidence) {
+      await access(evidencePath);
+      expect(evidencePath).not.toBe(reviewPath);
+    }
+
+    const diagnosticPath = existingEvidence.find((evidencePath) =>
+      evidencePath.includes('unparseable-invocation'),
+    );
+    expect(diagnosticPath, existingEvidence.join('\n')).toEqual(expect.any(String));
+    const diagnostic = JSON.parse(await readFile(diagnosticPath as string, 'utf8')) as {
+      kind?: string;
+      task_id?: string;
+      attempt?: number;
+      role?: string;
+      profile_id?: string;
+      provider?: string;
+      code?: string;
+      parse_outcome?: string;
+      stdout?: string;
+      decision?: string;
+    };
+    expect(diagnostic).toMatchObject({
+      kind: 'REVIEW_PARSE_FAILURE',
+      task_id: 'T1',
+      attempt: 1,
+      role: 'reviewer',
+      profile_id: PROFILE,
+      code: 'REVIEW_VERDICT_NOT_PARSEABLE',
+    });
+    expect(diagnostic.decision).toBeUndefined();
+    expect(diagnostic.parse_outcome).toEqual(expect.any(String));
+    expect(diagnostic.provider).toEqual(expect.any(String));
+    expect(diagnostic.stdout).toContain('reviewer prose without a verdict object');
+    expect(diagnostic.stdout).not.toContain(leakedSecret);
+    expect(diagnostic.stdout).toContain('[REDACTED:anthropic-api-key]');
+
+    const state = await readState(fixture.paths);
+    expect(state.tasks[0]).toMatchObject({ status: 'RUNNING', phase: 'FINALIZING', attempts: 1 });
+    expect(await headSha(fixture.sandbox.root)).not.toBe(fixture.baseline);
+  }, 90_000);
+
+  it('exit não-zero do reviewer persiste stdout/stderr e não aponta review.json fantasma', async () => {
+    const fixture = await setup();
+    const loaded = await loadPlan(fixture.paths.planFile);
+    const outside = await mkdtemp(path.join(os.tmpdir(), 'agentlab-review-exit1-'));
+    roots.push(outside);
+    const authorizationFile = path.join(outside, 'agentlab-run.yaml');
+    await writeFile(authorizationFile, AUTHORIZATION.replace('risk: low', 'risk: high'), 'utf8');
+    const authorization = await loadProjectRunAuthorization(authorizationFile);
+    const leakedSecret = 'sk-ant-api03-FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE0123456789AA';
+    const stdout = `{"is_error":true,"result":"Claude session limit reached ${leakedSecret}"}`;
+    const controlPlane = await createProjectControlPlane({
+      paths: fixture.paths,
+      loaded,
+      authorization: authorization.file,
+      authorizationFile: authorization.source_file,
+      historyLabRoot: outside,
+      reviewerPort: {
+        async run() {
+          throw new ProviderRoleInvocationError({
+            role: 'reviewer',
+            exitCode: 1,
+            stdout,
+            stderr: '',
+          });
+        },
+      },
+    });
+    const previousMode = process.env['AGENTLAB_FAKE_MODE'];
+    process.env['AGENTLAB_FAKE_MODE'] = 'orchestrator-success';
+    let result;
+    try {
+      result = await runOrchestrate({
+        paths: fixture.paths,
+        loaded,
+        profileId: PROFILE,
+        maxIterations: 1,
+        controlPlane,
+      });
+    } finally {
+      if (previousMode === undefined) delete process.env['AGENTLAB_FAKE_MODE'];
+      else process.env['AGENTLAB_FAKE_MODE'] = previousMode;
+    }
+
+    expect(result.stop.status, JSON.stringify(result.payload, null, 2)).toBe('HUMAN_REQUIRED');
+    expect(result.stop.reason).toContain('review independente não pôde ser concluída');
+    expect(result.stop.reason).toContain('exit 1');
+
+    const reviewPath = candidateReviewPath(fixture.paths, 'T1', 1);
+    await expect(readCandidateReview(fixture.paths, 'T1', 1)).resolves.toBeNull();
+    await expect(access(reviewPath)).rejects.toMatchObject({ code: 'ENOENT' });
+
+    const evidencePaths = result.payload['evidence_paths'];
+    expect(Array.isArray(evidencePaths) && evidencePaths.length > 0).toBe(true);
+    const existingEvidence = evidencePaths as string[];
+    for (const evidencePath of existingEvidence) {
+      await access(evidencePath);
+      expect(evidencePath).not.toBe(reviewPath);
+    }
+    const diagnosticPath = existingEvidence.find((evidencePath) =>
+      evidencePath.includes('unparseable-invocation'),
+    );
+    expect(diagnosticPath, existingEvidence.join('\n')).toEqual(expect.any(String));
+    const diagnostic = JSON.parse(await readFile(diagnosticPath as string, 'utf8')) as {
+      kind?: string;
+      code?: string;
+      parse_outcome?: string;
+      stdout?: string;
+      decision?: string;
+    };
+    expect(diagnostic).toMatchObject({
+      kind: 'REVIEW_PARSE_FAILURE',
+      code: 'REVIEW_INVOCATION_FAILED',
+      parse_outcome: 'INVOCATION_FAILED',
+    });
+    expect(diagnostic.decision).toBeUndefined();
+    expect(diagnostic.stdout).toContain('session limit reached');
+    expect(diagnostic.stdout).not.toContain(leakedSecret);
+    expect(diagnostic.stdout).toContain('[REDACTED:anthropic-api-key]');
   }, 90_000);
 
   it('implementation defect sem autoridade BOUNDED_REPAIR não arquiva nem relança', async () => {

@@ -2207,6 +2207,46 @@ export type ReviewRejectionClassificationRecord = z.infer<
   typeof ReviewRejectionClassificationRecord
 >;
 
+export const REVIEW_PARSE_FAILURE_OUTCOMES = [
+  'NOT_PARSEABLE',
+  'TRANSPORT_MALFORMED',
+  'PROVIDER_TERMINAL_FAILURE',
+  'STRUCTURAL',
+  'INVOCATION_FAILED',
+] as const;
+export const ReviewParseFailureOutcome = z.enum(REVIEW_PARSE_FAILURE_OUTCOMES);
+export type ReviewParseFailureOutcome = z.infer<typeof ReviewParseFailureOutcome>;
+
+/**
+ * Evidência append-only de uma invocação de reviewer cuja saída NÃO pôde ser
+ * parseada como veredito. Não é um CandidateReviewRecord: ausência de parse
+ * nunca vira ACCEPT/REJECT, e review.json não é inventado.
+ *
+ * O stdout entra já redigido. O arquivo é endereçado pelo hash desse texto
+ * para que uma segunda invocação com bytes diferentes acrescente evidência em
+ * vez de reescrever a anterior.
+ */
+export const ReviewParseFailureRecord = z
+  .object({
+    schema_version: z.literal(DEV_SCHEMA_VERSION),
+    kind: z.literal('REVIEW_PARSE_FAILURE'),
+    task_id: identifier,
+    attempt: z.number().int().positive(),
+    role: z.literal('reviewer'),
+    profile_id: nonEmpty,
+    provider: nonEmpty,
+    agent: nonEmpty,
+    parse_outcome: ReviewParseFailureOutcome,
+    code: nonEmpty,
+    reason: nonEmpty,
+    stdout: z.string(),
+    stderr: z.string().nullable(),
+    captured_at: z.string().datetime(),
+    provenance: nonEmpty,
+  })
+  .strict();
+export type ReviewParseFailureRecord = z.infer<typeof ReviewParseFailureRecord>;
+
 // ---------------------------------------------------------------------------
 // Revalidação de FAIL por validation oficial
 // (.dev/revalidations/<task>/attempt-<n>/revalidation-<sequence>.json)
