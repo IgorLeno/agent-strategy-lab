@@ -1215,6 +1215,11 @@ export const AttemptAbandonmentRecord = z
     handoff_draft_sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
     source_report_result: z.literal('FAILURE').optional(),
     source_base_sha: shaHex.optional(),
+    /** Falha terminal provada depois do fato a partir da evidência crua do attempt. */
+    provider_failure: ProviderTerminalFailure.optional(),
+    provider_failure_source: z.enum(['launch_record', 'stdout_stream', 'stdout_json']).optional(),
+    /** Completion FAIL criado pelo fechamento antigo antes de a falha ser reconhecida. */
+    misclassified_completion_sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
     abandoned_at: z.string().datetime(),
   })
   .strict()
@@ -1235,6 +1240,20 @@ export const AttemptAbandonmentRecord = z
           message: 'output de infraestrutura exige report, handoff e metadados completos',
         });
       }
+    }
+    const providerMetadata = [
+      record.provider_failure,
+      record.provider_failure_source,
+      record.misclassified_completion_sha256,
+    ];
+    if (
+      providerMetadata.some((value) => value !== undefined) &&
+      !providerMetadata.every((value) => value !== undefined)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'provider failure histórica exige falha, provenance e completion hash',
+      });
     }
   });
 export type AttemptAbandonmentRecord = z.infer<typeof AttemptAbandonmentRecord>;

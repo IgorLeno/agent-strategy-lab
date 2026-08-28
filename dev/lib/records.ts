@@ -372,7 +372,7 @@ export function infraAttemptEvidencePath(
   paths: HarnessPaths,
   taskId: string,
   attempt: number,
-  name: 'launch.infra.json' | 'stdout.log' | 'stderr.log',
+  name: 'launch.infra.json' | 'stdout.log' | 'stderr.log' | 'completion.misclassified.json',
 ): string {
   return path.join(failedAttemptDir(paths, taskId, attempt), name);
 }

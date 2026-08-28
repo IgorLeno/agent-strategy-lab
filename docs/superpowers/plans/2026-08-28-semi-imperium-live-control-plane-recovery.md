@@ -173,6 +173,25 @@ control plane que nao possa ser tomada com seguranca nesta autorizacao.
 - [ ] Emitir novo grant one-shot com provenance desta autorizacao continuada e
   retomar o mesmo runtime sem edicao manual do target.
 
+## Incidente 6 — recovery truthful do FAIL historico causado pelo provider
+
+- [x] Provar que `authorize-repair` recusa sem mutacao enquanto o attempt 3
+  ainda nao e um `AUTOMATIC_REPAIR_EXHAUSTED` arquivado (`NOT_APPLICABLE`).
+- [x] Provar que `resume` pararia em FAIL e que `dev-retry-failed` atribuiria
+  capability/validation a um attempt cujo envelope terminal declara 429 e cujo
+  report/handoff nunca existiu.
+- [x] RED: recovery de output incompleto aceita somente FAIL historico com
+  completion sem report, provider failure tipada derivada do transporte `json`
+  e patch byte-identico ao binding; casos ambiguos continuam fail-closed.
+- [x] Preservar append-only completion, patch, LaunchRecord e stdout/stderr;
+  liberar o slot corrente e resetar somente os paths selados antes de READY.
+- [x] Registrar provider failure e provenance no AttemptAbandonmentRecord sem
+  criar capability fail nem official-validation fail.
+- [x] Rodar gates focados e completos: 14/14 recovery, 115/115 recovery/infra,
+  64/64 policy/lifecycle, typecheck, build e suite 175 arquivos/2510 testes.
+- [ ] Commitar, executar a primitive oficial,
+  emitir grant somente se o novo estado realmente exigir e retomar o runtime.
+
 ## Auditoria terminal
 
 - [ ] Provar cada uma das sete tasks com estado, attempts, profile/model,

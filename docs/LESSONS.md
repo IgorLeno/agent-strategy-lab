@@ -5,6 +5,18 @@ Regra, não narrativa: cada entrada termina numa restrição aplicável.
 
 ---
 
+[2026-08-28] Context: tentativa de autorizar novo repair depois de um worker
+encerrar por erro terminal do provider, mas o launcher antigo fechar o patch
+parcial como FAIL de validation.
+Mistake: pedir o grant antes de arquivar o attempt pela classificacao factual;
+o lifecycle respondeu NOT_APPLICABLE porque grants so existem diante de
+AUTOMATIC_REPAIR_EXHAUSTED.
+Rule: derive primeiro a classe do attempt da evidencia tipada e use a primitive
+capability-neutral correspondente; nunca converta provider/output incompleto em
+capability fail apenas para tornar um grant elegivel.
+
+---
+
 [2026-08-28] Context: regressao de launcher exercitada por fixture curta que
 gera stdout em um subprocesso Node aninhado.
 Mistake: interpretar stdout vazio no sandbox restrito como defeito do pipe do
