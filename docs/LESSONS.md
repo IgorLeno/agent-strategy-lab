@@ -5,6 +5,12 @@ Regra, não narrativa: cada entrada termina numa restrição aplicável.
 
 ---
 
+[2026-08-28] Context: regressão do selamento na finalização orquestrada.
+Mistake: fixar no teste a quantidade de validations declarada no plano e
+esquecer que o diff-check oficial também integra a evidência final.
+Rule: em testes do handoff selado, compare validations com o record autoritativo
+da finalização; não recalcule nem fixe uma contagem parcial do pipeline.
+
 [2026-08-24] Context: helper de subprocesso carregado por Vitest/Vite precisava
 resolver o entrypoint público de uma dependência fora do worktree descartável.
 Mistake: usar `import.meta.resolve`, disponível no Node 22 direto, sem considerar

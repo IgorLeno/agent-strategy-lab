@@ -592,6 +592,30 @@ describe('finalizeOrchestratedTask', () => {
     ]);
   });
 
+  it('finaliza candidate cujo Git deriva 51 arquivos sem truncar o selo', async () => {
+    const actualFiles = Array.from(
+      { length: 51 },
+      (_, index) => `src/large-candidate/file-${index}.ts`,
+    );
+    // A nota do worker continua dentro do contrato declarativo de 50 entradas;
+    // o 51º arquivo é fato material descoberto pelo orquestrador no Git.
+    await prepareRun(actualFiles.slice(0, 50));
+    await writeFile(path.join(root, actualFiles[50]!), 'export const extra = 51;\n');
+
+    const outcome = await finalize();
+    const finalization = await readOrchestratedFinalization(paths, 'T1', 1);
+    const completion = await readCompletion(paths, 'T1');
+    const handoff = await readHandoff(paths, 'T1');
+
+    expect(outcome.kind).toBe('PASS');
+    expect(finalization?.changed_files).toEqual([...actualFiles].sort());
+    expect(completion?.orchestrator_evidence.changed_files).toEqual([...actualFiles].sort());
+    expect(handoff?.changed_files).toEqual([...actualFiles].sort());
+    expect(handoff?.changed_files).toHaveLength(51);
+    expect(handoff?.validations).toEqual(finalization?.validation_results);
+    expect(handoff?.validations.length).toBeGreaterThan(0);
+  });
+
   it('adota arquivo real extra no candidate e recusa staging prévio', async () => {
     // Onda 1: o Git é a autoridade sobre o material. Um arquivo real que o
     // report não declarou É parte do candidate — a declaração errada vira

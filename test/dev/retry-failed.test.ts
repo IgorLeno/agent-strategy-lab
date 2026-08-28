@@ -35,6 +35,7 @@ import {
   readPreviousAttemptDiagnostics,
   retryFailedAttempt,
 } from '../../dev/lib/retry-failed.js';
+import { PreviousAttemptDiagnostics } from '../../dev/lib/schemas.js';
 import type {
   AgentCompletionReport,
   CompletionRecord,
@@ -1394,6 +1395,40 @@ describe('dev-retry-failed feedback para o attempt de reparo', () => {
       previousAttemptDiagnosticsFrom(result.record),
     );
     expect(await exists(validationFailedAttemptPath(fixture.paths, TASK, 2))).toBe(true);
+  });
+
+  it('preserva e parseia mais de 50 arquivos reais do attempt anterior', () => {
+    const changedFiles = Array.from(
+      { length: 51 },
+      (_, index) => `src/large-candidate/file-${index}.ts`,
+    );
+    const diagnostics = previousAttemptDiagnosticsFrom(
+      validationFailedRecord(TASK, 2, 'a'.repeat(40), { changedFiles }),
+    );
+
+    const parsed = PreviousAttemptDiagnostics.parse(diagnostics);
+    expect(parsed.changed_files).toEqual([...changedFiles].sort());
+    expect(parsed.changed_files).toHaveLength(51);
+  });
+
+  it('preserva e parseia mais de 20 falhas de validação oficiais', () => {
+    const validationResults = Array.from({ length: 21 }, (_, index) => ({
+      argv: ['pnpm', 'test', `suite-${index}`],
+      exit_code: 1,
+      timed_out: false,
+      duration_ms: index + 1,
+    }));
+    const diagnostics = previousAttemptDiagnosticsFrom({
+      ...validationFailedRecord(TASK, 2, 'a'.repeat(40)),
+      original_validation_results: validationResults,
+      original_validation_evidence: [],
+    });
+
+    const parsed = PreviousAttemptDiagnostics.parse(diagnostics);
+    expect(parsed.failed_validations).toHaveLength(21);
+    expect(parsed.failed_validations.map((result) => result.argv)).toEqual(
+      validationResults.map((result) => result.argv),
+    );
   });
 });
 

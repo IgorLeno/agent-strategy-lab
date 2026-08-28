@@ -231,6 +231,32 @@ describe('propriedade do budget de handoff (regressão semi-imperium-real-01)', 
     // delas é candidata a truncamento para caber num teto.
     expect(record.what_i_did_not_check).toHaveLength(5);
   });
+
+  it('sela e preserva 51 arquivos reais junto com 21 validações oficiais', () => {
+    const changedFiles = Array.from(
+      { length: 51 },
+      (_, index) => `src/semi_imperium/large-candidate/file-${index}.py`,
+    );
+    const validations = Array.from({ length: 21 }, (_, index) => ({
+      argv: ['pytest', `tests/official/validation-${index}.py`, '-q'],
+      exit_code: 0,
+      timed_out: false,
+      duration_ms: 100 + index,
+    }));
+
+    const record = parseHandoffRecord(
+      sealHandoff(parseHandoffDraft(realDraft()), {
+        ...SEALING_FACTS,
+        changed_files: changedFiles,
+        validations,
+      }),
+    );
+
+    expect(record.changed_files).toEqual(changedFiles);
+    expect(record.changed_files).toHaveLength(51);
+    expect(record.validations).toEqual(validations);
+    expect(record.validations).toHaveLength(21);
+  });
 });
 
 describe('o draft do worker é validado por schema, não por tamanho', () => {
@@ -290,15 +316,9 @@ describe('remover o teto do record não afrouxa o schema', () => {
     expect(() => parseHandoffRecord(missing)).toThrow();
   });
 
-  it('record acima dos limites de cardinalidade continua falhando', () => {
+  it('record acima do limite semântico de decisões continua falhando', () => {
     expect(() =>
       parseHandoffRecord({ ...sealedBase(), decisions: ['a', 'b', 'c', 'd', 'e', 'f'] }),
-    ).toThrow();
-    expect(() =>
-      parseHandoffRecord({
-        ...sealedBase(),
-        changed_files: Array.from({ length: 51 }, (_, index) => `src/f-${index}.ts`),
-      }),
     ).toThrow();
   });
 });
