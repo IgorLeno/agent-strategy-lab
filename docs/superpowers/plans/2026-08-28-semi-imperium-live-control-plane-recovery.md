@@ -112,6 +112,8 @@ control plane que nao possa ser tomada com seguranca nesta autorizacao.
 | 3 | Crest RUNNING/FINALIZING; REJECT IMPLEMENTATION_DEFECT duravel | PLAN_READY | RetryFailedAttemptError, exit 1 | Nenhum provider/target novo | Corrigir compatibilidade do archive com finalization legado de provenance parcial |
 | 5 | Crest RUNNING/FINALIZING attempt 2; candidate c3cd117 | REVIEWED | HUMAN_REQUIRED REVIEW_INVOCATION_FAILED exit 1, stdout descartado | Reviewer Claude opus invocado; exit 1 em 6s; stderr vazio | Preservar stdout/stderr da invocacao falha |
 | 6 | Crest FAIL attempt 3; grant one-shot consumido | WORKER_RUNNING | Claude `json` encerrou com `is_error=true`, `terminal_reason=api_error`, HTTP 429; launcher gravou `provider_failure=null`; validation exit 4 porque o teste nao existia | Worker deixou patch parcial sem report/handoff; HEAD permaneceu 5070358 | Corrigir leitura de falha terminal no transporte `json`, validar e recuperar pelo lifecycle oficial |
+| 7 | Crest RUNNING attempt 4; candidate eb6fe21 no HEAD do target | REVIEWED | HUMAN_REQUIRED REVIEW_VERDICT_NOT_PARSEABLE, exit 9 | Reviewer Claude sonnet5 stream emitiu ACCEPT com coverage completa mas SEM o campo `reason` | Relancar a review em contexto fresco antes de tocar no Lab |
+| 8 | Crest RUNNING attempt 4; mesmo candidate eb6fe21 | ACCEPTED | HUMAN_REQUIRED launch-authorization, exit 9 | Reviewer repetiu em contexto fresco e ACEITOU com reason; crest fechou em PASS | Decisao humana sobre o risco critico de mopac_minimum_workflow |
 
 ## Incidente 2 — archive de review repair com provenance parcial legado
 
@@ -201,17 +203,43 @@ control plane que nao possa ser tomada com seguranca nesta autorizacao.
   OpenCode Go KNOWN com folga.
 - [x] RED: remaining 0 vira EXHAUSTED; reviewer pinado EXHAUSTED rerroteia;
   grant append-only nao edita o snapshot e recusa OpenRouter/openai.
-- [ ] Grant oficial no runtime canonico e resume ate ALL_DONE.
+- [x] Grant oficial no runtime canonico; resume 8 fechou crest em PASS.
 
 ## Auditoria terminal
 
 - [ ] Provar cada uma das sete tasks com estado, attempts, profile/model,
   validation, review, repair/escalation e accepted commit.
-- [ ] Provar recuperacao do candidate Crest sem relaunch incorreto.
+- [x] Provar recuperacao do candidate Crest sem relaunch incorreto.
 - [ ] Provar fresh quota e ausencia de autorizacao/billing ampliados.
 - [ ] Se `ALL_DONE`, executar somente a suite canonica final do target,
   read-only quanto a reparos manuais.
-- [ ] Rodar todos os gates finais do Agent Lab e registrar contagens/exits.
-- [ ] Confirmar arvores, HEADs e ausencia de edicao externa do target.
-- [ ] Push da branch, abrir uma PR, confirmar `NOT MERGED`.
+- [x] Gates finais em `fix/additional-repair-authorization-one-shot`:
+  `pnpm typecheck` exit 0; `pnpm build` exit 0; `git diff --check` exit 0;
+  `pnpm test` 177 arquivos e 2522/2522 testes, exit 0.
+- [x] Target limpo em `eb6fe21`, quatro commits de work unit, nenhuma edicao
+  externa: todo commit veio do lifecycle.
+- [x] Push da branch e uma PR de recuperacao, confirmada `NOT MERGED`.
 - [ ] Entregar relatorio requisito a requisito e verdict terminal exato.
+
+## Estado terminal desta sessao de recuperacao
+
+- Verdict: **HUMAN_REQUIRED genuino** — `project:mopac_minimum_workflow:launch-authorization`,
+  motivo `risco critico ou security-sensitive`, exit 9.
+- 4/7 work units em PASS: `semiimperium_foundation`, `semiimperium_domain_persistence`,
+  `molecule_resolution_validation` e `crest_selection_workflow` (attempt 4,
+  accepted commit `eb6fe21`).
+- Nao e defeito: o planner declarou `risk: critical` somente para
+  `mopac_minimum_workflow` — as outras seis work units sao `high`. A
+  classificacao do planner e autoritativa sobre o default do
+  `authorization.yaml` (`work_units.default.risk: low`, overrides vazios), e
+  `authorizeProjectLaunch` recusa `critical` por desenho
+  (`dev/lib/project-orchestrate.ts:278`). Nenhum provider foi lancado.
+- `mopac_minimum_workflow` bloqueia por dependencia as duas ultimas work units,
+  entao a run inteira depende dessa decisao.
+- Falso alarme descartado: o `REVIEW_VERDICT_NOT_PARSEABLE` do resume 7 era o
+  reviewer omitindo `reason` num ACCEPT bem formado, nao defeito do prompt. O
+  resume 8 relancou a review em contexto fresco e obteve um ACCEPT valido com
+  `reason` — nenhuma correcao no Lab foi necessaria.
+- Decisao humana pendente, com as opcoes que o proprio gate emitiu: ampliar
+  `autonomous_execution_boundary` explicitamente, reduzir o risco declarado da
+  work unit, ou executar a acao manualmente.
