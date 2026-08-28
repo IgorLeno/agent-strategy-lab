@@ -6,12 +6,14 @@ Regra, não narrativa: cada entrada termina numa restrição aplicável.
 ---
 
 [2026-08-28] Context: reviewer OpenCode Go flash lançado após Codex/Claude
-EXHAUSTED retornou UnknownError/server error em ~13s.
-Mistake: REVIEW_INVOCATION_FAILED virou HUMAN_REQUIRED imediato e o próximo
-resume relançaria o mesmo profile.
+EXHAUSTED retornou UnknownError/server error em ~13s; o loop seguinte tentou
+os outros cinco profiles Go e todos devolveram o mesmo UnknownError.
+Mistake: tratar o HUMAN_REQUIRED de invocação como se ainda houvesse reviewer
+elegível, ou relançar a run na esperança de o mesmo pool se recuperar.
 Rule: falha de invocação INFRA exclui o profile (não o pool) e tenta o próximo
-já autorizado na mesma decisão; HUMAN_REQUIRED só quando não resta reviewer
-elegível; nunca relançar o mesmo profile na mesma review.
+já autorizado na mesma decisão; o mesmo profile não é relançado neste attempt;
+quando todos os reviewers restantes da policy falham com o mesmo erro de
+servidor do provider, pare — é INFRA de plataforma, não decisão de produto.
 
 ---
 
