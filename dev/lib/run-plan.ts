@@ -6,6 +6,7 @@ import {
   ProjectAuthorizationError,
   type LoadedProjectRunAuthorization,
 } from './project-authorization.js';
+import { applyProviderExpansionAuthorization, ProviderExpansionAuthorizationError } from './provider-expansion.js';
 import { createProjectControlPlane, type ProjectControlPlane } from './project-run.js';
 import { exitCodeForOrchestrationStop } from './orchestration-termination.js';
 import type { HarnessPaths } from './paths.js';
@@ -199,8 +200,13 @@ export async function runPlan(input: PlanRunInput): Promise<PlanRunResult> {
   if (input.authorizationFile !== undefined) {
     try {
       authorization = await loadProjectRunAuthorization(input.authorizationFile);
+      authorization = await applyProviderExpansionAuthorization({
+        paths,
+        original: authorization,
+      });
     } catch (error) {
-      throw error instanceof ProjectAuthorizationError
+      throw error instanceof ProjectAuthorizationError ||
+        error instanceof ProviderExpansionAuthorizationError
         ? new PlanSetupError(error.message)
         : error;
     }

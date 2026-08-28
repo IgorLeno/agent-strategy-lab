@@ -41,6 +41,11 @@ export interface HarnessPaths {
    * Concessões humanas one-shot de repair adicional após AUTOMATIC_REPAIR_EXHAUSTED.
    * Append-only: grant e consumption são arquivos distintos.
    */
+  /**
+   * Concessões humanas append-only de expansão de provider para um runtime
+   * já autorizado. Não substitui `lab/authorization.yaml`.
+   */
+  readonly providerExpansionAuthorizationsDir: string;
   readonly additionalRepairAuthorizationsDir: string;
   readonly validationLogsDir: string;
   /**
@@ -146,6 +151,7 @@ export function resolveHarnessPaths(
     reviewsDir: path.join(devDir, 'reviews'),
     failedAttemptsDir: path.join(devDir, 'failed-attempts'),
     additionalRepairAuthorizationsDir: path.join(devDir, 'additional-repair-authorizations'),
+    providerExpansionAuthorizationsDir: path.join(devDir, 'provider-expansion-authorizations'),
     validationLogsDir: path.join(devDir, 'validation-logs'),
     plannedWorkAdoptionsDir: path.join(devDir, 'planned-work-adoptions'),
     projectHistoryBindingsDir: path.join(devDir, 'project', 'history-bindings'),

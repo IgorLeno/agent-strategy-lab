@@ -7,6 +7,7 @@ import {
   AgentCompletionReport,
   AdditionalRepairAuthorizationConsumptionRecord,
   AdditionalRepairAuthorizationRecord,
+  ProviderExpansionAuthorizationRecord,
   AttemptAbandonmentRecord,
   CandidateReviewRecord,
   CloseManifest,
@@ -709,6 +710,33 @@ export const writeAdditionalRepairAuthorizationConsumption = async (
   await writeJsonOnce(file, parsed);
   return file;
 };
+
+export function providerExpansionGrantPath(paths: HarnessPaths, grantSha256: string): string {
+  return path.join(paths.providerExpansionAuthorizationsDir, `grant-${grantSha256}.json`);
+}
+
+export const listProviderExpansionAuthorizationFiles = async (
+  paths: HarnessPaths,
+): Promise<readonly string[]> => {
+  try {
+    return await readdir(paths.providerExpansionAuthorizationsDir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
+  }
+};
+
+export const writeProviderExpansionAuthorizationGrant = async (
+  paths: HarnessPaths,
+  record: ProviderExpansionAuthorizationRecord,
+  grantSha256: string,
+): Promise<string> => {
+  const parsed = ProviderExpansionAuthorizationRecord.parse(record);
+  const file = providerExpansionGrantPath(paths, grantSha256);
+  await writeJsonOnce(file, parsed);
+  return file;
+};
+
 
 export const readRevalidationSourceBinding = (
   paths: HarnessPaths,

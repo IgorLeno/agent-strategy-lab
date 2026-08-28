@@ -103,6 +103,7 @@ import {
   type PoolCapacityLaunchContext,
   type PoolCapacityProbe,
 } from './pool-capacity-observer.js';
+import { selectReviewerProfileForFreshCapacity } from './reviewer-capacity.js';
 import {
   classificationFor,
   ProjectAuthorizationError,
@@ -2096,13 +2097,36 @@ export async function createProjectControlPlane(
     }
 
     const requirement = lookup.requirement as CandidateReviewRequirement;
-    const reviewerProfile = profiles.get(requirement.reviewer_profile_id) ?? null;
+    const pinnedReviewerId = requirement.reviewer_profile_id;
+    const freshCapacityByPool = await observeEligiblePoolCapacities(
+      [...profiles.values()],
+      poolCapacityProbe,
+      (profile) => quotaPoolOf(profile.id),
+    );
+    const selectedReviewer = selectReviewerProfileForFreshCapacity({
+      pinnedProfileId: pinnedReviewerId,
+      policyProfiles: authorization.profile_policy.profiles,
+      poolOf: quotaPoolOf,
+      capacityByPool: freshCapacityByPool,
+    });
+    if (selectedReviewer.profileId === null) {
+      return reviewBlocked(
+        taskId,
+        'REVIEW_LAUNCH_HUMAN_REQUIRED',
+        'UNAVAILABLE',
+        selectedReviewer.reason,
+        'autorizar outro pool subscription-only ou esperar o reset da quota',
+        ['inspecionar a observação fresca de capacidade', 'inspecionar o candidate preparado'],
+        [input.authorizationFile],
+      );
+    }
+    const reviewerProfile = profiles.get(selectedReviewer.profileId) ?? null;
     if (reviewerProfile === null) {
       return reviewBlocked(
         taskId,
         'REVIEW_PROFILE_OUTSIDE_POLICY',
         'UNAVAILABLE',
-        `a policy exigiu review independente e o reviewer ${requirement.reviewer_profile_id} não pertence à profile policy`,
+        `a policy exigiu review independente e o reviewer ${selectedReviewer.profileId} não pertence à profile policy`,
         'declarar um reviewer elegível na profile policy',
         ['declarar review.reviewer_profile_id', 'reduzir o risco declarado'],
         [input.authorizationFile],
@@ -2137,7 +2161,7 @@ export async function createProjectControlPlane(
           }
         : null;
 
-    const reviewerFacts = await launchFactsFor(reviewerProfile);
+    const reviewerFacts = await launchFactsFor(reviewerProfile, freshCapacityByPool);
     const verdict: ProjectReviewResult = await launchProjectReviewer({
       paths,
       profile: reviewerProfile,

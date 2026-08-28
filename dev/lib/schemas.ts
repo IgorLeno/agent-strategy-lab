@@ -2804,6 +2804,46 @@ export type AdditionalRepairAuthorizationConsumptionRecord = z.infer<
 >;
 
 /**
+ * Concessão humana explícita para AMPLIAR os providers/profiles permitidos
+ * de um runtime já autorizado, sem editar o snapshot original.
+ *
+ * Só existe para o caso operacional em que os pools originalmente autorizados
+ * estão EXHAUSTED e o humano autoriza um terceiro pool subscription-only.
+ * Não altera billing global nem substitui o histórico Codex/Claude.
+ */
+export const ProviderExpansionAuthorizationRecord = z
+  .object({
+    schema_version: z.literal(DEV_SCHEMA_VERSION),
+    kind: z.literal('PROVIDER_EXPANSION_AUTHORIZATION'),
+    expansion_class: z.literal('OPENCODE_GO_SUBSCRIPTION_ONLY'),
+    added_providers: z.array(z.literal('opencode')).min(1),
+    added_profiles: z
+      .array(
+        z
+          .object({
+            id: z
+              .string()
+              .regex(/^[A-Za-z0-9][A-Za-z0-9_.-]*$/, 'id deve ser alfanumérico com - _ ou .'),
+            capability_rank: z.number().int().nonnegative(),
+            rationale: nonEmpty,
+          })
+          .strict(),
+      )
+      .min(1),
+    original_authorization_sha256: sha256Hex,
+    original_allowed_providers: z.array(nonEmpty).min(1),
+    original_profile_ids: z.array(identifier).min(1),
+    exhausted_pools: z.array(nonEmpty).min(1),
+    reason: nonEmpty,
+    granted_at: z.string().datetime(),
+    provenance: z.literal('human_explicit'),
+  })
+  .strict();
+export type ProviderExpansionAuthorizationRecord = z.infer<
+  typeof ProviderExpansionAuthorizationRecord
+>;
+
+/**
  * Motivos pelos quais um attempt é arquivado SEM solução nenhuma para preservar.
  * Append-only, como os demais códigos.
  */

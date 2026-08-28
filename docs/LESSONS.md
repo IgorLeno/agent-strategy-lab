@@ -5,6 +5,17 @@ Regra, não narrativa: cada entrada termina numa restrição aplicável.
 
 ---
 
+[2026-08-28] Context: candidate Crest já commitado e validado, review pinada
+no Codex cujo pool fresco estava EXHAUSTED; Claude five_hour remaining 0
+ainda era KNOWN.
+Mistake: tratar remaining 0 como folga baixa e deixar o reviewer pinado
+bloquear a run mesmo com outro pool autorizado (ou autorizável) disponível.
+Rule: remaining_percent=0 numa janela viva é EXHAUSTED, não UNKNOWN nem
+folga baixa; reviewer pinado EXHAUSTED rerroteia dentro da policy; expansão
+OpenCode Go subscription-only é grant append-only, nunca edição do snapshot.
+
+---
+
 [2026-08-28] Context: tentativa de autorizar novo repair depois de um worker
 encerrar por erro terminal do provider, mas o launcher antigo fechar o patch
 parcial como FAIL de validation.

@@ -31,8 +31,9 @@ control plane que nao possa ser tomada com seguranca nesta autorizacao.
   manualmente seus records, state ou autorizacao.
 - [x] Nao modificar manualmente o Grimperium; apenas workers do Agent Lab podem
   implementar ou reparar o target.
-- [x] Preservar a autorizacao historica Claude/Codex subscription-only; nao
-  adicionar OpenCode, OpenRouter, billing API ou novo provider.
+- [x] Preservar a autorizacao historica Claude/Codex subscription-only no
+  snapshot `lab/authorization.yaml`; expansao OpenCode Go so via grant
+  append-only depois de exaustao fresca, sem OpenRouter nem billing API.
 - [x] Preservar quota observada de forma fresca por atividade; UNKNOWN continua
   distinto de zero e de EXHAUSTED.
 - [x] Preservar provas read-only antes e depois da resolucao efetiva do argv.
@@ -189,8 +190,18 @@ control plane que nao possa ser tomada com seguranca nesta autorizacao.
   criar capability fail nem official-validation fail.
 - [x] Rodar gates focados e completos: 14/14 recovery, 115/115 recovery/infra,
   64/64 policy/lifecycle, typecheck, build e suite 175 arquivos/2510 testes.
-- [ ] Commitar, executar a primitive oficial,
+- [x] Commitar, executar a primitive oficial,
   emitir grant somente se o novo estado realmente exigir e retomar o runtime.
+
+## Incidente — review pinada em pool EXHAUSTED / expansao OpenCode Go
+
+- [x] Worker attempt 4: turn.failed por quota Codex; orquestrador commitou
+  `eb6fe21`, validou 31/31 e parou em REVIEW_LAUNCH_HUMAN_REQUIRED.
+- [x] Observacao fresca: Codex EXHAUSTED; Claude five_hour remaining 0;
+  OpenCode Go KNOWN com folga.
+- [x] RED: remaining 0 vira EXHAUSTED; reviewer pinado EXHAUSTED rerroteia;
+  grant append-only nao edita o snapshot e recusa OpenRouter/openai.
+- [ ] Grant oficial no runtime canonico e resume ate ALL_DONE.
 
 ## Auditoria terminal
 
