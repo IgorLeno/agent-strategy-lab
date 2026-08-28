@@ -32,10 +32,24 @@ const result = (overrides = {}) => ({
   ...overrides,
 });
 
-write({ type: 'system', subtype: 'init', session_id: SESSION });
-write({ type: 'assistant', message: { role: 'assistant', content: [] } });
+if (scenario === 'json-api-error') {
+  write(
+    result({
+      is_error: true,
+      terminal_reason: 'api_error',
+      api_error_status: 429,
+      result: "You've hit your session limit · resets 6:30pm (America/Sao_Paulo)",
+      num_turns: 75,
+      total_cost_usd: 6.7753535,
+      usage: { input_tokens: 128, output_tokens: 98390 },
+    }),
+  );
+  process.exitCode = 1;
+} else {
+  write({ type: 'system', subtype: 'init', session_id: SESSION });
+  write({ type: 'assistant', message: { role: 'assistant', content: [] } });
 
-switch (scenario) {
+  switch (scenario) {
   case 'no-events':
     write(result());
     break;
@@ -124,4 +138,5 @@ switch (scenario) {
     write(rateLimit(41.5, WINDOW_A));
     write(result());
     break;
+  }
 }

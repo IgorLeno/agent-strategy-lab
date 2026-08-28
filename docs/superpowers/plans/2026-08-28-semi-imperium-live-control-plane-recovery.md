@@ -4,7 +4,9 @@
 
 **Status:** EM ANDAMENTO
 
-**Branch unica:** `fix/semi-imperium-live-control-plane-recovery`
+**Branch inicial da recuperacao:** `fix/semi-imperium-live-control-plane-recovery`
+
+**Branch ativa:** `fix/additional-repair-authorization-one-shot`
 
 **Baseline Agent Lab:** `852a81cb67e8c4935c6b25847b6d8937aa1350b7`
 
@@ -108,6 +110,7 @@ control plane que nao possa ser tomada com seguranca nesta autorizacao.
 | 2 | Crest RUNNING/FINALIZING; candidate be5ff5a | REVIEWED | HUMAN_REQUIRED com REVIEW_REPAIRABLE, exit 9 | Reviewer Claude read-only revisou o candidate; implementer nao foi relancado | Novo resume deve consumir o REJECT duravel e abrir bounded repair |
 | 3 | Crest RUNNING/FINALIZING; REJECT IMPLEMENTATION_DEFECT duravel | PLAN_READY | RetryFailedAttemptError, exit 1 | Nenhum provider/target novo | Corrigir compatibilidade do archive com finalization legado de provenance parcial |
 | 5 | Crest RUNNING/FINALIZING attempt 2; candidate c3cd117 | REVIEWED | HUMAN_REQUIRED REVIEW_INVOCATION_FAILED exit 1, stdout descartado | Reviewer Claude opus invocado; exit 1 em 6s; stderr vazio | Preservar stdout/stderr da invocacao falha |
+| 6 | Crest FAIL attempt 3; grant one-shot consumido | WORKER_RUNNING | Claude `json` encerrou com `is_error=true`, `terminal_reason=api_error`, HTTP 429; launcher gravou `provider_failure=null`; validation exit 4 porque o teste nao existia | Worker deixou patch parcial sem report/handoff; HEAD permaneceu 5070358 | Corrigir leitura de falha terminal no transporte `json`, validar e recuperar pelo lifecycle oficial |
 
 ## Incidente 2 — archive de review repair com provenance parcial legado
 
@@ -143,6 +146,32 @@ control plane que nao possa ser tomada com seguranca nesta autorizacao.
 - [x] Port passa a lancar ProviderRoleInvocationError com stdout+stderr.
 - [x] Persistencia append-only reusa o record de invocacao indisponivel.
 - [x] HUMAN_REQUIRED referencia somente paths reais; secrets redigidos.
+
+## Incidente 5 — falha terminal Claude em `json` passa como FINISHED
+
+- [x] Auditar state, LaunchRecord, stdout/stderr, completion, validation logs,
+  grant consumido e working tree do attempt 3.
+- [x] Provar a causa exata do pytest exit 4: arquivo
+  `tests/unit/semi_imperium/test_conformer_selection.py` ausente, sem mudanca de
+  config/layout do pytest.
+- [x] Provar a falha primaria do provider no envelope preservado:
+  `is_error=true`, `terminal_reason=api_error`, `api_error_status=429` e limite
+  de sessao, sem report/handoff.
+- [x] RED no launcher de producao com profile Claude `--output-format json` e
+  envelope terminal valido.
+- [x] Isolar o stdout vazio das fixtures: o mesmo `node` direto produz o stream,
+  mas `child_process.spawn` aninhado no sandbox retorna exit 0 com zero bytes;
+  tratar como bloqueio ambiental e validar esta regressao fora da restricao.
+- [x] Ler o objeto unico `json` com o mesmo `providerTerminalFailure` usado pelo
+  transporte `stream-json`, sem adivinhar por texto de erro.
+- [x] Provar que falha terminal `json` vira `INFRA_ERROR`, entra no LaunchRecord
+  e impede validacao de patch incompleto em attempts futuros.
+- [x] Rodar testes focados e gates do Agent Lab: regressao 1/1, arquivo focado
+  49/49, `pnpm typecheck`, `pnpm build`, `git diff --check` e suite completa
+  175 arquivos/2507 testes; registrar a licao ambiental.
+- [ ] Commitar a correcao do Agent Lab antes de retomar o runtime.
+- [ ] Emitir novo grant one-shot com provenance desta autorizacao continuada e
+  retomar o mesmo runtime sem edicao manual do target.
 
 ## Auditoria terminal
 

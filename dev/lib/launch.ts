@@ -23,8 +23,11 @@ import {
   type CredentialProbe,
 } from './billing.js';
 import {
+  JSON_OUTPUT_FORMAT,
+  claudeOutputFormat,
   providerTerminalFailure,
   rateLimitWindowDeltas,
+  readClaudeJsonResult,
   readClaudeStream,
   streamContractViolation,
   usesClaudeStreamJson,
@@ -479,9 +482,15 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
     ? readClaudeStream(stdout)
     : null;
 
+  const claudeResult =
+    stream?.result ??
+    (profile.agent === 'claude' && claudeOutputFormat(profile.argv) === JSON_OUTPUT_FORMAT
+      ? readClaudeJsonResult(stdout)
+      : null);
+
   // A falha terminal do provider é lida SEMPRE, mesmo quando outro diagnóstico
   // vence a classificação: ela é evidência do run, não só um veredito.
-  const providerFailure = stream ? providerTerminalFailure(stream.result) : null;
+  const providerFailure = providerTerminalFailure(claudeResult);
 
   const record: LaunchRecord = {
     ...base,

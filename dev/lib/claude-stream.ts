@@ -19,6 +19,9 @@ import { sha256Hex } from './canonical.js';
 
 export const STREAM_JSON_OUTPUT_FORMAT = 'stream-json';
 
+/** Objeto único emitido por `claude --print --output-format json`. */
+export const JSON_OUTPUT_FORMAT = 'json';
+
 /** `--output-format` ausente: a CLI cai no default `text`, ilegível aqui. */
 export const OUTPUT_FORMAT_NOT_DECLARED = 'not_declared';
 
@@ -56,6 +59,23 @@ export function claudeOutputFormat(argv: readonly string[]): string {
 /** `true` só quando o perfil é Claude E declarou stream-json de forma única. */
 export function usesClaudeStreamJson(agent: string, argv: readonly string[]): boolean {
   return agent === 'claude' && claudeOutputFormat(argv) === STREAM_JSON_OUTPUT_FORMAT;
+}
+
+/**
+ * Lê somente o objeto único declarado pelo transporte `json`.
+ *
+ * Falha de parse ou qualquer valor que não seja objeto fica `null`: o caller
+ * não pode transformar stdout arbitrário em evidência de falha do provider.
+ */
+export function readClaudeJsonResult(stdout: string): Record<string, unknown> | null {
+  const bytes = stdout.trim();
+  if (bytes === '') return null;
+  try {
+    const parsed: unknown = JSON.parse(bytes);
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------

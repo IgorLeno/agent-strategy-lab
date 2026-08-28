@@ -5,6 +5,17 @@ Regra, não narrativa: cada entrada termina numa restrição aplicável.
 
 ---
 
+[2026-08-28] Context: regressao de launcher exercitada por fixture curta que
+gera stdout em um subprocesso Node aninhado.
+Mistake: interpretar stdout vazio no sandbox restrito como defeito do pipe do
+launcher, embora o mesmo fixture direto emitisse JSON e um `spawn` minimo
+tambem perdesse todos os bytes somente naquele ambiente.
+Rule: antes de alterar captura de processo por stdout vazio em teste, reproduza
+com um `child_process.spawn` minimo e rerode o gate fora da restricao; falha
+ambiental de subprocesso nao autoriza mudar o lifecycle de producao.
+
+---
+
 [2026-08-28] Context: HUMAN_REQUIRED por AUTOMATIC_REPAIR_EXHAUSTED após dois
 REJECT de review, com autorização humana explícita para um repair adicional.
 Mistake: o Lab pedia decisão humana mas não tinha primitive oficial para
