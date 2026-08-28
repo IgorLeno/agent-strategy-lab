@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-28
 
-**Status:** VALIDATED — COMMIT/PR PENDING
+**Status:** COMPLETED — PR #8 READY FOR HUMAN REVIEW
 
 **Branch:** `fix/orchestrator-derived-array-caps`
 
@@ -39,7 +39,7 @@ policies unchanged.
 - [x] Run focused regressions and review the diff for unchanged review coverage,
   semantic bounds, advisory byte telemetry, and Semi-Imperium runtime state.
 - [x] Run `pnpm typecheck`, `pnpm test`, `pnpm build`, and `git diff --check`.
-- [ ] Record the outcome, create one coherent commit, push the branch, and open
+- [x] Record the outcome, create one coherent commit, push the branch, and open
   a focused non-merged PR.
 
 ## Implementation gate
@@ -63,3 +63,5 @@ authorize merging or resuming the Semi-Imperium runtime.
 - The immediate audit found no additional same-class capped array.
   `AgentCompletionReport` remains worker-authored and
   `CandidateReviewCoverage` remains reviewer-declared.
+- Delivery commit `b98d6c5` was pushed and PR #8 was opened ready for human
+  review. No merge or Semi-Imperium resume was performed.
