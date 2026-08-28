@@ -107,7 +107,11 @@ control plane que nao possa ser tomada com seguranca nesta autorizacao.
 | 1 | Crest RUNNING/FINALIZING; candidate be5ff5a | PLAN_READY | RoleOverlayError, exit 1 | Nenhum reviewer/target novo | Corrigir proof canonico e validar |
 | 2 | Crest RUNNING/FINALIZING; candidate be5ff5a | REVIEWED | HUMAN_REQUIRED com REVIEW_REPAIRABLE, exit 9 | Reviewer Claude read-only revisou o candidate; implementer nao foi relancado | Novo resume deve consumir o REJECT duravel e abrir bounded repair |
 | 3 | Crest RUNNING/FINALIZING; REJECT IMPLEMENTATION_DEFECT duravel | PLAN_READY | RetryFailedAttemptError, exit 1 | Nenhum provider/target novo | Corrigir compatibilidade do archive com finalization legado de provenance parcial |
+| 4 | Crest RUNNING/FINALIZING; REJECT IMPLEMENTATION_DEFECT duravel | REVIEWED | HUMAN_REQUIRED REVIEW_VERDICT_NOT_PARSEABLE, exit 9 | Archive do REJECT consumiu o reparo bounded; implementer repair (attempt 2, claude-opus-5 high, 26min) produziu o candidate c3cd117 | Preservar a saida do reviewer que o gate citava sem ter escrito |
 | 5 | Crest RUNNING/FINALIZING attempt 2; candidate c3cd117 | REVIEWED | HUMAN_REQUIRED REVIEW_INVOCATION_FAILED exit 1, stdout descartado | Reviewer Claude opus invocado; exit 1 em 6s; stderr vazio | Preservar stdout/stderr da invocacao falha |
+| 6 | Crest RUNNING/FINALIZING attempt 2; candidate c3cd117 | REVIEWED | HUMAN_REQUIRED REVIEW_REPAIRABLE, exit 9 | Reviewer Claude read-only concluiu depois do reset de quota das 13:30 e REJEITOU com IMPLEMENTATION_DEFECT | Novo resume deve consumir o REJECT duravel |
+| 7 | Crest com dois REJECT capability-bearing arquivados | PREFLIGHT | AUTOMATIC_REPAIR_EXHAUSTED, exit 9 | Nenhum provider lancado; nenhum attempt consumido; target intacto | Parada de politica: decisao humana |
+| 8 | Crest READY attempts=2; diagnostics aguardando bounded repair | PREFLIGHT | AUTOMATIC_REPAIR_EXHAUSTED, exit 9, `provider_called: false` | Confirmacao idempotente apos gates em `main` `54522ab`; nenhum attempt 3 | HUMAN_REQUIRED genuino — nao ampliar budget de repair sem autorizacao humana |
 
 ## Incidente 2 — archive de review repair com provenance parcial legado
 
@@ -148,11 +152,36 @@ control plane que nao possa ser tomada com seguranca nesta autorizacao.
 
 - [ ] Provar cada uma das sete tasks com estado, attempts, profile/model,
   validation, review, repair/escalation e accepted commit.
-- [ ] Provar recuperacao do candidate Crest sem relaunch incorreto.
+- [x] Provar recuperacao do candidate Crest sem relaunch incorreto.
 - [ ] Provar fresh quota e ausencia de autorizacao/billing ampliados.
 - [ ] Se `ALL_DONE`, executar somente a suite canonica final do target,
   read-only quanto a reparos manuais.
-- [ ] Rodar todos os gates finais do Agent Lab e registrar contagens/exits.
-- [ ] Confirmar arvores, HEADs e ausencia de edicao externa do target.
-- [ ] Push da branch, abrir uma PR, confirmar `NOT MERGED`.
+- [x] Gates finais no `main` merged (54522ab): `pnpm typecheck` exit 0;
+  `pnpm build` exit 0; `git diff --check` exit 0; `pnpm test` 175 arquivos
+  e 2501/2501 testes, exit 0.
+- [x] Confirmar arvores, HEADs e ausencia de edicao externa do target.
+- [x] Push da branch e PR de recuperacao: PR #9 e PR #10, ambas ja MERGED
+  em `main` pelo humano fora desta sessao; nao restam commits nao integrados.
 - [ ] Entregar relatorio requisito a requisito e verdict terminal exato.
+
+## Estado terminal desta sessao de recuperacao
+
+- Verdict: **HUMAN_REQUIRED genuino** — `AUTOMATIC_REPAIR_EXHAUSTED`, exit 9.
+- Motivo exato do control plane: `2 rejeicao(oes) capability-bearing ja
+  registradas — o unico reparo automatico bounded foi consumido; intervencao
+  humana e necessaria` (`dev/lib/automatic-repair.ts`).
+- Nao e defeito: a politica autoriza exatamente um reparo automatico bounded
+  por task, e o attempt 2 foi esse reparo. Nenhum caminho de escalacao
+  automatica existe para este blocker (`dev/lib/orchestrate.ts:870`).
+- `crest_selection_workflow` volta a `READY` com attempts=2; os dois candidates
+  rejeitados ficam preservados em `failed-attempts/attempt-{1,2}` com patch,
+  manifest, report e handoff.
+- REJECT do attempt 2, provado read-only pelo reviewer: regressao de quality
+  gate introduzida pelo commit — `ruff` I001 em `conformers/__init__.py:13`,
+  `confpass.py:17`, `workflow.py:14`, `tests/unit/semi_imperium/test_conformer_selection.py:17`;
+  `black --check` reformataria `ensemble.py:186` e `confpass.py:95-98`. As cinco
+  linhas de acceptance e a validacao oficial (30 passed, exit 0) estavam OK.
+- Target `grimperium` intacto e limpo em `5070358dd0ba07edac1d4e9738608205fe8f4d52`,
+  identico ao `authorized_head_sha` do state.
+- Decisao humana pendente: autorizar (ou nao) um reparo alem do orcamento
+  bounded para `crest_selection_workflow`.
