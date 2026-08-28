@@ -75,4 +75,53 @@ describe('reviewer — pool EXHAUSTED do profile pinado não bloqueia outro auto
     expect(selected.profileId).toBeNull();
     expect(selected.rerouted).toBe(false);
   });
+
+  it('INFRA no pinado rerroteia mesmo quando o pool dele NÃO está EXHAUSTED', () => {
+    const selected = selectReviewerProfileForFreshCapacity({
+      pinnedProfileId: 'codex-sol',
+      policyProfiles: POLICY,
+      poolOf,
+      capacityByPool: new Map([
+        ['openai_chatgpt_subscription', capacity(CapacityStatus.KNOWN)],
+        ['anthropic_subscription', capacity(CapacityStatus.KNOWN)],
+      ]),
+      excludedProfileIds: ['codex-sol'],
+    });
+    expect(selected.profileId).toBe('claude-opus');
+    expect(selected.rerouted).toBe(true);
+  });
+
+  it('INFRA no primeiro rerroteio escolhe o próximo, sem repetir o mesmo profile', () => {
+    const selected = selectReviewerProfileForFreshCapacity({
+      pinnedProfileId: 'codex-sol',
+      policyProfiles: POLICY,
+      poolOf,
+      capacityByPool: new Map([
+        ['openai_chatgpt_subscription', capacity(CapacityStatus.EXHAUSTED)],
+        ['anthropic_subscription', capacity(CapacityStatus.EXHAUSTED)],
+        ['opencode_go_subscription', capacity(CapacityStatus.KNOWN)],
+      ]),
+      excludedProfileIds: ['opencode-go-kimi'],
+    });
+    expect(selected.profileId).toBeNull();
+  });
+
+  it('dois OpenCode Go: INFRA no flash escolhe o pro, não o flash de novo', () => {
+    const selected = selectReviewerProfileForFreshCapacity({
+      pinnedProfileId: 'codex-sol',
+      policyProfiles: [
+        { id: 'codex-sol', capability_rank: 2 },
+        { id: 'opencode-go-flash', capability_rank: 4 },
+        { id: 'opencode-go-pro', capability_rank: 5 },
+      ],
+      poolOf,
+      capacityByPool: new Map([
+        ['openai_chatgpt_subscription', capacity(CapacityStatus.EXHAUSTED)],
+        ['opencode_go_subscription', capacity(CapacityStatus.KNOWN)],
+      ]),
+      excludedProfileIds: ['opencode-go-flash'],
+    });
+    expect(selected.profileId).toBe('opencode-go-pro');
+    expect(selected.rerouted).toBe(true);
+  });
 });

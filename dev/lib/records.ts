@@ -664,6 +664,30 @@ export const writeReviewParseFailure = async (
   return file;
 };
 
+export const listReviewParseFailures = async (
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+): Promise<readonly ReviewParseFailureRecord[]> => {
+  const dir = path.join(paths.reviewsDir, taskId, `attempt-${attempt}`);
+  let names: string[];
+  try {
+    names = await readdir(dir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
+  }
+  const records: ReviewParseFailureRecord[] = [];
+  for (const name of names) {
+    if (!name.startsWith('unparseable-invocation-') || !name.endsWith('.json')) continue;
+    const parsed = ReviewParseFailureRecord.safeParse(
+      JSON.parse(await readFile(path.join(dir, name), 'utf8')),
+    );
+    if (parsed.success) records.push(parsed.data);
+  }
+  return records;
+};
+
 export const listAdditionalRepairAuthorizationFiles = async (
   paths: HarnessPaths,
   taskId: string,

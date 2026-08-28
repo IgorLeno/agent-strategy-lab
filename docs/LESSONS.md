@@ -5,6 +5,16 @@ Regra, não narrativa: cada entrada termina numa restrição aplicável.
 
 ---
 
+[2026-08-28] Context: reviewer OpenCode Go flash lançado após Codex/Claude
+EXHAUSTED retornou UnknownError/server error em ~13s.
+Mistake: REVIEW_INVOCATION_FAILED virou HUMAN_REQUIRED imediato e o próximo
+resume relançaria o mesmo profile.
+Rule: falha de invocação INFRA exclui o profile (não o pool) e tenta o próximo
+já autorizado na mesma decisão; HUMAN_REQUIRED só quando não resta reviewer
+elegível; nunca relançar o mesmo profile na mesma review.
+
+---
+
 [2026-08-28] Context: candidate Crest já commitado e validado, review pinada
 no Codex cujo pool fresco estava EXHAUSTED; Claude five_hour remaining 0
 ainda era KNOWN.
