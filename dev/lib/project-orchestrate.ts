@@ -1718,7 +1718,10 @@ export async function launchProjectReviewer(
     // A permissão do role vive no ambiente do processo; prová-la no overlay e
     // depois lançar sem ela seria provar a coisa errada.
     const roleEnv = { ...env, ...overlay.env };
-    assertReadOnlyArgv('reviewer', options.profile.agent, argv, roleEnv);
+    assertReadOnlyArgv('reviewer', options.profile.agent, argv, roleEnv, {
+      catalogRoot: options.paths.profileCatalogRoot,
+      workerCwd: options.paths.repoRoot,
+    });
 
     let stdout: string;
     try {

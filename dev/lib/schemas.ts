@@ -2667,6 +2667,14 @@ export const ReviewRejectedAttemptRecord = z
     original_validation_evidence: z.array(ValidationEvidence).optional(),
     patch_fingerprint: sha256Hex,
     change_bundle: PreservedChangeBundleRef,
+    /**
+     * Bytes do inbox preservados na transicao para repair. Estes hashes nao
+     * fingem provenance no FinalizationRecord: quando a finalizacao historica
+     * omitiu uma nota opcional, eles ligam somente a observacao arquivada por
+     * esta transicao ao attempt rejeitado.
+     */
+    archived_report_sha256: sha256Hex.optional(),
+    archived_handoff_draft_sha256: sha256Hex.optional(),
     archived_at: z.string().datetime(),
   })
   .strict()
@@ -2686,6 +2694,15 @@ export const ReviewRejectedAttemptRecord = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: 'changed_files deve ser único e ordenado',
+      });
+    }
+    if (
+      (record.archived_report_sha256 === undefined) !==
+      (record.archived_handoff_draft_sha256 === undefined)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'archive do output de review rejection exige o par de hashes',
       });
     }
   });

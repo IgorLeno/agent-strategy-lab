@@ -5,6 +5,14 @@ Regra, não narrativa: cada entrada termina numa restrição aplicável.
 
 ---
 
+[2026-08-28] Context: regressão de uma porta assíncrona que captura o argv de
+lançamento para asserções posteriores.
+Mistake: esperar que o TypeScript estreitasse uma variável inicialmente `null`
+depois de uma atribuição feita dentro de callback assíncrono.
+Rule: em testes que capturam argumentos de callbacks, grave-os em um objeto
+mutável tipado e verifique suas propriedades; não dependa de narrowing entre
+fronteiras assíncronas.
+
 [2026-08-28] Context: regressão do selamento na finalização orquestrada.
 Mistake: fixar no teste a quantidade de validations declarada no plano e
 esquecer que o diff-check oficial também integra a evidência final.
@@ -1041,3 +1049,10 @@ Rule: medida de recurso externo só vale para a decisão que a observou. Falha
 instrumental é UNKNOWN e permanece UNKNOWN; histórico responde "quanto isto
 consumiu", nunca "quanto existe agora". Reuso só dentro da MESMA decisão
 imediata, indexado pela chave do recurso — nunca por tempo decorrido.
+
+[2026-08-28] Context: regressao de recovery precisava comparar hashes fora do
+fixture que montava o FinalizationRecord.
+Mistake: o digest helper foi declarado dentro do fixture e reutilizado pela
+asserção fora daquele escopo, fazendo o teste GREEN falhar por erro do teste.
+Rule: helper usado tanto na montagem quanto na asserção fica no escopo do
+modulo ou reutiliza a primitive canonica de producao.
