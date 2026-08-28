@@ -2749,6 +2749,42 @@ export const ReviewRejectedAttemptRecord = z
 export type ReviewRejectedAttemptRecord = z.infer<typeof ReviewRejectedAttemptRecord>;
 
 /**
+ * Concessão humana explícita de UM repair adicional depois de
+ * AUTOMATIC_REPAIR_EXHAUSTED. Não altera retry_budget global: o record vive no
+ * runtime, na task, e é one-shot.
+ */
+export const AdditionalRepairAuthorizationRecord = z
+  .object({
+    schema_version: z.literal(DEV_SCHEMA_VERSION),
+    kind: z.literal('ADDITIONAL_REPAIR_AUTHORIZATION'),
+    task_id: identifier,
+    additional_attempts: z.literal(1),
+    reason: nonEmpty,
+    granted_at: z.string().datetime(),
+    provenance: z.literal('human_explicit'),
+    blocker: z.literal('AUTOMATIC_REPAIR_EXHAUSTED'),
+  })
+  .strict();
+export type AdditionalRepairAuthorizationRecord = z.infer<
+  typeof AdditionalRepairAuthorizationRecord
+>;
+
+/** Recibo append-only de que a concessão one-shot foi gasta num attempt. */
+export const AdditionalRepairAuthorizationConsumptionRecord = z
+  .object({
+    schema_version: z.literal(DEV_SCHEMA_VERSION),
+    kind: z.literal('ADDITIONAL_REPAIR_AUTHORIZATION_CONSUMPTION'),
+    task_id: identifier,
+    grant_sha256: sha256Hex,
+    consumed_by_attempt: z.number().int().positive(),
+    consumed_at: z.string().datetime(),
+  })
+  .strict();
+export type AdditionalRepairAuthorizationConsumptionRecord = z.infer<
+  typeof AdditionalRepairAuthorizationConsumptionRecord
+>;
+
+/**
  * Motivos pelos quais um attempt é arquivado SEM solução nenhuma para preservar.
  * Append-only, como os demais códigos.
  */

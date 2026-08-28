@@ -5,6 +5,8 @@ import { sha256Hex } from './canonical.js';
 import type { HarnessPaths } from './paths.js';
 import {
   AgentCompletionReport,
+  AdditionalRepairAuthorizationConsumptionRecord,
+  AdditionalRepairAuthorizationRecord,
   AttemptAbandonmentRecord,
   CandidateReviewRecord,
   CloseManifest,
@@ -234,6 +236,30 @@ export function revalidationCheckpointPath(
 
 export function failedAttemptDir(paths: HarnessPaths, taskId: string, attempt: number): string {
   return path.join(paths.failedAttemptsDir, taskId, `attempt-${attempt}`);
+}
+
+export function additionalRepairTaskDir(paths: HarnessPaths, taskId: string): string {
+  return path.join(paths.additionalRepairAuthorizationsDir, taskId);
+}
+
+export function additionalRepairGrantPath(
+  paths: HarnessPaths,
+  taskId: string,
+  grantSha256: string,
+): string {
+  return path.join(additionalRepairTaskDir(paths, taskId), `grant-${grantSha256}.json`);
+}
+
+export function additionalRepairConsumptionPath(
+  paths: HarnessPaths,
+  taskId: string,
+  grantSha256: string,
+  attempt: number,
+): string {
+  return path.join(
+    additionalRepairTaskDir(paths, taskId),
+    `consumed-${grantSha256}-attempt-${attempt}.json`,
+  );
 }
 
 export function validationFailedAttemptPath(
@@ -632,6 +658,53 @@ export const writeReviewParseFailure = async (
     parsed.task_id,
     parsed.attempt,
     sha256Hex(parsed.stdout),
+  );
+  await writeJsonOnce(file, parsed);
+  return file;
+};
+
+export const listAdditionalRepairAuthorizationFiles = async (
+  paths: HarnessPaths,
+  taskId: string,
+): Promise<readonly string[]> => {
+  try {
+    return await readdir(additionalRepairTaskDir(paths, taskId));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
+  }
+};
+
+export const readAdditionalRepairAuthorizationGrant = (
+  paths: HarnessPaths,
+  taskId: string,
+  grantSha256: string,
+): Promise<AdditionalRepairAuthorizationRecord | null> =>
+  readOptional(additionalRepairGrantPath(paths, taskId, grantSha256), (input) =>
+    AdditionalRepairAuthorizationRecord.parse(input),
+  );
+
+export const writeAdditionalRepairAuthorizationGrant = async (
+  paths: HarnessPaths,
+  record: AdditionalRepairAuthorizationRecord,
+  grantSha256: string,
+): Promise<string> => {
+  const parsed = AdditionalRepairAuthorizationRecord.parse(record);
+  const file = additionalRepairGrantPath(paths, parsed.task_id, grantSha256);
+  await writeJsonOnce(file, parsed);
+  return file;
+};
+
+export const writeAdditionalRepairAuthorizationConsumption = async (
+  paths: HarnessPaths,
+  record: AdditionalRepairAuthorizationConsumptionRecord,
+): Promise<string> => {
+  const parsed = AdditionalRepairAuthorizationConsumptionRecord.parse(record);
+  const file = additionalRepairConsumptionPath(
+    paths,
+    parsed.task_id,
+    parsed.grant_sha256,
+    parsed.consumed_by_attempt,
   );
   await writeJsonOnce(file, parsed);
   return file;

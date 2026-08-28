@@ -5,7 +5,16 @@ Regra, não narrativa: cada entrada termina numa restrição aplicável.
 
 ---
 
-[2026-08-28] Context: reviewer devolveu saída não parseável (e depois exit 1)
+[2026-08-28] Context: HUMAN_REQUIRED por AUTOMATIC_REPAIR_EXHAUSTED após dois
+REJECT de review, com autorização humana explícita para um repair adicional.
+Mistake: o Lab pedia decisão humana mas não tinha primitive oficial para
+consumir uma resposta afirmativa sem editar state/runtime à mão; `dev-retry-failed`
+não se aplica a task já READY com os attempts arquivados.
+Rule: AUTOMATIC_REPAIR_EXHAUSTED só libera um novo attempt via concessão
+humana one-shot, append-only, scoped por runtime+task, consumida no launch;
+nunca altere retry_budget global nem reutilize a mesma concessão.
+
+---
 na run Semi-Imperium.
 Mistake: HUMAN_REQUIRED apontou para review.json que nunca foi escrito e o
 stdout/stderr da invocação foi descartado — inclusive quando o processo saía
