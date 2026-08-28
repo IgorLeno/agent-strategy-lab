@@ -3,6 +3,7 @@ import path from 'node:path';
 import { canonicalSha256 } from './canonical.js';
 import type { HarnessPaths } from './paths.js';
 import {
+  additionalRepairConsumptionPath,
   additionalRepairTaskDir,
   listAdditionalRepairAuthorizationFiles,
   readAttemptAbandonment,
@@ -135,7 +136,7 @@ async function readUnusedAdditionalRepairGrant(
     };
   }
   const unused: string[] = [];
-  const consumed = new Set<string>();
+  const consumedAttempt = new Map<string, number>();
   for (const name of names) {
     const consumption = CONSUMPTION_FILE.exec(name);
     if (consumption) {
@@ -158,13 +159,13 @@ async function readUnusedAdditionalRepairGrant(
             reason: `recibo de autorização adicional diverge do attempt: ${name}`,
           };
         }
+        consumedAttempt.set(grantSha, parsed.consumed_by_attempt);
       } catch (error) {
         return {
           status: 'invalid',
           reason: `recibo de autorização adicional ilegível (${name}): ${errorMessage(error)}`,
         };
       }
-      consumed.add(grantSha);
       continue;
     }
     const grant = GRANT_FILE.exec(name);
@@ -198,7 +199,11 @@ async function readUnusedAdditionalRepairGrant(
     }
     unused.push(grantSha);
   }
-  const remaining = unused.filter((sha) => !consumed.has(sha));
+  const task = getTaskState(await readState(paths), taskId);
+  const remaining = unused.filter((sha) => {
+    const spentAt = consumedAttempt.get(sha);
+    return spentAt === undefined || spentAt > task.attempts;
+  });
   if (remaining.length === 0) return { status: 'none' };
   if (remaining.length > 1) {
     return {
@@ -283,6 +288,32 @@ export async function consumeAdditionalRepairAuthorization(input: {
   readonly attempt: number;
   readonly now?: () => string;
 }): Promise<string> {
+  const existingPath = additionalRepairConsumptionPath(
+    input.paths,
+    input.taskId,
+    input.grantSha256,
+    input.attempt,
+  );
+  try {
+    const existing = AdditionalRepairAuthorizationConsumptionRecord.parse(
+      JSON.parse(await readFile(existingPath, 'utf8')) as unknown,
+    );
+    if (
+      existing.task_id === input.taskId &&
+      existing.grant_sha256 === input.grantSha256 &&
+      existing.consumed_by_attempt === input.attempt
+    ) {
+      return existingPath;
+    }
+    throw new AdditionalRepairAuthorizationError(
+      `recibo de autorização adicional diverge em ${existingPath}`,
+    );
+  } catch (error) {
+    if (error instanceof AdditionalRepairAuthorizationError) throw error;
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw new AdditionalRepairAuthorizationError(errorMessage(error));
+    }
+  }
   const lookup = await readUnusedAdditionalRepairGrant(input.paths, input.taskId);
   if (lookup.status === 'invalid') {
     throw new AdditionalRepairAuthorizationError(lookup.reason);

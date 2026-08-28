@@ -691,8 +691,16 @@ describe('decideAutomaticRepair — rejeição de implementation defect', () => 
     });
 
     expect(await decideAutomaticRepair(paths, TASK)).toMatchObject({
+      action: 'REPAIR_ALLOWED',
+      additional_authorization_sha256: granted.sha256,
+    });
+
+    await writeReviewRejectedAttempt(paths, reviewRejected(3));
+    await setTask('READY', 3);
+
+    expect(await decideAutomaticRepair(paths, TASK)).toMatchObject({
       action: 'REPAIR_EXHAUSTED',
-      validation_fail_count: 2,
+      validation_fail_count: 3,
     });
   });
 
@@ -712,6 +720,8 @@ describe('decideAutomaticRepair — rejeição de implementation defect', () => 
       grantSha256: first.sha256,
       attempt: 3,
     });
+    await writeReviewRejectedAttempt(paths, reviewRejected(3));
+    await setTask('READY', 3);
 
     expect(await decideAutomaticRepair(paths, TASK)).toMatchObject({
       action: 'REPAIR_EXHAUSTED',
