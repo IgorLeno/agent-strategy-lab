@@ -5,12 +5,15 @@ Regra, não narrativa: cada entrada termina numa restrição aplicável.
 
 ---
 
-[2026-08-28] Context: reviewer devolveu saída não parseável na run Semi-Imperium.
-Mistake: HUMAN_REQUIRED apontou para review.json que nunca foi escrito e
-descartou o stdout — a única evidência disponível para diagnosticar o parse.
-Rule: saída de reviewer não parseável é persistida append-only (nunca como
-CandidateReviewRecord) antes de qualquer HUMAN_REQUIRED; evidence_paths só cita
-paths que existem; ausência de parse nunca vira ACCEPT/REJECT.
+[2026-08-28] Context: reviewer devolveu saída não parseável (e depois exit 1)
+na run Semi-Imperium.
+Mistake: HUMAN_REQUIRED apontou para review.json que nunca foi escrito e o
+stdout/stderr da invocação foi descartado — inclusive quando o processo saía
+com código não-zero e o erro estava no stdout.
+Rule: evidência real da invocação do reviewer (stdout/stderr redigidos) é
+persistida append-only, nunca como CandidateReviewRecord, antes de qualquer
+HUMAN_REQUIRED; evidence_paths só cita paths que existem; ausência de parse
+ou falha de processo nunca vira ACCEPT/REJECT.
 
 [2026-08-28] Context: regressão de uma porta assíncrona que captura o argv de
 lançamento para asserções posteriores.

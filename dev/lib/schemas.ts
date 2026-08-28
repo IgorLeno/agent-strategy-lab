@@ -2212,6 +2212,7 @@ export const REVIEW_PARSE_FAILURE_OUTCOMES = [
   'TRANSPORT_MALFORMED',
   'PROVIDER_TERMINAL_FAILURE',
   'STRUCTURAL',
+  'INVOCATION_FAILED',
 ] as const;
 export const ReviewParseFailureOutcome = z.enum(REVIEW_PARSE_FAILURE_OUTCOMES);
 export type ReviewParseFailureOutcome = z.infer<typeof ReviewParseFailureOutcome>;

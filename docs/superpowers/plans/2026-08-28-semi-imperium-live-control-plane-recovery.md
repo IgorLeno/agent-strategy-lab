@@ -107,7 +107,7 @@ control plane que nao possa ser tomada com seguranca nesta autorizacao.
 | 1 | Crest RUNNING/FINALIZING; candidate be5ff5a | PLAN_READY | RoleOverlayError, exit 1 | Nenhum reviewer/target novo | Corrigir proof canonico e validar |
 | 2 | Crest RUNNING/FINALIZING; candidate be5ff5a | REVIEWED | HUMAN_REQUIRED com REVIEW_REPAIRABLE, exit 9 | Reviewer Claude read-only revisou o candidate; implementer nao foi relancado | Novo resume deve consumir o REJECT duravel e abrir bounded repair |
 | 3 | Crest RUNNING/FINALIZING; REJECT IMPLEMENTATION_DEFECT duravel | PLAN_READY | RetryFailedAttemptError, exit 1 | Nenhum provider/target novo | Corrigir compatibilidade do archive com finalization legado de provenance parcial |
-| 4 | Crest RUNNING/FINALIZING attempt 2; candidate c3cd117 | REVIEWED | HUMAN_REQUIRED REVIEW_VERDICT_NOT_PARSEABLE, evidência fantasma | Repair worker concluiu; reviewer executou; review.json de attempt 2 nao foi escrito | Persistir stdout nao parseavel e apontar so para paths reais |
+| 5 | Crest RUNNING/FINALIZING attempt 2; candidate c3cd117 | REVIEWED | HUMAN_REQUIRED REVIEW_INVOCATION_FAILED exit 1, stdout descartado | Reviewer Claude opus invocado; exit 1 em 6s; stderr vazio | Preservar stdout/stderr da invocacao falha |
 
 ## Incidente 2 — archive de review repair com provenance parcial legado
 
@@ -134,6 +134,15 @@ control plane que nao possa ser tomada com seguranca nesta autorizacao.
 - [x] Persistir `ReviewParseFailureRecord` append-only (nao e veredito).
 - [x] HUMAN_REQUIRED referencia somente paths existentes; stdout redigido.
 - [x] Fail-closed: ausencia de parse nao vira ACCEPT/REJECT nem review.json.
+
+## Incidente 4 — exit nao-zero do reviewer descarta stdout
+
+- [x] Resume #5: reviewer Claude opus exit 1 em ~6s; stderr vazio; stdout
+  descartado pelo port; evidence_paths so validation-logs.
+- [x] RED: processo/porta de reviewer com exit 1 e envelope no stdout.
+- [x] Port passa a lancar ProviderRoleInvocationError com stdout+stderr.
+- [x] Persistencia append-only reusa o record de invocacao indisponivel.
+- [x] HUMAN_REQUIRED referencia somente paths reais; secrets redigidos.
 
 ## Auditoria terminal
 
