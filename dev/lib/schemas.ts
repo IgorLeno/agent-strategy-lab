@@ -393,8 +393,8 @@ export function readHandoffConfidence(statement: string | undefined): HandoffCon
 const handoffCommonBody = {
   task_id: identifier,
   result: z.enum(['PASS', 'FAIL']),
-  changed_files: z.array(nonEmpty).max(50),
-  validations: z.array(ValidationResult).max(20),
+  changed_files: z.array(nonEmpty),
+  validations: z.array(ValidationResult),
   decisions: z.array(nonEmpty).max(5),
   lessons: z.array(nonEmpty).max(3),
   next_relevant_files: z.array(nonEmpty).max(5),
@@ -568,7 +568,7 @@ export const PreviousAttemptDiagnostics = z
     worker_self_reported_result: z.literal('SUCCESS'),
     reason_code: nonEmpty,
     reason: nonEmpty,
-    failed_validations: z.array(PreviousAttemptFailedValidation).max(20),
+    failed_validations: z.array(PreviousAttemptFailedValidation),
     review_rejection: z
       .object({
         disposition: z.literal('IMPLEMENTATION_DEFECT'),
@@ -577,7 +577,7 @@ export const PreviousAttemptDiagnostics = z
       })
       .strict()
       .optional(),
-    changed_files: z.array(nonEmpty).max(50),
+    changed_files: z.array(nonEmpty),
     /** Diretório dos logs oficiais, relativo ao devDir. */
     validation_logs_dir: nonEmpty.optional(),
   })
