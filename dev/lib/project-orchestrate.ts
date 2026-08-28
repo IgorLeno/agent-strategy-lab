@@ -1642,10 +1642,37 @@ interface ProjectReviewVerdict<Outcome extends 'ACCEPT' | 'REJECT'> {
 export type ProjectReviewResult =
   | ProjectReviewVerdict<'ACCEPT'>
   | ProjectReviewVerdict<'REJECT'>
-  | { readonly outcome: 'REVIEW_UNAVAILABLE'; readonly code: string; readonly reason: string };
+  | {
+      readonly outcome: 'REVIEW_UNAVAILABLE';
+      readonly code: string;
+      readonly reason: string;
+      readonly evidence?: ProjectReviewUnavailableEvidence;
+    };
 
-function reviewUnavailable(code: string, reason: string): ProjectReviewResult {
-  return { outcome: 'REVIEW_UNAVAILABLE', code, reason };
+export type ReviewParseOutcome =
+  | 'NOT_PARSEABLE'
+  | 'TRANSPORT_MALFORMED'
+  | 'PROVIDER_TERMINAL_FAILURE'
+  | 'STRUCTURAL';
+
+/**
+ * Stdout (e stderr, se houver) da invocação que não produziu veredito.
+ * Quem persiste é o control plane: este adapter não inventa review.json.
+ */
+export interface ProjectReviewUnavailableEvidence {
+  readonly parse_outcome: ReviewParseOutcome;
+  readonly stdout: string;
+  readonly stderr: string | null;
+}
+
+function reviewUnavailable(
+  code: string,
+  reason: string,
+  evidence?: ProjectReviewUnavailableEvidence,
+): ProjectReviewResult {
+  return evidence === undefined
+    ? { outcome: 'REVIEW_UNAVAILABLE', code, reason }
+    : { outcome: 'REVIEW_UNAVAILABLE', code, reason, evidence };
 }
 
 /**
@@ -1746,15 +1773,34 @@ export async function launchProjectReviewer(
       argv,
       stdout,
     });
+    const invocationEvidence = (
+      parse_outcome: ReviewParseOutcome,
+    ): ProjectReviewUnavailableEvidence => ({
+      parse_outcome,
+      stdout,
+      stderr: null,
+    });
     switch (extracted.outcome) {
       case 'EXTRACTED':
         break;
       case 'PROVIDER_TERMINAL_FAILURE':
-        return reviewUnavailable('REVIEW_INVOCATION_FAILED', extracted.message);
+        return reviewUnavailable(
+          'REVIEW_INVOCATION_FAILED',
+          extracted.message,
+          invocationEvidence('PROVIDER_TERMINAL_FAILURE'),
+        );
       case 'TRANSPORT_MALFORMED':
-        return reviewUnavailable('REVIEW_INVOCATION_FAILED', extracted.message);
+        return reviewUnavailable(
+          'REVIEW_INVOCATION_FAILED',
+          extracted.message,
+          invocationEvidence('TRANSPORT_MALFORMED'),
+        );
       case 'NOT_PARSEABLE':
-        return reviewUnavailable('REVIEW_VERDICT_NOT_PARSEABLE', extracted.message);
+        return reviewUnavailable(
+          'REVIEW_VERDICT_NOT_PARSEABLE',
+          extracted.message,
+          invocationEvidence('NOT_PARSEABLE'),
+        );
       default: {
         const _exhaustive: never = extracted;
         return _exhaustive;
@@ -1777,18 +1823,21 @@ export async function launchProjectReviewer(
       return reviewUnavailable(
         'REVIEW_VERDICT_NOT_PARSEABLE',
         'saída do reviewer não contém um único JSON {"decision":"ACCEPT|REJECT","reason":"..."}',
+        invocationEvidence('STRUCTURAL'),
       );
     }
     if (decision === 'REJECT' && !rejectionDisposition.success) {
       return reviewUnavailable(
         'REVIEW_VERDICT_NOT_PARSEABLE',
         'REJECT exige rejection_disposition estruturada reconhecida',
+        invocationEvidence('STRUCTURAL'),
       );
     }
     if (decision === 'ACCEPT' && parsed?.rejection_disposition !== undefined) {
       return reviewUnavailable(
         'REVIEW_VERDICT_NOT_PARSEABLE',
         'ACCEPT não pode declarar rejection_disposition',
+        invocationEvidence('STRUCTURAL'),
       );
     }
 

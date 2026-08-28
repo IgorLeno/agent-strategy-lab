@@ -29,7 +29,7 @@
 
 import { createHash } from 'node:crypto';
 import { ZodError } from 'zod';
-import { readFile } from 'node:fs/promises';
+import { access, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { canonicalSha256 } from './canonical.js';
 
@@ -47,6 +47,7 @@ import type { PoolCapacityObservation } from '../../src/quota/index.js';
 import { AttemptRole } from '../../src/performance/attempt-facts.js';
 import { InterventionType, type InterventionRecord } from '../../src/schemas/index.js';
 import type { PerformanceHistoryQueryResultV2 } from '../../src/performance/query.js';
+import { redactString } from '../../src/storage/index.js';
 import {
   CapabilityRegistry,
   capabilityOf,
@@ -152,11 +153,13 @@ import {
   reportPath,
   validationFailedAttemptPath,
   writeCandidateReview,
+  writeReviewParseFailure,
   writeReviewRejectionClassification,
 } from './records.js';
 import type {
   CandidateReviewRequirement,
   OrchestratedFinalizationRecord,
+  ReviewParseFailureRecord,
 } from './schemas.js';
 import { isHandoffDraftV2, readHandoffConfidence } from './schemas.js';
 import { retryFailedAttempt, retryReviewRejectedAttempt } from './retry-failed.js';
@@ -1922,6 +1925,50 @@ export async function createProjectControlPlane(
     return { status: 'HUMAN_REQUIRED', code, human_required: output };
   }
 
+  async function existingEvidencePaths(candidates: readonly string[]): Promise<string[]> {
+    const existing: string[] = [];
+    for (const candidate of candidates) {
+      try {
+        await access(candidate);
+        existing.push(candidate);
+      } catch {
+        // evidência fantasma não entra na decisão
+      }
+    }
+    return existing;
+  }
+
+  async function persistUnparseableReviewEvidence(details: {
+    readonly taskId: string;
+    readonly attempt: number;
+    readonly profile: LauncherProfile;
+    readonly code: string;
+    readonly reason: string;
+    readonly stdout: string;
+    readonly stderr: string | null;
+    readonly parseOutcome: ReviewParseFailureRecord['parse_outcome'];
+  }): Promise<string> {
+    const capturedAt = (input.now?.() ?? new Date()).toISOString();
+    return writeReviewParseFailure(paths, {
+      schema_version: 1,
+      kind: 'REVIEW_PARSE_FAILURE',
+      task_id: details.taskId,
+      attempt: details.attempt,
+      role: 'reviewer',
+      profile_id: details.profile.id,
+      provider: details.profile.provider ?? details.profile.agent,
+      agent: details.profile.agent,
+      parse_outcome: details.parseOutcome,
+      code: details.code,
+      reason: details.reason,
+      stdout: redactString(details.stdout),
+      stderr: details.stderr === null ? null : redactString(details.stderr),
+      captured_at: capturedAt,
+      provenance:
+        'stdout da invocação do reviewer, redigido antes da persistência; não é CandidateReviewRecord',
+    });
+  }
+
   /**
    * DECISÃO de aceitação sobre um candidate JÁ preparado e validado.
    *
@@ -2126,8 +2173,23 @@ export async function createProjectControlPlane(
 
     if (verdict.outcome === 'REVIEW_UNAVAILABLE') {
       // Review exigida que não pôde ser concluída não vira aceite nem vira
-      // reprovação permanente: nada é publicado, e a próxima tentativa
-      // continua encontrando o candidate aguardando decisão.
+      // reprovação permanente. A evidência real da invocação é persistida
+      // ANTES do HUMAN_REQUIRED; review.json só existe para um veredito válido.
+      const persisted: string[] = [];
+      if (verdict.evidence !== undefined) {
+        persisted.push(
+          await persistUnparseableReviewEvidence({
+            taskId,
+            attempt: record.attempt,
+            profile: reviewerProfile,
+            code: verdict.code,
+            reason: verdict.reason,
+            stdout: verdict.evidence.stdout,
+            stderr: verdict.evidence.stderr,
+            parseOutcome: verdict.evidence.parse_outcome,
+          }),
+        );
+      }
       return reviewBlocked(
         taskId,
         verdict.code,
@@ -2135,7 +2197,7 @@ export async function createProjectControlPlane(
         `review independente não pôde ser concluída: ${verdict.reason}`,
         'tornar a review independente executável ou decidir manualmente',
         ['corrigir a configuração do reviewer', 'inspecionar o candidate preparado'],
-        evidencePaths,
+        await existingEvidencePaths([...persisted, paths.validationLogsDir]),
       );
     }
 
