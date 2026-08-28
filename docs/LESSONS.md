@@ -1121,3 +1121,19 @@ Mistake: o digest helper foi declarado dentro do fixture e reutilizado pela
 asserção fora daquele escopo, fazendo o teste GREEN falhar por erro do teste.
 Rule: helper usado tanto na montagem quanto na asserção fica no escopo do
 modulo ou reutiliza a primitive canonica de producao.
+
+[2026-08-28] Context: `resolveProfileArgv` convertia `--model
+opencode-go/deepseek-v4-flash` em path absoluto do catálogo.
+Mistake: classificar qualquer token com `/` como recurso de filesystem.
+Rule: a semântica do operando vem do flag dono — `--model`/`-m` é identidade
+e nunca resolve; `--settings` é recurso do catálogo; posicional só resolve se
+o arquivo existir de fato no catálogo. Basename, sufixo e lista de modelos
+não classificam path.
+
+[2026-08-28] Context: planner default da run era o menor capability_rank da
+policy — o baseline de IMPLEMENTATION, não o modelo mais capaz.
+Mistake: reutilizar a ladder de implementação como seleção de PLANNING.
+Rule: PLANNING tem seleção de papel própria: qualidade/capacidade primeiro,
+cold-start Opus então Sol, quota EXHAUSTED faz failover, UNKNOWN não bloqueia,
+pedido explícito falha fechado, OpenRouter/API nunca entra por fallback
+implícito. Implementation routing permanece intacto.

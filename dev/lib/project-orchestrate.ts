@@ -569,6 +569,7 @@ export interface ReviewedPathDeliberation {
   /** Instrução humana verbatim: autoridade de intenção do refinamento. */
   readonly humanRequest: string;
   readonly onTurn?: (turn: DeliberationTurnRecord) => void;
+  readonly plannerProvider?: string;
 }
 
 export interface ReviewedPathInput {
@@ -648,6 +649,9 @@ export async function runReviewedPath(input: ReviewedPathInput): Promise<Reviewe
       inspection: ProjectInspection.parse(input.inspection),
       authorizationScope: ExecutionAuthorizationScope.parse(input.authorizationScope),
     }),
+    ...(deliberation.plannerProvider === undefined
+      ? {}
+      : { plannerProvider: deliberation.plannerProvider }),
   });
   for (const turn of deliberated.artifact.turns) deliberation.onTurn?.(turn);
 
@@ -1271,9 +1275,13 @@ export function createLaunchedDeliberationWorker(
   options: LaunchedDeliberationWorkerOptions,
 ): PlanDeliberationWorkerPort {
   const invocationId = options.invocationId ?? `deliberator-${options.profile.id}`;
-  const failure = (code: string, message: string): PlanDeliberationInvocationResult => ({
+  const failure = (
+    code: string,
+    message: string,
+    retryable = false,
+  ): PlanDeliberationInvocationResult => ({
     outcome: 'INVOCATION_FAILED',
-    failure: { code, message: `${invocationId}: ${message}` },
+    failure: { code, message: `${invocationId}: ${message}`, retryable },
   });
 
   return {
@@ -1296,7 +1304,7 @@ export function createLaunchedDeliberationWorker(
         worker_owns_official_validation: options.profile.official_validation_owner !== 'orchestrator',
       });
       if (authorization.outcome === 'HUMAN_REQUIRED') {
-        return failure('DELIBERATION_LAUNCH_HUMAN_REQUIRED', authorization.reason);
+        return failure('DELIBERATION_LAUNCH_HUMAN_REQUIRED', authorization.reason, true);
       }
 
       const ceiling = machineSafetyCeiling();
@@ -1338,7 +1346,7 @@ export function createLaunchedDeliberationWorker(
         orchestratorEnv: process.env,
       });
       if (!billing.ok) {
-        return failure('BILLING_PREFLIGHT_REFUSED', billing.refusal ?? 'motivo não informado');
+        return failure('BILLING_PREFLIGHT_REFUSED', billing.refusal ?? 'motivo não informado', true);
       }
 
       let stdout: string;
@@ -1356,6 +1364,7 @@ export function createLaunchedDeliberationWorker(
         return failure(
           'PROVIDER_INVOCATION_FAILED',
           error instanceof Error ? error.message : String(error),
+          true,
         );
       }
 
@@ -1363,7 +1372,12 @@ export function createLaunchedDeliberationWorker(
       if (extracted.outcome === 'EXTRACTED') {
         return { outcome: 'VERDICT_RETURNED', verdict: extracted.value };
       }
-      return failure(extracted.outcome, extracted.message);
+      return failure(
+        extracted.outcome,
+        extracted.message,
+        extracted.outcome === 'TRANSPORT_MALFORMED' ||
+          extracted.outcome === 'PROVIDER_TERMINAL_FAILURE',
+      );
     },
   };
 }

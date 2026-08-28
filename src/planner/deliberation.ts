@@ -122,7 +122,12 @@ export type PlanDeliberationInvocationResult =
   | { readonly outcome: 'VERDICT_RETURNED'; readonly verdict: unknown }
   | {
       readonly outcome: 'INVOCATION_FAILED';
-      readonly failure: { readonly code: string; readonly message: string };
+      readonly failure: {
+        readonly code: string;
+        readonly message: string;
+        /** INFRA/quota: tenta o próximo elegível. Ausente = não retryable. */
+        readonly retryable?: boolean;
+      };
     };
 
 /**
@@ -222,32 +227,46 @@ export function planVersionSha256(plan: ImplementationPlan): string {
   return canonicalSha256(planViewOf(plan));
 }
 
+function cycleCandidates(
+  candidates: readonly DeliberatorAssignment[],
+  maxTurns: number,
+): DeliberatorAssignment[] {
+  return Array.from(
+    { length: maxTurns },
+    (_, index) => candidates[index % candidates.length] as DeliberatorAssignment,
+  );
+}
+
 /**
- * Sequência de deliberadores. `cross_provider_preferred` alterna providers
- * enquanto houver mais de um; com um provider só, ela devolve o mesmo profile
- * e o artifact registra explicitamente que a diversidade NÃO foi satisfeita —
- * preferência não vira exigência silenciosa nem gate novo.
+ * Sequência de deliberadores. Os `candidates` chegam PRÉ-RANKEADOS por
+ * capacidade de planning (melhor primeiro); esta função não inventa ordem
+ * entre modelos empateados.
+ *
+ * `cross_provider_preferred` tenta um top-tier de provider diferente do
+ * planner quando isso existe. Com um provider só, segue com o melhor
+ * candidato e registra que a diversidade NÃO foi satisfeita — preferência
+ * não vira exigência silenciosa nem gate novo.
  */
 export function selectDeliberators(input: {
   readonly candidates: readonly DeliberatorAssignment[];
   readonly maxTurns: number;
   readonly diversity: DeliberationDiversity;
+  /** Scaffold do planner que acabou de produzir o plano. Não autoriza nada. */
+  readonly plannerProvider?: string;
 }): {
   readonly sequence: readonly DeliberatorAssignment[];
   readonly satisfied: boolean;
   readonly reason: string;
 } {
-  const candidates = [...input.candidates].sort((left, right) =>
-    left.profile_id.localeCompare(right.profile_id),
-  );
+  const candidates = [...input.candidates];
   if (candidates.length === 0) {
     return { sequence: [], satisfied: false, reason: 'nenhum profile elegível para o papel de deliberador' };
   }
   if (input.diversity === 'none') {
     return {
-      sequence: Array.from({ length: input.maxTurns }, (_, index) => candidates[index % candidates.length] as DeliberatorAssignment),
+      sequence: cycleCandidates(candidates, input.maxTurns),
       satisfied: true,
-      reason: 'diversidade não foi pedida; a sequência percorre os profiles elegíveis em ordem determinística',
+      reason: 'diversidade não foi pedida; a sequência percorre os profiles elegíveis em ordem de capacidade',
     };
   }
 
@@ -255,28 +274,44 @@ export function selectDeliberators(input: {
   for (const candidate of candidates) {
     byProvider.set(candidate.provider, [...(byProvider.get(candidate.provider) ?? []), candidate]);
   }
-  const providers = [...byProvider.keys()].sort();
+  const providers = [...byProvider.keys()];
   if (providers.length < 2) {
     return {
-      sequence: Array.from({ length: input.maxTurns }, (_, index) => candidates[index % candidates.length] as DeliberatorAssignment),
+      sequence: cycleCandidates(candidates, input.maxTurns),
       satisfied: false,
       reason: `cross_provider_preferred pedido, mas só o provider ${providers[0]} está disponível e autorizado; a deliberação segue sem alternância, registrada`,
     };
   }
 
+  const firstDifferent = candidates.find(
+    (candidate) =>
+      input.plannerProvider !== undefined && candidate.provider !== input.plannerProvider,
+  );
+  const start = firstDifferent ?? (candidates[0] as DeliberatorAssignment);
+  const rotation: string[] = [start.provider];
+  for (const provider of providers) {
+    if (!rotation.includes(provider)) rotation.push(provider);
+  }
+
   const sequence: DeliberatorAssignment[] = [];
   const cursor = new Map<string, number>();
   for (let turn = 0; turn < input.maxTurns; turn += 1) {
-    const provider = providers[turn % providers.length] as string;
+    const provider = rotation[turn % rotation.length] as string;
     const pool = byProvider.get(provider) as DeliberatorAssignment[];
     const index = cursor.get(provider) ?? 0;
     sequence.push(pool[index % pool.length] as DeliberatorAssignment);
     cursor.set(provider, index + 1);
   }
+  const diversityNote =
+    input.plannerProvider === undefined
+      ? `alternância cross-provider entre ${rotation.join(', ')}`
+      : firstDifferent === undefined
+        ? `alternância cross-provider entre ${rotation.join(', ')}; diversidade de provider distinta do planner ${input.plannerProvider} não foi satisfeita`
+        : `alternância cross-provider começando por ${start.provider} (distinto do planner ${input.plannerProvider}) entre ${rotation.join(', ')}`;
   return {
     sequence,
-    satisfied: true,
-    reason: `alternância cross-provider entre ${providers.join(', ')}`,
+    satisfied: firstDifferent !== undefined || input.plannerProvider === undefined,
+    reason: diversityNote,
   };
 }
 
@@ -290,6 +325,7 @@ export interface DeliberatePlanInput {
   readonly worker: PlanDeliberationWorkerPort;
   /** MESMOS gates da geração; injetados para manter esta função pura. */
   readonly revalidate: (draft: unknown) => PlanGenerationResult;
+  readonly plannerProvider?: string;
 }
 
 export interface DeliberatePlanResult {
@@ -368,6 +404,7 @@ export async function deliberatePlan(input: DeliberatePlanInput): Promise<Delibe
     candidates: input.deliberators,
     maxTurns: input.maxTurns,
     diversity: input.diversity,
+    ...(input.plannerProvider === undefined ? {} : { plannerProvider: input.plannerProvider }),
   });
   if (selection.sequence.length === 0) {
     return {
@@ -435,7 +472,7 @@ export async function deliberatePlan(input: DeliberatePlanInput): Promise<Delibe
     if (result.outcome === 'INVOCATION_FAILED') {
       // Deliberador indisponível NÃO invalida o plano corrente: ele é uma
       // etapa de refinamento opcional, e a versão canônica já passou pelos
-      // gates. A falha fica registrada e a deliberação para.
+      // gates. INFRA/quota retryable tenta o próximo candidato; o resto para.
       turns.push(
         DeliberationTurnRecord.parse({
           ...base,
@@ -450,6 +487,9 @@ export async function deliberatePlan(input: DeliberatePlanInput): Promise<Delibe
           invocation_failure: `${result.failure.code}: ${result.failure.message}`,
         }),
       );
+      if (result.failure.retryable === true && index < selection.sequence.length - 1) {
+        continue;
+      }
       stopReason = `deliberação encerrada no turno ${turn}: ${result.failure.code}; a versão canônica anterior segue como plano de execução`;
       break;
     }
