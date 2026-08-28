@@ -59,8 +59,8 @@ control plane que nao possa ser tomada com seguranca nesta autorizacao.
 - [x] Aplicar a menor correcao coerente sem mudancas especulativas.
 - [x] Rodar o teste focado e regressao relacionada.
 - [x] Rodar `pnpm typecheck`, `pnpm test`, `pnpm build` e `git diff --check`.
-- [ ] Revisar escopo e criar um commit coerente do incidente.
-- [ ] Retomar o mesmo runtime pela interface publica e repetir o ciclo.
+- [x] Revisar escopo e criar um commit coerente do incidente.
+- [x] Retomar o mesmo runtime pela interface publica e repetir o ciclo.
 
 ## Incidente 1 — prova read-only Claude pos-resolucao
 
@@ -74,7 +74,7 @@ control plane que nao possa ser tomada com seguranca nesta autorizacao.
   arquivo homonimo local ao target, lookalike absoluto, permission mode errado
   e setting sources enfraquecido.
 - [x] GREEN ate a porta de invocacao do provider, sem inferencia Claude real.
-- [ ] Validar, commitar e retomar o runtime.
+- [x] Validar, commitar e retomar o runtime.
 
 ### Evidencia do incidente 1
 
@@ -98,12 +98,30 @@ control plane que nao possa ser tomada com seguranca nesta autorizacao.
   `--permission-mode plan` e `--setting-sources project`.
 - GREEN: 135/135 focados; `pnpm typecheck` exit 0; `pnpm build` exit 0;
   `pnpm test` 175 arquivos e 2494/2494 testes; `git diff --check` exit 0.
+- Commit coerente: `f112c0d28412e291113a97c54ed19bf65634f0b5`.
 
 ## Registro de resumes
 
 | # | Estado antes | Stage maximo | Outcome | Provider/target work | Acao seguinte |
 |---|---|---|---|---|---|
 | 1 | Crest RUNNING/FINALIZING; candidate be5ff5a | PLAN_READY | RoleOverlayError, exit 1 | Nenhum reviewer/target novo | Corrigir proof canonico e validar |
+| 2 | Crest RUNNING/FINALIZING; candidate be5ff5a | REVIEWED | HUMAN_REQUIRED com REVIEW_REPAIRABLE, exit 9 | Reviewer Claude read-only revisou o candidate; implementer nao foi relancado | Novo resume deve consumir o REJECT duravel e abrir bounded repair |
+| 3 | Crest RUNNING/FINALIZING; REJECT IMPLEMENTATION_DEFECT duravel | PLAN_READY | RetryFailedAttemptError, exit 1 | Nenhum provider/target novo | Corrigir compatibilidade do archive com finalization legado de provenance parcial |
+
+## Incidente 2 — archive de review repair com provenance parcial legado
+
+- [x] Reproduzir no runtime canonico antes de qualquer novo worker.
+- [x] Provar que o FinalizationRecord sela `report_sha256`, mas nao
+  `handoff_draft_sha256`, embora o par atual exista e o report corresponda ao
+  hash selado.
+- [x] Confirmar que provenance de notas do worker e opcional no contrato de
+  finalizacao e nao invalida candidate, validacao oficial ou review.
+- [x] RED com FinalizationRecord realista que sela somente report.
+- [x] Ligar criptograficamente os dois bytes arquivados ao
+  ReviewRejectedAttemptRecord sem reescrever evidencia historica.
+- [x] Preservar fail-closed para par ausente/incompleto ou hash declarado
+  divergente.
+- [x] Rodar testes focados e gates do Agent Lab, commitar e retomar o runtime.
 
 ## Auditoria terminal
 

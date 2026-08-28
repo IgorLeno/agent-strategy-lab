@@ -890,9 +890,6 @@ export async function retryReviewRejectedAttempt(
   ) {
     throw new RetryFailedAttemptError('finalization diverge de task/attempt/base');
   }
-  if (finalization.report_sha256 === undefined || finalization.handoff_draft_sha256 === undefined) {
-    throw new RetryFailedAttemptError('finalization não sela report/handoff do worker');
-  }
   if (
     finalization.validation_results.some(
       (result) => result.exit_code !== 0 || result.timed_out,
@@ -953,6 +950,35 @@ export async function retryReviewRejectedAttempt(
   if (staged.length > 0 && (!resumingAfterHeadMove || staged.some((file) => !files.includes(file)))) {
     throw new RetryFailedAttemptError('index contém mudanças fora do candidate rejeitado');
   }
+  const currentInbox = await readCurrentInboxArtifacts(paths, taskId);
+  const currentPair =
+    currentInbox.report !== null && currentInbox.handoff !== null
+      ? { report: currentInbox.report, handoff: currentInbox.handoff }
+      : null;
+  const reportSha256 =
+    existing?.archived_report_sha256 ??
+    finalization.report_sha256 ??
+    (currentPair === null ? undefined : sha256Hex(currentPair.report));
+  const handoffDraftSha256 =
+    existing?.archived_handoff_draft_sha256 ??
+    finalization.handoff_draft_sha256 ??
+    (currentPair === null ? undefined : sha256Hex(currentPair.handoff));
+  if (reportSha256 === undefined || handoffDraftSha256 === undefined) {
+    throw new RetryFailedAttemptError(
+      'output do worker sem par completo nem hashes suficientes para archive',
+    );
+  }
+  if (
+    (finalization.report_sha256 !== undefined &&
+      finalization.report_sha256 !== reportSha256) ||
+    (finalization.handoff_draft_sha256 !== undefined &&
+      finalization.handoff_draft_sha256 !== handoffDraftSha256)
+  ) {
+    throw new RetryFailedAttemptError(
+      'hashes do archive divergem da provenance declarada na finalization',
+    );
+  }
+  const outputHashes = { reportSha256, handoffDraftSha256 };
   const bundle =
     existing === null
       ? await preserveFailedAttemptBundle({
@@ -986,20 +1012,18 @@ export async function retryReviewRejectedAttempt(
         : { original_validation_evidence: finalization.validation_evidence }),
       patch_fingerprint: finalization.patch_fingerprint,
       change_bundle: bundle?.ref,
+      archived_report_sha256: outputHashes.reportSha256,
+      archived_handoff_draft_sha256: outputHashes.handoffDraftSha256,
       archived_at: now(),
     });
   if (existing === null) await writeReviewRejectedAttempt(paths, record);
   await input.afterRecordWritten?.(record);
 
-  const currentInbox = await readCurrentInboxArtifacts(paths, taskId);
   let inboxBytes: InboxArtifactPair;
-  if (currentInbox.report !== null && currentInbox.handoff !== null) {
-    inboxBytes = { report: currentInbox.report, handoff: currentInbox.handoff };
+  if (currentPair !== null) {
+    inboxBytes = currentPair;
   } else {
-    const archived = await readArchivedInboxArtifacts(paths, taskId, attempt, {
-      reportSha256: finalization.report_sha256,
-      handoffDraftSha256: finalization.handoff_draft_sha256,
-    });
+    const archived = await readArchivedInboxArtifacts(paths, taskId, attempt, outputHashes);
     if (archived === null) {
       throw new RetryFailedAttemptError('output do worker ausente no inbox e no archive');
     }
@@ -1010,20 +1034,14 @@ export async function retryReviewRejectedAttempt(
     taskId,
     attempt,
     bytes: inboxBytes,
-    expected: {
-      reportSha256: finalization.report_sha256,
-      handoffDraftSha256: finalization.handoff_draft_sha256,
-    },
+    expected: outputHashes,
   });
   const released = await releaseCurrentInboxArtifacts(
     paths,
     taskId,
     {
       attempt,
-      hashes: {
-        reportSha256: finalization.report_sha256,
-        handoffDraftSha256: finalization.handoff_draft_sha256,
-      },
+      hashes: outputHashes,
     },
     input.inboxReleaseHooks,
   );

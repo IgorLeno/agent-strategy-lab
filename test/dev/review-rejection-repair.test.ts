@@ -9,6 +9,7 @@ import {
   finalizationFingerprint,
   validationResultsFingerprint,
 } from '../../dev/lib/candidate-review.js';
+import { sha256Hex } from '../../dev/lib/canonical.js';
 import { headSha } from '../../dev/lib/git.js';
 import { resolveHarnessPaths, type HarnessPaths } from '../../dev/lib/paths.js';
 import {
@@ -42,7 +43,9 @@ async function git(args: readonly string[]): Promise<string> {
   return result.stdout.trim();
 }
 
-async function seedRejectedCandidate(): Promise<{
+async function seedRejectedCandidate(options: {
+  readonly omitHandoffHash?: boolean;
+} = {}): Promise<{
   finalization: OrchestratedFinalizationRecord;
   reviewBytes: Buffer;
 }> {
@@ -78,7 +81,7 @@ async function seedRejectedCandidate(): Promise<{
       worker_validation_policy: 'targeted',
     },
     report_sha256: sha256(reportBytes),
-    handoff_draft_sha256: sha256(handoffBytes),
+    ...(options.omitHandoffHash ? {} : { handoff_draft_sha256: sha256(handoffBytes) }),
     report_result: 'SUCCESS',
     report_candidate_commit: null,
     commit_message: 'candidate',
@@ -162,6 +165,84 @@ afterEach(async () => {
 });
 
 describe('retryReviewRejectedAttempt', () => {
+  it('preserva output de finalization legado que selou somente o report', async () => {
+    const { reviewBytes } = await seedRejectedCandidate({ omitHandoffHash: true });
+    const reportBytes = await readFile(path.join(paths.inboxDir, 'T1', 'report.json'));
+    const handoffBytes = await readFile(path.join(paths.inboxDir, 'T1', 'handoff-draft.json'));
+
+    const result = await retryReviewRejectedAttempt({
+      paths,
+      taskId: 'T1',
+      reason: 'bounded repair autorizado para finalization legado',
+      now: () => NOW,
+    });
+
+    expect(result.record).toMatchObject({
+      archived_report_sha256: sha256Hex(reportBytes),
+      archived_handoff_draft_sha256: sha256Hex(handoffBytes),
+    });
+    expect(await readFile(candidateReviewPath(paths, 'T1', 1))).toEqual(reviewBytes);
+    expect(await readFile(failedAttemptReportPath(paths, 'T1', 1))).toEqual(reportBytes);
+    expect(await readFile(failedAttemptHandoffDraftPath(paths, 'T1', 1))).toEqual(handoffBytes);
+    expect(await headSha(root)).toBe(baseSha);
+    expect(getTaskState(await readState(paths), 'T1').status).toBe('READY');
+  });
+
+  it('recusa output legado quando o hash que a finalization declarou diverge', async () => {
+    await seedRejectedCandidate({ omitHandoffHash: true });
+    await writeFile(path.join(paths.inboxDir, 'T1', 'report.json'), '{"altered":true}\n');
+
+    await expect(
+      retryReviewRejectedAttempt({
+        paths,
+        taskId: 'T1',
+        reason: 'bounded repair autorizado para finalization legado',
+        now: () => NOW,
+      }),
+    ).rejects.toThrow('report.json diverge de report_sha256 do attempt');
+  });
+
+  it('recusa output legado sem par completo para preservar', async () => {
+    await seedRejectedCandidate({ omitHandoffHash: true });
+    await rm(path.join(paths.inboxDir, 'T1', 'handoff-draft.json'));
+
+    await expect(
+      retryReviewRejectedAttempt({
+        paths,
+        taskId: 'T1',
+        reason: 'bounded repair autorizado para finalization legado',
+        now: () => NOW,
+      }),
+    ).rejects.toThrow('output do worker sem par completo nem hashes suficientes para archive');
+  });
+
+  it('retoma finalization legado depois de publicar o record com hashes recuperados', async () => {
+    await seedRejectedCandidate({ omitHandoffHash: true });
+
+    await expect(
+      retryReviewRejectedAttempt({
+        paths,
+        taskId: 'T1',
+        reason: 'bounded repair autorizado para finalization legado',
+        now: () => NOW,
+        afterRecordWritten: async () => {
+          throw new Error('crash injetado depois do record legado');
+        },
+      }),
+    ).rejects.toThrow('crash injetado depois do record legado');
+
+    const resumed = await retryReviewRejectedAttempt({
+      paths,
+      taskId: 'T1',
+      reason: 'bounded repair autorizado para finalization legado',
+      now: () => NOW,
+    });
+
+    expect(resumed.alreadyArchived).toBe(true);
+    expect(await headSha(root)).toBe(baseSha);
+    expect(getTaskState(await readState(paths), 'T1').status).toBe('READY');
+  });
+
   it('preserva o candidate/review, volta à base e reabre a mesma task', async () => {
     const { reviewBytes } = await seedRejectedCandidate();
 
