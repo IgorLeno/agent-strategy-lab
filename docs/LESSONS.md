@@ -5,6 +5,14 @@ Regra, não narrativa: cada entrada termina numa restrição aplicável.
 
 ---
 
+[2026-08-28] Context: regressão de uma porta assíncrona que captura o argv de
+lançamento para asserções posteriores.
+Mistake: esperar que o TypeScript estreitasse uma variável inicialmente `null`
+depois de uma atribuição feita dentro de callback assíncrono.
+Rule: em testes que capturam argumentos de callbacks, grave-os em um objeto
+mutável tipado e verifique suas propriedades; não dependa de narrowing entre
+fronteiras assíncronas.
+
 [2026-08-28] Context: regressão do selamento na finalização orquestrada.
 Mistake: fixar no teste a quantidade de validations declarada no plano e
 esquecer que o diff-check oficial também integra a evidência final.

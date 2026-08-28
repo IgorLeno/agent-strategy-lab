@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -335,6 +335,75 @@ describe('roles estruturais', () => {
       expect(() => assertReadOnlyArgv(role, profile.agent, overlay.argv)).not.toThrow();
     });
   }
+
+  it('prova o argv Claude efetivo somente contra o recurso autoritativo do catálogo', async () => {
+    const catalog = REPO_ROOT;
+    const target = await makeTemporaryDir();
+    const lookalikeRoot = await makeTemporaryDir();
+    const paths = resolveHarnessPaths(target, { profileCatalogRoot: catalog });
+    const profile = await loadProfile(catalog, CLAUDE_PROFILE_ID);
+    const overlay = buildRoleArgv(profile, { role: 'reviewer', prompt: 'packet' });
+    const argv = resolveRoleOverlayArgv(paths, overlay.argv);
+    const proofContext = {
+      catalogRoot: paths.profileCatalogRoot,
+      workerCwd: paths.repoRoot,
+    };
+    const settingsIndex = argv.indexOf('--settings');
+    const permissionIndex = argv.indexOf('--permission-mode');
+    const sourcesIndex = argv.indexOf('--setting-sources');
+
+    expect(() =>
+      assertReadOnlyArgv('reviewer', profile.agent, argv, overlay.env, proofContext),
+    ).not.toThrow();
+
+    const targetLocalSettings = path.join(target, CLAUDE_READ_ONLY_SETTINGS_FILE);
+    await mkdir(path.dirname(targetLocalSettings), { recursive: true });
+    await writeFile(targetLocalSettings, '{}\n', 'utf8');
+    const targetLocalArgv = [...argv];
+    targetLocalArgv[settingsIndex + 1] = targetLocalSettings;
+    expect(() =>
+      assertReadOnlyArgv('reviewer', profile.agent, targetLocalArgv, overlay.env, proofContext),
+    ).toThrow(RoleOverlayError);
+
+    const absoluteLookalikeArgv = [...argv];
+    absoluteLookalikeArgv[settingsIndex + 1] = path.join(
+      lookalikeRoot,
+      CLAUDE_READ_ONLY_SETTINGS_FILE,
+    );
+    expect(() =>
+      assertReadOnlyArgv(
+        'reviewer',
+        profile.agent,
+        absoluteLookalikeArgv,
+        overlay.env,
+        proofContext,
+      ),
+    ).toThrow(RoleOverlayError);
+
+    const wrongPermissionArgv = [...argv];
+    wrongPermissionArgv[permissionIndex + 1] = 'acceptEdits';
+    expect(() =>
+      assertReadOnlyArgv(
+        'reviewer',
+        profile.agent,
+        wrongPermissionArgv,
+        overlay.env,
+        proofContext,
+      ),
+    ).toThrow(RoleOverlayError);
+
+    const weakenedSourcesArgv = [...argv];
+    weakenedSourcesArgv[sourcesIndex + 1] = 'user,project';
+    expect(() =>
+      assertReadOnlyArgv(
+        'reviewer',
+        profile.agent,
+        weakenedSourcesArgv,
+        overlay.env,
+        proofContext,
+      ),
+    ).toThrow(RoleOverlayError);
+  });
 });
 
 describe('transporte do provider vs payload do modelo', () => {
@@ -1256,6 +1325,63 @@ describe('G — reviewer não ganha autorização mais fraca que o implementer',
       },
     };
   }
+
+  it('Claude reviewer em target externo prova o argv resolvido e alcança a porta do provider', async () => {
+    const target = await makeTemporaryDir();
+    const externalPaths = resolveHarnessPaths(target, { profileCatalogRoot: REPO_ROOT });
+    const loadedProfile = await loadProfile(REPO_ROOT, CLAUDE_PROFILE_ID);
+    const fakeClaude = path.join(REPO_ROOT, 'fixtures', 'fake-clis', 'claude');
+    const profile: LauncherProfile = {
+      ...loadedProfile,
+      argv: [fakeClaude, ...loadedProfile.argv.slice(1)],
+      env_allowlist: [...loadedProfile.env_allowlist, 'AGENTLAB_FAKE_AUTH'],
+      env_extra: { ...loadedProfile.env_extra, AGENTLAB_FAKE_AUTH: 'subscription' },
+    };
+    const launched: { argv?: readonly string[]; cwd?: string } = {};
+
+    const result = await launchProjectReviewer({
+      paths: externalPaths,
+      profile,
+      scope: authorizationScope(),
+      implementerProfileId: CODEX_PROFILE_ID,
+      diversityRequirement: 'required',
+      risk: 'low',
+      credential: { availability: true, provenance: 'probe local provou a assinatura' },
+      quota: { availability: null, provenance: 'quota desconhecida não é esgotamento' },
+      packet: reviewerPacket(),
+      port: {
+        run: async ({ argv, cwd }) => {
+          launched.argv = argv;
+          launched.cwd = cwd;
+          return JSON.stringify({
+            type: 'result',
+            is_error: false,
+            terminal_reason: 'completed',
+            session_id: 'fixture-review',
+            result: JSON.stringify({
+              decision: 'ACCEPT',
+              reason: 'candidate satisfaz o acceptance',
+              coverage: validCoverage,
+            }),
+          });
+        },
+      },
+    });
+
+    expect(result, JSON.stringify(result)).toMatchObject({
+      outcome: 'ACCEPT',
+      coverage: validCoverage,
+    });
+    expect(launched.cwd).toBe(target);
+    expect(launched.argv).toBeDefined();
+    const settingsIndex = launched.argv?.indexOf('--settings') ?? -1;
+    expect(launched.argv?.[settingsIndex + 1]).toBe(
+      path.join(REPO_ROOT, CLAUDE_READ_ONLY_SETTINGS_FILE),
+    );
+    expect(launched.argv?.[settingsIndex + 1]).not.toBe(
+      path.join(target, CLAUDE_READ_ONLY_SETTINGS_FILE),
+    );
+  });
 
   for (const [label, credential] of [
     ['desconhecida', { availability: null, provenance: 'CLI não está autenticada' }],

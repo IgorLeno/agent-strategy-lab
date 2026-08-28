@@ -24,7 +24,11 @@ import {
   OPENCODE_PERMISSION_VARIABLE,
   type OpenCodePermissionConfig,
 } from './opencode-scaffold.js';
-import { assertNoForbiddenFlags, type LauncherProfile } from './profile.js';
+import {
+  assertNoForbiddenFlags,
+  resolveProfileArgv,
+  type LauncherProfile,
+} from './profile.js';
 
 export const PROJECT_WORKER_ROLES = ['planner', 'implementer', 'reviewer'] as const;
 export type ProjectWorkerRole = (typeof PROJECT_WORKER_ROLES)[number];
@@ -266,6 +270,11 @@ export function assertReadOnlyArgv(
    * lançamento sem restrição nenhuma.
    */
   env: Readonly<Record<string, string | undefined>> = {},
+  /**
+   * Quando o argv já passou pela resolução de recursos do profile, a prova
+   * deriva o settings esperado pela MESMA resolução canônica.
+   */
+  profileResolution?: { readonly catalogRoot: string; readonly workerCwd: string },
 ): void {
   if (agent === 'codex') {
     const index = singleFlagIndex(argv, '--sandbox');
@@ -276,10 +285,16 @@ export function assertReadOnlyArgv(
   }
   if (agent === 'claude') {
     const settingsIndex = singleFlagIndex(argv, '--settings');
+    const sourcesIndex = singleFlagIndex(argv, '--setting-sources');
     const permissionIndex = singleFlagIndex(argv, '--permission-mode');
+    const expectedSettings = profileResolution
+      ? resolveProfileArgv([CLAUDE_READ_ONLY_SETTINGS_FILE], profileResolution)[0]
+      : CLAUDE_READ_ONLY_SETTINGS_FILE;
     if (
       settingsIndex < 0 ||
-      argv[settingsIndex + 1] !== CLAUDE_READ_ONLY_SETTINGS_FILE ||
+      argv[settingsIndex + 1] !== expectedSettings ||
+      sourcesIndex < 0 ||
+      argv[sourcesIndex + 1] !== 'project' ||
       permissionIndex < 0 ||
       argv[permissionIndex + 1] !== CLAUDE_READ_ONLY_PERMISSION_MODE
     ) {
