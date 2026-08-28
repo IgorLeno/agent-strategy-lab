@@ -1024,3 +1024,14 @@ Mistake: a justificativa sobreviveu ao fato que a sustentava e continuaria
 ensinando a próxima pessoa a não medir.
 Rule: comentário que justifica uma AUSÊNCIA é revalidado junto com a mudança que
 remove o motivo da ausência. Racional obsoleto é dívida, não histórico.
+
+[2026-08-28] Context: `effectiveQuotaHeadroom` combinava probe fresco com o
+último `LaunchRecord` do mesmo pool — probe UNKNOWN herdava 90% de folga de
+outra work unit, e um `EXHAUSTED` antigo continuava recusando um profile cuja
+janela já podia ter resetado.
+Mistake: fallback foi tratado como robustez. Ele preservava um NÚMERO às custas
+do fato de que ninguém sabia mais nada — e o número era de outra atividade.
+Rule: medida de recurso externo só vale para a decisão que a observou. Falha
+instrumental é UNKNOWN e permanece UNKNOWN; histórico responde "quanto isto
+consumiu", nunca "quanto existe agora". Reuso só dentro da MESMA decisão
+imediata, indexado pela chave do recurso — nunca por tempo decorrido.

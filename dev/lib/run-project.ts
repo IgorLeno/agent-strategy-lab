@@ -21,10 +21,9 @@ import {
   runReviewedPath,
   type ReviewedPathDeliberation,
 } from './project-orchestrate.js';
-import { collectProjectLaunchFacts, quotaHeadroomByPool } from './project-preflight.js';
+import { collectCurrentLaunchFacts } from './project-preflight.js';
 import {
   createProductionPoolCapacityProbe,
-  observeEligiblePoolCapacities,
   quotaPoolOfProfile,
   type PoolCapacityProbe,
 } from './pool-capacity-observer.js';
@@ -394,21 +393,18 @@ export async function runProject(input: ProjectRunInput): Promise<PlanRunResult>
     const profile = roleProfiles.get(profileId);
     return profile === undefined ? null : quotaPoolOfProfile(profile);
   };
+  /**
+   * Fatos de um role NÃO-implementer (planner, deliberador). Cada invocação é
+   * uma ATIVIDADE nova, e por isso observa o pool de novo: a leitura do turno
+   * anterior descreve aquele turno, não a capacidade deste.
+   */
   async function roleLaunchFacts(profile: LauncherProfile, homeNamespace: string) {
-    const pool = quotaPoolOf(profile.id);
-    const [fresh, historical] = await Promise.all([
-      observeEligiblePoolCapacities([profile], capacityProbe),
-      quotaHeadroomByPool(input.paths, quotaPoolOf),
-    ]);
-    const observation = pool === null ? undefined : fresh.get(pool);
-    return collectProjectLaunchFacts({
+    return collectCurrentLaunchFacts({
       paths: input.paths,
       profile,
+      probe: capacityProbe,
+      poolOf: (item) => quotaPoolOf(item.id),
       homeNamespace,
-      ...(observation === undefined ? {} : { capacityObservation: observation }),
-      ...(pool === null || historical[pool] === undefined
-        ? {}
-        : { historicalHeadroom: historical[pool] }),
     });
   }
 

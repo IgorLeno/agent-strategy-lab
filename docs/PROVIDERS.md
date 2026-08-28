@@ -186,6 +186,78 @@ prova se Codex e OpenCode observam o mesmo pool.
 `/api/v1/credits` é usado em vez de `/api/v1/key` justamente porque a resposta
 de `/key` inclui um rótulo derivado da própria chave.
 
+## 5.1 Quota ATUAL é sempre observada agora
+
+> **Invariante.** A quota usada para QUALQUER decisão de execução vem sempre de
+> uma leitura fresca, feita imediatamente para a atividade corrente.
+
+Quota histórica pode descrever consumo passado e alimentar analytics de
+eficiência de modelo. Ela **nunca** descreve capacidade presente, e **nunca**
+bloqueia nem autoriza uma atividade nova.
+
+### O que é "atual"
+
+| fonte | é quota atual? |
+| --- | --- |
+| observação feita por ESTA atividade, antes de rotear | sim |
+| a mesma observação reusada dentro da MESMA decisão imediata | sim |
+| `LaunchRecord.pool_capacity` de qualquer launch anterior | não |
+| `LaunchRecord.subscription_usage` de qualquer launch anterior | não |
+| `LaunchRecord.rate_limit_observations` de qualquer launch anterior | não |
+| um `EXHAUSTED` observado numa work unit anterior | não |
+
+### Ciclo por atividade
+
+```
+atividade vai começar
+  -> candidatos autorizados e compatíveis com o role são conhecidos
+  -> pools ÚNICOS desses candidatos são resolvidos
+  -> probes read-only são executados AGORA (um por pool)
+  -> currentCapacityByPool
+  -> elegibilidade + routing
+  -> profile selecionado
+  -> o MESMO snapshot vira o `before` do LaunchRecord
+  -> worker executa
+  -> UMA observação `after`
+```
+
+A próxima atividade recomeça do topo. Não existe `quota_cache_ttl`, e não
+existe reuso entre work units, entre turnos de deliberação ou entre roles.
+
+### Escopo exato da deduplicação
+
+Dentro de UMA decisão imediata, o snapshot é indexado por POOL e reusado. Codex
+CLI e OpenCode/OpenAI compartilham `openai_chatgpt_subscription`: quando os dois
+são candidatos do mesmo assessment, o endpoint é chamado **uma vez**. O mesmo
+vale para os degraus de uma única decisão de escalation.
+
+Fora dessa decisão, nada é reusado.
+
+### UNKNOWN não tem substituto
+
+Probe que falhou — rede, endpoint mudado, credencial ilegível, parse quebrado —
+produz `UNKNOWN` com proveniência. `UNKNOWN` não vira `0%`, não vira
+`EXHAUSTED`, não vira indisponibilidade e **não** é preenchido por histórico. Um
+chamador isolado que não forneça observação fresca recebe `UNKNOWN`.
+
+### Quem observa
+
+`collectCurrentLaunchFacts` (`dev/lib/project-preflight.ts`) é o caminho ÚNICO
+de todo role provider-backed — planner, deliberador, implementer, reviewer,
+bounded repair e degrau de escalation. Não há um segundo regime de quota por
+role.
+
+### História de DESEMPENHO permanece intacta
+
+Pass rate, repair rate, duração, tokens, resultado de validação e
+`quota.consumed_pp.p90_total` continuam alimentando o routing por qualidade e
+eficiência. Consumo passado é uma métrica de desempenho do modelo; capacidade
+presente é outra pergunta, e só a leitura fresca a responde.
+
+`LaunchRecord.pool_capacity.before/after/deltas` continua gravado, e continua
+sendo evidência experimental do launch CONCLUÍDO. Nenhum código de produção o
+lê para inferir quanta quota existe agora.
+
 ## 6. Quota é evidência de routing, não gate de execução
 
 A ordem de decisão do routing é:
@@ -211,6 +283,11 @@ reset da janela o perfil volta a ser elegível, e por isso não vira
 `UNKNOWN`, a quota simplesmente NÃO desempata — comparar um percentual
 observado contra um ausente inventaria o lado que falta.
 
+Sob `static_cost`, o esgotamento ATUAL continua afetando elegibilidade — ele é
+um fato de disponibilidade real, não uma preferência. Já a folga não-esgotada
+NÃO participa: `static_cost` desempata por custo estático, e 80% contra 20% não
+muda essa ordem. `SelectionEvidence.quota_considered` registra isso.
+
 ## 7. evidence_balanced com perfis novos
 
 Um perfil novo entra com zero amostras, o que é um FATO — e é justamente o fato
@@ -220,7 +297,8 @@ A ordem do desempate, entre perfis JÁ do menor tier suficiente:
 1. perfil menos amostrado
 2. **upstream** menos amostrado
 3. menor concentração nesta run
-4. maior folga de quota OBSERVADA (só quando conhecida para TODOS)
+4. maior folga de quota OBSERVADA **nesta atividade** (só quando conhecida
+   para TODOS)
 5. custo estático declarado
 6. `profile_id`
 

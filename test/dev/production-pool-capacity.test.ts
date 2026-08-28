@@ -25,7 +25,10 @@ import { resolveHarnessPaths, type HarnessPaths } from '../../dev/lib/paths.js';
 import { loadProfileFromCatalog, type LauncherProfile } from '../../dev/lib/profile.js';
 import { loadProjectRunAuthorization } from '../../dev/lib/project-authorization.js';
 import { createProjectControlPlane } from '../../dev/lib/project-run.js';
-import { collectProjectLaunchFacts } from '../../dev/lib/project-preflight.js';
+import {
+  collectCurrentLaunchFacts,
+  collectProjectLaunchFacts,
+} from '../../dev/lib/project-preflight.js';
 import { launchRecordPath, readLaunchRecord } from '../../dev/lib/records.js';
 import { LaunchRecord } from '../../dev/lib/schemas.js';
 import {
@@ -248,7 +251,10 @@ const PROFILES = {
   go: 'opencode-go-glm-5.3-v1',
 } as const;
 
-function authorizationYaml(profileIds: readonly string[]): string {
+function authorizationYaml(
+  profileIds: readonly string[],
+  selectionPolicy: 'evidence_balanced' | 'static_cost' = 'evidence_balanced',
+): string {
   return [
     'schema_version: 1',
     'requested_scope:',
@@ -266,7 +272,7 @@ function authorizationYaml(profileIds: readonly string[]): string {
     'profile_policy:',
     '  id: live-capacity-test',
     '  allowed_providers: [codex, opencode]',
-    '  selection_policy: evidence_balanced',
+    `  selection_policy: ${selectionPolicy}`,
     '  profiles:',
     ...profileIds.flatMap((id, index) => [
       `    - id: ${id}`,
@@ -306,7 +312,10 @@ interface RoutingFixture {
   readonly authorizationFile: string;
 }
 
-async function routingFixture(profileIds: readonly string[]): Promise<RoutingFixture> {
+async function routingFixture(
+  profileIds: readonly string[],
+  selectionPolicy: 'evidence_balanced' | 'static_cost' = 'evidence_balanced',
+): Promise<RoutingFixture> {
   const sandbox = await makeSandboxRepo(PLAN);
   roots.push(sandbox.root);
   await writeFile(
@@ -321,8 +330,13 @@ async function routingFixture(profileIds: readonly string[]): Promise<RoutingFix
   await writeState(paths, buildInitialState(loaded.plan, loaded.planSha256, { baselineSha: baseline }));
   const outside = await temporaryDir('agentlab-capacity-policy-');
   const authorizationFile = path.join(outside, 'agentlab-run.yaml');
-  await writeFile(authorizationFile, authorizationYaml(profileIds), 'utf8');
+  await writeFile(authorizationFile, authorizationYaml(profileIds, selectionPolicy), 'utf8');
   return { paths, loaded, authorizationFile };
+}
+
+/** Mesma fixture, `selection_policy: static_cost` — a folga não desempata lá. */
+async function staticCostFixture(profileIds: readonly string[]): Promise<RoutingFixture> {
+  return routingFixture(profileIds, 'static_cost');
 }
 
 let launchOrdinal = 0;
@@ -331,7 +345,7 @@ async function writeHistoricalCapacity(
   paths: HarnessPaths,
   profileId: string,
   observation: PoolCapacityObservation,
-): Promise<void> {
+): Promise<string> {
   launchOrdinal += 1;
   await mkdir(paths.logsDir, { recursive: true });
   const record = LaunchRecord.parse({
@@ -360,7 +374,9 @@ async function writeHistoricalCapacity(
       deltas: [],
     },
   });
-  await writeFile(launchRecordPath(paths, record.task_id), `${JSON.stringify(record)}\n`, 'utf8');
+  const file = launchRecordPath(paths, record.task_id);
+  await writeFile(file, `${JSON.stringify(record)}\n`, 'utf8');
+  return file;
 }
 
 function poolForProfile(profile: LauncherProfile): string {
@@ -435,8 +451,10 @@ describe('capacidade fresca no routing de produção', () => {
     expect(preview.status).not.toBe('HUMAN_REQUIRED');
   });
 
-  it('UNKNOWN fresco não fabrica zero e não apaga histórico válido', async () => {
+  it('UNKNOWN fresco permanece UNKNOWN: folga histórica OBSERVED não o preenche', async () => {
     const fixture = await routingFixture([PROFILES.codex, PROFILES.go]);
+    // Histórico rico e recente: 90% de folga OpenAI gravada por um launch
+    // anterior. Sob a política antiga ele virava a folga "atual" do Codex.
     await writeHistoricalCapacity(
       fixture.paths,
       PROFILES.codex,
@@ -455,17 +473,164 @@ describe('capacidade fresca no routing de produção', () => {
     });
 
     expect(preview.status, JSON.stringify(preview, null, 2)).toBe('READY');
-    expect(preview.work_unit?.routing.selected_profile_id).toBe(PROFILES.codex);
     const openai = preview.work_unit?.routing.selection?.balanced_candidates.find(
       (entry) => entry.profile_id === PROFILES.codex,
     );
     expect(openai?.quota_headroom).toMatchObject({
-      status: 'OBSERVED',
-      remaining_pct: 90,
-      provenance: expect.stringContaining('fallback histórico'),
+      status: 'UNKNOWN',
+      reason: expect.stringContaining('falha de rede no probe fresco'),
     });
-    expect(JSON.stringify(preview)).not.toMatch(/"remaining_pct":0\b/);
-    expect(JSON.stringify(preview)).toContain('falha de rede no probe fresco');
+    const serialized = JSON.stringify(preview);
+    expect(serialized).not.toContain('history:valid-openai');
+    expect(serialized).not.toContain('fallback histórico');
+    // UNKNOWN também nunca vira zero, e nunca remove o profile do routing.
+    expect(serialized).not.toMatch(/"remaining_pct":0\b/);
+    expect(preview.work_unit?.routing.rationale.join('\n')).not.toContain('QUOTA_POOL_EXHAUSTED');
+  });
+
+  it('EXHAUSTED histórico não bloqueia a atividade atual quando o probe fresco é UNKNOWN', async () => {
+    const fixture = await routingFixture([PROFILES.codex, PROFILES.go]);
+    await writeHistoricalCapacity(
+      fixture.paths,
+      PROFILES.codex,
+      exhaustedCapacity('openai_chatgpt_subscription'),
+    );
+    const preview = await previewWith(fixture, async (profile) => {
+      const pool = poolForProfile(profile);
+      return pool === 'openai_chatgpt_subscription'
+        ? unknownCapacity(pool)
+        : knownCapacity({ pool, used: 50, source: 'fresh:go' });
+    });
+
+    expect(preview.status, JSON.stringify(preview, null, 2)).toBe('READY');
+    const openai = preview.work_unit?.routing.selection?.balanced_candidates.find(
+      (entry) => entry.profile_id === PROFILES.codex,
+    );
+    // O Codex continua ELEGÍVEL: o esgotamento antigo já pode ter resetado, e
+    // só evidência atual tem autoridade sobre a execução de agora.
+    expect(openai?.quota_headroom).toMatchObject({ status: 'UNKNOWN' });
+    expect(preview.work_unit?.routing.rationale.join('\n')).not.toContain('QUOTA_POOL_EXHAUSTED');
+  });
+
+  it('cada work unit reobserva o pool: o snapshot anterior nunca é reaproveitado', async () => {
+    const fixture = await routingFixture([PROFILES.codex]);
+    const readings: string[] = [];
+    const probe: PoolCapacityProbe = async (profile) => {
+      const source = `fresh:reading-${readings.length + 1}`;
+      readings.push(source);
+      return knownCapacity({ pool: poolForProfile(profile), used: readings.length, source });
+    };
+
+    const first = await previewWith(fixture, probe);
+    const second = await previewWith(fixture, probe);
+
+    expect(first.status).toBe('READY');
+    expect(second.status).toBe('READY');
+    // Dois assessments, duas leituras. Não há cache nem TTL entre atividades.
+    expect(readings).toEqual(['fresh:reading-1', 'fresh:reading-2']);
+    expect(
+      second.work_unit?.routing.selection?.balanced_candidates[0]?.quota_headroom,
+    ).toMatchObject({ provenance: expect.stringContaining('fresh:reading-2') });
+    expect(JSON.stringify(second)).not.toContain('fresh:reading-1');
+  });
+
+  it('LaunchRecord com before/after de outra atividade não vira quota atual', async () => {
+    const fixture = await routingFixture([PROFILES.codex, PROFILES.go]);
+    // before/after persistidos permanecem no disco como analytics do launch
+    // concluído; a decisão de agora não os lê.
+    const historicalFile = await writeHistoricalCapacity(
+      fixture.paths,
+      PROFILES.codex,
+      knownCapacity({ pool: 'openai_chatgpt_subscription', used: 2, source: 'history:before-after' }),
+    );
+    let probes = 0;
+    const preview = await previewWith(fixture, async (profile) => {
+      probes += 1;
+      return knownCapacity({
+        pool: poolForProfile(profile),
+        used: 60,
+        source: 'fresh:this-activity',
+      });
+    });
+
+    expect(preview.status, JSON.stringify(preview, null, 2)).toBe('READY');
+    expect(probes).toBe(2);
+    for (const candidate of preview.work_unit?.routing.selection?.balanced_candidates ?? []) {
+      expect(candidate.quota_headroom).toMatchObject({
+        status: 'OBSERVED',
+        remaining_pct: 40,
+        provenance: expect.stringContaining('fresh:this-activity'),
+      });
+    }
+    expect(JSON.stringify(preview)).not.toContain('history:before-after');
+    // A evidência histórica continua GRAVADA — ela só perdeu autoridade.
+    const persisted = await readFile(historicalFile, 'utf8');
+    expect(persisted).toContain('history:before-after');
+    expect(JSON.parse(persisted).pool_capacity).toMatchObject({
+      before: { source: 'history:before-after' },
+      after: { source: 'history:before-after' },
+    });
+  });
+
+  it('static_cost: esgotamento fresco recusa, folga não-esgotada não desempata', async () => {
+    const exhausted = await staticCostFixture([PROFILES.codex, PROFILES.go]);
+    const withExhaustion = await previewWith(exhausted, async (profile) => {
+      const pool = poolForProfile(profile);
+      return pool === 'openai_chatgpt_subscription'
+        ? exhaustedCapacity(pool)
+        : knownCapacity({ pool, used: 40 });
+    });
+
+    expect(withExhaustion.status, JSON.stringify(withExhaustion, null, 2)).toBe('READY');
+    expect(withExhaustion.work_unit?.routing.selected_profile_id).toBe(PROFILES.go);
+    expect(withExhaustion.work_unit?.routing.rationale.join('\n')).toContain('QUOTA_POOL_EXHAUSTED');
+
+    // Mesma policy, mesmas capabilities: só a folga muda de lado. Sob
+    // static_cost a escolha NÃO pode acompanhar a folga.
+    const generous = await staticCostFixture([PROFILES.codex, PROFILES.go]);
+    const codexRoomy = await previewWith(generous, async (profile) =>
+      knownCapacity({
+        pool: poolForProfile(profile),
+        used: poolForProfile(profile) === 'openai_chatgpt_subscription' ? 20 : 80,
+      }),
+    );
+    const tight = await staticCostFixture([PROFILES.codex, PROFILES.go]);
+    const codexTight = await previewWith(tight, async (profile) =>
+      knownCapacity({
+        pool: poolForProfile(profile),
+        used: poolForProfile(profile) === 'openai_chatgpt_subscription' ? 80 : 20,
+      }),
+    );
+
+    expect(codexRoomy.work_unit?.routing.selected_profile_id).toBe(
+      codexTight.work_unit?.routing.selected_profile_id,
+    );
+    // A folga não é sequer considerada sob static_cost — e a evidência diz isso.
+    expect(codexRoomy.work_unit?.routing.selection?.quota_considered).toBe(false);
+    expect(codexTight.work_unit?.routing.selection?.quota_considered).toBe(false);
+    expect(codexRoomy.work_unit?.routing.selection?.balanced_candidates).toEqual([]);
+  });
+
+  it('evidence_balanced desempata pela folga FRESCA, nunca pela histórica', async () => {
+    const fixture = await routingFixture([PROFILES.codex, PROFILES.go]);
+    // Histórico diz que o Go está apertado; a leitura de agora diz o contrário.
+    await writeHistoricalCapacity(
+      fixture.paths,
+      PROFILES.go,
+      knownCapacity({ pool: 'opencode_go_subscription', used: 95, source: 'history:go-tight' }),
+    );
+    const preview = await previewWith(fixture, async (profile) =>
+      knownCapacity({
+        pool: poolForProfile(profile),
+        used: poolForProfile(profile) === 'openai_chatgpt_subscription' ? 95 : 20,
+        source: 'fresh:balanced',
+      }),
+    );
+
+    expect(preview.status, JSON.stringify(preview, null, 2)).toBe('READY');
+    expect(preview.work_unit?.routing.selected_profile_id).toBe(PROFILES.go);
+    expect(preview.work_unit?.routing.selection?.quota_considered).toBe(true);
+    expect(JSON.stringify(preview)).not.toContain('history:go-tight');
   });
 
   it('1% restante continua elegível quando o provider não declarou esgotamento', async () => {
@@ -480,6 +645,106 @@ describe('capacidade fresca no routing de produção', () => {
     expect(probes).toBe(1);
     expect(preview.work_unit?.routing.selected_profile_id).toBe(PROFILES.codex);
     expect(preview.work_unit?.routing.rationale.join('\n')).not.toContain('QUOTA_POOL_EXHAUSTED');
+  });
+});
+
+/**
+ * Planner, deliberador, reviewer e degrau de escalation não têm um regime de
+ * quota próprio: todos passam por `collectCurrentLaunchFacts`, que observa o
+ * pool DA ATIVIDADE. Estes testes exercem esse caminho compartilhado
+ * diretamente, que é exatamente o que `run-project.ts` e `project-run.ts`
+ * chamam para os roles não-implementer.
+ */
+describe('roles não-implementer observam quota da própria atividade', () => {
+  const PLANNER_PROFILE = 'codex-build-worker-subscription-sol-medium-v2';
+
+  it('cada atividade de role faz uma NOVA leitura, sem herdar a anterior', async () => {
+    const profile = await loadProfileFromCatalog(REPO_ROOT, PLANNER_PROFILE);
+    const paths = resolveHarnessPaths(REPO_ROOT);
+    // LaunchRecord anterior existe e é irrelevante: o role nem o abre.
+    const readings: string[] = [];
+    const probe: PoolCapacityProbe = async () => {
+      const source = `fresh:role-reading-${readings.length + 1}`;
+      readings.push(source);
+      return knownCapacity({ pool: 'openai_chatgpt_subscription', used: 30, source });
+    };
+
+    const planner = await collectCurrentLaunchFacts({
+      paths,
+      profile,
+      probe,
+      homeNamespace: 'planner-homes',
+      runner: credentialRunner(),
+    });
+    const reviewer = await collectCurrentLaunchFacts({
+      paths,
+      profile,
+      probe,
+      homeNamespace: 'reviewer-homes',
+      runner: credentialRunner(),
+    });
+
+    expect(readings).toEqual(['fresh:role-reading-1', 'fresh:role-reading-2']);
+    expect(planner.quota.provenance).toContain('fresh:role-reading-1');
+    expect(reviewer.quota.provenance).toContain('fresh:role-reading-2');
+    expect(planner.quota.availability).toBe(true);
+    expect(reviewer.quota.availability).toBe(true);
+  });
+
+  it('esgotamento FRESCO do pool reprova o role; probe UNKNOWN permanece UNKNOWN', async () => {
+    const profile = await loadProfileFromCatalog(REPO_ROOT, PLANNER_PROFILE);
+    const paths = resolveHarnessPaths(REPO_ROOT);
+
+    const exhausted = await collectCurrentLaunchFacts({
+      paths,
+      profile,
+      probe: async () => exhaustedCapacity('openai_chatgpt_subscription'),
+      homeNamespace: 'planner-homes',
+      runner: credentialRunner(),
+    });
+    const unknown = await collectCurrentLaunchFacts({
+      paths,
+      profile,
+      probe: async () => unknownCapacity('openai_chatgpt_subscription'),
+      homeNamespace: 'planner-homes',
+      runner: credentialRunner(),
+    });
+
+    expect(exhausted.quota.availability).toBe(false);
+    expect(unknown.quota.availability).toBeNull();
+    expect(unknown.quota.provenance).toContain('não recorre a histórico');
+  });
+
+  it('dois profiles do MESMO pool na mesma decisão compartilham uma leitura', async () => {
+    const profiles = await Promise.all(
+      [PROFILES.codex, PROFILES.openai].map((id) => loadProfileFromCatalog(REPO_ROOT, id)),
+    );
+    const paths = resolveHarnessPaths(REPO_ROOT);
+    let probes = 0;
+    const probe: PoolCapacityProbe = async () => {
+      probes += 1;
+      return knownCapacity({ pool: 'openai_chatgpt_subscription', used: 7, source: 'fresh:shared' });
+    };
+
+    const observed = await observeEligiblePoolCapacities(profiles, probe);
+    const facts = await Promise.all(
+      profiles.map((profile) =>
+        collectCurrentLaunchFacts({
+          paths,
+          profile,
+          probe,
+          observed,
+          homeNamespace: 'deliberator-homes',
+          runner: credentialRunner(),
+        }),
+      ),
+    );
+
+    expect(probes).toBe(1);
+    for (const fact of facts) {
+      expect(fact.quota.availability).toBe(true);
+      expect(fact.quota.provenance).toContain('openai_chatgpt_subscription');
+    }
   });
 });
 
@@ -659,6 +924,7 @@ describe('OpenRouter: saldo observado não é autorização de cobrança', () =>
   async function routerFacts(
     capacity: PoolCapacityObservation,
     authorized: boolean,
+    paths: HarnessPaths = resolveHarnessPaths(REPO_ROOT),
   ) {
     const previous = process.env[API_BILLING_AUTHORIZATION_VARIABLE];
     if (authorized) {
@@ -668,7 +934,7 @@ describe('OpenRouter: saldo observado não é autorização de cobrança', () =>
     }
     try {
       return await collectProjectLaunchFacts({
-        paths: resolveHarnessPaths(REPO_ROOT),
+        paths,
         profile: await loadProfileFromCatalog(REPO_ROOT, ROUTER_PROFILE),
         homeNamespace: 'openrouter-capacity-homes',
         runner: credentialRunner(),
@@ -703,6 +969,34 @@ describe('OpenRouter: saldo observado não é autorização de cobrança', () =>
 
     expect(facts.quota.availability).toBe(false);
     expect(facts.quota.provenance).toContain('saldo pré-pago esgotado');
+  });
+
+  it('recarga: saldo histórico ZERO não sobrevive a uma leitura fresca de 9,61', async () => {
+    // Runtime isolado: o registro anterior existe em disco de verdade, mas
+    // fora do runtime real do repositório.
+    const paths = resolveHarnessPaths(await temporaryDir('agentlab-router-history-'), {
+      profileCatalogRoot: REPO_ROOT,
+    });
+    // Registro anterior real: saldo zerado, esgotamento declarado.
+    await writeHistoricalCapacity(paths, ROUTER_PROFILE, balanceCapacity(0));
+
+    const facts = await routerFacts(balanceCapacity(9.61), true, paths);
+
+    expect(facts.quota.availability).toBe(true);
+    expect(facts.quota.provenance).toContain('saldo pré-pago observado');
+    expect(facts.quota.provenance).not.toContain('esgotad');
+  });
+
+  it('recarga com probe fresco UNKNOWN: nem 9,61 nem zero histórico — UNKNOWN', async () => {
+    const paths = resolveHarnessPaths(await temporaryDir('agentlab-router-history-'), {
+      profileCatalogRoot: REPO_ROOT,
+    });
+    await writeHistoricalCapacity(paths, ROUTER_PROFILE, balanceCapacity(0));
+
+    const facts = await routerFacts(unknownCapacity('openrouter_balance'), true, paths);
+
+    expect(facts.quota.availability).toBeNull();
+    expect(facts.quota.provenance).toContain('UNKNOWN não é zero');
   });
 
   it('saldo UNKNOWN não vira zero nem esgotamento', async () => {
