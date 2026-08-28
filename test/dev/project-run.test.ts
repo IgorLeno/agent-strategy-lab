@@ -51,6 +51,11 @@ import {
   quotaFactOf,
   type ProjectLaunchFacts,
 } from '../../dev/lib/project-preflight.js';
+import {
+  CapacityPrecision,
+  CapacityStatus,
+  PoolCapacityObservation,
+} from '../../src/quota/index.js';
 import { launchRecordPath } from '../../dev/lib/records.js';
 import { CandidateReviewRecord, LaunchRecord, PlanTask } from '../../dev/lib/schemas.js';
 import {
@@ -270,6 +275,62 @@ const CLAUDE_LIKE_PROFILE = LauncherProfile.parse({
   env_allowlist: ['PATH', 'HOME'],
 });
 
+/**
+ * Observações FRESCAS de fixture. Elas representam o que o probe read-only
+ * acabou de ler — nunca um LaunchRecord relido.
+ */
+function knownNow(pool: string, usedPercent: number): PoolCapacityObservation {
+  return PoolCapacityObservation.parse({
+    schema_version: 1,
+    quota_pool: pool,
+    status: CapacityStatus.KNOWN,
+    windows: [
+      {
+        window_id: 'five_hour',
+        used_percent: usedPercent,
+        remaining_percent: 100 - usedPercent,
+        precision: CapacityPrecision.FRACTIONAL_PERCENT,
+        window_seconds: 18_000,
+        window_instance: '2030-01-01T00:00:00.000Z',
+        resets_at: '2030-01-01T00:00:00.000Z',
+      },
+    ],
+    balance: null,
+    plan: null,
+    reason: 'provider reportou capacidade agora',
+    source: 'fixture:fresh-read',
+    observed_at: '2026-08-27T12:00:00.000Z',
+  });
+}
+
+function exhaustedNow(pool: string): PoolCapacityObservation {
+  return PoolCapacityObservation.parse({
+    schema_version: 1,
+    quota_pool: pool,
+    status: CapacityStatus.EXHAUSTED,
+    windows: [],
+    balance: null,
+    plan: null,
+    reason: 'provider declarou limit_reached agora',
+    source: 'fixture:fresh-exhaustion',
+    observed_at: '2026-08-27T12:00:00.000Z',
+  });
+}
+
+function unknownNow(pool: string): PoolCapacityObservation {
+  return PoolCapacityObservation.parse({
+    schema_version: 1,
+    quota_pool: pool,
+    status: CapacityStatus.UNKNOWN,
+    windows: [],
+    balance: null,
+    plan: null,
+    reason: 'probe fresco falhou por rede',
+    source: 'fixture:failed-fresh-read',
+    observed_at: '2026-08-27T12:00:00.000Z',
+  });
+}
+
 function runnerReturning(output: string): CommandRunner {
   return async () => ({ code: 0, output });
 }
@@ -343,64 +404,44 @@ describe('proveniência de credencial e quota', () => {
     expect(facts.quota.provenance).toContain('nenhuma observação fresca de capacidade');
   });
 
-  it('D — quota PROVEN FALSE com recusa observada e janela ainda aberta', async () => {
-    const repoRoot = await temporaryDir();
-    const paths = resolveHarnessPaths(repoRoot);
-    await writeRateLimitedLaunchRecord(paths, CLAUDE_LIKE_PROFILE.id, {
-      status: 'rejected',
-      resetsAt: '2030-01-01T00:00:00.000Z',
-    });
-
-    const fact = await quotaFactOf({
-      paths,
-      profile: CLAUDE_LIKE_PROFILE,
-      now: () => new Date('2029-12-31T23:00:00.000Z'),
+  it('D — quota PROVEN FALSE somente com esgotamento FRESCO declarado pelo provider', () => {
+    const fact = quotaFactOf({
+      capacityObservation: exhaustedNow('anthropic_subscription'),
     });
     expect(fact.availability).toBe(false);
-    expect(fact.provenance).toContain('2030-01-01T00:00:00.000Z');
+    expect(fact.provenance).toContain('limit_reached');
   });
 
-  it('E — janela já resetada volta a UNKNOWN: reset não prova quota suficiente', async () => {
+  it('D — LaunchRecord com recusa por limite NÃO bloqueia a atividade atual', async () => {
     const repoRoot = await temporaryDir();
     const paths = resolveHarnessPaths(repoRoot);
+    // Recusa histórica real, gravada por um launch anterior, com janela que
+    // ainda nem abriu. Sob a política antiga isto produzia PROVEN FALSE agora.
     await writeRateLimitedLaunchRecord(paths, CLAUDE_LIKE_PROFILE.id, {
       status: 'rejected',
       resetsAt: '2030-01-01T00:00:00.000Z',
     });
 
-    const fact = await quotaFactOf({
+    const facts = await collectProjectLaunchFacts({
       paths,
       profile: CLAUDE_LIKE_PROFILE,
-      now: () => new Date('2030-01-01T01:00:00.000Z'),
+      runner: runnerReturning(JSON.stringify({ loggedIn: false })),
     });
-    expect(fact.availability).toBeNull();
-    expect(fact.provenance).toContain('já resetou');
+    expect(facts.quota.availability).toBeNull();
+    expect(evidenceOf(facts.quota)).toBe('UNKNOWN');
+    expect(facts.quota.provenance).not.toContain('2030-01-01');
   });
 
-  it('E — reset não datável nunca vira quota insuficiente nem suficiente', async () => {
-    const repoRoot = await temporaryDir();
-    const paths = resolveHarnessPaths(repoRoot);
-    await writeRateLimitedLaunchRecord(paths, CLAUDE_LIKE_PROFILE.id, {
-      status: 'rejected',
-      resetsAt: 1893456000,
-    });
-
-    const fact = await quotaFactOf({ paths, profile: CLAUDE_LIKE_PROFILE });
+  it('E — UNKNOWN fresco permanece UNKNOWN: nenhuma folga histórica o preenche', () => {
+    const fact = quotaFactOf({ capacityObservation: unknownNow('anthropic_subscription') });
     expect(fact.availability).toBeNull();
-    expect(fact.provenance).toContain('não é datável');
+    expect(fact.provenance).toContain('UNKNOWN não é zero');
   });
 
-  it('E — observação sem recusa continua UNKNOWN: ausência de recusa não é prova', async () => {
-    const repoRoot = await temporaryDir();
-    const paths = resolveHarnessPaths(repoRoot);
-    await writeRateLimitedLaunchRecord(paths, CLAUDE_LIKE_PROFILE.id, {
-      status: 'allowed',
-      resetsAt: '2030-01-01T00:00:00.000Z',
-    });
-
-    const fact = await quotaFactOf({ paths, profile: CLAUDE_LIKE_PROFILE });
-    expect(fact.availability).toBeNull();
-    expect(fact.provenance).toContain('ausência de recusa não prova');
+  it('E — medida fresca não esgotada é PROVEN TRUE, mesmo com folga mínima', () => {
+    const fact = quotaFactOf({ capacityObservation: knownNow('anthropic_subscription', 99) });
+    expect(fact.availability).toBe(true);
+    expect(fact.provenance).toContain('anthropic_subscription');
   });
 
   it('F — a evidência da escalation reusa os MESMOS fatos, sem segundo preflight', async () => {

@@ -88,11 +88,10 @@ import {
   type ProfileProvenance,
 } from './profile.js';
 import {
-  collectProjectLaunchFacts,
-  effectiveQuotaHeadroomByPool,
+  collectCurrentLaunchFacts,
+  currentQuotaHeadroomByPool,
   escalationPreflightOf,
   evidenceOf,
-  quotaHeadroomByPool,
   type LaunchFact,
   type LaunchFactEvidence,
   type ProjectLaunchFacts,
@@ -1000,28 +999,21 @@ export async function createProjectControlPlane(
    */
   async function launchFactsFor(
     profile: LauncherProfile,
-    context?: {
-      readonly fresh?: PoolCapacityObservation | null;
-      readonly historical?: Readonly<Record<string, QuotaHeadroom>>;
-    },
+    /**
+     * Snapshot já observado por ESTA decisão imediata. Passá-lo é a única
+     * forma autorizada de não reprobar: dentro de um mesmo assessment, dois
+     * profiles do MESMO pool leem a MESMA medição. Ausente, esta atividade faz
+     * a sua própria leitura fresca — nunca herda a de outra work unit.
+     */
+    observed?: ReadonlyMap<string, PoolCapacityObservation>,
   ): Promise<ProjectLaunchFacts> {
-    const pool = quotaPoolOf(profile.id);
-    const historical = context?.historical ?? (await quotaHeadroomByPool(paths, quotaPoolOf));
-    const fresh =
-      context?.fresh !== undefined
-        ? context.fresh
-        : pool === null
-          ? null
-          : (await observeEligiblePoolCapacities([profile], poolCapacityProbe, (item) => quotaPoolOf(item.id))).get(pool) ?? null;
-    return collectProjectLaunchFacts({
+    return collectCurrentLaunchFacts({
       paths,
       profile,
-      capacityObservation: fresh,
-      ...(pool === null || historical[pool] === undefined
-        ? {}
-        : { historicalHeadroom: historical[pool] }),
+      probe: poolCapacityProbe,
+      poolOf: (item) => quotaPoolOf(item.id),
+      ...(observed === undefined ? {} : { observed }),
       ...(input.credentialRunner === undefined ? {} : { runner: input.credentialRunner }),
-      ...(input.now === undefined ? {} : { now: input.now }),
     });
   }
 
@@ -1045,9 +1037,12 @@ export async function createProjectControlPlane(
 
   /**
    * Amostragem comparável POR PROFILE e POR PROVIDER, concentração nesta run e
-   * folga de quota observada. Zero amostras é um FATO — é justamente o fato que
-   * a política de cold-start precisa para preferir adquirir a evidência que
+   * folga de quota ATUAL. Zero amostras é um FATO — é justamente o fato que a
+   * política de cold-start precisa para preferir adquirir a evidência que
    * falta. Quota ausente permanece UNKNOWN e simplesmente não desempata.
+   *
+   * As duas histórias não se confundem: a de DESEMPENHO continua inteira e
+   * decide qualidade; a de QUOTA não entra aqui de forma alguma.
    */
   async function evidenceBalanceFactsOf(
     eligible: readonly string[],
@@ -1082,7 +1077,7 @@ export async function createProjectControlPlane(
       provenance: [
         'PerformanceHistoryQueryResultV2.series[].routing_aggregations.trials.sample_size',
         'launches já decididos por este control plane nesta run',
-        'observação read-only fresca por POOL com fallback para LaunchRecords históricos',
+        'observação read-only FRESCA por POOL, feita nesta atividade; nenhum LaunchRecord anterior participa',
       ],
     });
   }
@@ -1251,25 +1246,22 @@ export async function createProjectControlPlane(
     // Snapshot por POOL e por ASSESSMENT. Perfis que compartilham pool entram
     // uma vez, e a próxima work unit observa de novo — sem TTL global capaz de
     // esconder consumo feito fora do Agent Lab.
-    const historicalCapacityByPool = await quotaHeadroomByPool(paths, quotaPoolOf);
     const freshCapacityByPool = await observeEligiblePoolCapacities(
       eligible.map((profileId) => profiles.get(profileId) as LauncherProfile),
       poolCapacityProbe,
       (profile) => quotaPoolOf(profile.id),
     );
-    const effectiveCapacityByPool = effectiveQuotaHeadroomByPool(
-      historicalCapacityByPool,
-      freshCapacityByPool,
-    );
+    const currentCapacityByPool = currentQuotaHeadroomByPool(freshCapacityByPool);
 
-    // FATOS de aquisição de evidência. Amostragem sai da história canônica,
-    // concentração sai dos launches desta run e headroom prefere o snapshot
-    // fresco read-only. O histórico só substitui probe fresco UNKNOWN.
+    // FATOS de aquisição de evidência. Amostragem sai da história canônica de
+    // DESEMPENHO, concentração sai dos launches desta run e headroom sai
+    // EXCLUSIVAMENTE do snapshot fresco acima. História de quota não entra:
+    // ela descreve consumo passado, não capacidade agora.
     const selectionPolicy = authorization.profile_policy.selection_policy;
     const evidenceBalance = await evidenceBalanceFactsOf(
       eligible,
       history,
-      effectiveCapacityByPool,
+      currentCapacityByPool,
     );
     const routed = routeInitialProfileWithHistory({
       work_unit: {
@@ -1333,10 +1325,9 @@ export async function createProjectControlPlane(
     const selectedPool = quotaPoolOf(selectedProfileId);
     const selectedCapacity =
       selectedPool === null ? null : (freshCapacityByPool.get(selectedPool) ?? null);
-    const facts = await launchFactsFor(profile, {
-      fresh: selectedCapacity,
-      historical: historicalCapacityByPool,
-    });
+    // O MESMO snapshot que roteou vira o fato de quota do launch: é a mesma
+    // decisão imediata, então reobservar aqui seria uma requisição duplicada.
+    const facts = await launchFactsFor(profile, freshCapacityByPool);
     const launchAuthorization = authorizeProjectLaunch({
       scope,
       capability: request.attemptKind === 'REPAIR' ? 'BOUNDED_REPAIR' : 'CONFIGURED_SUBSCRIPTION_WORKER',
@@ -2513,11 +2504,23 @@ export async function createProjectControlPlane(
       provenance: 'project_execution_policy',
     };
 
+    // UMA decisão de escalation, UMA rodada de observação. Os degraus da ladder
+    // são avaliados juntos, então os pools são lidos uma vez e compartilhados:
+    // dois degraus contra a mesma conta OpenAI não geram duas requisições, e
+    // nenhum deles herda a leitura de uma work unit anterior.
+    const ladderCandidates = ladderSteps
+      .map((entry) => profiles.get(entry.id))
+      .filter((candidate): candidate is LauncherProfile => candidate !== undefined);
+    const ladderCapacityByPool = await observeEligiblePoolCapacities(
+      ladderCandidates,
+      poolCapacityProbe,
+      (profile) => quotaPoolOf(profile.id),
+    );
     const preflights: EscalationCandidatePreflight[] = [];
-    for (const entry of ladderSteps) {
-      const candidate = profiles.get(entry.id);
-      if (candidate === undefined) continue;
-      preflights.push(escalationPreflightOf(candidate, await launchFactsFor(candidate)));
+    for (const candidate of ladderCandidates) {
+      preflights.push(
+        escalationPreflightOf(candidate, await launchFactsFor(candidate, ladderCapacityByPool)),
+      );
     }
 
     const escalation = decideEscalation({
