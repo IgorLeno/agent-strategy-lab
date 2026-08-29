@@ -451,6 +451,35 @@ describe('capacidade fresca no routing de produção', () => {
     expect(preview.status).not.toBe('HUMAN_REQUIRED');
   });
 
+  it('pin de repair num pool EXHAUSTED faz failover na policy — não HUMAN_REQUIRED', async () => {
+    const fixture = await routingFixture([PROFILES.codex, PROFILES.go]);
+    const authorization = await loadProjectRunAuthorization(fixture.authorizationFile);
+    const controlPlane = await createProjectControlPlane({
+      paths: fixture.paths,
+      loaded: fixture.loaded,
+      authorization: authorization.file,
+      authorizationFile: authorization.source_file,
+      historyLabRoot: await temporaryDir('agentlab-capacity-history-'),
+      credentialRunner: credentialRunner(),
+      poolCapacityProbe: async (profile) => {
+        const pool = poolForProfile(profile);
+        return pool === 'openai_chatgpt_subscription'
+          ? exhaustedCapacity(pool)
+          : knownCapacity({ pool, used: 20, source: 'fresh:go-available' });
+      },
+    });
+
+    const decision = await controlPlane.beforeWorkUnit({
+      taskId: 'T1',
+      attemptKind: 'FIRST_PASS',
+      pinnedProfileId: PROFILES.codex,
+    });
+
+    expect(decision.outcome, JSON.stringify(decision, null, 2)).toBe('LAUNCH');
+    if (decision.outcome !== 'LAUNCH') return;
+    expect(decision.profile_id).toBe(PROFILES.go);
+  });
+
   it('UNKNOWN fresco permanece UNKNOWN: folga histórica OBSERVED não o preenche', async () => {
     const fixture = await routingFixture([PROFILES.codex, PROFILES.go]);
     // Histórico rico e recente: 90% de folga OpenAI gravada por um launch

@@ -5,6 +5,15 @@ Regra, não narrativa: cada entrada termina numa restrição aplicável.
 
 ---
 
+[2026-08-29] Context: after Codex INFRA recover, bounded repair pinou
+sol-high cujo pool estava EXHAUSTED; Claude UNKNOWN e OpenCode Go KNOWN
+estavam na policy e o routing virou HUMAN_REQUIRED de "ampliar policy".
+Mistake: pin de repair restringiu eligible a um único profile esgotado.
+Rule: pin cujo pool fresco está EXHAUSTED é inelegível; observe a policy
+inteira e faça failover. UNKNOWN não é EXHAUSTED. Não é decisão de produto.
+
+---
+
 [2026-08-29] Context: calculate_database_settings_ui repair morreu com Codex
 turn.failed de usage limit; launcher gravou FINISHED (exit 1, sem
 provider_failure) e o close ficou PENDING por material Git vazio.
