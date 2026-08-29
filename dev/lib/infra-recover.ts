@@ -13,8 +13,11 @@ import {
   providerTerminalFailure,
   readClaudeStream,
   streamContractViolation,
-  type ClaudeProviderFailure,
 } from './claude-stream.js';
+import {
+  codexProviderTerminalFailure,
+  codexUsesEventStream,
+} from './codex-transport.js';
 import { stagedFiles } from './git.js';
 import {
   InboxArtifactError,
@@ -429,23 +432,32 @@ async function deriveProviderFailureFromStdout(
     );
   };
 
-  if (claudeOutputFormat(launch.argv) !== STREAM_JSON_OUTPUT_FORMAT) {
-    refuse('o argv do lançamento não declarou stream-json');
-  }
   const stdout = await readFile(path.join(paths.logsDir, `${taskId}.stdout.log`), 'utf8').catch(
     () => null,
   );
-  if (stdout === null) refuse('stdout do attempt ausente');
+  if (stdout === null) return refuse('stdout do attempt ausente');
 
-  const reading = readClaudeStream(stdout as string);
+  if (codexUsesEventStream(launch.argv)) {
+    const failure = codexProviderTerminalFailure(stdout);
+    if (failure === null) return refuse('o stream JSONL do Codex não declarou turn.failed');
+    return {
+      failure: { ...failure, signals: [...failure.signals] },
+      source: 'stdout_stream',
+    };
+  }
+
+  if (claudeOutputFormat(launch.argv) !== STREAM_JSON_OUTPUT_FORMAT) {
+    return refuse('o argv do lançamento não declarou stream-json');
+  }
+
+  const reading = readClaudeStream(stdout);
   const violation = streamContractViolation(reading);
-  if (violation) refuse(violation);
+  if (violation) return refuse(violation);
 
   const failure = providerTerminalFailure(reading.result);
-  if (!failure) refuse('o result do stream declarou término normal');
-  const declared = failure as ClaudeProviderFailure;
+  if (failure === null) return refuse('o result do stream declarou término normal');
   return {
-    failure: { ...declared, signals: [...declared.signals] },
+    failure: { ...failure, signals: [...failure.signals] },
     source: 'stdout_stream',
   };
 }

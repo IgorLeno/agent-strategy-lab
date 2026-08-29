@@ -22,6 +22,12 @@
  * schema nem "acha JSON" por regex sobre o stream inteiro.
  */
 
+import { sha256Hex } from './canonical.js';
+import {
+  PROVIDER_FAILURE_MESSAGE_MAX_CHARS,
+  type ClaudeProviderFailure,
+} from './claude-stream.js';
+
 type JsonObject = Record<string, unknown>;
 
 function isObject(value: unknown): value is JsonObject {
@@ -120,4 +126,26 @@ export function decodeCodexEventStream(stdout: string): CodexEventStreamDecoding
     };
   }
   return { outcome: 'AGENT_MESSAGE', text: lastAgentMessage };
+}
+
+/**
+ * `turn.failed` / `error` do JSONL Codex é a mesma classe de evidência que o
+ * `result.is_error` do Claude: a sessão morreu no provider, não no protocolo
+ * do worker. Sem isto o launcher trata exit 1 como FINISHED e o fechamento
+ * pede eternamente um report que nunca vai existir.
+ */
+export function codexProviderTerminalFailure(stdout: string): ClaudeProviderFailure | null {
+  const decoded = decodeCodexEventStream(stdout);
+  if (decoded.outcome !== 'TURN_FAILED') return null;
+  const message = decoded.message;
+  return {
+    is_error: true,
+    terminal_reason: 'turn.failed',
+    api_error_status: null,
+    subtype: null,
+    num_turns: null,
+    message: message.slice(0, PROVIDER_FAILURE_MESSAGE_MAX_CHARS),
+    message_sha256: sha256Hex(message),
+    signals: ['turn.failed'],
+  };
 }

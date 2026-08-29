@@ -5,6 +5,17 @@ Regra, não narrativa: cada entrada termina numa restrição aplicável.
 
 ---
 
+[2026-08-29] Context: calculate_database_settings_ui repair morreu com Codex
+turn.failed de usage limit; launcher gravou FINISHED (exit 1, sem
+provider_failure) e o close ficou PENDING por material Git vazio.
+Mistake: tratar transporte Codex como se só Claude declarasse falha terminal;
+resume retratava o mesmo close vazio sem recoverInfra.
+Rule: turn.failed do JSONL Codex é INFRA_ERROR capability-neutral; derive do
+stdout quando o LaunchRecord histórico não tem o campo; resume recupera e
+rerroteia — não é FAIL, não é HUMAN_REQUIRED, não fica em PENDING eterno.
+
+---
+
 [2026-08-29] Context: mopac_minimum_workflow risk=critical, implementer Codex
 sol-high, review pinada no mesmo profile porque authorization.review estava
 vazio; Claude estava na policy e NÃO estava EXHAUSTED.

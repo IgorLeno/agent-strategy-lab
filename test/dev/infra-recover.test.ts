@@ -169,6 +169,46 @@ async function stripProviderFailureFromLaunchRecord(): Promise<void> {
 }
 
 /**
+ * Incidente real do piloto Semi-Imperium: Codex `exec --json` morreu com
+ * `turn.failed` de quota, o launcher gravou FINISHED (sem provider_failure) e
+ * o fechamento ficou PENDING por material Git vazio.
+ */
+async function rewriteLaunchAsCodexUsageLimit(): Promise<void> {
+  const file = launchRecordPath(paths, 'T1');
+  const launch = JSON.parse(await readFile(file, 'utf8')) as Record<string, unknown>;
+  launch['argv'] = [
+    'codex',
+    'exec',
+    '--json',
+    '--strict-config',
+    '--ignore-user-config',
+    '--sandbox',
+    'workspace-write',
+    '--ephemeral',
+    '--ignore-rules',
+    '--model',
+    'gpt-5.6-sol',
+    '-',
+  ];
+  launch['profile_id'] = 'codex-build-worker-subscription-sol-high-v2';
+  delete launch['provider_failure'];
+  await writeFile(file, `${JSON.stringify(launch, null, 2)}\n`, 'utf8');
+  const message =
+    "You've hit your usage limit. Upgrade to Pro or try again at 4:45 AM.";
+  await writeFile(
+    path.join(paths.logsDir, 'T1.stdout.log'),
+    [
+      '{"type":"thread.started","thread_id":"th_quota"}',
+      '{"type":"turn.started"}',
+      JSON.stringify({ type: 'error', message }),
+      JSON.stringify({ type: 'turn.failed', error: { message } }),
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+}
+
+/**
  * O incidente REAL da M33: o launcher classificava o run como FINISHED e o
  * fechamento parava pedindo um report que nunca existiu. Reproduz o state
  * exatamente como ele ficava antes desta manutenção.
@@ -500,6 +540,43 @@ describe('dev-recover-infra', () => {
     await writeFile(file, JSON.stringify({ ...launch, timed_out: true }, null, 2), 'utf8');
 
     await expect(recover()).rejects.toThrow(/timeout/i);
+  });
+
+  it('Codex turn.failed de quota no stdout, sem provider_failure no LaunchRecord, é INFRA recuperável', async () => {
+    await runFailedAttempt();
+    await simulateLegacyFinalizingState();
+    await rewriteLaunchAsCodexUsageLimit();
+
+    const record = (await recover()).record;
+    expect(record.provider_failure_source).toBe('stdout_stream');
+    expect(record.provider_failure).toMatchObject({
+      is_error: true,
+      terminal_reason: 'turn.failed',
+      signals: ['turn.failed'],
+    });
+    expect(record.provider_failure.message).toMatch(/usage limit/i);
+    expect(getTaskState(await readState(paths), 'T1')).toMatchObject({
+      status: 'READY',
+      phase: null,
+      attempts: 1,
+    });
+  });
+
+  it('resume do orquestrador recupera FINALIZING+quota Codex em vez de ficar em PENDING', async () => {
+    await runFailedAttempt();
+    await simulateLegacyFinalizingState();
+    await rewriteLaunchAsCodexUsageLimit();
+
+    const result = await runDevCli(
+      'dev-orchestrate.ts',
+      ['--repo', sandbox.root, '--profile', PROFILE_ID, '--max-iterations', '1'],
+      devEnv(),
+    );
+    const output = JSON.parse(result.stdout) as { stopped_by: string; reason: string };
+    expect(output.stopped_by).not.toBe('PENDING');
+    expect(output.reason).not.toMatch(/material derivado do Git está vazio/i);
+    expect(await readInfraFailedAttempt(paths, 'T1', 1)).not.toBeNull();
+    expect(getTaskState(await readState(paths), 'T1').phase).not.toBe('FINALIZING');
   });
 
   it('LaunchRecord anterior ao campo: a falha é derivada do stdout preservado', async () => {

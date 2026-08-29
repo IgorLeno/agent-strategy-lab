@@ -12,6 +12,7 @@ import { closeTaskByLaunchPolicy } from './close-dispatch.js';
 import { experimentFactsOf } from './doctor.js';
 import { resumePendingAcceptance } from './finalize-orchestrated.js';
 import { headSha } from './git.js';
+import { InfraRecoveryError, recoverInfraAttempt } from './infra-recover.js';
 import { withHarnessLock } from './lock.js';
 import { runOrchestrationPreflight, type PreflightResult } from './orchestrate-preflight.js';
 import {
@@ -733,11 +734,62 @@ async function resumePendingFinalization(input: {
     taskId: pending.id,
     ...(input.acceptance === undefined ? {} : { acceptance: input.acceptance }),
   });
+  if (outcome.kind === 'PENDING') {
+    const recovered = await tryRecoverProvenProviderInfra(
+      input.paths,
+      pending.id,
+      `fechamento pendente após falha terminal do provider: ${outcome.reason}`,
+    );
+    if (recovered) {
+      return {
+        status: 'RESUMED',
+        taskId: pending.id,
+        reason: recovered,
+      };
+    }
+  }
   return {
     status: outcome.kind === 'PENDING' ? 'NONE' : 'RESUMED',
     taskId: pending.id,
     reason: outcome.reason,
   };
+}
+
+/**
+ * INFRA comprovada (LaunchRecord ou stdout tipado) não é decisão humana nem
+ * FAIL de capacidade. Resume do MESMO comando recupera sem o operador conhecer
+ * `dev-recover-infra`. Ausência de prova deixa o estado como estava.
+ */
+async function tryRecoverProvenProviderInfra(
+  paths: HarnessPaths,
+  taskId: string,
+  reason: string,
+): Promise<string | null> {
+  try {
+    const recovered = await recoverInfraAttempt({ paths, taskId, reason });
+    return recovered.record.reason;
+  } catch (error) {
+    if (error instanceof InfraRecoveryError) return null;
+    throw error;
+  }
+}
+
+async function resumePendingInfraRecovery(paths: HarnessPaths): Promise<void> {
+  let state;
+  try {
+    state = await readState(paths);
+  } catch {
+    return;
+  }
+  const infra = state.tasks.filter((task) => task.status === 'INFRA_ERROR');
+  if (infra.length !== 1) return;
+  const pending = infra[0];
+  if (pending === undefined || pending.attempts < 1) return;
+  await tryRecoverProvenProviderInfra(
+    paths,
+    pending.id,
+    pending.diagnostics ?? 'falha de infraestrutura do provider',
+  );
 }
 
 export async function runOrchestrate(options: OrchestrateOptions): Promise<OrchestrateResult> {
@@ -814,6 +866,7 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
       loaded,
       ...(acceptance === undefined ? {} : { acceptance }),
     });
+    await resumePendingInfraRecovery(paths);
 
     if (!skipPreflight) {
       let currentPreflight = await runOrchestrationPreflight({

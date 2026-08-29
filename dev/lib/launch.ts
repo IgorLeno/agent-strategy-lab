@@ -65,6 +65,11 @@ import {
   windowDeltas,
   type PoolCapacityObservation,
 } from '../../src/quota/index.js';
+import {
+  codexProviderTerminalFailure,
+  codexUsesEventStream,
+  decodeCodexEventStream,
+} from './codex-transport.js';
 import { openCodePermissionEnv, openCodeRunUsageOf } from './opencode-scaffold.js';
 import { OPENCODE_IMPLEMENTER_MECHANISM } from './project-roles.js';
 import { buildWorkerPrompt } from './prompt.js';
@@ -511,9 +516,15 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
       ? readClaudeJsonResult(stdout)
       : null);
 
+  const codexStream = codexUsesEventStream(profile.argv) ? decodeCodexEventStream(stdout) : null;
+
   // A falha terminal do provider é lida SEMPRE, mesmo quando outro diagnóstico
   // vence a classificação: ela é evidência do run, não só um veredito.
-  const providerFailure = providerTerminalFailure(claudeResult);
+  // Codex declara o mesmo fato via `turn.failed` no JSONL — sem isto, exit 1
+  // cai em FINISHED e o fechamento pede um report que a sessão nunca produziu.
+  const providerFailure =
+    providerTerminalFailure(claudeResult) ??
+    (codexStream?.outcome === 'TURN_FAILED' ? codexProviderTerminalFailure(stdout) : null);
 
   const record: LaunchRecord = {
     ...base,
@@ -564,7 +575,11 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
     exitCode,
     signal,
     survivorsRemaining: cleanup.remaining,
-    streamViolation: stream ? streamContractViolation(stream) : null,
+    streamViolation: stream
+      ? streamContractViolation(stream)
+      : codexStream?.outcome === 'TRANSPORT_MALFORMED'
+        ? codexStream.message
+        : null,
     providerFailure,
   });
   return { record, classification, reason };
