@@ -901,6 +901,12 @@ export interface LaunchedPlanningWorkerOptions {
   readonly paths: HarnessPaths;
   readonly profile: LauncherProfile;
   readonly scope: ExecutionAuthorizationScope;
+  /**
+   * Categorias que a HumanInstruction persistida implica de fato. Ausência
+   * significa "nenhuma implicação estruturada neste runtime" — nunca deriva
+   * de risk, objective ou requested_scope.
+   */
+  readonly implied_human_gated?: readonly HumanGatedCapability[];
   /** Default `false`: o caminho de provider real existe, mas nasce desligado. */
   readonly providerEnabled?: boolean;
   /** Default `true`: dry-run/preflight jamais chama provider. */
@@ -910,6 +916,13 @@ export interface LaunchedPlanningWorkerOptions {
   readonly quota: LaunchFact;
   readonly port?: ProviderRoleInvocationPort;
   readonly invocationId?: string;
+}
+
+function impliedHumanGatedLaunchField(
+  implied: readonly HumanGatedCapability[] | undefined,
+): Pick<ProjectLaunchContext, 'implied_human_gated'> | Record<string, never> {
+  if (implied === undefined || implied.length === 0) return {};
+  return { implied_human_gated: implied };
 }
 
 function invocationFailure(
@@ -1084,6 +1097,7 @@ export function createLaunchedPlanningWorker(
         risk: 'low',
         worker_owns_commit: options.profile.commit_owner !== 'orchestrator',
         worker_owns_official_validation: options.profile.official_validation_owner !== 'orchestrator',
+        ...impliedHumanGatedLaunchField(options.implied_human_gated),
       });
       if (authorization.outcome === 'HUMAN_REQUIRED') {
         if (options.quota.availability === false) {
@@ -1321,6 +1335,7 @@ export function createLaunchedDeliberationWorker(
         risk: 'low',
         worker_owns_commit: options.profile.commit_owner !== 'orchestrator',
         worker_owns_official_validation: options.profile.official_validation_owner !== 'orchestrator',
+        ...impliedHumanGatedLaunchField(options.implied_human_gated),
       });
       if (authorization.outcome === 'HUMAN_REQUIRED') {
         if (options.quota.availability === false) {
@@ -1683,6 +1698,7 @@ export interface ProjectReviewerLaunchOptions {
   readonly credential: LaunchFact;
   readonly quota: LaunchFact;
   readonly port?: ProviderRoleInvocationPort;
+  readonly implied_human_gated?: readonly HumanGatedCapability[];
 }
 
 interface ProjectReviewVerdict<Outcome extends 'ACCEPT' | 'REJECT'> {
@@ -1768,6 +1784,7 @@ export async function launchProjectReviewer(
     risk: options.risk,
     worker_owns_commit: options.profile.commit_owner !== 'orchestrator',
     worker_owns_official_validation: options.profile.official_validation_owner !== 'orchestrator',
+    ...impliedHumanGatedLaunchField(options.implied_human_gated),
   });
   if (authorization.outcome === 'HUMAN_REQUIRED') {
     return reviewUnavailable('REVIEW_LAUNCH_HUMAN_REQUIRED', authorization.reason);
@@ -1977,6 +1994,7 @@ export interface ProjectLifecyclePlanInput extends DirectPathInput {
   readonly predictedRuntimeMs: number;
   readonly quota: LaunchFact;
   readonly credential: LaunchFact;
+  readonly implied_human_gated?: readonly HumanGatedCapability[];
 }
 
 export type ProjectLifecyclePlanResult =
@@ -2002,6 +2020,7 @@ export function planDirectLifecycle(input: ProjectLifecyclePlanInput): ProjectLi
     risk: direct.assessment.risk.value,
     worker_owns_commit: input.profile.commit_owner !== 'orchestrator',
     worker_owns_official_validation: input.profile.official_validation_owner !== 'orchestrator',
+    ...impliedHumanGatedLaunchField(input.implied_human_gated),
   });
 
   return {

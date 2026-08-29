@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { stringify as stringifyYaml } from 'yaml';
@@ -5,8 +6,6 @@ import { stringify as stringifyYaml } from 'yaml';
 import { inspectRepository, type ProjectInspection } from '../../src/inspection/index.js';
 import { CapacityStatus } from '../../src/quota/index.js';
 import {
-  authorizeExecutionAction,
-  classifyImpliedHumanGatedMatches,
   createHumanInstruction,
   HUMAN_GATE_GRANT_PATH,
   DETERMINISTIC_INTAKE_COMPILER_PROFILE,
@@ -16,11 +15,16 @@ import {
   ProjectIntakeRequest,
   RunDirectiveError,
   runDirectiveHash,
+  type ExecutionAuthorizationScope,
   type AgentLabRunDirectiveHeader,
   type HumanInstruction,
   type IntakeCompilerPort,
   type ParsedRunDirective,
 } from '../../src/intake/index.js';
+import {
+  evaluateImpliedHumanGatedIntent,
+  executionScopeFromAuthorization,
+} from './human-gated-intent.js';
 import { grantAdditionalRepairAuthorization } from './automatic-repair.js';
 import {
   createProductionPoolCapacityProbe,
@@ -203,6 +207,54 @@ function humanRequiredPayload(
     ],
     evidence_paths: [runtimeDir],
     runtime_dir: runtimeDir,
+  };
+}
+
+async function loadObservabilityIfPresent(file: string): Promise<LabObservability | undefined> {
+  if (!(await pathExists(file))) return undefined;
+  return JSON.parse(await readFile(file, 'utf8')) as LabObservability;
+}
+
+/**
+ * Mesma avaliação para NEW e RESUME. Resume não amplia autoridade e não
+ * relança provider quando a instrução persistida ainda implica uma categoria
+ * never-grantable.
+ */
+function humanGatedInstructionStop(input: {
+  readonly instructionBody: string;
+  readonly scope: ExecutionAuthorizationScope;
+  readonly publishAllowed: boolean;
+  readonly runtimeDir: string;
+  readonly artifacts: ReturnType<typeof labArtifactPaths>;
+  readonly authorizationFile: string;
+  readonly policyPreset: string;
+  readonly observability?: LabObservability;
+  readonly extra?: Record<string, unknown>;
+  readonly onProgress?: LabProgressListener;
+}): LabRunResult | null {
+  const evaluation = evaluateImpliedHumanGatedIntent({
+    instructionBody: input.instructionBody,
+    scope: input.scope,
+    publishAllowed: input.publishAllowed,
+  });
+  if (evaluation.outcome !== 'HUMAN_REQUIRED') return null;
+  input.onProgress?.({ stage: 'HUMAN_REQUIRED', detail: evaluation.capability });
+  return {
+    payload: {
+      ...humanRequiredPayload(
+        evaluation.capability,
+        input.runtimeDir,
+        `a instrução implica ${evaluation.capability} (evidência: ${JSON.stringify(evaluation.evidence)}); ` +
+          'texto livre não autoriza esta categoria e o header estruturado também não a concedeu.',
+      ),
+      human_instruction: input.artifacts.humanInstruction,
+      intake_file: input.artifacts.intake,
+      authorization_file: input.authorizationFile,
+      policy_preset: input.policyPreset,
+      ...(input.observability === undefined ? {} : { observability: input.observability }),
+      ...(input.extra ?? {}),
+    },
+    exitCode: 9,
   };
 }
 
@@ -690,42 +742,22 @@ export async function submitHumanInstruction(
     runtime: runtimeDir,
   });
 
-  const implied = classifyImpliedHumanGatedMatches(humanInstructionBody(instruction));
-  for (const match of implied) {
-    // INTENT != AUTHORIZATION: a única satisfação possível vem do header
-    // estruturado. Intenção de publicar no remoto/ref já concedido por
-    // authorization.publish não é um gate novo — é exatamente o que o grant
-    // autoriza. Toda outra categoria continua HUMAN_REQUIRED.
-    if (match.satisfiable_by === 'publish' && publishGrant.allowed) continue;
-    const decision = authorizeExecutionAction(
-      {
-        schema_version: 1,
-        requested_scope: intake.requested_scope,
-        autonomous_execution_boundary: authorization.file.autonomous_execution_boundary,
-        human_gated_capabilities: authorization.file.human_gated_capabilities,
-      },
-      { kind: 'human_gated', capability: match.capability },
-    );
-    if (decision === 'HUMAN_REQUIRED') {
-      onProgress?.({ stage: 'HUMAN_REQUIRED', detail: match.capability });
-      return {
-        payload: {
-          ...humanRequiredPayload(
-            match.capability,
-            runtimeDir,
-            `a instrução implica ${match.capability} (evidência: ${JSON.stringify(match.evidence)}); ` +
-              'texto livre não autoriza esta categoria e o header estruturado também não a concedeu.',
-          ),
-          human_instruction: artifacts.humanInstruction,
-          intake_file: artifacts.intake,
-          authorization_file: authorizationFile,
-          policy_preset: presetName,
-          observability,
-        },
-        exitCode: 9,
-      };
-    }
-  }
+  const gated = humanGatedInstructionStop({
+    instructionBody: humanInstructionBody(instruction),
+    scope: executionScopeFromAuthorization({
+      requested_scope: intake.requested_scope,
+      autonomous_execution_boundary: authorization.file.autonomous_execution_boundary,
+      human_gated_capabilities: authorization.file.human_gated_capabilities,
+    }),
+    publishAllowed: publishGrant.allowed,
+    runtimeDir,
+    artifacts,
+    authorizationFile,
+    policyPreset: presetName,
+    observability,
+    ...(onProgress === undefined ? {} : { onProgress }),
+  });
+  if (gated !== null) return gated;
 
   if (targetType === 'self') {
     await assertControllerUnchanged(selfIdentity as SelfTargetIdentity, controlRoot);
@@ -802,6 +834,27 @@ export async function resumeHumanInstruction(
       'conflito: --publish tenta conceder publicação e a Run Directive persistida a nega.',
     );
   }
+
+  const observability = await loadObservabilityIfPresent(artifacts.observability);
+  const gated = humanGatedInstructionStop({
+    instructionBody: humanInstructionBody(instruction),
+    scope: executionScopeFromAuthorization({
+      requested_scope: intake.requested_scope,
+      autonomous_execution_boundary: authorization.file.autonomous_execution_boundary,
+      human_gated_capabilities: authorization.file.human_gated_capabilities,
+    }),
+    // Resume nunca amplia autoridade: só o grant persistido satisfaz publish.
+    publishAllowed: persistedGrant?.allowed === true,
+    runtimeDir,
+    artifacts,
+    authorizationFile: artifacts.authorization,
+    policyPreset: authorization.file.profile_policy.id,
+    extra: { resumed: true },
+    ...(observability === undefined ? {} : { observability }),
+    ...(onProgress === undefined ? {} : { onProgress }),
+  });
+  if (gated !== null) return gated;
+
   const controlRoot = await resolveControlRepo(input.control_root ?? resolveHarnessInstallationRoot());
 
   let repoRoot = path.resolve(instruction.target.identity);

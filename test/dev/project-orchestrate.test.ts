@@ -824,6 +824,15 @@ describe('gate humano proporcional e autorização de escopo', () => {
     expect(authorization.outcome).toBe('ALLOW');
   });
 
+  it('project-run e run-project encaminham implied_human_gated da HumanInstruction persistida', async () => {
+    const projectRun = await readFile(path.join(REPO_ROOT, 'dev/lib/project-run.ts'), 'utf8');
+    const runProject = await readFile(path.join(REPO_ROOT, 'dev/lib/run-project.ts'), 'utf8');
+    expect(projectRun).toContain('resolveImpliedHumanGatedFromRuntime');
+    expect(projectRun).toMatch(/implied_human_gated:\s*impliedHumanGated/);
+    expect(runProject).toContain('resolveImpliedHumanGatedFromRuntime');
+    expect(runProject).toMatch(/implied_human_gated:\s*impliedHumanGated/);
+  });
+
   it('A/B/C — credencial provada libera; provada-falsa e desconhecida param, sem promoção', () => {
     const proven = authorizeProjectLaunch({
       ...base,
@@ -1131,6 +1140,28 @@ describe('adapter real da PlanningWorkerPort', () => {
     expect(result.outcome).toBe('INVOCATION_FAILED');
     if (result.outcome !== 'INVOCATION_FAILED') return;
     expect(result.failure.code).toBe('PLANNING_LAUNCH_HUMAN_REQUIRED');
+  });
+
+  it('HumanInstruction implied_human_gated chega ao planning launch real e recusa o provider', async () => {
+    let called = false;
+    const port = await worker({
+      implied_human_gated: ['DEPLOYMENT_OR_PRODUCTION'],
+      providerEnabled: true,
+      dryRun: false,
+      port: {
+        run: async () => {
+          called = true;
+          return '{}';
+        },
+      },
+    });
+    const result = await port.invoke(invocation());
+
+    expect(result.outcome).toBe('INVOCATION_FAILED');
+    if (result.outcome !== 'INVOCATION_FAILED') return;
+    expect(result.failure.code).toBe('PLANNING_LAUNCH_HUMAN_REQUIRED');
+    expect(result.failure.message).toContain('DEPLOYMENT_OR_PRODUCTION');
+    expect(called).toBe(false);
   });
 
   it('planner não contorna esgotamento real observado para o mesmo pool', async () => {

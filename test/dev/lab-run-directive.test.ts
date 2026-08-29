@@ -1,12 +1,17 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { loadPersistedIntake, loadPublishGrant } from '../../dev/lib/lab-runtime.js';
 import {
+  executionScopeFromAuthorization,
+  resolveImpliedHumanGatedFromRuntime,
+} from '../../dev/lib/human-gated-intent.js';
+import {
   LabRunError,
   resolveLabTarget,
+  resumeHumanInstruction,
   submitRunDirective,
 } from '../../dev/lib/lab.js';
 import { loadProjectRunAuthorization } from '../../dev/lib/project-authorization.js';
@@ -177,6 +182,82 @@ describe('submitRunDirective', () => {
     expect(launched).toBe(false);
   });
 
+  it('HUMAN_REQUIRED em NEW continua HUMAN_REQUIRED no RESUME da mesma runtime', async () => {
+    const target = await gitRepo('agentlab-rd-resume-gate-');
+    const runs = await mkdtemp(path.join(os.tmpdir(), 'agentlab-rd-resume-gate-runs-'));
+    created.push(runs);
+    const raw = directive({
+      header: `target:\n  type: repository\n  path: ${target}\n`,
+      body: 'deploy this application to production\n',
+    });
+    let launched = 0;
+    const spy = async () => {
+      launched += 1;
+      return fakeProject();
+    };
+    const createdRun = await submitRunDirective({
+      raw_directive: raw,
+      instruction_source: 'stdin',
+      env: { AGENTLAB_FAKE_MODE: '1', AGENTLAB_RUNS_DIR: runs },
+      run_project: spy,
+    });
+    expect(createdRun.exitCode).toBe(9);
+    expect(createdRun.payload['status']).toBe('HUMAN_REQUIRED');
+    expect(createdRun.payload['decision_needed']).toBe('DEPLOYMENT_OR_PRODUCTION');
+    expect(launched).toBe(0);
+
+    const runtimeDir = createdRun.payload['runtime_dir'] as string;
+    const snapshot = await loadProjectRunAuthorization(
+      path.join(runtimeDir, 'lab', 'authorization.yaml'),
+    );
+    expect(
+      await resolveImpliedHumanGatedFromRuntime(
+        runtimeDir,
+        executionScopeFromAuthorization({
+          requested_scope: snapshot.file.requested_scope,
+          autonomous_execution_boundary: snapshot.file.autonomous_execution_boundary,
+          human_gated_capabilities: snapshot.file.human_gated_capabilities,
+        }),
+      ),
+    ).toEqual(['DEPLOYMENT_OR_PRODUCTION']);
+    const authorizationBefore = await readFile(
+      path.join(runtimeDir, 'lab', 'authorization.yaml'),
+      'utf8',
+    );
+
+    const resumed = await resumeHumanInstruction({
+      runtime_dir: runtimeDir,
+      env: { AGENTLAB_FAKE_MODE: '1', AGENTLAB_RUNS_DIR: runs },
+      run_project: spy,
+    });
+    expect(resumed.exitCode).toBe(9);
+    expect(resumed.payload['status']).toBe('HUMAN_REQUIRED');
+    expect(resumed.payload['decision_needed']).toBe('DEPLOYMENT_OR_PRODUCTION');
+    expect(resumed.payload['resumed']).toBe(true);
+    expect(launched).toBe(0);
+
+    const resubmitted = await submitRunDirective({
+      raw_directive: raw,
+      instruction_source: 'stdin',
+      runtime_dir: runtimeDir,
+      env: { AGENTLAB_FAKE_MODE: '1', AGENTLAB_RUNS_DIR: runs },
+      run_project: spy,
+    });
+    expect(resubmitted.exitCode).toBe(9);
+    expect(resubmitted.payload['status']).toBe('HUMAN_REQUIRED');
+    expect(resubmitted.payload['decision_needed']).toBe('DEPLOYMENT_OR_PRODUCTION');
+    expect(launched).toBe(0);
+
+    const authorizationAfter = await readFile(
+      path.join(runtimeDir, 'lab', 'authorization.yaml'),
+      'utf8',
+    );
+    expect(authorizationAfter).toBe(authorizationBefore);
+    await expect(access(path.join(runtimeDir, 'project', 'generated-plan.yaml'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
   it('H — header malformado não lança provider', async () => {
     let launched = false;
     await expect(
@@ -293,6 +374,61 @@ describe('preflight de intenção — PROHIBITION != REQUEST e opções verdadei
     expect(result.payload['decision_needed']).toBe('EXTERNAL_SIDE_EFFECT');
     const options = (result.payload['options'] as string[]).join('\n');
     expect(options).toMatch(/authorization\.publish/);
+  });
+
+  it('categoria never continua HUMAN_REQUIRED no resume; publish grant não gera falso gate no resume', async () => {
+    const target = await gitRepo('agentlab-rd-resume-sem-');
+    const runs = await mkdtemp(path.join(os.tmpdir(), 'agentlab-rd-resume-sem-runs-'));
+    created.push(runs);
+    let launched = 0;
+    const spy = async () => {
+      launched += 1;
+      return fakeProject();
+    };
+
+    const destructive = await submitRunDirective({
+      raw_directive: directive({
+        header: `target:\n  type: repository\n  path: ${target}\n`,
+        body: 'Clean the repository history: do a force push of the rewritten branch.\n',
+      }),
+      instruction_source: 'stdin',
+      env: { AGENTLAB_FAKE_MODE: '1', AGENTLAB_RUNS_DIR: runs },
+      run_project: spy,
+    });
+    expect(destructive.payload['decision_needed']).toBe('DESTRUCTIVE_ACTION');
+    expect(launched).toBe(0);
+    const destructiveResume = await resumeHumanInstruction({
+      runtime_dir: destructive.payload['runtime_dir'] as string,
+      env: { AGENTLAB_FAKE_MODE: '1', AGENTLAB_RUNS_DIR: runs },
+      run_project: spy,
+    });
+    expect(destructiveResume.payload['decision_needed']).toBe('DESTRUCTIVE_ACTION');
+    expect(destructiveResume.exitCode).toBe(9);
+    expect(launched).toBe(0);
+
+    const publishRuns = await mkdtemp(path.join(os.tmpdir(), 'agentlab-rd-resume-pub-runs-'));
+    created.push(publishRuns);
+    const published = await submitRunDirective({
+      raw_directive: directive({
+        header:
+          `target:\n  type: repository\n  path: ${target}\n` +
+          'authorization:\n  publish:\n    allowed: true\n    remote: origin\n    ref: main\n',
+        body: 'Implement the fix and, at the end, git push to origin/main.\n',
+      }),
+      instruction_source: 'stdin',
+      env: { AGENTLAB_FAKE_MODE: '1', AGENTLAB_RUNS_DIR: publishRuns },
+      run_project: spy,
+    });
+    expect(published.exitCode).toBe(0);
+    expect(launched).toBe(1);
+    const publishedResume = await resumeHumanInstruction({
+      runtime_dir: published.payload['runtime_dir'] as string,
+      env: { AGENTLAB_FAKE_MODE: '1', AGENTLAB_RUNS_DIR: publishRuns },
+      run_project: spy,
+    });
+    expect(publishedResume.exitCode).toBe(0);
+    expect(launched).toBe(2);
+    expect(publishedResume.payload['status']).not.toBe('HUMAN_REQUIRED');
   });
 });
 
