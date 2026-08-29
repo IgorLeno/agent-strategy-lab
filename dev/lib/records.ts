@@ -454,10 +454,21 @@ export const readHandoff = (paths: HarnessPaths, taskId: string): Promise<Handof
 export const writeHandoff = (paths: HarnessPaths, record: HandoffRecord): Promise<void> =>
   writeJson(handoffPath(paths, record.task_id), parseHandoffRecord(record));
 
-export const readHandoffDraft = (
+/**
+ * Nota do worker: ausente, ilegível ou fora do contrato vira `null`.
+ * `parseHandoffDraft` é estrito (campo a mais, claim acima do teto, etc.);
+ * isso não pode derrubar review/aceitação de um candidate já validado.
+ */
+export async function readHandoffDraft(
   paths: HarnessPaths,
   taskId: string,
-): Promise<HandoffDraft | null> => readOptional(handoffDraftPath(paths, taskId), parseHandoffDraft);
+): Promise<HandoffDraft | null> {
+  try {
+    return await readOptional(handoffDraftPath(paths, taskId), parseHandoffDraft);
+  } catch {
+    return null;
+  }
+}
 
 export const readReport = (
   paths: HarnessPaths,

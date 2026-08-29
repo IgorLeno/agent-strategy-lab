@@ -105,6 +105,7 @@ import {
 } from './pool-capacity-observer.js';
 import {
   isRetryableReviewerInvocationFailure,
+  isRetryableReviewerUnavailability,
   selectReviewerProfileForFreshCapacity,
 } from './reviewer-capacity.js';
 import {
@@ -1214,17 +1215,36 @@ export async function createProjectControlPlane(
     );
     const environment = evaluateEnvironmentReadiness(assessment.environment_readiness);
 
-    const pinned = request.pinnedProfileId ?? escalatedProfileByTask.get(request.taskId) ?? null;
-    const eligible = pinned === null ? [...profiles.keys()] : [pinned];
-    if (eligible.some((profileId) => !profiles.has(profileId))) {
+    const requestedPin = request.pinnedProfileId ?? escalatedProfileByTask.get(request.taskId) ?? null;
+    if (requestedPin !== null && !profiles.has(requestedPin)) {
       return blocked({
         incidentId: `project:${request.taskId}:profile-outside-policy`,
         decisionNeeded: 'usar somente profiles da policy autorizada',
-        why: `profile ${pinned} exigido pelo runtime está fora da profile policy ${authorization.profile_policy.id}`,
+        why: `profile ${requestedPin} exigido pelo runtime está fora da profile policy ${authorization.profile_policy.id}`,
         options: ['declarar o profile na policy', 'rerodar sem o pin de profile'],
         evidencePaths: [input.authorizationFile],
       });
     }
+
+    // Snapshot por POOL e por ASSESSMENT, sobre TODA a policy. Um pin cujo pool
+    // está EXHAUSTED não pode esconder alternativas já autorizadas — isso
+    // transformaria INFRA temporária em HUMAN_REQUIRED de "ampliar policy".
+    const freshCapacityByPool = await observeEligiblePoolCapacities(
+      [...profiles.values()],
+      poolCapacityProbe,
+      (profile) => quotaPoolOf(profile.id),
+    );
+    const currentCapacityByPool = currentQuotaHeadroomByPool(freshCapacityByPool);
+
+    let pinned = requestedPin;
+    if (pinned !== null) {
+      const pinPool = quotaPoolOf(pinned);
+      const pinCapacity = pinPool === null ? null : (freshCapacityByPool.get(pinPool) ?? null);
+      if (pinCapacity?.status === 'EXHAUSTED') {
+        pinned = null;
+      }
+    }
+    const eligible = pinned === null ? [...profiles.keys()] : [pinned];
     const workDefinitionFingerprint = projectWorkDefinitionFingerprint({ planTask, classification });
     const historyQuery = {
       workDefinitionFingerprintSha256: workDefinitionFingerprint,
@@ -1253,15 +1273,6 @@ export async function createProjectControlPlane(
           });
         },
       ));
-    // Snapshot por POOL e por ASSESSMENT. Perfis que compartilham pool entram
-    // uma vez, e a próxima work unit observa de novo — sem TTL global capaz de
-    // esconder consumo feito fora do Agent Lab.
-    const freshCapacityByPool = await observeEligiblePoolCapacities(
-      eligible.map((profileId) => profiles.get(profileId) as LauncherProfile),
-      poolCapacityProbe,
-      (profile) => quotaPoolOf(profile.id),
-    );
-    const currentCapacityByPool = currentQuotaHeadroomByPool(freshCapacityByPool);
 
     // FATOS de aquisição de evidência. Amostragem sai da história canônica de
     // DESEMPENHO, concentração sai dos launches desta run e headroom sai
@@ -2160,6 +2171,8 @@ export async function createProjectControlPlane(
         poolOf: quotaPoolOf,
         capacityByPool: freshCapacityByPool,
         excludedProfileIds,
+        implementerProfileId: record.profile_id,
+        diversityRequirement: requirement.diversity_requirement,
       });
       lastSelectionReason = selectedReviewer.reason;
       if (selectedReviewer.profileId === null) {
@@ -2233,7 +2246,7 @@ export async function createProjectControlPlane(
           }),
         );
       }
-      if (isRetryableReviewerInvocationFailure(verdict.code)) {
+      if (isRetryableReviewerUnavailability(verdict.code)) {
         excludedProfileIds.push(reviewerProfile.id);
         lastInvocationFailureReason = verdict.reason;
         continue;

@@ -5,7 +5,48 @@ Regra, não narrativa: cada entrada termina numa restrição aplicável.
 
 ---
 
-[2026-08-28] Context: resumeHumanInstruction ia direto para executeProject
+[2026-08-29] Context: calculate_database_settings_ui attempt 3 commitou o
+candidate e a validação oficial passou; accept/review leu o HandoffDraft via
+readHandoffDraft e Zod estourou em evidence.claim > 160, crash após o commit.
+Mistake: a nota do worker tinha poder de veto no caminho de review/aceitação
+embora finalize já tratasse draft malformado como opinião ausente.
+Rule: readHandoffDraft devolve null em parse error; candidate validado não
+cai por teto de campo da nota. Não é FAIL, não é HUMAN_REQUIRED.
+
+---
+
+[2026-08-29] Context: after Codex INFRA recover, bounded repair pinou
+sol-high cujo pool estava EXHAUSTED; Claude UNKNOWN e OpenCode Go KNOWN
+estavam na policy e o routing virou HUMAN_REQUIRED de "ampliar policy".
+Mistake: pin de repair restringiu eligible a um único profile esgotado.
+Rule: pin cujo pool fresco está EXHAUSTED é inelegível; observe a policy
+inteira e faça failover. UNKNOWN não é EXHAUSTED. Não é decisão de produto.
+
+---
+
+[2026-08-29] Context: calculate_database_settings_ui repair morreu com Codex
+turn.failed de usage limit; launcher gravou FINISHED (exit 1, sem
+provider_failure) e o close ficou PENDING por material Git vazio.
+Mistake: tratar transporte Codex como se só Claude declarasse falha terminal;
+resume retratava o mesmo close vazio sem recoverInfra.
+Rule: turn.failed do JSONL Codex é INFRA_ERROR capability-neutral; derive do
+stdout quando o LaunchRecord histórico não tem o campo; resume recupera e
+rerroteia — não é FAIL, não é HUMAN_REQUIRED, não fica em PENDING eterno.
+
+---
+
+[2026-08-29] Context: mopac_minimum_workflow risk=critical, implementer Codex
+sol-high, review pinada no mesmo profile porque authorization.review estava
+vazio; Claude estava na policy e NÃO estava EXHAUSTED.
+Mistake: diversity=required só recusava o launch e virava HUMAN_REQUIRED,
+sem rerrotear para outro profile autorizado.
+Rule: reviewer pinado que coincide com o implementer sob diversity=required
+é inelegível como EXHAUSTED/INFRA; rerroteie dentro da policy. Não é
+decisão de produto.
+
+---
+
+
 depois de um NEW HUMAN_REQUIRED; o gate lexical só vivia em submitHumanInstruction.
 Mistake: tratar o gate da HumanInstruction como preflight só do modo NEW.
 Rule: NEW e RESUME reusam a MESMA avaliação (HumanInstruction persistida +

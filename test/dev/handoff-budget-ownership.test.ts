@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -12,7 +12,13 @@ import {
   parseTaskPacket,
   sealHandoff,
 } from '../../dev/lib/schemas.js';
-import { readHandoff, writeHandoff } from '../../dev/lib/records.js';
+import {
+  ensureTaskInbox,
+  handoffDraftPath,
+  readHandoff,
+  readHandoffDraft,
+  writeHandoff,
+} from '../../dev/lib/records.js';
 import { resolveHarnessPaths, type HarnessPaths } from '../../dev/lib/paths.js';
 import { ensureRuntimeDirs } from '../../dev/lib/state.js';
 
@@ -427,5 +433,71 @@ describe('o record selado acima do alvo advisório do draft é persistível', ()
 
     expect(roundTripped).toEqual(sealed);
     expect(byteSize(roundTripped)).toBe(4318);
+  });
+});
+
+describe('HandoffDraft fora do contrato não derruba o leitor de produção', () => {
+  let root: string;
+  let paths: HarnessPaths;
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), 'handoff-claim-'));
+    paths = resolveHarnessPaths(root);
+    await ensureRuntimeDirs(paths);
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  /**
+   * Regressão da run real `semi-imperium-real-01`, tarefa
+   * `calculate_database_settings_ui` attempt 3: candidate já commitado,
+   * validação oficial verde, e a review leu o draft via `readHandoffDraft`.
+   * `evidence[2].claim` tinha 175 caracteres; Zod estourou o processo e o
+   * candidate ficou sem aceitação. A nota malformada é opinião ausente.
+   */
+  it('claim acima do teto de campo devolve null em vez de lançar', async () => {
+    const taskId = 'calculate_database_settings_ui';
+    const claim =
+      'prepare_runs groups executable pairs by signature into one run per ' +
+      'effective configuration and save_prepared_runs persists run manifests ' +
+      'plus pending records before execution.';
+    expect(claim.length).toBeGreaterThan(160);
+    expect(() =>
+      parseHandoffDraft({
+        schema_version: 2,
+        task_id: taskId,
+        result: 'PASS',
+        changed_files: [],
+        validations: [],
+        decisions: [],
+        lessons: [],
+        next_relevant_files: [],
+        what_i_did_not_check: [],
+        evidence: [{ kind: 'command', argv: ['pytest', '-q'], claim }],
+        open_questions: [],
+      }),
+    ).toThrow(/at most 160/);
+
+    await ensureTaskInbox(paths, taskId);
+    await writeFile(
+      handoffDraftPath(paths, taskId),
+      JSON.stringify({
+        schema_version: 2,
+        task_id: taskId,
+        result: 'PASS',
+        changed_files: [],
+        validations: [],
+        decisions: [],
+        lessons: [],
+        next_relevant_files: [],
+        what_i_did_not_check: [],
+        evidence: [{ kind: 'command', argv: ['pytest', '-q'], claim }],
+        open_questions: [],
+      }),
+    );
+
+    await expect(readHandoffDraft(paths, taskId)).resolves.toBeNull();
   });
 });

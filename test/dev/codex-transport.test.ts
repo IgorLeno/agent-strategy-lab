@@ -3,7 +3,12 @@ import path from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
-import { codexUsesEventStream, decodeCodexEventStream } from '../../dev/lib/codex-transport.js';
+import {
+  codexProviderTerminalFailure,
+  codexUsesEventStream,
+  decodeCodexEventStream,
+} from '../../dev/lib/codex-transport.js';
+import { classifyTermination } from '../../dev/lib/launch.js';
 import { extractRoleModelJson } from '../../dev/lib/project-orchestrate.js';
 import { REPO_ROOT } from './helpers.js';
 
@@ -25,6 +30,45 @@ describe('decodeCodexEventStream — contrato REAL de codex exec --json (JSONL)'
     expect(decoded.outcome).toBe('TURN_FAILED');
     if (decoded.outcome !== 'TURN_FAILED') return;
     expect(decoded.message).toContain('not supported');
+  });
+
+  it('turn.failed de quota vira falha terminal tipada — não FINISHED', async () => {
+    const message =
+      "You've hit your usage limit. Upgrade to Pro or try again at 4:45 AM.";
+    const stdout = [
+      '{"type":"thread.started","thread_id":"t"}',
+      '{"type":"turn.started"}',
+      JSON.stringify({ type: 'error', message }),
+      JSON.stringify({ type: 'turn.failed', error: { message } }),
+    ].join('\n');
+    const failure = codexProviderTerminalFailure(stdout);
+    expect(failure).toMatchObject({
+      is_error: true,
+      terminal_reason: 'turn.failed',
+      message,
+      signals: ['turn.failed'],
+    });
+    expect(
+      classifyTermination({
+        terminationCause: null,
+        terminationDetail: null,
+        exitCode: 1,
+        signal: null,
+        survivorsRemaining: [],
+        streamViolation: null,
+        providerFailure: failure,
+      }),
+    ).toMatchObject({ classification: 'INFRA_ERROR' });
+  });
+
+  it('turn.completed sem falha não inventa provider failure', () => {
+    const stdout = [
+      '{"type":"thread.started","thread_id":"t"}',
+      '{"type":"turn.started"}',
+      '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"{}"}}',
+      '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}',
+    ].join('\n');
+    expect(codexProviderTerminalFailure(stdout)).toBeNull();
   });
 
   it('várias agent_message: a última é o payload', () => {
