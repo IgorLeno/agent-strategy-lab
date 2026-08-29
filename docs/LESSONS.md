@@ -5,6 +5,16 @@ Regra, não narrativa: cada entrada termina numa restrição aplicável.
 
 ---
 
+[2026-08-29] Context: calculate_database_settings_ui attempt 3 commitou o
+candidate e a validação oficial passou; accept/review leu o HandoffDraft via
+readHandoffDraft e Zod estourou em evidence.claim > 160, crash após o commit.
+Mistake: a nota do worker tinha poder de veto no caminho de review/aceitação
+embora finalize já tratasse draft malformado como opinião ausente.
+Rule: readHandoffDraft devolve null em parse error; candidate validado não
+cai por teto de campo da nota. Não é FAIL, não é HUMAN_REQUIRED.
+
+---
+
 [2026-08-29] Context: after Codex INFRA recover, bounded repair pinou
 sol-high cujo pool estava EXHAUSTED; Claude UNKNOWN e OpenCode Go KNOWN
 estavam na policy e o routing virou HUMAN_REQUIRED de "ampliar policy".
