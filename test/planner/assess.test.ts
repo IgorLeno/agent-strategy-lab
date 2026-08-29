@@ -399,4 +399,32 @@ describe('assessExecution — review requirement', () => {
     expect(result.review_requirement.independent_review_required).toBe(true);
     expect(result.review_requirement.diversity_requirement).toBe('required');
   });
+
+  it('MOPAC-like: risco científico critical continua exigindo review e diversidade, sem virar categoria de autorização', () => {
+    const result = assessExecution(
+      coherentTask({
+        task_id: 'mopac_minimum_workflow',
+        objective:
+          'Implement independent AM1/PM3/PM7 optimization, minimum verification, and explicitly bounded recovery from saddle or verification failure.',
+        risk: 'critical',
+        taxonomy: validTaxonomy({
+          difficulty_declared: 'hard',
+          complexity: 'subsystem',
+          ambiguity: 'medium',
+          verification: 'partially_deterministic',
+        }),
+        environment_requirements: [
+          {
+            kind: 'tool',
+            name: 'MOPAC',
+            reason: 'Optional real AM1/PM3/PM7 optimization; unit tests must use test doubles.',
+          },
+        ],
+      }),
+      { inspection: readyInspection(), expectedBaseRevisionSha: HEAD_SHA },
+    );
+    expect(result.risk.value).toBe('critical');
+    expect(result.review_requirement.independent_review_required).toBe(true);
+    expect(result.review_requirement.diversity_requirement).toBe('required');
+  });
 });

@@ -69,7 +69,7 @@ import { openCodePermissionEnv, openCodeRunUsageOf } from './opencode-scaffold.j
 import { OPENCODE_IMPLEMENTER_MECHANISM } from './project-roles.js';
 import { buildWorkerPrompt } from './prompt.js';
 import { observedWorkerTokens } from './worker-token-usage.js';
-import { ensureTaskInbox, writeLaunchRecord } from './records.js';
+import { ensureTaskInbox, persistStallSuspectedEvidence, writeLaunchRecord } from './records.js';
 import { WorkerSupervisor, type TerminationCause } from './termination.js';
 import {
   DEV_SCHEMA_VERSION,
@@ -84,6 +84,12 @@ export interface LaunchInput {
   readonly paths: HarnessPaths;
   readonly profile: LauncherProfile;
   readonly packet: TaskPacket;
+  /**
+   * Attempt corrente deste launch. A evidência de stall é write-once por
+   * attempt: sem este número, um stall do attempt 1 seria lido como se
+   * pertencesse ao attempt 2.
+   */
+  readonly attempt?: number;
   /**
    * Encolhe o TETO DE SEGURANÇA DE MÁQUINA — usado só por testes, para que o
    * failsafe possa ser exercitado em segundos em vez de em horas. Não é budget
@@ -210,6 +216,7 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
   // Tag única por lançamento: filhos herdam o environment, então ela permite
   // reconhecer descendente que escapou do process group via setsid.
   const launchId = randomUUID();
+  const attempt = input.attempt ?? 1;
   const env: NodeJS.ProcessEnv = {
     ...buildEnvironment(profile, process.env, { sanitizedHome: io.homeDir }),
     // FRONTEIRA DO IMPLEMENTER, quando o scaffold é OpenCode. A permissão é do
@@ -332,10 +339,25 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
   // ambos recebem o MESMO chunk, então nenhum byte do log é consumido, movido
   // ou truncado, e os parsers post-hoc continuam lendo exatamente o que liam.
   // O que é observado é o TIMESTAMP do chunk, nunca o seu conteúdo.
+  let stallPersist: Promise<void> = Promise.resolve();
   const activity = new ActivityObserver({
     startedAtMs,
     ...(input.activityObserverOptions ?? {}),
-    ...(input.onStallSuspected ? { onStallSuspected: input.onStallSuspected } : {}),
+    onStallSuspected: (telemetry) => {
+      stallPersist = persistStallSuspectedEvidence(paths, {
+        taskId: packet.task_id,
+        attempt,
+        launchId,
+        activity: telemetry,
+      }).catch(
+        () => {
+          // Persistência observacional: falha de disco não pode matar, falhar
+          // a task, pedir humano nem consumir attempt. O LaunchRecord final
+          // ainda carrega activity.stall_suspected_at.
+        },
+      );
+      input.onStallSuspected?.(telemetry);
+    },
   });
   child.stdout?.on('data', (chunk: Buffer) => activity.record('stdout', chunk.length));
   child.stderr?.on('data', (chunk: Buffer) => activity.record('stderr', chunk.length));
@@ -424,6 +446,7 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
   const { exitCode, signal } = await termination;
   supervisor.disarm();
   const activityTelemetry = activity.stop();
+  await stallPersist;
   const terminationRequest = await supervisor.settled();
   stdoutLog.end();
   stderrLog.end();

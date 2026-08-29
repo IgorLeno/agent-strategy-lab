@@ -23,10 +23,11 @@
  *   7. CROSS_PROVIDER — escalation cross-provider decidida pelo control plane,
  *                       nunca pelo worker; contexto sempre fresco. Integra a
  *                       prova de AUTONOMIA dentro do escopo (3 tasks, zero gate).
- *   8. HUMAN_GATE     — risco crítico e boundary não autorizado param a
- *                       automação com decision_needed/options expostos e ZERO
- *                       spawn depois do gate. Integra a prova de PARADA na
- *                       fronteira.
+ *   8. HUMAN_GATE     — capability human-gated explícita e boundary não
+ *                       autorizado param a automação com decision_needed/options
+ *                       expostos e ZERO spawn depois do gate. Risco crítico
+ *                       sozinho não inventa o gate. Integra a prova de PARADA
+ *                       na fronteira.
  *   9. ROUTING_BUDGET — materialização operacional preserva validation como
  *                       stage do orchestrator; runtime genuíno ainda respeita
  *                       o bound do coding worker.
@@ -1006,12 +1007,12 @@ describe('M85 — External Project Fake E2E', () => {
   // -------------------------------------------------------------------------
   // 8. HUMAN_GATE (+ integração PARADA na fronteira)
   // -------------------------------------------------------------------------
-  it('HUMAN_GATE — risco crítico e boundary não autorizado param a automação com decision_needed/options, zero spawn depois', async () => {
+  it('HUMAN_GATE — capability human-gated e boundary não autorizado param a automação com decision_needed/options, zero spawn depois', async () => {
     const sandbox = await externalProjectFixture();
     const tasks: PlannedTaskLike[] = [
       {
         task_id: 'T1',
-        objective: 'ação de risco crítico, nunca deveria ser lançada sem humano',
+        objective: 'ação security-sensitive explícita, nunca deveria ser lançada sem humano',
         blocked_by: [],
         initial_files: ['src/greet.ts'],
         acceptance: ['nunca alcançada nesta prova'],
@@ -1022,7 +1023,18 @@ describe('M85 — External Project Fake E2E', () => {
     const stateBefore = await readState(paths);
     const headBefore = await headSha(sandbox.root);
 
-    // risco crítico / ação security-sensitive: HUMAN_REQUIRED, nenhum launch permitido.
+    const criticalRiskAlone = authorizeProjectLaunch({
+      scope: scope(),
+      capability: 'CONFIGURED_SUBSCRIPTION_WORKER',
+      billing_mode: 'subscription_only',
+      quota: { availability: null, provenance: 'quota não probada antes do launch' },
+      credential: { availability: true, provenance: 'probe local provou a assinatura' },
+      risk: 'critical',
+      worker_owns_commit: false,
+      worker_owns_official_validation: false,
+    });
+    expect(criticalRiskAlone.outcome).toBe('ALLOW');
+
     const criticalAuthorization = authorizeProjectLaunch({
       scope: scope(),
       capability: 'CONFIGURED_SUBSCRIPTION_WORKER',
@@ -1030,6 +1042,7 @@ describe('M85 — External Project Fake E2E', () => {
       quota: { availability: null, provenance: 'quota não probada antes do launch' },
       credential: { availability: true, provenance: 'probe local provou a assinatura' },
       risk: 'critical',
+      implied_human_gated: ['CRITICAL_OR_SECURITY_SENSITIVE_ACTION'],
       worker_owns_commit: false,
       worker_owns_official_validation: false,
     });

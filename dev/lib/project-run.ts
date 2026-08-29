@@ -126,6 +126,7 @@ import {
   type ProviderRoleInvocationPort,
 } from './project-orchestrate.js';
 import type { LabProgressListener, LabProgressQuota } from './lab-progress.js';
+import { resolveImpliedHumanGatedFromRuntime } from './human-gated-intent.js';
 import { machineSafetyCeiling } from './machine-safety.js';
 import {
   OPERATIONAL_ATTEMPT_SCHEMA_VERSION,
@@ -960,6 +961,7 @@ export async function createProjectControlPlane(
     autonomous_execution_boundary: authorization.autonomous_execution_boundary,
     human_gated_capabilities: authorization.human_gated_capabilities,
   });
+  const impliedHumanGated = await resolveImpliedHumanGatedFromRuntime(paths.devDir, scope);
 
   const ladderSteps = [...authorization.profile_policy.profiles].sort(
     (left, right) => left.capability_rank - right.capability_rank,
@@ -1345,6 +1347,7 @@ export async function createProjectControlPlane(
       risk: assessment.risk.value,
       worker_owns_commit: profile.commit_owner !== 'orchestrator',
       worker_owns_official_validation: profile.official_validation_owner !== 'orchestrator',
+      ...(impliedHumanGated.length === 0 ? {} : { implied_human_gated: impliedHumanGated }),
     });
 
     const reviewerProfileId = authorization.review.reviewer_profile_id ?? selectedProfileId;
@@ -2189,6 +2192,7 @@ export async function createProjectControlPlane(
         // `REVIEW_UNAVAILABLE`, nunca ACCEPT.
         credential: reviewerFacts.credential,
         quota: reviewerFacts.quota,
+        ...(impliedHumanGated.length === 0 ? {} : { implied_human_gated: impliedHumanGated }),
         packet: {
           task_id: taskId,
           objective: planTask.objective,

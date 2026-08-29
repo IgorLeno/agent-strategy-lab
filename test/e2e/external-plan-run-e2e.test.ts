@@ -1038,17 +1038,18 @@ describe('external plan run — dev-run-plan pelo lifecycle universal', () => {
     expect((await readState(paths)).tasks.map((task) => task.status)).toEqual(['READY', 'READY']);
   }, 120_000);
 
-  it('HUMAN GATE — risco crítico é ação security-sensitive e nunca é executado sozinho', async () => {
-    const target = await fixture(
-      planYaml({ secondValidation: "['true']" }),
-      authorizationYaml({ risk: 'critical' }),
-    );
+  it('risco crítico sem capability human-gated autoriza o launch e preserva review independente', async () => {
+    const target = await fixture(singleTaskPlanYaml(), authorizationYaml({ risk: 'critical' }));
 
-    const result = await runPlan(target, 'orchestrator-success');
-    expect(result.exitCode).toBe(9);
-    const output = parse(result);
-    expect(output.stopped_by).toBe('HUMAN_REQUIRED');
-    expect(output.iteration_count).toBe(0);
-    expect(output.reason).toContain('risco crítico');
+    const result = await runPlan(target, 'orchestrator-success', ['--dry-run']);
+    expect(result.exitCode, result.stderr).toBe(0);
+    const output = JSON.parse(result.stdout) as DryRunOutput;
+    const unit = output.project_lifecycle_preview.work_unit;
+
+    expect(output.status).toBe('READY');
+    expect(unit?.launch_authorization).toBe('ALLOW');
+    expect(unit?.review_required).toBe(true);
+    expect(unit?.path).toBe('REVIEWED');
+    expect(output.provider_called).toBe(false);
   }, 120_000);
 });

@@ -5,6 +5,54 @@ Regra, não narrativa: cada entrada termina numa restrição aplicável.
 
 ---
 
+[2026-08-28] Context: resumeHumanInstruction ia direto para executeProject
+depois de um NEW HUMAN_REQUIRED; o gate lexical só vivia em submitHumanInstruction.
+Mistake: tratar o gate da HumanInstruction como preflight só do modo NEW.
+Rule: NEW e RESUME reusam a MESMA avaliação (HumanInstruction persistida +
+authorization persistida + publish grant persistido + HUMAN_GATE_GRANT_PATH);
+resume nunca amplia autoridade e never-grantable permanece HUMAN_REQUIRED.
+
+---
+
+[2026-08-28] Context: authorizeProjectLaunch aceitava implied_human_gated mas
+o caller de produção em project-run.ts não encaminhava a lista; testes unitários
+passavam o campo à mão.
+Mistake: provar o gate na função e não no lifecycle que lança planner/worker.
+Rule: a fonte autoritativa de implicação é classifyImpliedHumanGatedMatches da
+HumanInstruction persistida; encaminhe essa lista a authorizeProjectLaunch no
+caminho de produção. Não derive de risk, objective ou prosa do planner.
+
+---
+
+[2026-08-28] Context: stall-suspected.json era write-once por task; o segundo
+attempt da mesma task ou perdia a evidência (append-only diverge) ou herdava
+o stall do attempt 1.
+Mistake: artifact observacional sem identidade de attempt/launch.
+Rule: evidência de stall é write-once por (task, attempt) com launch_id; um
+stall antigo não pode ser apresentado como do attempt corrente; nunca vira
+kill/FAIL/HUMAN_REQUIRED.
+
+---
+
+[2026-08-28] Context: mopac_minimum_workflow na run Semi-Imperium ficou READY
+com risk=critical e o launch virou HUMAN_REQUIRED / CRITICAL_OR_SECURITY_SENSITIVE_ACTION.
+Mistake: tratar TaskRisk.critical (risco de execução científico/técnico) como
+se fosse HumanGatedCapability.
+Rule: risco de execução e capability human-gated são dimensões ortogonais;
+critical sozinho não inventa HUMAN_REQUIRED; o gate humano exige evidência
+da categoria (implied_human_gated, billing, credencial, escopo, ownership).
+
+---
+
+[2026-08-28] Context: ActivityObserver dispara onStallSuspected; launch.ts
+repassa; launchTask (caller de produção) não fornecia callback.
+Mistake: deixar evidência de stall suspeito opt-in por callback de teste.
+Rule: stall suspeito persiste evidência observacional no launch de produção;
+nunca vira kill, FAIL, HUMAN_REQUIRED nem attempt extra; teto de máquina
+permanece autoridade separada.
+
+---
+
 [2026-08-28] Context: reviewer OpenCode Go flash lançado após Codex/Claude
 EXHAUSTED retornou UnknownError/server error em ~13s; o loop seguinte tentou
 os outros cinco profiles Go e todos devolveram o mesmo UnknownError.

@@ -41,6 +41,7 @@ import { loadPlan } from './plan.js';
 import { PlanSetupError, runPlan, type PlanRunResult } from './run-plan.js';
 import { inspectRepository, type ProjectInspection } from '../../src/inspection/index.js';
 import type { LabProgressListener } from './lab-progress.js';
+import { resolveImpliedHumanGatedFromRuntime } from './human-gated-intent.js';
 import {
   ExecutionAuthorizationScope,
   ProjectIntakeRequest,
@@ -431,6 +432,10 @@ export async function runProject(input: ProjectRunInput): Promise<PlanRunResult>
   }
   const authorization = loadedAuthorization.file;
   const authorizationScope = executionScopeOf(authorization);
+  const impliedHumanGated = await resolveImpliedHumanGatedFromRuntime(
+    input.paths.devDir,
+    authorizationScope,
+  );
   const capacityProbe =
     input.poolCapacityProbe ?? createProductionPoolCapacityProbe({ paths: input.paths });
   const roleProfiles = new Map<string, LauncherProfile>();
@@ -504,6 +509,7 @@ export async function runProject(input: ProjectRunInput): Promise<PlanRunResult>
                 paths: input.paths,
                 profile,
                 scope: authorizationScope,
+                ...(impliedHumanGated.length === 0 ? {} : { implied_human_gated: impliedHumanGated }),
                 providerEnabled: true,
                 dryRun: false,
                 credential: facts.credential,
@@ -562,6 +568,7 @@ export async function runProject(input: ProjectRunInput): Promise<PlanRunResult>
             paths: input.paths,
             profile,
             scope: authorizationScope,
+            ...(impliedHumanGated.length === 0 ? {} : { implied_human_gated: impliedHumanGated }),
             providerEnabled: true,
             dryRun: false,
             credential: facts.credential,

@@ -742,10 +742,95 @@ describe('gate humano proporcional e autorização de escopo', () => {
         credential: { availability: false, provenance: 'probe local provou fonte de API' },
       }).outcome,
     ).toBe('HUMAN_REQUIRED');
-    expect(
-      authorizeProjectLaunch({ ...base, capability: 'CONFIGURED_SUBSCRIPTION_WORKER', risk: 'critical' })
-        .outcome,
-    ).toBe('HUMAN_REQUIRED');
+  });
+
+  it('risk=critical sem capability human-gated não inventa HUMAN_REQUIRED', () => {
+    const authorization = authorizeProjectLaunch({
+      ...base,
+      capability: 'CONFIGURED_SUBSCRIPTION_WORKER',
+      risk: 'critical',
+    });
+    expect(authorization.outcome).toBe('ALLOW');
+    if (authorization.outcome !== 'ALLOW') return;
+    expect(authorization.checks.find((check) => check.name === 'risk')).toEqual(
+      expect.objectContaining({ decision: 'ALLOWED', reason: 'risk=critical' }),
+    );
+  });
+
+  it('risk=critical + CRITICAL_OR_SECURITY_SENSITIVE_ACTION explícita continua HUMAN_REQUIRED', () => {
+    const authorization = authorizeProjectLaunch({
+      ...base,
+      capability: 'CONFIGURED_SUBSCRIPTION_WORKER',
+      risk: 'critical',
+      implied_human_gated: ['CRITICAL_OR_SECURITY_SENSITIVE_ACTION'],
+    });
+    expect(authorization.outcome).toBe('HUMAN_REQUIRED');
+    if (authorization.outcome !== 'HUMAN_REQUIRED') return;
+    expect(authorization.gated_capability).toBe('CRITICAL_OR_SECURITY_SENSITIVE_ACTION');
+  });
+
+  it('risk=high + DESTRUCTIVE_ACTION continua HUMAN_REQUIRED', () => {
+    const authorization = authorizeProjectLaunch({
+      ...base,
+      capability: 'CONFIGURED_SUBSCRIPTION_WORKER',
+      risk: 'high',
+      implied_human_gated: ['DESTRUCTIVE_ACTION'],
+    });
+    expect(authorization.outcome).toBe('HUMAN_REQUIRED');
+    if (authorization.outcome !== 'HUMAN_REQUIRED') return;
+    expect(authorization.gated_capability).toBe('DESTRUCTIVE_ACTION');
+  });
+
+  it('risk=low + DEPLOYMENT_OR_PRODUCTION continua HUMAN_REQUIRED', () => {
+    const authorization = authorizeProjectLaunch({
+      ...base,
+      capability: 'CONFIGURED_SUBSCRIPTION_WORKER',
+      risk: 'low',
+      implied_human_gated: ['DEPLOYMENT_OR_PRODUCTION'],
+    });
+    expect(authorization.outcome).toBe('HUMAN_REQUIRED');
+    if (authorization.outcome !== 'HUMAN_REQUIRED') return;
+    expect(authorization.gated_capability).toBe('DEPLOYMENT_OR_PRODUCTION');
+  });
+
+  it('efeito externo, credencial nova, billing e expansão de escopo continuam HUMAN_REQUIRED independentemente do risk', () => {
+    const cases = [
+      ['EXTERNAL_SIDE_EFFECT', 'low'],
+      ['NEW_CREDENTIAL_BOUNDARY', 'medium'],
+      ['UNAUTHORIZED_API_BILLING', 'high'],
+      ['SCOPE_EXPANSION', 'critical'],
+    ] as const;
+    for (const [capability, risk] of cases) {
+      const authorization = authorizeProjectLaunch({
+        ...base,
+        capability: 'CONFIGURED_SUBSCRIPTION_WORKER',
+        risk,
+        implied_human_gated: [capability],
+      });
+      expect(authorization.outcome, capability).toBe('HUMAN_REQUIRED');
+      if (authorization.outcome !== 'HUMAN_REQUIRED') continue;
+      expect(authorization.gated_capability).toBe(capability);
+    }
+  });
+
+  it('MOPAC-like: risco científico/técnico critical sem capability externa/security não false-positive human gate', () => {
+    // Espelha mopac_minimum_workflow: risk=critical declarado pelo planner,
+    // sem implied_human_gated. O label não é evidência de consentimento humano.
+    const authorization = authorizeProjectLaunch({
+      ...base,
+      capability: 'CONFIGURED_SUBSCRIPTION_WORKER',
+      risk: 'critical',
+    });
+    expect(authorization.outcome).toBe('ALLOW');
+  });
+
+  it('project-run e run-project encaminham implied_human_gated da HumanInstruction persistida', async () => {
+    const projectRun = await readFile(path.join(REPO_ROOT, 'dev/lib/project-run.ts'), 'utf8');
+    const runProject = await readFile(path.join(REPO_ROOT, 'dev/lib/run-project.ts'), 'utf8');
+    expect(projectRun).toContain('resolveImpliedHumanGatedFromRuntime');
+    expect(projectRun).toMatch(/implied_human_gated:\s*impliedHumanGated/);
+    expect(runProject).toContain('resolveImpliedHumanGatedFromRuntime');
+    expect(runProject).toMatch(/implied_human_gated:\s*impliedHumanGated/);
   });
 
   it('A/B/C — credencial provada libera; provada-falsa e desconhecida param, sem promoção', () => {
@@ -1055,6 +1140,28 @@ describe('adapter real da PlanningWorkerPort', () => {
     expect(result.outcome).toBe('INVOCATION_FAILED');
     if (result.outcome !== 'INVOCATION_FAILED') return;
     expect(result.failure.code).toBe('PLANNING_LAUNCH_HUMAN_REQUIRED');
+  });
+
+  it('HumanInstruction implied_human_gated chega ao planning launch real e recusa o provider', async () => {
+    let called = false;
+    const port = await worker({
+      implied_human_gated: ['DEPLOYMENT_OR_PRODUCTION'],
+      providerEnabled: true,
+      dryRun: false,
+      port: {
+        run: async () => {
+          called = true;
+          return '{}';
+        },
+      },
+    });
+    const result = await port.invoke(invocation());
+
+    expect(result.outcome).toBe('INVOCATION_FAILED');
+    if (result.outcome !== 'INVOCATION_FAILED') return;
+    expect(result.failure.code).toBe('PLANNING_LAUNCH_HUMAN_REQUIRED');
+    expect(result.failure.message).toContain('DEPLOYMENT_OR_PRODUCTION');
+    expect(called).toBe(false);
   });
 
   it('planner não contorna esgotamento real observado para o mesmo pool', async () => {

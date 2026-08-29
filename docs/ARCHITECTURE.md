@@ -433,8 +433,10 @@ As fronteiras principais são:
 - **Autorização é de escopo.** `requested_scope` registra o pedido, enquanto o
   boundary enumera capabilities autônomas. Spawns, bounded repair e escalation
   dentro da ladder/policy não criam aprovação repetitiva; billing/credential
-  novo, destruição, efeitos externos, deploy, expansão, risco crítico ou
-  profile/provider fora da policy exigem `HUMAN_REQUIRED`.
+  novo, destruição, efeitos externos, deploy, expansão, ação
+  security-sensitive explícita ou profile/provider fora da policy exigem
+  `HUMAN_REQUIRED`. Risco de execução `critical` exige review/diversidade, não
+  o gate humano por si só.
 - **Roles são estruturais.** Planner/reviewer são read-only por argv/settings e
   ownership, não por promessa no prompt; implementer muta apenas o workspace
   autorizado. Review usa invocação e contexto frescos; diversidade adicional é
