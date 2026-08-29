@@ -52,6 +52,9 @@ export const ImplementationPlan = z
         inspection_sha256: z.string().regex(/^[0-9a-f]{64}$/),
         authorization_scope_sha256: z.string().regex(/^[0-9a-f]{64}$/),
         base_revision_sha: z.string().regex(/^[0-9a-f]{40}$/),
+        planner_profile_id: nonEmpty.optional(),
+        planner_upstream: nonEmpty.optional(),
+        planner_model: nonEmpty.optional(),
       })
       .strict(),
     control: z
@@ -466,7 +469,21 @@ export async function generateImplementationPlan(
       rejected_stage: validated.outcome === 'REJECTED' ? validated.stage : null,
       issues: validated.outcome === 'REJECTED' ? validated.issues : [],
     });
-    if (validated.outcome === 'AUTHORIZED') return validated;
+    if (validated.outcome === 'AUTHORIZED') {
+      const returned = invocationResult.data;
+      const source = {
+        ...validated.plan.source,
+        ...(returned.profile_id === undefined ? {} : { planner_profile_id: returned.profile_id }),
+        ...(returned.upstream_provider === undefined
+          ? {}
+          : { planner_upstream: returned.upstream_provider }),
+        ...(returned.model.length === 0 ? {} : { planner_model: returned.model }),
+      };
+      return {
+        outcome: 'AUTHORIZED',
+        plan: ImplementationPlan.parse({ ...validated.plan, source }),
+      };
+    }
     if (attempt === 2 || !REVISION_ELIGIBLE_STAGES.has(validated.stage)) return validated;
 
     try {

@@ -112,6 +112,7 @@ import {
 } from './claude-stream.js';
 import { codexUsesEventStream, decodeCodexEventStream } from './codex-transport.js';
 import { buildTimeoutArgv } from './exec.js';
+import { planningDiversityProviderOf } from './pool-capacity-observer.js';
 import { evidenceOf, type LaunchFact, type LaunchFactEvidence } from './project-preflight.js';
 import type { HarnessPaths } from './paths.js';
 import { buildEnvironment, resolveProfileArgv, type LauncherProfile } from './profile.js';
@@ -569,6 +570,7 @@ export interface ReviewedPathDeliberation {
   /** Instrução humana verbatim: autoridade de intenção do refinamento. */
   readonly humanRequest: string;
   readonly onTurn?: (turn: DeliberationTurnRecord) => void;
+  readonly plannerProvider?: string;
 }
 
 export interface ReviewedPathInput {
@@ -636,6 +638,8 @@ export async function runReviewedPath(input: ReviewedPathInput): Promise<Reviewe
     };
   }
 
+  const plannerProvider =
+    generated.plan.source.planner_upstream ?? deliberation.plannerProvider;
   const deliberated = await deliberatePlan({
     plan: generated.plan,
     humanRequest: deliberation.humanRequest,
@@ -648,6 +652,7 @@ export async function runReviewedPath(input: ReviewedPathInput): Promise<Reviewe
       inspection: ProjectInspection.parse(input.inspection),
       authorizationScope: ExecutionAuthorizationScope.parse(input.authorizationScope),
     }),
+    ...(plannerProvider === undefined ? {} : { plannerProvider }),
   });
   for (const turn of deliberated.artifact.turns) deliberation.onTurn?.(turn);
 
@@ -1074,6 +1079,15 @@ export function createLaunchedPlanningWorker(
         worker_owns_official_validation: options.profile.official_validation_owner !== 'orchestrator',
       });
       if (authorization.outcome === 'HUMAN_REQUIRED') {
+        if (options.quota.availability === false) {
+          return invocationFailure(
+            options,
+            invocationId,
+            'PLANNING_QUOTA_EXHAUSTED',
+            authorization.reason,
+            true,
+          );
+        }
         return invocationFailure(
           options,
           invocationId,
@@ -1182,6 +1196,8 @@ export function createLaunchedPlanningWorker(
             invocation_id: invocationId,
             provider_id: options.profile.agent,
             model: options.profile.id,
+            profile_id: options.profile.id,
+            upstream_provider: planningDiversityProviderOf(options.profile),
             draft: extracted.value,
           };
         case 'PROVIDER_TERMINAL_FAILURE':
@@ -1271,9 +1287,13 @@ export function createLaunchedDeliberationWorker(
   options: LaunchedDeliberationWorkerOptions,
 ): PlanDeliberationWorkerPort {
   const invocationId = options.invocationId ?? `deliberator-${options.profile.id}`;
-  const failure = (code: string, message: string): PlanDeliberationInvocationResult => ({
+  const failure = (
+    code: string,
+    message: string,
+    retryable = false,
+  ): PlanDeliberationInvocationResult => ({
     outcome: 'INVOCATION_FAILED',
-    failure: { code, message: `${invocationId}: ${message}` },
+    failure: { code, message: `${invocationId}: ${message}`, retryable },
   });
 
   return {
@@ -1296,7 +1316,10 @@ export function createLaunchedDeliberationWorker(
         worker_owns_official_validation: options.profile.official_validation_owner !== 'orchestrator',
       });
       if (authorization.outcome === 'HUMAN_REQUIRED') {
-        return failure('DELIBERATION_LAUNCH_HUMAN_REQUIRED', authorization.reason);
+        if (options.quota.availability === false) {
+          return failure('DELIBERATION_QUOTA_EXHAUSTED', authorization.reason, true);
+        }
+        return failure('DELIBERATION_LAUNCH_HUMAN_REQUIRED', authorization.reason, false);
       }
 
       const ceiling = machineSafetyCeiling();
@@ -1338,7 +1361,7 @@ export function createLaunchedDeliberationWorker(
         orchestratorEnv: process.env,
       });
       if (!billing.ok) {
-        return failure('BILLING_PREFLIGHT_REFUSED', billing.refusal ?? 'motivo não informado');
+        return failure('BILLING_PREFLIGHT_REFUSED', billing.refusal ?? 'motivo não informado', false);
       }
 
       let stdout: string;
@@ -1356,6 +1379,7 @@ export function createLaunchedDeliberationWorker(
         return failure(
           'PROVIDER_INVOCATION_FAILED',
           error instanceof Error ? error.message : String(error),
+          true,
         );
       }
 
@@ -1363,7 +1387,12 @@ export function createLaunchedDeliberationWorker(
       if (extracted.outcome === 'EXTRACTED') {
         return { outcome: 'VERDICT_RETURNED', verdict: extracted.value };
       }
-      return failure(extracted.outcome, extracted.message);
+      return failure(
+        extracted.outcome,
+        extracted.message,
+        extracted.outcome === 'TRANSPORT_MALFORMED' ||
+          extracted.outcome === 'PROVIDER_TERMINAL_FAILURE',
+      );
     },
   };
 }

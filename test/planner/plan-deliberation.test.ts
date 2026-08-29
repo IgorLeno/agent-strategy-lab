@@ -405,6 +405,85 @@ describe('deliberação de plano — turnos, convergência e fronteiras', () => 
     expect(result.artifact.stop_reason).toContain('versão canônica anterior');
   });
 
+  it('INFRA retryable de um deliberador permite o próximo candidato elegível', async () => {
+    const worker = scriptedWorker([
+      {
+        outcome: 'INVOCATION_FAILED',
+        failure: {
+          code: 'PROVIDER_INVOCATION_FAILED',
+          message: 'Unexpected server error',
+          retryable: true,
+        },
+      },
+      ACCEPT,
+    ]);
+    const result = await deliberatePlan({
+      plan: authorizedPlan(),
+      humanRequest: intake().user_request,
+      maxTurns: 3,
+      diversity: 'none',
+      deliberators: [CLAUDE, CODEX],
+      worker,
+      revalidate,
+    });
+    expect(result.artifact.turns).toHaveLength(2);
+    expect(result.artifact.turns[0]?.invocation_failure).toContain('PROVIDER_INVOCATION_FAILED');
+    expect(result.artifact.turns[1]?.decision).toBe('ACCEPT');
+    expect(result.artifact.convergence_status).toBe('CONVERGED');
+  });
+
+  it('DELIBERATION_LAUNCH_HUMAN_REQUIRED não chama o próximo deliberador', async () => {
+    const worker = scriptedWorker([
+      {
+        outcome: 'INVOCATION_FAILED',
+        failure: {
+          code: 'DELIBERATION_LAUNCH_HUMAN_REQUIRED',
+          message: 'credencial não provada',
+          retryable: true,
+        },
+      },
+      ACCEPT,
+    ]);
+    const result = await deliberatePlan({
+      plan: authorizedPlan(),
+      humanRequest: intake().user_request,
+      maxTurns: 3,
+      diversity: 'none',
+      deliberators: [CLAUDE, CODEX],
+      worker,
+      revalidate,
+    });
+    expect(worker.seen).toHaveLength(1);
+    expect(result.artifact.turns).toHaveLength(1);
+    expect(result.artifact.turns[0]?.invocation_failure).toContain('DELIBERATION_LAUNCH_HUMAN_REQUIRED');
+    expect(result.artifact.convergence_status).not.toBe('CONVERGED');
+  });
+
+  it('BILLING_PREFLIGHT_REFUSED no deliberador não chama o próximo candidato', async () => {
+    const worker = scriptedWorker([
+      {
+        outcome: 'INVOCATION_FAILED',
+        failure: {
+          code: 'BILLING_PREFLIGHT_REFUSED',
+          message: 'api key detectada',
+          retryable: true,
+        },
+      },
+      ACCEPT,
+    ]);
+    const result = await deliberatePlan({
+      plan: authorizedPlan(),
+      humanRequest: intake().user_request,
+      maxTurns: 3,
+      diversity: 'none',
+      deliberators: [CLAUDE, CODEX],
+      worker,
+      revalidate,
+    });
+    expect(worker.seen).toHaveLength(1);
+    expect(result.artifact.turns[0]?.invocation_failure).toContain('BILLING_PREFLIGHT_REFUSED');
+  });
+
   it('veredito não estruturado não vira convergência nem plano', async () => {
     const worker = scriptedWorker([
       { outcome: 'VERDICT_RETURNED', verdict: { decision: 'parece bom para mim' } },
@@ -478,6 +557,50 @@ describe('diversidade de deliberadores', () => {
     expect(selection.sequence.map((entry) => entry.provider)).toEqual(['codex', 'codex']);
     expect(selection.satisfied).toBe(false);
     expect(selection.reason).toContain('só o provider codex está disponível');
+  });
+
+  it('cross_provider_preferred prefere top-tier de provider distinto do planner', () => {
+    const selection = selectDeliberators({
+      candidates: [CLAUDE, CODEX],
+      maxTurns: 3,
+      diversity: 'cross_provider_preferred',
+      plannerProvider: 'claude',
+    });
+    expect(selection.sequence.map((entry) => entry.provider)).toEqual(['codex', 'claude', 'codex']);
+    expect(selection.satisfied).toBe(true);
+  });
+
+  it('planner Sol prefere deliberador Opus', () => {
+    const selection = selectDeliberators({
+      candidates: [CLAUDE, CODEX],
+      maxTurns: 2,
+      diversity: 'cross_provider_preferred',
+      plannerProvider: 'codex',
+    });
+    expect(selection.sequence.map((entry) => entry.provider)).toEqual(['claude', 'codex']);
+    expect(selection.satisfied).toBe(true);
+  });
+
+  it('Codex/OpenAI e OpenCode/OpenAI não são diversidade de upstream', () => {
+    const codexOpenai: DeliberatorAssignment = {
+      profile_id: 'codex-sol',
+      provider: 'openai',
+      model: 'gpt-5.6-sol',
+    };
+    const opencodeOpenai: DeliberatorAssignment = {
+      profile_id: 'opencode-openai',
+      provider: 'openai',
+      model: 'gpt-5.4',
+    };
+    const selection = selectDeliberators({
+      candidates: [codexOpenai, opencodeOpenai],
+      maxTurns: 2,
+      diversity: 'cross_provider_preferred',
+      plannerProvider: 'openai',
+    });
+    expect(selection.satisfied).toBe(false);
+    expect(selection.reason).toMatch(/só o provider openai/i);
+    expect(selection.sequence.map((entry) => entry.provider)).toEqual(['openai', 'openai']);
   });
 
   it('sem deliberador elegível a deliberação não acontece e o plano segue', async () => {

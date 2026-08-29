@@ -134,6 +134,163 @@ describe('ensureGeneratedProjectPlan', () => {
     expect(planner.invocations).toBe(1);
     expect((await loadPlan(planFile)).plan.generated_from?.base_revision_sha).toBe(head);
   });
+
+  it('resume com PlanFile existente não relança planner nem deliberador e preserva os bytes', async () => {
+    const sandbox = await makeSandboxRepo();
+    created.push(sandbox.root);
+    const head = (await runGit(sandbox.root, ['rev-parse', 'HEAD'])).stdout.trim();
+    const planFile = path.join(sandbox.root, '.dev', 'project', 'generated-plan.yaml');
+    const paths = resolveHarnessPaths(sandbox.root, { planFile });
+    const intake: ProjectIntakeRequest = {
+      schema_version: 1,
+      target_repo: { url: sandbox.root },
+      base_revision: { sha: head },
+      user_request: 'Criar o marcador pedido pelo usuário',
+      objectives: ['src/t1.txt existe após a execução'],
+      constraints: [],
+      exclusions: ['deploy'],
+      requested_scope: { summary: 'criar um marcador local' },
+    };
+    const authorizationScope: ExecutionAuthorizationScope = {
+      schema_version: 1,
+      requested_scope: intake.requested_scope,
+      autonomous_execution_boundary: ['DISPOSABLE_LOCAL_WORKSPACE'],
+      human_gated_capabilities: ['DESTRUCTIVE_ACTION'],
+    };
+    const first = await ensureGeneratedProjectPlan({
+      paths,
+      intake,
+      authorizationScope,
+      inspect: (repoRoot) => inspectRepository({ repoRoot }),
+      planningWorker: async () => new Planner(),
+      deliberation: async () => ({
+        maxTurns: 2,
+        diversity: 'cross_provider_preferred' as const,
+        deliberators: [{ profile_id: 'a-claude', provider: 'claude', model: 'opus-5' }],
+        humanRequest: intake.user_request,
+        worker: {
+          async invoke(): Promise<PlanDeliberationInvocationResult> {
+            return {
+              outcome: 'VERDICT_RETURNED',
+              verdict: {
+                decision: 'ACCEPT',
+                material_objections: [],
+                material_changes: [],
+                rationale: 'plano adequado',
+                revised_plan: null,
+              },
+            };
+          },
+        },
+      }),
+    });
+    const original = await readFile(planFile);
+
+    let plannerFactories = 0;
+    let deliberatorFactories = 0;
+    let deliberatorInvocations = 0;
+    const second = await ensureGeneratedProjectPlan({
+      paths,
+      intake,
+      authorizationScope,
+      inspect: () => {
+        throw new Error('inspection não deve repetir no resume');
+      },
+      planningWorker: async () => {
+        plannerFactories += 1;
+        throw new Error('planner não deve ser construído no resume');
+      },
+      deliberation: async () => {
+        deliberatorFactories += 1;
+        return {
+          maxTurns: 2,
+          diversity: 'cross_provider_preferred' as const,
+          deliberators: [{ profile_id: 'a-claude', provider: 'claude', model: 'opus-5' }],
+          humanRequest: intake.user_request,
+          worker: {
+            async invoke(): Promise<PlanDeliberationInvocationResult> {
+              deliberatorInvocations += 1;
+              throw new Error('deliberador não deve ser chamado no resume');
+            },
+          },
+        };
+      },
+    });
+
+    expect(first.origin).toBe('GENERATED');
+    expect(second.origin).toBe('REUSED');
+    expect(plannerFactories).toBe(0);
+    expect(deliberatorFactories).toBe(0);
+    expect(deliberatorInvocations).toBe(0);
+    expect(second.deliberation).toBeNull();
+    expect(await readFile(planFile)).toEqual(original);
+  });
+
+  it('resume preserva o planner original do PlanFile, não o atualmente disponível', async () => {
+    const sandbox = await makeSandboxRepo();
+    created.push(sandbox.root);
+    const head = (await runGit(sandbox.root, ['rev-parse', 'HEAD'])).stdout.trim();
+    const planFile = path.join(sandbox.root, '.dev', 'project', 'generated-plan.yaml');
+    const paths = resolveHarnessPaths(sandbox.root, { planFile });
+    const intake: ProjectIntakeRequest = {
+      schema_version: 1,
+      target_repo: { url: sandbox.root },
+      base_revision: { sha: head },
+      user_request: 'Criar o marcador pedido pelo usuário',
+      objectives: ['src/t1.txt existe após a execução'],
+      constraints: [],
+      exclusions: ['deploy'],
+      requested_scope: { summary: 'criar um marcador local' },
+    };
+    const authorizationScope: ExecutionAuthorizationScope = {
+      schema_version: 1,
+      requested_scope: intake.requested_scope,
+      autonomous_execution_boundary: ['DISPOSABLE_LOCAL_WORKSPACE'],
+      human_gated_capabilities: ['DESTRUCTIVE_ACTION'],
+    };
+    const originalPlannerId = 'codex-build-worker-subscription-sol-high-v2';
+    const first = await ensureGeneratedProjectPlan({
+      paths,
+      intake,
+      authorizationScope,
+      inspect: (repoRoot) => inspectRepository({ repoRoot }),
+      plannerProfileId: originalPlannerId,
+      planningWorker: async () => ({
+        async invoke(invocation: PlanningWorkerInvocation): Promise<PlanningWorkerInvocationResult> {
+          const result = await new Planner().invoke(invocation);
+          if (result.outcome !== 'DRAFT_RETURNED') return result;
+          return {
+            ...result,
+            profile_id: originalPlannerId,
+            provider_id: 'openai',
+            model: 'gpt-5.6-sol',
+          };
+        },
+      }),
+    });
+    const originalBytes = await readFile(planFile);
+    const generated = await loadPlan(planFile);
+    expect(first.origin).toBe('GENERATED');
+    expect(generated.plan.generated_from?.planner_profile_id).toBe(originalPlannerId);
+    expect(first.planner_profile_id).toBe(originalPlannerId);
+
+    const second = await ensureGeneratedProjectPlan({
+      paths,
+      intake,
+      authorizationScope,
+      inspect: () => {
+        throw new Error('inspection não deve repetir no resume');
+      },
+      plannerProfileId: 'claude-build-worker-subscription-opus5-high-v3',
+      planningWorker: async () => {
+        throw new Error('planner não deve ser construído no resume');
+      },
+    });
+    expect(second.origin).toBe('REUSED');
+    expect(second.planner_profile_id).toBe(originalPlannerId);
+    expect((await loadPlan(planFile)).plan.generated_from?.planner_profile_id).toBe(originalPlannerId);
+    expect(await readFile(planFile)).toEqual(originalBytes);
+  });
 });
 
 describe('deliberação de plano no caminho de projeto', () => {

@@ -124,6 +124,9 @@ export const GeneratedPlanSource = z
     inspection_sha256: z.string().regex(/^[0-9a-f]{64}$/),
     authorization_scope_sha256: z.string().regex(/^[0-9a-f]{64}$/),
     base_revision_sha: shaHex,
+    planner_profile_id: z.string().min(1).optional(),
+    planner_upstream: z.string().min(1).optional(),
+    planner_model: z.string().min(1).optional(),
   })
   .strict();
 export type GeneratedPlanSource = z.infer<typeof GeneratedPlanSource>;
