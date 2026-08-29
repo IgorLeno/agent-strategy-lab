@@ -70,6 +70,7 @@ import {
   codexUsesEventStream,
   decodeCodexEventStream,
 } from './codex-transport.js';
+import { workingTreeFiles } from './git.js';
 import { openCodePermissionEnv, openCodeRunUsageOf } from './opencode-scaffold.js';
 import { OPENCODE_IMPLEMENTER_MECHANISM } from './project-roles.js';
 import { buildWorkerPrompt } from './prompt.js';
@@ -309,6 +310,16 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
   // era o task deadline, apenas escondido numa camada de processo.
   const argv = [...agentArgv];
 
+  // Baseline de ATRIBUIÇÃO, tirado enquanto ainda é verdade: depois do spawn
+  // não existe mais como separar o que o worker mudou do que já estava sujo.
+  // É observação pura — árvore suja não impede o lançamento aqui, quem decide
+  // progressão é a guarda de base.
+  const preLaunchDirty = await workingTreeFiles(paths.repoRoot);
+  const preLaunchWorkingTree = {
+    clean: preLaunchDirty.length === 0,
+    files: [...new Set(preLaunchDirty)].sort(),
+  };
+
   const stdoutLog = createWriteStream(path.join(paths.logsDir, `${packet.task_id}.stdout.log`));
   const stderrLog = createWriteStream(path.join(paths.logsDir, `${packet.task_id}.stderr.log`));
   const startedAtMs = Date.now();
@@ -419,6 +430,7 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
       ...deriveControlledFacts(profile, agentArgv, env),
       ...accessContractFacts(accessProof),
     },
+    pre_launch_working_tree: preLaunchWorkingTree,
   };
 
   // Registra o lançamento antes de esperar: um crash do orquestrador aqui

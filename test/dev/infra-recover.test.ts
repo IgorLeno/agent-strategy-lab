@@ -2,8 +2,12 @@ import { createHash } from 'node:crypto';
 import { access, copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { headSha } from '../../dev/lib/git.js';
-import { InfraRecoveryError, recoverInfraAttempt } from '../../dev/lib/infra-recover.js';
+import { headSha, isWorkingTreeClean } from '../../dev/lib/git.js';
+import {
+  InfraRecoveryError,
+  readRecoverableUnfinalizedPatch,
+  recoverInfraAttempt,
+} from '../../dev/lib/infra-recover.js';
 import {
   adoptMaintenanceRange,
   type MaintenanceValidationRunner,
@@ -11,13 +15,17 @@ import {
 import { resolveHarnessPaths, type HarnessPaths } from '../../dev/lib/paths.js';
 import { loadPlan, type LoadedPlan } from '../../dev/lib/plan.js';
 import {
+  completionPath,
   failedAttemptHandoffDraftPath,
   failedAttemptReportPath,
   handoffDraftPath,
   infraAttemptEvidencePath,
   infraFailedAttemptPath,
   launchRecordPath,
+  preservedBundleManifestPath,
+  preservedBundlePatchPath,
   readInfraFailedAttempt,
+  readPreservedBundleManifest,
   readValidationFailedAttempt,
   reportPath,
   validationFailedAttemptPath,
@@ -496,11 +504,18 @@ describe('dev-recover-infra', () => {
     expect(getTaskState(await readState(paths), 'T1').status).toBe('READY');
   });
 
-  it('M — recusa quando a working tree tem trabalho inesperado', async () => {
+  /**
+   * Este teste afirmava que QUALQUER árvore suja recusava a recuperação — e era
+   * exatamente aí que o trabalho do worker morria com o provider. Mudança
+   * posterior a um launch de árvore limpa agora é preservada (ver a suíte de
+   * trabalho não finalizado). O que continua recusado é o caminho que o worker
+   * nunca deveria ter tocado.
+   */
+  it('M — recusa quando o attempt tocou caminho proibido ao worker', async () => {
     await runFailedAttempt();
-    await writeFile(path.join(sandbox.root, 'patch-inesperado.txt'), 'algo\n', 'utf8');
+    await writeFile(path.join(sandbox.root, 'dev', 'plan.yaml'), '# reescrito\n', 'utf8');
 
-    await expect(recover()).rejects.toThrow(/working tree suja/i);
+    await expect(recover()).rejects.toThrow(/caminho proibido/i);
     expect(getTaskState(await readState(paths), 'T1').status).toBe('INFRA_ERROR');
   });
 
@@ -934,5 +949,184 @@ describe('dev-recover depois da recuperação de infra', () => {
     );
     const output = JSON.parse(result.stdout) as { reconciliations: unknown[] };
     expect(output.reconciliations).toEqual([]);
+  });
+});
+
+/**
+ * INCIDENTE REAL do piloto Semi-Imperium, attempt 2 de
+ * `semiimperium_docs_and_integration_tests`: o worker Codex escreveu 510 KB em
+ * 187 chunks de stdout ao longo de 680967 ms, e então o provider morreu com
+ * `turn.failed` / "You've hit your usage limit". O attempt virou INFRA_ERROR e
+ * `failed-attempts/<task>/attempt-2` ficou SEM patch: o trabalho existia
+ * apenas na working tree do alvo, invisível para o control plane.
+ *
+ * A distinção que estes testes fixam: falha do PROVIDER não pode virar perda
+ * de DURABILIDADE do control plane. O patch é preservado como
+ * RECOVERABLE_UNFINALIZED_PATCH — nunca como candidate, accepted ou PASS.
+ */
+describe('falha terminal do provider com trabalho não finalizado na árvore', () => {
+  /** Reproduz a forma do incidente: tracked modificado + untracked novo. */
+  async function workerTouchedTarget(): Promise<void> {
+    await writeFile(
+      path.join(sandbox.root, 'README.md'),
+      '# sandbox\n\nlinha escrita pelo worker antes de o provider morrer\n',
+      'utf8',
+    );
+    await mkdir(path.join(sandbox.root, 'docs'), { recursive: true });
+    await writeFile(
+      path.join(sandbox.root, 'docs', 'SEMI_IMPERIUM.md'),
+      'documento novo que só existia na working tree\n',
+      'utf8',
+    );
+  }
+
+  /** Reescreve o baseline do LaunchRecord para declarar sujeira pré-existente. */
+  async function declarePreLaunchDirty(files: readonly string[]): Promise<void> {
+    const file = launchRecordPath(paths, 'T1');
+    const launch = JSON.parse(await readFile(file, 'utf8')) as Record<string, unknown>;
+    launch['pre_launch_working_tree'] = { clean: files.length === 0, files: [...files].sort() };
+    await writeFile(file, `${JSON.stringify(launch, null, 2)}\n`, 'utf8');
+  }
+
+  it('árvore limpa: INFRA_ERROR sem artifact de patch fabricado', async () => {
+    await runFailedAttempt();
+    const result = await recover();
+
+    expect(result.record.reason_code).toBe('PROVIDER_TERMINAL_FAILURE');
+    expect(result.record.recoverable_patch).toBeNull();
+    expect(result.record.recoverable_changed_files).toEqual([]);
+    expect(result.recoverable).toBeNull();
+    expect(await exists(preservedBundlePatchPath(paths, 'T1', 1))).toBe(false);
+    expect(await exists(preservedBundleManifestPath(paths, 'T1', 1))).toBe(false);
+  });
+
+  it('arquivos tracked E untracked do worker são preservados no bundle do attempt', async () => {
+    await runFailedAttempt();
+    await workerTouchedTarget();
+
+    const result = await recover();
+
+    expect(result.record.reason_code).toBe(
+      'PROVIDER_TERMINAL_FAILURE_WITH_RECOVERABLE_PATCH',
+    );
+    expect(result.record.recoverable_changed_files).toEqual([
+      'README.md',
+      'docs/SEMI_IMPERIUM.md',
+    ]);
+    const patch = await readFile(preservedBundlePatchPath(paths, 'T1', 1), 'utf8');
+    expect(patch).toContain('linha escrita pelo worker');
+    expect(patch).toContain('documento novo que só existia na working tree');
+    expect(result.record.recoverable_patch?.patch_path).toBe(
+      'failed-attempts/T1/attempt-1/changes.patch',
+    );
+
+    const manifest = await readPreservedBundleManifest(paths, 'T1', 1);
+    expect(manifest?.changed_files).toEqual(['README.md', 'docs/SEMI_IMPERIUM.md']);
+    expect(manifest?.files.map((file) => file.status)).toEqual(['modified', 'added']);
+
+    // A árvore volta ao base: o próximo attempt nasce do mesmo lugar de sempre.
+    expect(await isWorkingTreeClean(paths.repoRoot)).toBe(true);
+    expect(result.record.working_tree_clean).toBe(true);
+  });
+
+  it('patch preservado NÃO é candidate, NÃO é accepted, NÃO é PASS', async () => {
+    await runFailedAttempt();
+    await workerTouchedTarget();
+    const result = await recover();
+
+    expect(result.record.candidate_commit).toBeNull();
+    expect(result.record.launch_classification).toBe('INFRA_ERROR');
+    expect(result.record.worker_output_present).toBe(false);
+    const task = getTaskState(await readState(paths), 'T1');
+    expect(task.status).toBe('READY');
+    expect(task.candidate_commit).toBeNull();
+    expect(task.accepted_commit).toBeNull();
+    // Nenhum fechamento nasce daqui: completion, finalização e review continuam
+    // sendo o único caminho para o trabalho recuperado virar commit aceito.
+    expect(await exists(completionPath(paths, 'T1'))).toBe(false);
+    expect(await exists(path.join(paths.finalizationsDir, 'T1'))).toBe(false);
+  });
+
+  it('resume reconhece o trabalho não finalizado em vez de descartá-lo', async () => {
+    await runFailedAttempt();
+    await workerTouchedTarget();
+    await recover();
+
+    const recoverable = await readRecoverableUnfinalizedPatch(paths, 'T1');
+    expect(recoverable).not.toBeNull();
+    expect(recoverable?.attempt).toBe(1);
+    expect(recoverable?.changed_files).toEqual(['README.md', 'docs/SEMI_IMPERIUM.md']);
+
+    const next = await runDevCli('dev-next.ts', ['--repo', sandbox.root], devEnv());
+    expect(next.exitCode, next.stderr).toBe(0);
+    expect(JSON.parse(next.stdout)).toMatchObject({
+      task_id: 'T1',
+      attempt: 2,
+      recoverable_unfinalized_patch: {
+        attempt: 1,
+        changed_files: ['README.md', 'docs/SEMI_IMPERIUM.md'],
+        patch_path: 'failed-attempts/T1/attempt-1/changes.patch',
+      },
+    });
+  });
+
+  it('sujeira PRÉ-EXISTENTE nunca é absorvida no patch recuperável da task', async () => {
+    // O caminho de produto recusa lançar sobre árvore suja, então o baseline
+    // sujo é simulado no LaunchRecord — é ele a autoridade sobre atribuição.
+    await runFailedAttempt();
+    await declarePreLaunchDirty(['README.md']);
+    await writeFile(
+      path.join(sandbox.root, 'README.md'),
+      '# sandbox\n\nedição do humano, anterior ao launch\n',
+      'utf8',
+    );
+    await mkdir(path.join(sandbox.root, 'docs'), { recursive: true });
+    await writeFile(
+      path.join(sandbox.root, 'docs', 'SEMI_IMPERIUM.md'),
+      'documento novo do worker\n',
+      'utf8',
+    );
+
+    // A recuperação não conclui — sujeira alheia continua sendo decisão humana.
+    // Mas ela só recusa DEPOIS de o trabalho do worker estar salvo.
+    await expect(recover()).rejects.toThrow(/continua suja com mudanças anteriores ao launch/i);
+
+    const manifest = await readPreservedBundleManifest(paths, 'T1', 1);
+    expect(manifest?.changed_files).toEqual(['docs/SEMI_IMPERIUM.md']);
+    const patch = await readFile(preservedBundlePatchPath(paths, 'T1', 1), 'utf8');
+    expect(patch).toContain('documento novo do worker');
+    expect(patch).not.toContain('edição do humano');
+    // O arquivo do humano continua sujo e intocado.
+    expect(await readFile(path.join(sandbox.root, 'README.md'), 'utf8')).toContain(
+      'edição do humano',
+    );
+  });
+
+  it('sem prova de árvore limpa no launch a preservação é RECUSADA, não adivinhada', async () => {
+    await runFailedAttempt();
+    // LaunchRecord anterior ao campo: a atribuição deixa de ser demonstrável.
+    const file = launchRecordPath(paths, 'T1');
+    const launch = JSON.parse(await readFile(file, 'utf8')) as Record<string, unknown>;
+    delete launch['pre_launch_working_tree'];
+    await writeFile(file, `${JSON.stringify(launch, null, 2)}\n`, 'utf8');
+    await workerTouchedTarget();
+
+    await expect(recover()).rejects.toThrow(InfraRecoveryError);
+    // Nada foi apagado: o trabalho continua na árvore para inspeção humana.
+    expect(await readFile(path.join(sandbox.root, 'README.md'), 'utf8')).toContain(
+      'linha escrita pelo worker',
+    );
+  });
+
+  it('evidência do failed-attempt continua append-only: repetir converge', async () => {
+    await runFailedAttempt();
+    await workerTouchedTarget();
+    const first = await recover();
+    const second = await recover();
+
+    expect(second.alreadyArchived).toBe(true);
+    expect(second.record).toEqual(first.record);
+    const manifest = await readPreservedBundleManifest(paths, 'T1', 1);
+    expect(manifest?.patch_sha256).toBe(first.record.recoverable_patch?.patch_sha256);
   });
 });

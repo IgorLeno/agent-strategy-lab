@@ -18,7 +18,14 @@ import {
   codexProviderTerminalFailure,
   codexUsesEventStream,
 } from './codex-transport.js';
-import { stagedFiles } from './git.js';
+import {
+  preserveFailedAttemptBundle,
+  pruneEmptyParentDirectories,
+  readPreservedBundleRef,
+  resetFilesToBase,
+} from './failed-attempt-bundle.js';
+import { isForbiddenOrchestratedPath } from './finalize-orchestrated.js';
+import { patchFingerprint, stagedFiles, workingTreeFiles } from './git.js';
 import {
   InboxArtifactError,
   archiveInboxArtifacts,
@@ -37,8 +44,11 @@ import {
   infraAttemptEvidencePath,
   infraFailedAttemptPath,
   launchRecordPath,
+  preservedBundleManifestPath,
+  preservedBundlePatchPath,
   readInfraFailedAttempt,
   readLaunchRecord,
+  readPreservedBundleManifest,
   writeInfraFailedAttempt,
 } from './records.js';
 import {
@@ -47,6 +57,7 @@ import {
   type ArchivedEvidenceFile,
   type DevelopmentState,
   type LaunchRecord,
+  type PreservedChangeBundleRef,
   type ProviderTerminalFailure,
   type TaskState,
 } from './schemas.js';
@@ -109,6 +120,11 @@ export interface InfraRecoveryResult {
    * o preservou e liberou os slots; `null` quando o inbox já estava limpo.
    */
   readonly staleInboxOwnerAttempt: number | null;
+  /**
+   * RECOVERABLE_UNFINALIZED_PATCH deste attempt; `null` quando o alvo estava
+   * intocado. Nunca é candidate, nunca é solução aceita.
+   */
+  readonly recoverable: RecoverableUnfinalizedWork | null;
 }
 
 const EVIDENCE_SOURCES = [
@@ -179,6 +195,51 @@ async function archiveEvidence(
   return archived;
 }
 
+/**
+ * Confere que o patch recuperável declarado pelo record continua em disco e
+ * byte-idêntico. Um record que aponta para um patch sumido afirmaria uma
+ * durabilidade que não existe mais.
+ */
+async function assertArchivedRecoverablePatch(
+  paths: HarnessPaths,
+  record: InfraFailedAttemptRecord,
+): Promise<RecoverableUnfinalizedWork | null> {
+  if (record.recoverable_patch === null) return null;
+  const files: readonly [string, string, number | null][] = [
+    [
+      preservedBundlePatchPath(paths, record.task_id, record.attempt),
+      record.recoverable_patch.patch_sha256,
+      record.recoverable_patch.patch_size_bytes,
+    ],
+    [
+      preservedBundleManifestPath(paths, record.task_id, record.attempt),
+      record.recoverable_patch.manifest_sha256,
+      null,
+    ],
+  ];
+  for (const [file, expected, size] of files) {
+    let bytes: Buffer;
+    try {
+      bytes = await readFile(file);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      throw new InfraRecoveryError(`patch recuperável sumiu: ${relativeToDev(paths, file)}`);
+    }
+    if (sha256Hex(bytes) !== expected || (size !== null && bytes.byteLength !== size)) {
+      throw new InfraRecoveryError(
+        `patch recuperável foi alterado: ${relativeToDev(paths, file)}`,
+      );
+    }
+  }
+  return {
+    attempt: record.attempt,
+    ref: record.recoverable_patch,
+    changed_files: record.recoverable_changed_files,
+    patch_fingerprint: record.recoverable_patch_fingerprint as string,
+    alreadyPreserved: true,
+  };
+}
+
 /** Confere que a evidência já publicada continua íntegra e do tamanho declarado. */
 async function assertArchivedEvidence(
   paths: HarnessPaths,
@@ -223,6 +284,25 @@ interface InfraSource {
   readonly adoptedMaintenance: readonly string[];
   /** `null` quando o inbox está limpo — o caso normal de uma falha de infra. */
   readonly staleInbox: StaleInbox | null;
+  /** Trabalho não finalizado preservado deste attempt; `null` se o alvo estava intocado. */
+  readonly recoverable: RecoverableUnfinalizedWork | null;
+}
+
+/**
+ * RECOVERABLE_UNFINALIZED_PATCH — o que o worker já tinha escrito no alvo
+ * quando o provider morreu.
+ *
+ * Não é candidate, não é solução validada e não é PASS: nada foi medido e nada
+ * foi declarado pronto. É evidência preservada para que a morte do provider
+ * não apague trabalho real.
+ */
+export interface RecoverableUnfinalizedWork {
+  readonly attempt: number;
+  readonly ref: PreservedChangeBundleRef;
+  readonly changed_files: readonly string[];
+  readonly patch_fingerprint: string;
+  /** `true` quando o bundle já existia e esta execução apenas convergiu. */
+  readonly alreadyPreserved: boolean;
 }
 
 /**
@@ -321,9 +401,9 @@ async function loadInfraSource(
   const { paths, taskId } = input;
   const task = getTaskState(state, taskId);
 
-  const recoverable =
+  const recoverableStatus =
     (task.status === 'RUNNING' && task.phase === 'FINALIZING') || task.status === 'INFRA_ERROR';
-  if (!recoverable) {
+  if (!recoverableStatus) {
     throw new InfraRecoveryError(
       `dev-recover-infra exige RUNNING/FINALIZING ou INFRA_ERROR, encontrada ${task.status}${
         task.phase === null ? '' : `/${task.phase}`
@@ -381,6 +461,12 @@ async function loadInfraSource(
   if ((await stagedFiles(paths.repoRoot)).length > 0) {
     throw new InfraRecoveryError('index contém mudanças staged');
   }
+
+  // ANTES da guarda de HEAD, e não depois: a guarda exige árvore limpa, e a
+  // única coisa que pode limpá-la sem destruir trabalho é preservá-lo primeiro.
+  // Esta é a ordem que separa falha do PROVIDER de perda de DURABILIDADE.
+  const recoverable = await preserveUnfinalizedWork(paths, taskId, task, launch, input.now);
+
   let head: AttemptRecoveryHead;
   try {
     head = await assertAttemptRecoveryHead({
@@ -408,7 +494,117 @@ async function loadInfraSource(
     headMode: head.mode,
     adoptedMaintenance: head.adoptedChain.map((record) => record.adopted_head_sha),
     staleInbox,
+    recoverable,
   };
+}
+
+/**
+ * Preserva o trabalho não finalizado do attempt e devolve a árvore ao base.
+ *
+ * O incidente que este passo existe para não repetir: o worker escreveu 510 KB
+ * no alvo, o provider morreu com "usage limit", e a recuperação de infra
+ * afirmava `working_tree_clean: true` sem NUNCA olhar a árvore — o campo era
+ * literal de schema, não observação. O patch ficava só no checkout, invisível
+ * ao control plane, e a próxima progressão travava com "working tree suja".
+ *
+ * ATRIBUIÇÃO é o problema difícil, e ele não se resolve depois do fato: o único
+ * momento em que dá para saber o que o worker mudou é comparando com o que já
+ * estava sujo ANTES do spawn. Sem esse baseline no LaunchRecord a preservação é
+ * RECUSADA — absorver arquivo alheio na evidência da task seria pior do que não
+ * preservar, e o trabalho continua intacto na árvore para inspeção humana.
+ */
+async function preserveUnfinalizedWork(
+  paths: HarnessPaths,
+  taskId: string,
+  task: TaskState,
+  launch: LaunchRecord,
+  now: (() => string) | undefined,
+): Promise<RecoverableUnfinalizedWork | null> {
+  const attempt = task.attempts;
+  const baseSha = task.base_sha as string;
+  const dirty = await workingTreeFiles(paths.repoRoot);
+  const preexisting = new Set(launch.pre_launch_working_tree?.files ?? []);
+  const attributable = dirty.filter((file) => !preexisting.has(file)).sort();
+
+  const existing = await readPreservedBundleManifest(paths, taskId, attempt);
+  if (attributable.length === 0) {
+    // Nada atribuível agora. Ou o alvo estava intocado, ou uma execução
+    // anterior já preservou e resetou — e aí o bundle publicado é a resposta.
+    const ref = existing === null ? null : await readPreservedBundleRef(paths, taskId, attempt);
+    const work =
+      existing === null || ref === null
+        ? null
+        : {
+            attempt,
+            ref,
+            changed_files: existing.changed_files,
+            patch_fingerprint: existing.patch_fingerprint,
+            alreadyPreserved: true,
+          };
+    await assertNoForeignResidue(paths, taskId, attempt, work);
+    return work;
+  }
+
+  if (launch.pre_launch_working_tree === null) {
+    throw new InfraRecoveryError(
+      `working tree suja (${attributable.join(', ')}) e o LaunchRecord não registra o estado ` +
+        'anterior ao spawn: a atribuição do patch não é demonstrável. Preserve as mudanças ' +
+        'manualmente antes de recuperar — o harness não vai adivinhar de quem elas são',
+    );
+  }
+  const forbidden = attributable.filter(isForbiddenOrchestratedPath);
+  if (forbidden.length > 0) {
+    throw new InfraRecoveryError(
+      `o attempt tocou caminho proibido ao worker: ${forbidden.join(', ')}`,
+    );
+  }
+
+  const bundle = await preserveFailedAttemptBundle({
+    paths,
+    taskId,
+    attempt,
+    baseSha,
+    files: attributable,
+    patchFingerprint: await patchFingerprint(paths.repoRoot),
+    ...(now === undefined ? {} : { now }),
+  });
+  // Reset path-scoped: EXATAMENTE os arquivos preservados voltam ao base.
+  // Nada de `reset --hard` nem de `clean` — o que não é da task não é nosso.
+  await resetFilesToBase({ repoRoot: paths.repoRoot, baseSha, files: attributable });
+  await pruneEmptyParentDirectories(paths.repoRoot, attributable);
+
+  const work: RecoverableUnfinalizedWork = {
+    attempt,
+    ref: bundle.ref,
+    changed_files: bundle.manifest.changed_files,
+    patch_fingerprint: bundle.manifest.patch_fingerprint,
+    alreadyPreserved: bundle.alreadyPreserved,
+  };
+  await assertNoForeignResidue(paths, taskId, attempt, work);
+  return work;
+}
+
+/**
+ * Sujeira que NÃO é do attempt sobrevive ao reset path-scoped de propósito.
+ * Ela impede a recuperação — mas só depois de o patch do worker já estar salvo,
+ * para que a recusa custe uma decisão humana e nunca o trabalho.
+ */
+async function assertNoForeignResidue(
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+  preserved: RecoverableUnfinalizedWork | null,
+): Promise<void> {
+  const residue = await workingTreeFiles(paths.repoRoot);
+  if (residue.length === 0) return;
+  const saved =
+    preserved === null
+      ? ''
+      : ` O patch do attempt ${attempt} já está preservado em ${preserved.ref.patch_path}.`;
+  throw new InfraRecoveryError(
+    `working tree continua suja com mudanças anteriores ao launch de ${taskId}: ` +
+      `${residue.join(', ')}.${saved} Resolva-as e repita — nada delas entra na evidência da task`,
+  );
 }
 
 /**
@@ -490,13 +686,49 @@ function buildRecord(
     rate_limit_observations: launch.rate_limit_observations,
     worker_output_present: false,
     candidate_commit: null,
+    // Agora é observação, não literal: `preserveUnfinalizedWork` só devolve o
+    // controle com a árvore no base, e `assertNoForeignResidue` prova isso.
     working_tree_clean: true,
     head_sha: source.headSha,
+    recoverable_patch: source.recoverable?.ref ?? null,
+    recoverable_changed_files: [...(source.recoverable?.changed_files ?? [])],
+    recoverable_patch_fingerprint: source.recoverable?.patch_fingerprint ?? null,
     evidence: [...evidence],
-    reason_code: 'PROVIDER_TERMINAL_FAILURE',
+    reason_code:
+      source.recoverable === null
+        ? 'PROVIDER_TERMINAL_FAILURE'
+        : 'PROVIDER_TERMINAL_FAILURE_WITH_RECOVERABLE_PATCH',
     reason,
     archived_at: timestamp,
   });
+}
+
+/**
+ * Trabalho não finalizado que sobreviveu ao provider e ainda espera conclusão.
+ *
+ * Existe para que a retomada RECONHEÇA o patch em vez de reimplementar tudo a
+ * partir do base. Não concede nada: quem reaproveitar o patch continua devendo
+ * protocolo de conclusão, validation oficial e review quando a política exigir.
+ */
+export async function readRecoverableUnfinalizedPatch(
+  paths: HarnessPaths,
+  taskId: string,
+  attempts?: number,
+): Promise<RecoverableUnfinalizedWork | null> {
+  const state = await readState(paths).catch(() => null);
+  const highest = attempts ?? (state === null ? 0 : getTaskState(state, taskId).attempts);
+  for (let attempt = highest; attempt >= 1; attempt -= 1) {
+    const record = await readInfraFailedAttempt(paths, taskId, attempt);
+    if (record === null || record.recoverable_patch === null) continue;
+    return {
+      attempt: record.attempt,
+      ref: record.recoverable_patch,
+      changed_files: record.recoverable_changed_files,
+      patch_fingerprint: record.recoverable_patch_fingerprint as string,
+      alreadyPreserved: true,
+    };
+  }
+  return null;
 }
 
 /** Reabre a tarefa para um NOVO attempt. `attempts` nunca diminui. */
@@ -555,6 +787,7 @@ export async function recoverInfraAttempt(
       throw new InfraRecoveryError('InfraFailedAttemptRecord já gravado diverge do reason solicitado');
     }
     await assertArchivedEvidence(paths, archived);
+    const preserved = await assertArchivedRecoverablePatch(paths, archived);
     return {
       record: archived,
       recordPath: infraFailedAttemptPath(paths, taskId, archived.attempt),
@@ -563,6 +796,7 @@ export async function recoverInfraAttempt(
       headMode: null,
       adoptedMaintenance: [],
       staleInboxOwnerAttempt: null,
+      recoverable: preserved,
     };
   }
 
@@ -601,5 +835,6 @@ export async function recoverInfraAttempt(
     headMode: source.headMode,
     adoptedMaintenance: source.adoptedMaintenance,
     staleInboxOwnerAttempt: source.staleInbox?.owner.attempt ?? null,
+    recoverable: source.recoverable,
   };
 }

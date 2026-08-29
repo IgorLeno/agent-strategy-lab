@@ -16,8 +16,10 @@
  *   "nenhum token foi consumido" — consumo abaixo da resolução do endpoint
  *   existe e não aparece ali.
  *
- *   Delta não atravessa reset. Se a identidade da janela mudou entre before e
- *   after, não há delta: subtrair produziria consumo negativo inventado.
+ *   Delta não atravessa reset. Quando a janela PROVADAMENTE virou entre before
+ *   e after, não há delta: subtrair produziria consumo negativo inventado. Mas
+ *   reset exige prova: o provider reprevê o instante do reset a cada resposta,
+ *   e timestamp futuro reprevisto não é janela nova.
  *
  *   `remaining` só existe quando é matematicamente derivável do que o provider
  *   reportou. Nada é estimado.
@@ -60,8 +62,9 @@ export enum CapacityPrecision {
  *
  * `window_id` é a identidade SEMÂNTICA da janela dentro do pool (`primary`,
  * `weekly`, `rolling`, `monthly`). `window_instance` é a identidade da
- * INSTÂNCIA corrente — o instante de reset como o provider o escreveu. Duas
- * leituras só são subtraíveis quando as duas identidades coincidem.
+ * INSTÂNCIA corrente — o instante de reset como o provider o escreveu. Ela é
+ * evidência de identidade, não a definição dela: `windowContinuity` decide se
+ * duas leituras pertencem à mesma janela, porque o instante previsto deriva.
  */
 export const CapacityWindow = z
   .object({
@@ -205,6 +208,95 @@ export interface WindowDelta {
   readonly reason: string;
 }
 
+/**
+ * CONTINUIDADE de uma janela entre duas leituras.
+ *
+ * Identidade por igualdade EXATA do reset previsto é frágil: o provider
+ * reprevê o instante do reset a cada resposta, e um deslocamento de um segundo
+ * fazia duas leituras da mesma janela parecerem janelas diferentes. Foi assim
+ * que 17 pontos percentuais realmente consumidos viraram `window_reset: true`
+ * com `consumed_pp: null` no piloto Semi-Imperium.
+ *
+ * O invariante que substitui a igualdade não tem tolerância arbitrária — não é
+ * "um segundo", não é "cinco minutos". É temporal e verificável:
+ *
+ *   se a leitura POSTERIOR aconteceu ANTES do reset que a leitura ANTERIOR
+ *   declarou, então a janela anterior ainda não tinha resetado quando a
+ *   posterior foi tirada, e nenhum ajuste do timestamp previsto muda isso.
+ *
+ * Reset continua exigindo evidência: instância diferente E o reset declarado
+ * pelo before já passado no instante do after. Quando o reset declarado não é
+ * datável (rótulo humano da Claude), a igualdade da instância volta a ser a
+ * única evidência disponível, e a semântica antiga é preservada intacta.
+ */
+function windowContinuity(
+  beforeWindow: CapacityWindow,
+  afterWindow: CapacityWindow,
+  afterObservedAt: string,
+): {
+  readonly same_window: boolean | null;
+  readonly window_reset: boolean;
+  readonly contradicted: boolean;
+  readonly reason: string;
+} {
+  const unchanged = {
+    same_window: true as const,
+    window_reset: false,
+    contradicted: false,
+    reason: 'mesma instância de janela',
+  };
+  if (beforeWindow.window_instance === null || afterWindow.window_instance === null) {
+    return {
+      same_window: null,
+      window_reset: false,
+      contradicted: false,
+      reason: 'identidade de instância não reportada',
+    };
+  }
+  if (beforeWindow.window_instance === afterWindow.window_instance) return unchanged;
+
+  const declaredReset = Date.parse(beforeWindow.resets_at ?? '');
+  const observedAfter = Date.parse(afterObservedAt);
+  if (!Number.isFinite(declaredReset) || !Number.isFinite(observedAfter)) {
+    // Sem instante datável a única evidência é a identidade crua, e ela mudou.
+    return {
+      same_window: false,
+      window_reset: true,
+      contradicted: false,
+      reason: 'a janela resetou entre as duas observações: não há delta a subtrair',
+    };
+  }
+  if (observedAfter >= declaredReset) {
+    return {
+      same_window: false,
+      window_reset: true,
+      contradicted: false,
+      reason: 'a janela resetou entre as duas observações: não há delta a subtrair',
+    };
+  }
+
+  // O reset declarado pelo before ainda não tinha chegado. Se o uso CAIU, as
+  // duas evidências brigam e nenhuma delas é forte o bastante para decidir.
+  const dropped =
+    beforeWindow.used_percent !== null &&
+    afterWindow.used_percent !== null &&
+    afterWindow.used_percent < beforeWindow.used_percent;
+  if (dropped) {
+    return {
+      same_window: null,
+      window_reset: false,
+      contradicted: true,
+      reason:
+        'instância reprevista antes do reset declarado E uso decrescente: ' +
+        'evidências contraditórias, nem delta nem reset são observáveis',
+    };
+  }
+  return {
+    ...unchanged,
+    reason: 'reset apenas reprevisto pelo provider: o reset declarado ainda não tinha chegado',
+  };
+}
+
 export function windowDeltas(
   before: PoolCapacityObservation,
   after: PoolCapacityObservation,
@@ -228,11 +320,9 @@ export function windowDeltas(
         reason: 'janela ausente na observação posterior',
       };
     }
-    const sameWindow =
-      beforeWindow.window_instance === null || afterWindow.window_instance === null
-        ? null
-        : beforeWindow.window_instance === afterWindow.window_instance;
-    if (sameWindow === false) {
+    const continuity = windowContinuity(beforeWindow, afterWindow, after.observed_at);
+    const sameWindow = continuity.same_window;
+    if (continuity.window_reset) {
       // A janela virou. Subtrair aqui produziria consumo negativo que nunca
       // aconteceu — a medição falha fechada em vez de mentir.
       return {
@@ -242,7 +332,21 @@ export function windowDeltas(
         consumed_pp: null,
         same_window: false,
         window_reset: true,
-        reason: 'a janela resetou entre as duas observações: não há delta a subtrair',
+        reason: continuity.reason,
+      };
+    }
+    if (sameWindow === null && continuity.contradicted) {
+      // Instância trocada, reset declarado ainda no futuro E uso caindo: as
+      // duas evidências se contradizem. Escolher uma delas inventaria ou um
+      // consumo negativo ou um reset — as duas coisas que este contrato proíbe.
+      return {
+        window_id: beforeWindow.window_id,
+        before_used_percent: beforeWindow.used_percent,
+        after_used_percent: afterWindow.used_percent,
+        consumed_pp: null,
+        same_window: null,
+        window_reset: false,
+        reason: continuity.reason,
       };
     }
     if (beforeWindow.used_percent === null || afterWindow.used_percent === null) {

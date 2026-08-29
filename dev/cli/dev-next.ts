@@ -2,6 +2,7 @@
 import { inspectProgressionBase } from '../lib/base-guard.js';
 import { emit, isVerbose, parseArgs, runMain } from '../lib/cli.js';
 import { headSha } from '../lib/git.js';
+import { readRecoverableUnfinalizedPatch } from '../lib/infra-recover.js';
 import { buildTaskPacket } from '../lib/packet.js';
 import { resolveHarnessPaths } from '../lib/paths.js';
 import { loadPlan } from '../lib/plan.js';
@@ -53,6 +54,26 @@ async function main(): Promise<void> {
     selection.task.id,
     task?.attempts ?? 0,
   );
+  // Trabalho não finalizado que sobreviveu a uma falha terminal do provider.
+  // É INFORMAÇÃO, não autorização: o attempt continua sendo FIRST_PASS ou
+  // REPAIR pelo que os records de veredito dizem, e quem reaproveitar o patch
+  // continua devendo protocolo de conclusão, validation oficial e review.
+  const recoverable = await readRecoverableUnfinalizedPatch(
+    paths,
+    selection.task.id,
+    task?.attempts ?? 0,
+  );
+  const recoverableOutput =
+    recoverable === null
+      ? {}
+      : {
+          recoverable_unfinalized_patch: {
+            attempt: recoverable.attempt,
+            changed_files: recoverable.changed_files,
+            patch_path: recoverable.ref.patch_path,
+            manifest_path: recoverable.ref.manifest_path,
+          },
+        };
   const progressionBase = await inspectProgressionBase(paths, state);
   const baseSha = await headSha(paths.repoRoot);
   const packet = buildTaskPacket({
@@ -70,6 +91,7 @@ async function main(): Promise<void> {
       packet,
       ready_to_launch: readyToLaunch,
       authorized_head_sha: state.authorized_head_sha,
+      ...recoverableOutput,
     });
     return;
   }
@@ -83,6 +105,7 @@ async function main(): Promise<void> {
     attempt_kind: previousAttemptDiagnostics === null ? 'FIRST_PASS' : 'REPAIR',
     base_sha: baseSha,
     authorized_head_sha: state.authorized_head_sha,
+    ...recoverableOutput,
     ...(progressionBase.blocker === null ? {} : { blocker: progressionBase.blocker }),
   });
 }

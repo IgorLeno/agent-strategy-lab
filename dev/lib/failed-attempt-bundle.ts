@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { rm } from 'node:fs/promises';
+import { readFile, rm, rmdir } from 'node:fs/promises';
 import path from 'node:path';
 import { writeFileOnce } from './atomic.js';
 import { canonicalJson, sha256Hex } from './canonical.js';
@@ -230,6 +230,54 @@ export async function preserveFailedAttemptBundle(
     ref: refFrom(paths, manifest, manifestBytes(manifest)),
     alreadyPreserved: existing !== null,
   };
+}
+
+/**
+ * Diretório que só existia por causa de um arquivo ADDED do worker não é um
+ * path que o Git conheça: o reset path-scoped remove o arquivo e deixa a pasta
+ * vazia para trás. `readdir` ainda a enxerga, e scaffold recém-criado passa a
+ * parecer presente numa árvore git-limpa.
+ */
+export async function pruneEmptyParentDirectories(
+  repoRoot: string,
+  files: readonly string[],
+): Promise<void> {
+  const starts = [...new Set(files.map((file) => path.dirname(file)))]
+    .filter((dir) => dir !== '.' && dir !== '')
+    .sort((a, b) => b.length - a.length);
+  for (const start of starts) {
+    let current = start;
+    while (current !== '.' && current !== '') {
+      try {
+        await rmdir(path.join(repoRoot, current));
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === 'ENOENT') {
+          current = path.dirname(current);
+          continue;
+        }
+        break;
+      }
+      current = path.dirname(current);
+    }
+  }
+}
+
+/**
+ * Ref do bundle JÁ publicado, com os hashes lidos dos BYTES em disco.
+ *
+ * Recalcular o manifesto a partir do objeto reparseado poderia divergir dos
+ * bytes gravados; a evidência é o arquivo, então é dele que o hash sai.
+ */
+export async function readPreservedBundleRef(
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+): Promise<PreservedChangeBundleRef | null> {
+  const manifest = await readPreservedBundleManifest(paths, taskId, attempt);
+  if (manifest === null) return null;
+  const bytes = await readFile(preservedBundleManifestPath(paths, taskId, attempt));
+  return refFrom(paths, manifest, bytes);
 }
 
 export interface ResetFilesToBaseInput {
