@@ -8,9 +8,13 @@ const identifier = z
   .regex(/^[A-Za-z0-9][A-Za-z0-9_-]*$/, 'id deve ser alfanumérico com - ou _');
 
 /**
- * Risco de execução da task. Dimensão NOVA — não existe em TaskSpec nem em
- * TaskTaxonomy, e vive somente aqui para manter os dois contratos históricos
- * inalterados (evidência recomputável).
+ * Risco de execução da task (técnico/científico). Dimensão NOVA — não existe
+ * em TaskSpec nem em TaskTaxonomy, e vive somente aqui para manter os dois
+ * contratos históricos inalterados (evidência recomputável).
+ *
+ * Não é categoria de autorização humana. Consentimento vive em
+ * `HumanGatedCapability` / `implied_human_gated`. `critical` influencia
+ * review independente, diversidade e routing, não inventa HUMAN_REQUIRED.
  */
 export const TaskRisk = z.enum(['low', 'medium', 'high', 'critical']);
 export type TaskRisk = z.infer<typeof TaskRisk>;

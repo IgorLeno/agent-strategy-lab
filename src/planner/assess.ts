@@ -545,8 +545,8 @@ export type ReviewRequirementAssessment = z.infer<typeof ReviewRequirementAssess
  * concreto, não pelo fato de a task não ser trivial.
  *
  * Exige reviewer quando, e somente quando, houver uma razão concreta:
- * - `risk` high ou critical (inclui o que é security-sensitive, já declarado
- *   como risco alto pelo planejamento);
+ * - `risk` high ou critical (risco de execução; security-sensitive é
+ *   categoria de autorização distinta, não derivada deste label);
  * - `verification_strength` weak — validação ausente ou subjetiva, isto é,
  *   PASS/FAIL não é objetivamente determinável;
  * - `confidence` low — os fatos que sustentam a avaliação estão faltando.

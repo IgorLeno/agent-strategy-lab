@@ -5,6 +5,16 @@ Regra, não narrativa: cada entrada termina numa restrição aplicável.
 
 ---
 
+[2026-08-28] Context: mopac_minimum_workflow na run Semi-Imperium ficou READY
+com risk=critical e o launch virou HUMAN_REQUIRED / CRITICAL_OR_SECURITY_SENSITIVE_ACTION.
+Mistake: tratar TaskRisk.critical (risco de execução científico/técnico) como
+se fosse HumanGatedCapability.
+Rule: risco de execução e capability human-gated são dimensões ortogonais;
+critical sozinho não inventa HUMAN_REQUIRED; o gate humano exige evidência
+da categoria (implied_human_gated, billing, credencial, escopo, ownership).
+
+---
+
 [2026-08-28] Context: reviewer OpenCode Go flash lançado após Codex/Claude
 EXHAUSTED retornou UnknownError/server error em ~13s; o loop seguinte tentou
 os outros cinco profiles Go e todos devolveram o mesmo UnknownError.

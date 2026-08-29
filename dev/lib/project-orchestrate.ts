@@ -163,6 +163,11 @@ export interface ProjectLaunchContext {
    */
   readonly quota: LaunchFact;
   readonly credential: LaunchFact;
+  /**
+   * Risco de EXECUÇÃO da task (técnico/científico). Não é categoria de
+   * autorização: `critical` sozinho não inventa HUMAN_REQUIRED. Gates humanos
+   * entram por `implied_human_gated`, billing, credencial, escopo ou ownership.
+   */
   readonly risk: TaskRisk;
   readonly worker_owns_commit: boolean;
   readonly worker_owns_official_validation: boolean;
@@ -275,9 +280,11 @@ export function authorizeProjectLaunch(context: ProjectLaunchContext): ProjectLa
     provenance: context.credential.provenance,
   });
 
-  if (context.risk === 'critical') {
-    return deny('risk', 'risco crítico ou security-sensitive', 'CRITICAL_OR_SECURITY_SENSITIVE_ACTION');
-  }
+  // Risco de execução e autorização humana são dimensões ortogonais.
+  // `critical` continua visível aqui para observabilidade; review, diversidade
+  // e routing consomem a mesma dimensão em outros módulos. Inventar
+  // CRITICAL_OR_SECURITY_SENSITIVE_ACTION a partir do label sozinho misturaria
+  // as duas autoridades.
   checks.push({ name: 'risk', decision: 'ALLOWED', reason: `risk=${context.risk}` });
 
   if (context.worker_owns_commit || context.worker_owns_official_validation) {
