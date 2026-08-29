@@ -15,6 +15,15 @@ da categoria (implied_human_gated, billing, credencial, escopo, ownership).
 
 ---
 
+[2026-08-28] Context: ActivityObserver dispara onStallSuspected; launch.ts
+repassa; launchTask (caller de produção) não fornecia callback.
+Mistake: deixar evidência de stall suspeito opt-in por callback de teste.
+Rule: stall suspeito persiste evidência observacional no launch de produção;
+nunca vira kill, FAIL, HUMAN_REQUIRED nem attempt extra; teto de máquina
+permanece autoridade separada.
+
+---
+
 [2026-08-28] Context: reviewer OpenCode Go flash lançado após Codex/Claude
 EXHAUSTED retornou UnknownError/server error em ~13s; o loop seguinte tentou
 os outros cinco profiles Go e todos devolveram o mesmo UnknownError.

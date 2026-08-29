@@ -1,5 +1,6 @@
 import { mkdir, readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
+import type { WorkerActivityTelemetry } from './activity-observer.js';
 import { writeJsonAtomic, writeJsonOnce } from './atomic.js';
 import { sha256Hex } from './canonical.js';
 import type { HarnessPaths } from './paths.js';
@@ -14,6 +15,7 @@ import {
   CompletionRecord,
   InfraFailedAttemptRecord,
   LaunchRecord,
+  StallSuspectedEvidence,
   ProjectHistoryBinding,
   MaintenanceRecord,
   OrchestratedRevalidationRecord,
@@ -61,6 +63,10 @@ export async function ensureTaskInbox(paths: HarnessPaths, taskId: string): Prom
 
 export function launchRecordPath(paths: HarnessPaths, taskId: string): string {
   return path.join(paths.logsDir, `${taskId}.launch.json`);
+}
+
+export function stallSuspectedEvidencePath(paths: HarnessPaths, taskId: string): string {
+  return path.join(paths.logsDir, `${taskId}.stall-suspected.json`);
 }
 
 export function projectHistoryBindingPath(
@@ -469,6 +475,41 @@ export const readLaunchRecord = (
 
 export const writeLaunchRecord = (paths: HarnessPaths, record: LaunchRecordInput): Promise<void> =>
   writeJson(launchRecordPath(paths, record.task_id), LaunchRecord.parse(record));
+
+export const readStallSuspectedEvidence = (
+  paths: HarnessPaths,
+  taskId: string,
+): Promise<StallSuspectedEvidence | null> =>
+  readOptional(stallSuspectedEvidencePath(paths, taskId), (input) =>
+    StallSuspectedEvidence.parse(input),
+  );
+
+/**
+ * Persistência observacional da primeira suspeita de stall. Write-once.
+ * Falha de disco não pode virar FAIL do worker: o chamador trata o erro.
+ */
+export async function persistStallSuspectedEvidence(
+  paths: HarnessPaths,
+  taskId: string,
+  activity: WorkerActivityTelemetry,
+): Promise<void> {
+  await writeJsonOnce(
+    stallSuspectedEvidencePath(paths, taskId),
+    StallSuspectedEvidence.parse({
+      schema_version: 1,
+      kind: 'STALL_SUSPECTED',
+      task_id: taskId,
+      recorded_at: new Date().toISOString(),
+      activity: { ...activity, provenance: [...activity.provenance] },
+      effects: {
+        kill: false,
+        fail: false,
+        human_required: false,
+        attempt_consumed: false,
+      },
+    }),
+  );
+}
 
 export const readProjectHistoryBinding = (
   paths: HarnessPaths,

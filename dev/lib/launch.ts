@@ -69,7 +69,7 @@ import { openCodePermissionEnv, openCodeRunUsageOf } from './opencode-scaffold.j
 import { OPENCODE_IMPLEMENTER_MECHANISM } from './project-roles.js';
 import { buildWorkerPrompt } from './prompt.js';
 import { observedWorkerTokens } from './worker-token-usage.js';
-import { ensureTaskInbox, writeLaunchRecord } from './records.js';
+import { ensureTaskInbox, persistStallSuspectedEvidence, writeLaunchRecord } from './records.js';
 import { WorkerSupervisor, type TerminationCause } from './termination.js';
 import {
   DEV_SCHEMA_VERSION,
@@ -332,10 +332,20 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
   // ambos recebem o MESMO chunk, então nenhum byte do log é consumido, movido
   // ou truncado, e os parsers post-hoc continuam lendo exatamente o que liam.
   // O que é observado é o TIMESTAMP do chunk, nunca o seu conteúdo.
+  let stallPersist: Promise<void> = Promise.resolve();
   const activity = new ActivityObserver({
     startedAtMs,
     ...(input.activityObserverOptions ?? {}),
-    ...(input.onStallSuspected ? { onStallSuspected: input.onStallSuspected } : {}),
+    onStallSuspected: (telemetry) => {
+      stallPersist = persistStallSuspectedEvidence(paths, packet.task_id, telemetry).catch(
+        () => {
+          // Persistência observacional: falha de disco não pode matar, falhar
+          // a task, pedir humano nem consumir attempt. O LaunchRecord final
+          // ainda carrega activity.stall_suspected_at.
+        },
+      );
+      input.onStallSuspected?.(telemetry);
+    },
   });
   child.stdout?.on('data', (chunk: Buffer) => activity.record('stdout', chunk.length));
   child.stderr?.on('data', (chunk: Buffer) => activity.record('stderr', chunk.length));
@@ -424,6 +434,7 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
   const { exitCode, signal } = await termination;
   supervisor.disarm();
   const activityTelemetry = activity.stop();
+  await stallPersist;
   const terminationRequest = await supervisor.settled();
   stdoutLog.end();
   stderrLog.end();

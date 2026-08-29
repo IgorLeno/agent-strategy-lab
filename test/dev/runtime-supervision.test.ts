@@ -30,7 +30,7 @@ import { loadPlan, type LoadedPlan } from '../../dev/lib/plan.js';
 import { loadProfile, type LauncherProfile } from '../../dev/lib/profile.js';
 import { findSurvivors } from '../../dev/lib/process-audit.js';
 import { isSameProcessAlive } from '../../dev/lib/process-identity.js';
-import { readLaunchRecord, writePacket } from '../../dev/lib/records.js';
+import { readLaunchRecord, readStallSuspectedEvidence, writePacket } from '../../dev/lib/records.js';
 import { LaunchRecord } from '../../dev/lib/schemas.js';
 import {
   ACTIVE_TERMINATION_CAUSES,
@@ -38,7 +38,14 @@ import {
   WorkerSupervisor,
   terminationCauseOf,
 } from '../../dev/lib/termination.js';
-import { buildInitialState, ensureRuntimeDirs, writeState } from '../../dev/lib/state.js';
+import {
+  buildInitialState,
+  ensureRuntimeDirs,
+  getTaskState,
+  readState,
+  writeState,
+} from '../../dev/lib/state.js';
+import { launchTask } from '../../dev/lib/steps.js';
 import { makeSandboxRepo, type Sandbox } from './helpers.js';
 
 let sandbox: Sandbox;
@@ -448,6 +455,48 @@ describe('launchWorker — observação ao vivo e failsafe (integração)', () =
     expect(outcome.record.termination_request).toBeNull();
     // STALL_GUARD não é produzido nesta fase observacional.
     expect(outcome.record.termination_cause).not.toBe('STALL_GUARD');
+  }, 30_000);
+
+  it('launchTask de produção persiste stall suspeito sem kill, FAIL, HUMAN_REQUIRED nem attempt extra', async () => {
+    const packet = await packetForT1();
+    const previousMode = process.env.AGENTLAB_FAKE_MODE;
+    process.env.AGENTLAB_FAKE_MODE = 'stall';
+    const before = getTaskState(await readState(paths), 'T1');
+
+    try {
+      const result = await launchTask(
+        paths,
+        packet,
+        'fake-worker-v1',
+        undefined,
+        undefined,
+        { idleThresholdMs: 100, stallSuspicionMs: 300, pollIntervalMs: 25 },
+      );
+
+      expect(result.classification).toBe('FINISHED');
+      expect(result.outcome?.record.timed_out).toBe(false);
+      expect(result.outcome?.record.termination_cause).toBeNull();
+      expect(result.outcome?.record.termination_cause).not.toBe('STALL_GUARD');
+      expect(result.outcome?.record.activity?.termination_authority).toBe('NONE_OBSERVATION_ONLY');
+      expect(result.outcome?.record.activity?.stall_suspected_at).not.toBeNull();
+
+      const evidence = await readStallSuspectedEvidence(paths, 'T1');
+      expect(evidence).not.toBeNull();
+      expect(evidence?.kind).toBe('STALL_SUSPECTED');
+      expect(evidence?.effects).toEqual({
+        kill: false,
+        fail: false,
+        human_required: false,
+        attempt_consumed: false,
+      });
+
+      const after = getTaskState(await readState(paths), 'T1');
+      expect(after.status).not.toBe('FAIL');
+      expect(after.attempts).toBe(before.attempts + 1);
+    } finally {
+      if (previousMode === undefined) delete process.env.AGENTLAB_FAKE_MODE;
+      else process.env.AGENTLAB_FAKE_MODE = previousMode;
+    }
   }, 30_000);
 
   it('E — o implementer não recebe deadline derivado da task em lugar nenhum', async () => {

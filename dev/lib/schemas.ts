@@ -959,6 +959,30 @@ export const WorkerActivityTelemetry = z
   .strict();
 export type WorkerActivityTelemetry = z.infer<typeof WorkerActivityTelemetry>;
 
+/**
+ * Evidência ao vivo de stall suspeito. Append-only, escrita na primeira
+ * travessia do threshold. Nunca mata, nunca FAIL, nunca HUMAN_REQUIRED, nunca
+ * consome attempt: esses efeitos são literais `false` neste contrato.
+ */
+export const StallSuspectedEvidence = z
+  .object({
+    schema_version: z.literal(1),
+    kind: z.literal('STALL_SUSPECTED'),
+    task_id: identifier,
+    recorded_at: z.string().datetime(),
+    activity: WorkerActivityTelemetry,
+    effects: z
+      .object({
+        kill: z.literal(false),
+        fail: z.literal(false),
+        human_required: z.literal(false),
+        attempt_consumed: z.literal(false),
+      })
+      .strict(),
+  })
+  .strict();
+export type StallSuspectedEvidence = z.infer<typeof StallSuspectedEvidence>;
+
 /** Ver dev/lib/termination.ts para o significado de cada autoridade. */
 export const TerminationCause = z.enum([
   'LEGACY_TASK_DEADLINE',

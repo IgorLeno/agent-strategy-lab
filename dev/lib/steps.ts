@@ -1,4 +1,5 @@
 import { AccessContractError } from './access-contract.js';
+import type { ActivityObserverOptions } from './activity-observer.js';
 import { checkProgressionBase } from './base-guard.js';
 import { headSha } from './git.js';
 import {
@@ -113,6 +114,11 @@ export async function launchTask(
   machineSafetyCeilingSecondsOverride?: number,
   /** Contexto do routing; ausente usa o observer de produção diretamente. */
   poolCapacity?: PoolCapacityLaunchContext,
+  /**
+   * Encolhe janelas OBSERVACIONAIS de atividade — escape hatch de teste.
+   * Não concede autoridade de termination.
+   */
+  activityObserverOptions?: ActivityObserverOptions,
 ): Promise<LaunchStepResult> {
   const taskId = packet.task_id;
   const profile = await loadProfile(paths.repoRoot, profileId, {
@@ -153,6 +159,7 @@ export async function launchTask(
       ...(machineSafetyCeilingSecondsOverride === undefined
         ? {}
         : { machineSafetyCeilingSecondsOverride }),
+      ...(activityObserverOptions === undefined ? {} : { activityObserverOptions }),
       onStarted: async (identity) => {
         const state = await readState(paths);
         await writeState(
