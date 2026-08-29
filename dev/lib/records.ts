@@ -65,8 +65,12 @@ export function launchRecordPath(paths: HarnessPaths, taskId: string): string {
   return path.join(paths.logsDir, `${taskId}.launch.json`);
 }
 
-export function stallSuspectedEvidencePath(paths: HarnessPaths, taskId: string): string {
-  return path.join(paths.logsDir, `${taskId}.stall-suspected.json`);
+export function stallSuspectedEvidencePath(
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+): string {
+  return path.join(paths.logsDir, `${taskId}.attempt-${attempt}.stall-suspected.json`);
 }
 
 export function projectHistoryBindingPath(
@@ -479,28 +483,36 @@ export const writeLaunchRecord = (paths: HarnessPaths, record: LaunchRecordInput
 export const readStallSuspectedEvidence = (
   paths: HarnessPaths,
   taskId: string,
+  attempt: number,
 ): Promise<StallSuspectedEvidence | null> =>
-  readOptional(stallSuspectedEvidencePath(paths, taskId), (input) =>
+  readOptional(stallSuspectedEvidencePath(paths, taskId, attempt), (input) =>
     StallSuspectedEvidence.parse(input),
   );
 
 /**
- * Persistência observacional da primeira suspeita de stall. Write-once.
- * Falha de disco não pode virar FAIL do worker: o chamador trata o erro.
+ * Persistência observacional da suspeita de stall DESTE attempt. Write-once
+ * por (task, attempt): o attempt seguinte não pode herdar nem sobrescrever a
+ * evidência do anterior. Falha de disco não pode virar FAIL do worker.
  */
 export async function persistStallSuspectedEvidence(
   paths: HarnessPaths,
-  taskId: string,
-  activity: WorkerActivityTelemetry,
+  input: {
+    readonly taskId: string;
+    readonly attempt: number;
+    readonly launchId: string;
+    readonly activity: WorkerActivityTelemetry;
+  },
 ): Promise<void> {
   await writeJsonOnce(
-    stallSuspectedEvidencePath(paths, taskId),
+    stallSuspectedEvidencePath(paths, input.taskId, input.attempt),
     StallSuspectedEvidence.parse({
       schema_version: 1,
       kind: 'STALL_SUSPECTED',
-      task_id: taskId,
+      task_id: input.taskId,
+      attempt: input.attempt,
+      launch_id: input.launchId,
       recorded_at: new Date().toISOString(),
-      activity: { ...activity, provenance: [...activity.provenance] },
+      activity: { ...input.activity, provenance: [...input.activity.provenance] },
       effects: {
         kill: false,
         fail: false,

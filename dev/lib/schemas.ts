@@ -960,15 +960,18 @@ export const WorkerActivityTelemetry = z
 export type WorkerActivityTelemetry = z.infer<typeof WorkerActivityTelemetry>;
 
 /**
- * Evidência ao vivo de stall suspeito. Append-only, escrita na primeira
- * travessia do threshold. Nunca mata, nunca FAIL, nunca HUMAN_REQUIRED, nunca
- * consome attempt: esses efeitos são literais `false` neste contrato.
+ * Evidência ao vivo de stall suspeito. Write-once POR ATTEMPT: o artifact
+ * declara `attempt` e `launch_id` para que um stall antigo não seja lido
+ * como se pertencesse ao launch corrente. Nunca mata, nunca FAIL, nunca
+ * HUMAN_REQUIRED, nunca consome attempt: esses efeitos são literais `false`.
  */
 export const StallSuspectedEvidence = z
   .object({
     schema_version: z.literal(1),
     kind: z.literal('STALL_SUSPECTED'),
     task_id: identifier,
+    attempt: z.number().int().positive(),
+    launch_id: z.string().uuid(),
     recorded_at: z.string().datetime(),
     activity: WorkerActivityTelemetry,
     effects: z

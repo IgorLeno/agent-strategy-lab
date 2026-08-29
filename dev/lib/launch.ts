@@ -85,6 +85,12 @@ export interface LaunchInput {
   readonly profile: LauncherProfile;
   readonly packet: TaskPacket;
   /**
+   * Attempt corrente deste launch. A evidência de stall é write-once por
+   * attempt: sem este número, um stall do attempt 1 seria lido como se
+   * pertencesse ao attempt 2.
+   */
+  readonly attempt?: number;
+  /**
    * Encolhe o TETO DE SEGURANÇA DE MÁQUINA — usado só por testes, para que o
    * failsafe possa ser exercitado em segundos em vez de em horas. Não é budget
    * de task e não deriva de nada que o planner tenha estimado.
@@ -210,6 +216,7 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
   // Tag única por lançamento: filhos herdam o environment, então ela permite
   // reconhecer descendente que escapou do process group via setsid.
   const launchId = randomUUID();
+  const attempt = input.attempt ?? 1;
   const env: NodeJS.ProcessEnv = {
     ...buildEnvironment(profile, process.env, { sanitizedHome: io.homeDir }),
     // FRONTEIRA DO IMPLEMENTER, quando o scaffold é OpenCode. A permissão é do
@@ -337,7 +344,12 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
     startedAtMs,
     ...(input.activityObserverOptions ?? {}),
     onStallSuspected: (telemetry) => {
-      stallPersist = persistStallSuspectedEvidence(paths, packet.task_id, telemetry).catch(
+      stallPersist = persistStallSuspectedEvidence(paths, {
+        taskId: packet.task_id,
+        attempt,
+        launchId,
+        activity: telemetry,
+      }).catch(
         () => {
           // Persistência observacional: falha de disco não pode matar, falhar
           // a task, pedir humano nem consumir attempt. O LaunchRecord final

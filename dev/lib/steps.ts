@@ -152,6 +152,7 @@ export async function launchTask(
       paths,
       profile,
       packet,
+      attempt: before.attempts + 1,
       ...('before' in capacity && capacity.before !== undefined
         ? { poolCapacityBefore: capacity.before }
         : {}),

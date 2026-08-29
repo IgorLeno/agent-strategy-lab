@@ -5,7 +5,7 @@
  * deixou de encerrar qualquer coisa, e o que passou a encerrar é um failsafe de
  * infraestrutura que não conhece task nenhuma.
  */
-import { rm } from 'node:fs/promises';
+import { access, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -30,7 +30,7 @@ import { loadPlan, type LoadedPlan } from '../../dev/lib/plan.js';
 import { loadProfile, type LauncherProfile } from '../../dev/lib/profile.js';
 import { findSurvivors } from '../../dev/lib/process-audit.js';
 import { isSameProcessAlive } from '../../dev/lib/process-identity.js';
-import { readLaunchRecord, readStallSuspectedEvidence, writePacket } from '../../dev/lib/records.js';
+import { readLaunchRecord, readStallSuspectedEvidence, stallSuspectedEvidencePath, taskInboxDir, writePacket } from '../../dev/lib/records.js';
 import { LaunchRecord } from '../../dev/lib/schemas.js';
 import {
   ACTIVE_TERMINATION_CAUSES,
@@ -43,6 +43,7 @@ import {
   ensureRuntimeDirs,
   getTaskState,
   readState,
+  withTaskState,
   writeState,
 } from '../../dev/lib/state.js';
 import { launchTask } from '../../dev/lib/steps.js';
@@ -480,9 +481,11 @@ describe('launchWorker — observação ao vivo e failsafe (integração)', () =
       expect(result.outcome?.record.activity?.termination_authority).toBe('NONE_OBSERVATION_ONLY');
       expect(result.outcome?.record.activity?.stall_suspected_at).not.toBeNull();
 
-      const evidence = await readStallSuspectedEvidence(paths, 'T1');
+      const evidence = await readStallSuspectedEvidence(paths, 'T1', 1);
       expect(evidence).not.toBeNull();
       expect(evidence?.kind).toBe('STALL_SUSPECTED');
+      expect(evidence?.attempt).toBe(1);
+      expect(evidence?.launch_id).toBe(result.outcome?.record.launch_id);
       expect(evidence?.effects).toEqual({
         kill: false,
         fail: false,
@@ -493,6 +496,65 @@ describe('launchWorker — observação ao vivo e failsafe (integração)', () =
       const after = getTaskState(await readState(paths), 'T1');
       expect(after.status).not.toBe('FAIL');
       expect(after.attempts).toBe(before.attempts + 1);
+    } finally {
+      if (previousMode === undefined) delete process.env.AGENTLAB_FAKE_MODE;
+      else process.env.AGENTLAB_FAKE_MODE = previousMode;
+    }
+  }, 30_000);
+
+  it('dois attempts da mesma task preservam stall de cada um sem atribuição stale', async () => {
+    const firstPacket = await packetForT1();
+    const previousMode = process.env.AGENTLAB_FAKE_MODE;
+    process.env.AGENTLAB_FAKE_MODE = 'stall';
+    const observer = { idleThresholdMs: 100, stallSuspicionMs: 300, pollIntervalMs: 25 };
+
+    try {
+      const first = await launchTask(paths, firstPacket, 'fake-worker-v1', undefined, undefined, observer);
+      expect(first.classification).toBe('FINISHED');
+      expect(first.outcome?.record.activity?.stall_suspected_at).not.toBeNull();
+      const attempt1 = await readStallSuspectedEvidence(paths, 'T1', 1);
+      expect(attempt1?.attempt).toBe(1);
+      expect(attempt1?.launch_id).toBe(first.outcome?.record.launch_id);
+      expect(attempt1?.effects.human_required).toBe(false);
+
+      await rm(taskInboxDir(paths, 'T1'), { recursive: true, force: true });
+      const afterFirst = await readState(paths);
+      await writeState(
+        paths,
+        withTaskState(afterFirst, 'T1', {
+          status: 'READY',
+          phase: null,
+          process: null,
+          diagnostics: null,
+          finished_at: null,
+        }),
+      );
+
+      const secondPacket = await packetForT1();
+      const second = await launchTask(paths, secondPacket, 'fake-worker-v1', undefined, undefined, observer);
+      expect(second.classification).toBe('FINISHED');
+      expect(second.outcome?.record.activity?.stall_suspected_at).not.toBeNull();
+      const attempt2 = await readStallSuspectedEvidence(paths, 'T1', 2);
+      expect(attempt2?.attempt).toBe(2);
+      expect(attempt2?.launch_id).toBe(second.outcome?.record.launch_id);
+      expect(attempt2?.launch_id).not.toBe(attempt1?.launch_id);
+      expect(attempt2?.effects).toEqual({
+        kill: false,
+        fail: false,
+        human_required: false,
+        attempt_consumed: false,
+      });
+
+      const stillAttempt1 = await readStallSuspectedEvidence(paths, 'T1', 1);
+      expect(stillAttempt1?.launch_id).toBe(attempt1?.launch_id);
+      expect(stillAttempt1?.attempt).toBe(1);
+      expect(second.outcome?.record.launch_id).not.toBe(stillAttempt1?.launch_id);
+
+      await expect(access(path.join(paths.logsDir, 'T1.stall-suspected.json'))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      expect(stallSuspectedEvidencePath(paths, 'T1', 1)).toContain('T1.attempt-1.stall-suspected.json');
+      expect(stallSuspectedEvidencePath(paths, 'T1', 2)).toContain('T1.attempt-2.stall-suspected.json');
     } finally {
       if (previousMode === undefined) delete process.env.AGENTLAB_FAKE_MODE;
       else process.env.AGENTLAB_FAKE_MODE = previousMode;
