@@ -105,6 +105,7 @@ import {
 } from './pool-capacity-observer.js';
 import {
   isRetryableReviewerInvocationFailure,
+  isRetryableReviewerUnavailability,
   selectReviewerProfileForFreshCapacity,
 } from './reviewer-capacity.js';
 import {
@@ -2160,6 +2161,8 @@ export async function createProjectControlPlane(
         poolOf: quotaPoolOf,
         capacityByPool: freshCapacityByPool,
         excludedProfileIds,
+        implementerProfileId: record.profile_id,
+        diversityRequirement: requirement.diversity_requirement,
       });
       lastSelectionReason = selectedReviewer.reason;
       if (selectedReviewer.profileId === null) {
@@ -2233,7 +2236,7 @@ export async function createProjectControlPlane(
           }),
         );
       }
-      if (isRetryableReviewerInvocationFailure(verdict.code)) {
+      if (isRetryableReviewerUnavailability(verdict.code)) {
         excludedProfileIds.push(reviewerProfile.id);
         lastInvocationFailureReason = verdict.reason;
         continue;

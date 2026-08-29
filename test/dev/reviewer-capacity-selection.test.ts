@@ -106,6 +106,51 @@ describe('reviewer — pool EXHAUSTED do profile pinado não bloqueia outro auto
     expect(selected.profileId).toBeNull();
   });
 
+  it('diversity=required com pin igual ao implementer rerroteia mesmo com pool KNOWN', () => {
+    const selected = selectReviewerProfileForFreshCapacity({
+      pinnedProfileId: 'codex-sol',
+      implementerProfileId: 'codex-sol',
+      diversityRequirement: 'required',
+      policyProfiles: POLICY,
+      poolOf,
+      capacityByPool: new Map([
+        ['openai_chatgpt_subscription', capacity(CapacityStatus.KNOWN)],
+        ['anthropic_subscription', capacity(CapacityStatus.KNOWN)],
+      ]),
+    });
+    expect(selected.profileId).toBe('claude-opus');
+    expect(selected.rerouted).toBe(true);
+  });
+
+  it('diversity=required sem outro profile diverso não devolve o implementer', () => {
+    const selected = selectReviewerProfileForFreshCapacity({
+      pinnedProfileId: 'codex-sol',
+      implementerProfileId: 'codex-sol',
+      diversityRequirement: 'required',
+      policyProfiles: [{ id: 'codex-sol', capability_rank: 2 }],
+      poolOf,
+      capacityByPool: new Map([['openai_chatgpt_subscription', capacity(CapacityStatus.KNOWN)]]),
+    });
+    expect(selected.profileId).toBeNull();
+    expect(selected.rerouted).toBe(false);
+  });
+
+  it('diversity=preferred com pin igual ao implementer mantém o pin', () => {
+    const selected = selectReviewerProfileForFreshCapacity({
+      pinnedProfileId: 'codex-sol',
+      implementerProfileId: 'codex-sol',
+      diversityRequirement: 'preferred',
+      policyProfiles: POLICY,
+      poolOf,
+      capacityByPool: new Map([
+        ['openai_chatgpt_subscription', capacity(CapacityStatus.KNOWN)],
+        ['anthropic_subscription', capacity(CapacityStatus.KNOWN)],
+      ]),
+    });
+    expect(selected.profileId).toBe('codex-sol');
+    expect(selected.rerouted).toBe(false);
+  });
+
   it('dois OpenCode Go: INFRA no flash escolhe o pro, não o flash de novo', () => {
     const selected = selectReviewerProfileForFreshCapacity({
       pinnedProfileId: 'codex-sol',

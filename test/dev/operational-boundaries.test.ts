@@ -116,7 +116,7 @@ interface Fixture {
   readonly baseline: string;
 }
 
-function fakeProfileYaml(id: string): string {
+function fakeProfileYaml(id: string, reasoningEffort = 'medium'): string {
   return [
     `id: ${id}`,
     'agent: fake',
@@ -133,26 +133,31 @@ function fakeProfileYaml(id: string): string {
     'test_double_of:',
     '  agent: codex',
     '  model: gpt-5.6-sol',
-    '  reasoning_effort: medium',
+    `  reasoning_effort: ${reasoningEffort}`,
     '  sandbox: workspace-write',
   ].join('\n');
 }
 
 async function setup(
-  options: { gitignore?: string; extraProfileIds?: readonly string[] } = {},
+  options: {
+    gitignore?: string;
+    extraProfileIds?: readonly string[];
+    reasoningEffort?: string;
+  } = {},
 ): Promise<Fixture> {
   const sandbox = await makeSandboxRepo(PLAN);
   roots.push(sandbox.root);
   const paths = resolveHarnessPaths(sandbox.root);
+  const effort = options.reasoningEffort ?? 'medium';
   await writeFile(
     path.join(sandbox.root, 'dev', 'profiles', `${PROFILE}.yaml`),
-    fakeProfileYaml(PROFILE),
+    fakeProfileYaml(PROFILE, effort),
     'utf8',
   );
   for (const extraId of options.extraProfileIds ?? []) {
     await writeFile(
       path.join(sandbox.root, 'dev', 'profiles', `${extraId}.yaml`),
-      fakeProfileYaml(extraId),
+      fakeProfileYaml(extraId, effort),
       'utf8',
     );
   }
@@ -556,6 +561,78 @@ describe('fronteiras operacionais — Onda 1', () => {
 
     expect(result.stop.status, JSON.stringify(result.payload, null, 2)).toBe('ALL_DONE');
     expect(launchedReviewers).toEqual([PROFILE, PROFILE_ALT]);
+    expect(await readCandidateReview(fixture.paths, 'T1', 1)).toMatchObject({
+      decision: 'ACCEPT',
+      reviewer_profile_id: PROFILE_ALT,
+    });
+    expect((await readState(fixture.paths)).tasks[0]).toMatchObject({
+      status: 'PASS',
+      attempts: 1,
+    });
+  }, 90_000);
+
+  it('diversity=required com reviewer pinado no implementer não é decisão humana', async () => {
+    const fixture = await setup({ extraProfileIds: [PROFILE_ALT], reasoningEffort: 'high' });
+    const loaded = await loadPlan(fixture.paths.planFile);
+    const outside = await mkdtemp(path.join(os.tmpdir(), 'agentlab-review-diversity-'));
+    roots.push(outside);
+    const authorizationFile = path.join(outside, 'agentlab-run.yaml');
+    await writeFile(
+      authorizationFile,
+      AUTHORIZATION.replace('risk: low', 'risk: critical').replace(
+        `      rationale: degrau único declarado pela policy\n`,
+        [
+          '      rationale: degrau único declarado pela policy',
+          `    - id: ${PROFILE_ALT}`,
+          '      capability_rank: 2',
+          '      rationale: reviewer diverso quando o pin coincide com o implementer',
+          '',
+        ].join('\n'),
+      ),
+      'utf8',
+    );
+    const authorization = await loadProjectRunAuthorization(authorizationFile);
+    const launchedReviewers: string[] = [];
+    const controlPlane = await createProjectControlPlane({
+      paths: fixture.paths,
+      loaded,
+      authorization: authorization.file,
+      authorizationFile: authorization.source_file,
+      historyLabRoot: outside,
+      reviewerPort: {
+        async run(input) {
+          launchedReviewers.push(input.profile.id);
+          return JSON.stringify({
+            decision: 'ACCEPT',
+            reason: 'reviewer diverso da policy concluiu a review independente',
+            coverage: {
+              files: ['src/t1.txt'],
+              validations: [['test', '-f', 'src/t1.txt']],
+              behaviors: ['arquivo requerido existe'],
+              handoff_gaps: [],
+            },
+          });
+        },
+      },
+    });
+    const previousMode = process.env['AGENTLAB_FAKE_MODE'];
+    process.env['AGENTLAB_FAKE_MODE'] = 'orchestrator-success';
+    let result;
+    try {
+      result = await runOrchestrate({
+        paths: fixture.paths,
+        loaded,
+        profileId: PROFILE,
+        maxIterations: 1,
+        controlPlane,
+      });
+    } finally {
+      if (previousMode === undefined) delete process.env['AGENTLAB_FAKE_MODE'];
+      else process.env['AGENTLAB_FAKE_MODE'] = previousMode;
+    }
+
+    expect(result.stop.status, JSON.stringify(result.payload, null, 2)).toBe('ALL_DONE');
+    expect(launchedReviewers).toEqual([PROFILE_ALT]);
     expect(await readCandidateReview(fixture.paths, 'T1', 1)).toMatchObject({
       decision: 'ACCEPT',
       reviewer_profile_id: PROFILE_ALT,

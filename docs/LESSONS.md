@@ -5,7 +5,18 @@ Regra, não narrativa: cada entrada termina numa restrição aplicável.
 
 ---
 
-[2026-08-28] Context: resumeHumanInstruction ia direto para executeProject
+[2026-08-29] Context: mopac_minimum_workflow risk=critical, implementer Codex
+sol-high, review pinada no mesmo profile porque authorization.review estava
+vazio; Claude estava na policy e NÃO estava EXHAUSTED.
+Mistake: diversity=required só recusava o launch e virava HUMAN_REQUIRED,
+sem rerrotear para outro profile autorizado.
+Rule: reviewer pinado que coincide com o implementer sob diversity=required
+é inelegível como EXHAUSTED/INFRA; rerroteie dentro da policy. Não é
+decisão de produto.
+
+---
+
+
 depois de um NEW HUMAN_REQUIRED; o gate lexical só vivia em submitHumanInstruction.
 Mistake: tratar o gate da HumanInstruction como preflight só do modo NEW.
 Rule: NEW e RESUME reusam a MESMA avaliação (HumanInstruction persistida +
