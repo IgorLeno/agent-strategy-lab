@@ -1767,6 +1767,170 @@ describe('G — reviewer não ganha autorização mais fraca que o implementer',
     expect(result).toMatchObject({ outcome: 'ACCEPT', coverage: null });
   });
 
+  it('repete uma vez um ACCEPT sem reason, cita o campo ausente e aceita a correção completa', async () => {
+    const profile = await loadProfile(REPO_ROOT, CODEX_PROFILE_ID);
+    const prompts: string[] = [];
+    const outputs = [
+      { decision: 'ACCEPT', coverage: validCoverage },
+      {
+        decision: 'ACCEPT',
+        reason: 'candidate satisfaz os critérios de aceitação declarados',
+        coverage: validCoverage,
+      },
+    ];
+
+    const result = await launchProjectReviewer({
+      paths,
+      profile,
+      scope: authorizationScope(),
+      implementerProfileId: CLAUDE_PROFILE_ID,
+      diversityRequirement: 'required',
+      risk: 'low',
+      credential: { availability: true, provenance: 'probe local provou a assinatura' },
+      quota: { availability: null, provenance: 'quota não probada antes do launch' },
+      packet: reviewerPacket(),
+      port: {
+        run: async ({ prompt }) => {
+          prompts.push(prompt);
+          return codexStream(outputs[prompts.length - 1]);
+        },
+      },
+    });
+
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toMatch(/reason ausente/);
+    expect(result).toMatchObject({
+      outcome: 'ACCEPT',
+      reason: 'candidate satisfaz os critérios de aceitação declarados',
+      coverage: validCoverage,
+    });
+  });
+
+  it('ACCEPT sem reason nas duas invocations termina em REVIEW_VERDICT_NOT_PARSEABLE sem inventar reason', async () => {
+    const profile = await loadProfile(REPO_ROOT, CODEX_PROFILE_ID);
+    let invocations = 0;
+    const result = await launchProjectReviewer({
+      paths,
+      profile,
+      scope: authorizationScope(),
+      implementerProfileId: CLAUDE_PROFILE_ID,
+      diversityRequirement: 'required',
+      risk: 'low',
+      credential: { availability: true, provenance: 'probe local provou a assinatura' },
+      quota: { availability: null, provenance: 'quota não probada antes do launch' },
+      packet: reviewerPacket(),
+      port: {
+        run: async () => {
+          invocations += 1;
+          return codexStream({ decision: 'ACCEPT', coverage: validCoverage });
+        },
+      },
+    });
+
+    expect(invocations).toBe(2);
+    expect(result).toMatchObject({
+      outcome: 'REVIEW_UNAVAILABLE',
+      code: 'REVIEW_VERDICT_NOT_PARSEABLE',
+    });
+  });
+
+  it('REJECT sem reason recebe uma correção e a segunda válida ainda cumpre o contrato completo de REJECT', async () => {
+    const profile = await loadProfile(REPO_ROOT, CODEX_PROFILE_ID);
+    const prompts: string[] = [];
+    const outputs = [
+      { decision: 'REJECT', rejection_disposition: 'IMPLEMENTATION_DEFECT', coverage: validCoverage },
+      {
+        decision: 'REJECT',
+        rejection_disposition: 'IMPLEMENTATION_DEFECT',
+        reason: 'lacuna real contra o acceptance existente',
+        coverage: validCoverage,
+      },
+    ];
+
+    const result = await launchProjectReviewer({
+      paths,
+      profile,
+      scope: authorizationScope(),
+      implementerProfileId: CLAUDE_PROFILE_ID,
+      diversityRequirement: 'required',
+      risk: 'low',
+      credential: { availability: true, provenance: 'probe local provou a assinatura' },
+      quota: { availability: null, provenance: 'quota não probada antes do launch' },
+      packet: reviewerPacket(),
+      port: {
+        run: async ({ prompt }) => {
+          prompts.push(prompt);
+          return codexStream(outputs[prompts.length - 1]);
+        },
+      },
+    });
+
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toMatch(/reason ausente/);
+    expect(result).toMatchObject({
+      outcome: 'REJECT',
+      rejection_disposition: 'IMPLEMENTATION_DEFECT',
+      reason: 'lacuna real contra o acceptance existente',
+      coverage: validCoverage,
+    });
+  });
+
+  it('REJECT sem reason nas duas invocations termina em REVIEW_VERDICT_NOT_PARSEABLE após o bound', async () => {
+    const profile = await loadProfile(REPO_ROOT, CODEX_PROFILE_ID);
+    let invocations = 0;
+    const result = await launchProjectReviewer({
+      paths,
+      profile,
+      scope: authorizationScope(),
+      implementerProfileId: CLAUDE_PROFILE_ID,
+      diversityRequirement: 'required',
+      risk: 'low',
+      credential: { availability: true, provenance: 'probe local provou a assinatura' },
+      quota: { availability: null, provenance: 'quota não probada antes do launch' },
+      packet: reviewerPacket(),
+      port: {
+        run: async () => {
+          invocations += 1;
+          return codexStream({ decision: 'REJECT', rejection_disposition: 'INSUFFICIENT_EVIDENCE' });
+        },
+      },
+    });
+
+    expect(invocations).toBe(2);
+    expect(result).toMatchObject({
+      outcome: 'REVIEW_UNAVAILABLE',
+      code: 'REVIEW_VERDICT_NOT_PARSEABLE',
+    });
+  });
+
+  it('transport malformed mantém classificação própria e não ganha correção estrutural', async () => {
+    const profile = await loadProfile(REPO_ROOT, CODEX_PROFILE_ID);
+    let invocations = 0;
+    const result = await launchProjectReviewer({
+      paths,
+      profile,
+      scope: authorizationScope(),
+      implementerProfileId: CLAUDE_PROFILE_ID,
+      diversityRequirement: 'required',
+      risk: 'low',
+      credential: { availability: true, provenance: 'probe local provou a assinatura' },
+      quota: { availability: null, provenance: 'quota não probada antes do launch' },
+      packet: reviewerPacket(),
+      port: {
+        run: async () => {
+          invocations += 1;
+          return 'linha que não é JSON de transporte';
+        },
+      },
+    });
+
+    expect(invocations).toBe(1);
+    expect(result).toMatchObject({
+      outcome: 'REVIEW_UNAVAILABLE',
+      code: 'REVIEW_INVOCATION_FAILED',
+    });
+  });
+
   it('REJECT tipado como implementation defect é definitivo e não consome repetição', async () => {
     const profile = await loadProfile(REPO_ROOT, CODEX_PROFILE_ID);
     let invocations = 0;

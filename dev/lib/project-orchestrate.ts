@@ -1668,18 +1668,101 @@ export function buildReviewerPrompt(packet: ProjectReviewPacket): string {
   ].join('\n');
 }
 
-function buildReviewerCoverageCorrectionPrompt(
+function buildReviewerCorrectionPrompt(
   packet: ProjectReviewPacket,
-  issues: readonly string[],
+  corrections: readonly string[],
 ): string {
   return [
     buildReviewerPrompt(packet),
     '',
     'CORREÇÃO PROTOCOLAR — ÚNICA REPETIÇÃO PERMITIDA:',
-    `Seu ACCEPT anterior tinha coverage ausente ou malformada: ${issues.join('; ')}`,
+    ...corrections,
     'Não resuma nem remeta à resposta anterior. Responda novamente com o JSON',
-    'completo, incluindo todos os campos de coverage exigidos acima.',
+    'completo, incluindo todos os campos exigidos acima.',
   ].join('\n');
+}
+
+/**
+ * Avaliação ÚNICA de um verdict estruturalmente extraído: determina se ele
+ * vale como está, exige UMA correção bounded (cada sentença nomeia exatamente
+ * o campo ausente ou inválido) ou não é um verdict.
+ *
+ * Campos obrigatórios do verdict (decision, reason, rejection_disposition)
+ * são bloqueantes: sem eles não há veredito, e a segunda omissão é
+ * REVIEW_VERDICT_NOT_PARSEABLE — o adapter nunca sintetiza reason. Coverage
+ * ausente/malformada em ACCEPT é corrigível mas não bloqueia sozinha: quem a
+ * julga é o schema do `CandidateReviewRecord`, e null continua chegando lá.
+ */
+interface ReviewerVerdictAssessment {
+  readonly verdict: {
+    readonly decision: 'ACCEPT' | 'REJECT';
+    readonly reason: string;
+    readonly rejectionDisposition: ReviewRejectionDispositionType | null;
+    readonly coverage: CandidateReviewCoverage | null;
+  } | null;
+  readonly corrections: readonly string[];
+}
+
+function assessExtractedReviewerVerdict(parsed: unknown): ReviewerVerdictAssessment {
+  const value = parsed as {
+    decision?: unknown;
+    rejection_disposition?: unknown;
+    reason?: unknown;
+    coverage?: unknown;
+  } | null;
+  const decision = value?.decision;
+  const corrections: string[] = [];
+  if (decision !== 'ACCEPT' && decision !== 'REJECT') {
+    corrections.push(
+      'decision ausente ou inválida: responda exatamente "ACCEPT" ou "REJECT"',
+    );
+  }
+  const reason = typeof value?.reason === 'string' ? value.reason.trim() : '';
+  if (reason === '') {
+    corrections.push(
+      'reason ausente ou vazio: a fundamentação textual é obrigatória e não pode ser deduzida da coverage',
+    );
+  }
+  const rejectionDisposition = ReviewRejectionDisposition.safeParse(
+    value?.rejection_disposition,
+  );
+  if (decision === 'REJECT' && !rejectionDisposition.success) {
+    corrections.push(
+      'REJECT exige rejection_disposition estruturada reconhecida: ' +
+        'IMPLEMENTATION_DEFECT|REQUIREMENT_OR_SCOPE_DECISION|SAFETY_OR_AUTHORIZATION_DECISION|INSUFFICIENT_EVIDENCE',
+    );
+  }
+  if (decision === 'ACCEPT' && value?.rejection_disposition !== undefined) {
+    corrections.push('ACCEPT não pode declarar rejection_disposition');
+  }
+  const coverage = CandidateReviewCoverage.safeParse(value?.coverage);
+  if (decision === 'ACCEPT' && !coverage.success) {
+    corrections.push(
+      `Seu ACCEPT anterior tinha coverage ausente ou malformada: ${coverage.error.issues
+        .map((issue) => issue.message)
+        .join('; ')}`,
+    );
+  }
+
+  if (decision !== 'ACCEPT' && decision !== 'REJECT') {
+    return { verdict: null, corrections };
+  }
+  const blocking =
+    reason === '' ||
+    (decision === 'REJECT' && !rejectionDisposition.success) ||
+    (decision === 'ACCEPT' && value?.rejection_disposition !== undefined);
+  if (blocking) {
+    return { verdict: null, corrections };
+  }
+  return {
+    verdict: {
+      decision,
+      reason,
+      rejectionDisposition: decision === 'REJECT' ? rejectionDisposition.data! : null,
+      coverage: coverage.success ? coverage.data : null,
+    },
+    corrections,
+  };
 }
 
 export interface ProjectReviewerLaunchOptions {
@@ -1759,9 +1842,12 @@ function reviewUnavailable(
 /**
  * Invocação NOVA, contexto fresco, read-only estrutural e uma única decisão
  * JSON. Reusa exatamente os mesmos guards do adapter de planning: escopo,
- * billing, quota, credencial, risco e execution policy. Um ACCEPT com coverage
- * ausente ou malformada recebe uma única repetição corretiva em contexto novo;
- * a segunda omissão continua sem evidência e nunca vira um ACCEPT presumido.
+ * billing, quota, credencial, risco e execution policy. Um verdict
+ * estruturalmente extraído com campos obrigatórios ausentes ou inválidos —
+ * inclusive `reason` — recebe uma única repetição corretiva em contexto novo,
+ * com o prompt citando exatamente os campos faltantes; a segunda omissão é
+ * REVIEW_VERDICT_NOT_PARSEABLE e nunca vira um veredito presumido. Falha de
+ * transporte/provider mantém classificação própria e não ganha correção.
  */
 export async function launchProjectReviewer(
   options: ProjectReviewerLaunchOptions,
@@ -1897,69 +1983,39 @@ export async function launchProjectReviewer(
         return _exhaustive;
       }
     }
-    const parsed = extracted.value as
-      | {
-          decision?: unknown;
-          rejection_disposition?: unknown;
-          reason?: unknown;
-          coverage?: unknown;
-        }
-      | null;
-    const decision = parsed?.decision;
-    const rejectionDisposition = ReviewRejectionDisposition.safeParse(
-      parsed?.rejection_disposition,
-    );
-    const reason = parsed?.reason;
-    if ((decision !== 'ACCEPT' && decision !== 'REJECT') || typeof reason !== 'string' || reason.trim() === '') {
-      return reviewUnavailable(
-        'REVIEW_VERDICT_NOT_PARSEABLE',
-        'saída do reviewer não contém um único JSON {"decision":"ACCEPT|REJECT","reason":"..."}',
-        invocationEvidence('STRUCTURAL'),
-      );
-    }
-    if (decision === 'REJECT' && !rejectionDisposition.success) {
-      return reviewUnavailable(
-        'REVIEW_VERDICT_NOT_PARSEABLE',
-        'REJECT exige rejection_disposition estruturada reconhecida',
-        invocationEvidence('STRUCTURAL'),
-      );
-    }
-    if (decision === 'ACCEPT' && parsed?.rejection_disposition !== undefined) {
-      return reviewUnavailable(
-        'REVIEW_VERDICT_NOT_PARSEABLE',
-        'ACCEPT não pode declarar rejection_disposition',
-        invocationEvidence('STRUCTURAL'),
-      );
-    }
-
-    const coverage = CandidateReviewCoverage.safeParse(parsed?.coverage);
-    if (decision === 'ACCEPT' && !coverage.success && invocation === 1) {
-      prompt = buildReviewerCoverageCorrectionPrompt(
-        options.packet,
-        coverage.error.issues.map((issue) => issue.message),
-      );
+    const assessment = assessExtractedReviewerVerdict(extracted.value);
+    if (assessment.corrections.length > 0 && invocation === 1) {
+      prompt = buildReviewerCorrectionPrompt(options.packet, assessment.corrections);
       continue;
     }
+    if (assessment.verdict === null) {
+      return reviewUnavailable(
+        'REVIEW_VERDICT_NOT_PARSEABLE',
+        `saída do reviewer não satisfaz o contrato do veredito: ${assessment.corrections.join('; ')}`,
+        invocationEvidence('STRUCTURAL'),
+      );
+    }
+    const verdict = assessment.verdict;
     const commonVerdict = {
-      reason: reason.trim(),
+      reason: verdict.reason,
       // Evidência malformada não é completada pelo adapter. Depois da única
       // repetição, null continua chegando ao schema append-only e falha fechado.
-      coverage: coverage.success ? coverage.data : null,
+      coverage: verdict.coverage,
       policy: plan.policy,
       argv,
       workspace_access: overlay.workspace_access,
       read_only_mechanism: overlay.mechanism,
     };
-    return decision === 'REJECT'
+    return verdict.decision === 'REJECT'
       ? {
           ...commonVerdict,
           outcome: 'REJECT',
-          rejection_disposition: rejectionDisposition.data!,
+          rejection_disposition: verdict.rejectionDisposition!,
         }
       : { ...commonVerdict, outcome: 'ACCEPT', rejection_disposition: null };
   }
 
-  throw new Error('unreachable: reviewer coverage correction exceeded its bound');
+  throw new Error('unreachable: reviewer correction exceeded its bound');
 }
 
 // ---------------------------------------------------------------------------
