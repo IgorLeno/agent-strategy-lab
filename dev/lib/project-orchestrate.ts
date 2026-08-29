@@ -111,6 +111,7 @@ import {
   usesClaudeStreamJson,
 } from './claude-stream.js';
 import { codexUsesEventStream, decodeCodexEventStream } from './codex-transport.js';
+import { decodeOpenCodeRunStream, openCodeUsesRunStream } from './opencode-scaffold.js';
 import { buildTimeoutArgv } from './exec.js';
 import { planningDiversityProviderOf } from './pool-capacity-observer.js';
 import { evidenceOf, type LaunchFact, type LaunchFactEvidence } from './project-preflight.js';
@@ -1521,6 +1522,8 @@ function extractFromModelText(text: string, provider: string): RoleModelJsonExtr
  *   carrega os mesmos campos do envelope único (dev/lib/claude-stream.ts).
  * - Codex `--json` — JSONL de eventos; só o texto da `agent_message` é payload
  *   (dev/lib/codex-transport.ts, contrato real da CLI instalada).
+ * - OpenCode `run --format json` — JSONL de eventos; só o texto do último
+ *   evento `text` é payload (dev/lib/opencode-scaffold.ts).
  * - fallback (fake e formatos não estruturados) — stdout inteiro é o texto do
  *   modelo.
  */
@@ -1585,6 +1588,22 @@ export function extractRoleModelJson(input: {
       case 'TURN_FAILED':
         return { outcome: 'PROVIDER_TERMINAL_FAILURE', message: decoded.message };
       case 'NO_AGENT_MESSAGE':
+        return { outcome: 'NOT_PARSEABLE', message: decoded.message };
+      case 'TRANSPORT_MALFORMED':
+        return { outcome: 'TRANSPORT_MALFORMED', message: decoded.message };
+      default: {
+        const _exhaustive: never = decoded;
+        return _exhaustive;
+      }
+    }
+  }
+
+  if (input.agent === 'opencode' && openCodeUsesRunStream(input.argv)) {
+    const decoded = decodeOpenCodeRunStream(input.stdout);
+    switch (decoded.outcome) {
+      case 'MODEL_TEXT':
+        return extractFromModelText(decoded.text, 'opencode');
+      case 'NO_MODEL_TEXT':
         return { outcome: 'NOT_PARSEABLE', message: decoded.message };
       case 'TRANSPORT_MALFORMED':
         return { outcome: 'TRANSPORT_MALFORMED', message: decoded.message };

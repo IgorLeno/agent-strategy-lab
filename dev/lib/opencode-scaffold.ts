@@ -282,6 +282,81 @@ export function declaredProviderAgrees(
       };
 }
 
+// ---------------------------------------------------------------------------
+// Decodificação do TRANSPORTE de `opencode run --format json`
+// ---------------------------------------------------------------------------
+
+/**
+ * `--format json` declarado no argv do perfil OpenCode: o run emite eventos
+ * JSONL em vez de texto plano.
+ */
+export function openCodeUsesRunStream(argv: readonly string[]): boolean {
+  const index = argv.indexOf('--format');
+  return index !== -1 && argv[index + 1] === 'json';
+}
+
+export type OpenCodeRunStreamDecoding =
+  | { readonly outcome: 'MODEL_TEXT'; readonly text: string }
+  | { readonly outcome: 'NO_MODEL_TEXT'; readonly message: string }
+  | { readonly outcome: 'TRANSPORT_MALFORMED'; readonly message: string };
+
+/**
+ * Decodifica o stream de eventos do `opencode run --format json` (contrato
+ * observado: `step_start`, `tool_use`, `text`, `step_finish`). Sem reparo:
+ * linha não-JSON, stream vazio ou evento sem `type` são TRANSPORT_MALFORMED —
+ * nunca uma tentativa de regex sobre o texto bruto. O payload do modelo é o
+ * TEXTO do último evento `text` não vazio: comentários intermediários entre
+ * chamadas de ferramenta não são o veredito, da mesma forma que só a última
+ * `agent_message` é payload no stream do Codex.
+ */
+export function decodeOpenCodeRunStream(stdout: string): OpenCodeRunStreamDecoding {
+  const lines = stdout
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+
+  if (lines.length === 0) {
+    return {
+      outcome: 'TRANSPORT_MALFORMED',
+      message: 'stdout vazio: `opencode run --format json` deveria emitir eventos JSONL',
+    };
+  }
+
+  let lastText: string | null = null;
+  for (const [index, line] of lines.entries()) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      return {
+        outcome: 'TRANSPORT_MALFORMED',
+        message: `linha ${index + 1} do stream JSONL não é JSON: ${line.slice(0, 120)}`,
+      };
+    }
+    const event = asRecord(parsed);
+    if (event === null || typeof event['type'] !== 'string') {
+      return {
+        outcome: 'TRANSPORT_MALFORMED',
+        message: `linha ${index + 1} do stream JSONL não é um evento com type: ${line.slice(0, 120)}`,
+      };
+    }
+    if (event['type'] === 'text') {
+      const part = asRecord(event['part']);
+      const text = part === null ? null : part['text'];
+      if (typeof text === 'string' && text.trim() !== '') {
+        lastText = text;
+      }
+    }
+  }
+
+  if (lastText === null) {
+    return {
+      outcome: 'NO_MODEL_TEXT',
+      message: 'run terminou sem nenhum evento text de modelo: o provider terminou sem payload',
+    };
+  }
+  return { outcome: 'MODEL_TEXT', text: lastText };
+}
 
 // ---------------------------------------------------------------------------
 // Telemetria por run, lida da saída MÁQUINA do `--format json`

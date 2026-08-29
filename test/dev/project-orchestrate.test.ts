@@ -1931,6 +1931,69 @@ describe('G — reviewer não ganha autorização mais fraca que o implementer',
     });
   });
 
+  it('reviewer OpenCode entrega o veredito no último texto do stream e o adapter o lê', async () => {
+    const loadedProfile = await loadProfile(
+      REPO_ROOT,
+      'opencode-go-deepseek-v4-flash-v1',
+    );
+    const fakeOpenCode = path.join(REPO_ROOT, 'fixtures', 'fake-clis', 'opencode');
+    const profile: LauncherProfile = {
+      ...loadedProfile,
+      argv: [fakeOpenCode, ...loadedProfile.argv.slice(1)],
+    };
+    const stdout = [
+      JSON.stringify({ type: 'step_start', sessionID: 'ses', part: { type: 'step-start' } }),
+      JSON.stringify({
+        type: 'text',
+        sessionID: 'ses',
+        part: { type: 'text', text: 'comentário intermediário durante o audit' },
+      }),
+      JSON.stringify({
+        type: 'step_finish',
+        sessionID: 'ses',
+        part: { type: 'step-finish', reason: 'tool-calls' },
+      }),
+      JSON.stringify({
+        type: 'text',
+        sessionID: 'ses',
+        part: {
+          type: 'text',
+          text: JSON.stringify({
+            decision: 'ACCEPT',
+            reason: 'candidate satisfaz o acceptance declarado',
+            coverage: validCoverage,
+          }),
+        },
+      }),
+      JSON.stringify({
+        type: 'step_finish',
+        sessionID: 'ses',
+        part: { type: 'step-finish', reason: 'stop' },
+      }),
+    ].join('\n');
+
+    const result = await launchProjectReviewer({
+      paths,
+      profile,
+      scope: authorizationScope(),
+      implementerProfileId: CODEX_PROFILE_ID,
+      diversityRequirement: 'required',
+      risk: 'low',
+      credential: { availability: true, provenance: 'probe local provou a assinatura' },
+      quota: { availability: null, provenance: 'quota não probada antes do launch' },
+      packet: reviewerPacket(),
+      port: {
+        run: async () => stdout,
+      },
+    });
+
+    expect(result).toMatchObject({
+      outcome: 'ACCEPT',
+      reason: 'candidate satisfaz o acceptance declarado',
+      coverage: validCoverage,
+    });
+  });
+
   it('REJECT tipado como implementation defect é definitivo e não consome repetição', async () => {
     const profile = await loadProfile(REPO_ROOT, CODEX_PROFILE_ID);
     let invocations = 0;

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { openCodeRunUsageOf } from '../../dev/lib/opencode-scaffold.js';
 import { observedWorkerTokens } from '../../dev/lib/worker-token-usage.js';
+import { extractRoleModelJson } from '../../dev/lib/project-orchestrate.js';
 
 /**
  * Forma REAL da saida de `opencode run --format json`, capturada no smoke test
@@ -79,5 +80,120 @@ describe('telemetria por run do OpenCode', () => {
 
   it('sem contagem reportada o resultado e null, nunca um total inventado', () => {
     expect(observedWorkerTokens({ agent: 'opencode', stdout: '' })).toBeNull();
+  });
+});
+
+/**
+ * `opencode run --format json` emite eventos JSONL; o payload do modelo é o
+ * TEXTO da mensagem final, não o stdout inteiro. A forma abaixo é a observada
+ * em review real (identificadores trocados por exemplos).
+ */
+describe('extractRoleModelJson — OpenCode run stream', () => {
+  const OPENCODE_ARGV = [
+    'opencode',
+    'run',
+    '--format',
+    'json',
+    '--model',
+    'opencode-go/deepseek-v4-flash',
+  ] as const;
+  const verdict = { decision: 'ACCEPT', reason: 'candidate satisfaz o acceptance' };
+
+  function runStream(finalText: string): string {
+    return [
+      JSON.stringify({ type: 'step_start', sessionID: 'ses_EXEMPLO', part: { type: 'step-start' } }),
+      JSON.stringify({
+        type: 'tool_use',
+        sessionID: 'ses_EXEMPLO',
+        part: { type: 'tool', tool: 'read', state: { status: 'completed' } },
+      }),
+      JSON.stringify({
+        type: 'text',
+        sessionID: 'ses_EXEMPLO',
+        part: { type: 'text', text: 'comentário intermediário durante o audit' },
+      }),
+      JSON.stringify({
+        type: 'step_finish',
+        sessionID: 'ses_EXEMPLO',
+        part: { type: 'step-finish', reason: 'tool-calls' },
+      }),
+      JSON.stringify({
+        type: 'text',
+        sessionID: 'ses_EXEMPLO',
+        part: { type: 'text', text: finalText },
+      }),
+      JSON.stringify({
+        type: 'step_finish',
+        sessionID: 'ses_EXEMPLO',
+        part: { type: 'step-finish', reason: 'stop' },
+      }),
+    ].join('\n');
+  }
+
+  it('TRANSPORT VALID + MODEL PAYLOAD VALID: extrai o JSON do último texto do modelo', () => {
+    const extracted = extractRoleModelJson({
+      agent: 'opencode',
+      argv: [...OPENCODE_ARGV],
+      stdout: runStream(JSON.stringify(verdict)),
+    });
+    expect(extracted).toEqual({ outcome: 'EXTRACTED', value: verdict });
+  });
+
+  it('TRANSPORT VALID + MODEL PAYLOAD INVALID: NOT_PARSEABLE, não transporte', () => {
+    const extracted = extractRoleModelJson({
+      agent: 'opencode',
+      argv: [...OPENCODE_ARGV],
+      stdout: runStream('desculpe, não consigo gerar o veredito'),
+    });
+    expect(extracted.outcome).toBe('NOT_PARSEABLE');
+  });
+
+  it('TRANSPORT MALFORMED é diagnóstico distinto de payload inválido', () => {
+    const extracted = extractRoleModelJson({
+      agent: 'opencode',
+      argv: [...OPENCODE_ARGV],
+      stdout: 'not a jsonl stream at all',
+    });
+    expect(extracted.outcome).toBe('TRANSPORT_MALFORMED');
+  });
+
+  it('stdout vazio é transporte malformado', () => {
+    const extracted = extractRoleModelJson({
+      agent: 'opencode',
+      argv: [...OPENCODE_ARGV],
+      stdout: '',
+    });
+    expect(extracted.outcome).toBe('TRANSPORT_MALFORMED');
+  });
+
+  it('run sem nenhum texto de modelo é NOT_PARSEABLE, não EXTRACTED', () => {
+    const stdout = [
+      JSON.stringify({ type: 'step_start', sessionID: 'ses_EXEMPLO', part: { type: 'step-start' } }),
+      JSON.stringify({
+        type: 'tool_use',
+        sessionID: 'ses_EXEMPLO',
+        part: { type: 'tool', tool: 'read', state: { status: 'completed' } },
+      }),
+      JSON.stringify({
+        type: 'step_finish',
+        sessionID: 'ses_EXEMPLO',
+        part: { type: 'step-finish', reason: 'stop' },
+      }),
+    ].join('\n');
+    const extracted = extractRoleModelJson({
+      agent: 'opencode',
+      argv: [...OPENCODE_ARGV],
+      stdout,
+    });
+    expect(extracted.outcome).toBe('NOT_PARSEABLE');
+  });
+
+  it('OpenCode SEM --format json continua no fallback de payload textual direto', () => {
+    const extracted = extractRoleModelJson({
+      agent: 'opencode',
+      argv: ['opencode', 'run', '--model', 'opencode-go/deepseek-v4-flash'],
+      stdout: JSON.stringify(verdict),
+    });
+    expect(extracted).toEqual({ outcome: 'EXTRACTED', value: verdict });
   });
 });
