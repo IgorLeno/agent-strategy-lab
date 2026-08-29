@@ -44,6 +44,18 @@ export const MAX_DELIBERATION_TURNS_CEILING = 10;
 export const DeliberationDiversity = z.enum(['none', 'cross_provider_preferred']);
 export type DeliberationDiversity = z.infer<typeof DeliberationDiversity>;
 
+/** INFRA/quota tipados. HUMAN_REQUIRED e billing NÃO entram. */
+const RETRYABLE_DELIBERATION_FAILURE_CODES = new Set([
+  'PROVIDER_INVOCATION_FAILED',
+  'PROVIDER_TERMINAL_FAILURE',
+  'TRANSPORT_MALFORMED',
+  'DELIBERATION_QUOTA_EXHAUSTED',
+]);
+
+function isRetryableDeliberationFailure(code: string): boolean {
+  return RETRYABLE_DELIBERATION_FAILURE_CODES.has(code);
+}
+
 export const DeliberationDecision = z.enum(['ACCEPT', 'REVISE']);
 export type DeliberationDecision = z.infer<typeof DeliberationDecision>;
 
@@ -125,7 +137,7 @@ export type PlanDeliberationInvocationResult =
       readonly failure: {
         readonly code: string;
         readonly message: string;
-        /** INFRA/quota: tenta o próximo elegível. Ausente = não retryable. */
+        /** INFRA/quota tipados: tenta o próximo. HUMAN_REQUIRED/billing não. */
         readonly retryable?: boolean;
       };
     };
@@ -472,7 +484,8 @@ export async function deliberatePlan(input: DeliberatePlanInput): Promise<Delibe
     if (result.outcome === 'INVOCATION_FAILED') {
       // Deliberador indisponível NÃO invalida o plano corrente: ele é uma
       // etapa de refinamento opcional, e a versão canônica já passou pelos
-      // gates. INFRA/quota retryable tenta o próximo candidato; o resto para.
+      // gates. INFRA/quota tipados tentam o próximo candidato; HUMAN_REQUIRED
+      // e billing param.
       turns.push(
         DeliberationTurnRecord.parse({
           ...base,
@@ -487,7 +500,7 @@ export async function deliberatePlan(input: DeliberatePlanInput): Promise<Delibe
           invocation_failure: `${result.failure.code}: ${result.failure.message}`,
         }),
       );
-      if (result.failure.retryable === true && index < selection.sequence.length - 1) {
+      if (isRetryableDeliberationFailure(result.failure.code) && index < selection.sequence.length - 1) {
         continue;
       }
       stopReason = `deliberação encerrada no turno ${turn}: ${result.failure.code}; a versão canônica anterior segue como plano de execução`;

@@ -1,13 +1,18 @@
 import { describe, expect, it } from 'vitest';
 
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
+
 import {
   PLANNING_COLD_START_TOP_TIER_PROFILE_IDS,
   comparePlanningPreference,
   createPlanningFailoverPort,
+  rankPlanningCandidates,
   selectPlanningProfile,
   type PlanningPolicyContext,
   type PlanningProfileSnapshot,
 } from '../../dev/lib/planning-selection.js';
+import { REPO_ROOT } from './helpers.js';
 import type { PlanningWorkerInvocation } from '../../src/planner/draft.js';
 
 const OPUS = PLANNING_COLD_START_TOP_TIER_PROFILE_IDS[0];
@@ -240,18 +245,53 @@ describe('seleção de planner — política de PLANNING', () => {
     expect(selection.profile_id).toBe(PRO);
   });
 
-  it('história comparável de planning supera o cold-start', () => {
-    const selection = selectPlanningProfile({
-      snapshots: [opus, sol],
-      policy: POLICY,
-      history: [
-        { profile_id: OPUS, comparable_n: 3, quality: 0.4 },
-        { profile_id: SOL, comparable_n: 3, quality: 0.9 },
-      ],
+  it('role capability UNKNOWN não afirma planner-compatible; quota UNKNOWN não bloqueia', () => {
+    const unknownRole = snapshot({
+      id: PRO,
+      planner_compatible: null,
+      quota_available: true,
     });
-    expect(selection.outcome).toBe('SELECTED');
-    if (selection.outcome !== 'SELECTED') return;
-    expect(selection.profile_id).toBe(SOL);
+    const unknownQuota = snapshot({
+      ...opus,
+      quota_available: null,
+    });
+    const unknownRoleSelection = selectPlanningProfile({
+      snapshots: [unknownRole],
+      policy: { ...POLICY, policy_profile_ids: [PRO], allowed_providers: ['opencode'] },
+    });
+    expect(unknownRoleSelection.outcome).toBe('NONE_ELIGIBLE');
+    if (unknownRoleSelection.outcome !== 'NONE_ELIGIBLE') return;
+    expect(unknownRoleSelection.reason).toMatch(/planner-compatible|UNKNOWN|não foi provad/i);
+
+    const unknownQuotaSelection = selectPlanningProfile({
+      snapshots: [unknownQuota, { ...sol, quota_available: false }],
+      policy: POLICY,
+    });
+    expect(unknownQuotaSelection.outcome).toBe('SELECTED');
+    if (unknownQuotaSelection.outcome !== 'SELECTED') return;
+    expect(unknownQuotaSelection.profile_id).toBe(OPUS);
+  });
+
+  it('role capability FALSE é inelegível mesmo com quota UNKNOWN', () => {
+    const selection = selectPlanningProfile({
+      snapshots: [
+        snapshot({ id: PRO, planner_compatible: false, quota_available: null }),
+      ],
+      policy: { ...POLICY, policy_profile_ids: [PRO], allowed_providers: ['opencode'] },
+    });
+    expect(selection.outcome).toBe('NONE_ELIGIBLE');
+  });
+
+  it('ranking de planning é ordem total transitiva entre pelo menos três profiles', () => {
+    const ranked = rankPlanningCandidates([flash, pro, sol, opus]);
+    const again = rankPlanningCandidates([...ranked].reverse());
+    expect(ranked.map((entry) => entry.id)).toEqual(again.map((entry) => entry.id));
+    expect(ranked.map((entry) => entry.id)).toEqual([OPUS, SOL, PRO, FLASH]);
+    for (let i = 0; i < ranked.length; i += 1) {
+      for (let j = i + 1; j < ranked.length; j += 1) {
+        expect(comparePlanningPreference(ranked[i] as PlanningProfileSnapshot, ranked[j] as PlanningProfileSnapshot)).toBeLessThan(0);
+      }
+    }
   });
 });
 
@@ -309,5 +349,128 @@ describe('failover de invocação do planner', () => {
     expect(result.outcome).toBe('INVOCATION_FAILED');
     if (result.outcome !== 'INVOCATION_FAILED') return;
     expect(result.failure.code).toBe('DRAFT_NOT_PARSEABLE');
+  });
+
+  it('PLANNING_LAUNCH_HUMAN_REQUIRED não chama o próximo planner elegível', async () => {
+    const seen: string[] = [];
+    const port = createPlanningFailoverPort({
+      ranked_profile_ids: [OPUS, SOL],
+      invokeWith: async (profileId) => {
+        seen.push(profileId);
+        if (profileId === OPUS) {
+          return {
+            outcome: 'INVOCATION_FAILED',
+            invocation_id: profileId,
+            provider_id: 'claude',
+            model: profileId,
+            failure: {
+              code: 'PLANNING_LAUNCH_HUMAN_REQUIRED',
+              message: 'credencial não provada',
+              retryable: false,
+            },
+          };
+        }
+        return draftFrom(profileId);
+      },
+    });
+    const result = await port.invoke(invocation);
+    expect(seen).toEqual([OPUS]);
+    expect(result.outcome).toBe('INVOCATION_FAILED');
+    if (result.outcome !== 'INVOCATION_FAILED') return;
+    expect(result.failure.code).toBe('PLANNING_LAUNCH_HUMAN_REQUIRED');
+  });
+
+  it('BILLING_PREFLIGHT_REFUSED não atravessa autorização por fallback', async () => {
+    const seen: string[] = [];
+    const port = createPlanningFailoverPort({
+      ranked_profile_ids: [OPUS, SOL],
+      invokeWith: async (profileId) => {
+        seen.push(profileId);
+        if (profileId === OPUS) {
+          return {
+            outcome: 'INVOCATION_FAILED',
+            invocation_id: profileId,
+            provider_id: 'claude',
+            model: profileId,
+            failure: {
+              code: 'BILLING_PREFLIGHT_REFUSED',
+              message: 'api key detectada',
+              retryable: false,
+            },
+          };
+        }
+        return draftFrom(profileId);
+      },
+    });
+    const result = await port.invoke(invocation);
+    expect(seen).toEqual([OPUS]);
+    expect(result.outcome).toBe('INVOCATION_FAILED');
+    if (result.outcome !== 'INVOCATION_FAILED') return;
+    expect(result.failure.code).toBe('BILLING_PREFLIGHT_REFUSED');
+  });
+
+  it('quota EXHAUSTED tipada tenta o próximo profile elegível', async () => {
+    const seen: string[] = [];
+    const port = createPlanningFailoverPort({
+      ranked_profile_ids: [OPUS, SOL],
+      invokeWith: async (profileId) => {
+        seen.push(profileId);
+        if (profileId === OPUS) {
+          return {
+            outcome: 'INVOCATION_FAILED',
+            invocation_id: profileId,
+            provider_id: 'claude',
+            model: profileId,
+            failure: {
+              code: 'PLANNING_QUOTA_EXHAUSTED',
+              message: 'pool anthropic_subscription EXHAUSTED',
+              retryable: true,
+            },
+          };
+        }
+        return draftFrom(profileId);
+      },
+    });
+    const result = await port.invoke(invocation);
+    expect(seen).toEqual([OPUS, SOL]);
+    expect(result.outcome).toBe('DRAFT_RETURNED');
+  });
+
+  it('HUMAN_REQUIRED marcado retryable ainda não faz failover — o código é a autoridade', async () => {
+    const seen: string[] = [];
+    const port = createPlanningFailoverPort({
+      ranked_profile_ids: [OPUS, SOL],
+      invokeWith: async (profileId) => {
+        seen.push(profileId);
+        return {
+          outcome: 'INVOCATION_FAILED',
+          invocation_id: profileId,
+          provider_id: 'claude',
+          model: profileId,
+          failure: {
+            code: 'PLANNING_LAUNCH_HUMAN_REQUIRED',
+            message: 'gate humano',
+            retryable: true,
+          },
+        };
+      },
+    });
+    const result = await port.invoke(invocation);
+    expect(seen).toEqual([OPUS]);
+    expect(result.outcome).toBe('INVOCATION_FAILED');
+  });
+});
+
+describe('história de planning em produção', () => {
+  it('runProject não liga PlanningHistoryObservation ao selector', async () => {
+    const source = await readFile(path.join(REPO_ROOT, 'dev/lib/run-project.ts'), 'utf8');
+    expect(source).not.toContain('PlanningHistoryObservation');
+    expect(source).not.toMatch(/\bhistory\s*:/);
+  });
+
+  it('deliberadores publicam upstream de providerFactsOf, não scaffold agent', async () => {
+    const source = await readFile(path.join(REPO_ROOT, 'dev/lib/run-project.ts'), 'utf8');
+    expect(source).toContain('providerFactsOf');
+    expect(source).not.toMatch(/assignments\.push\(\{[\s\S]*provider:\s*capability\.agent/m);
   });
 });

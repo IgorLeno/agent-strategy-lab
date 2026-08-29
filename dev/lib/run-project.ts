@@ -24,6 +24,7 @@ import {
 import { collectCurrentLaunchFacts } from './project-preflight.js';
 import {
   createProductionPoolCapacityProbe,
+  planningDiversityProviderOf,
   quotaPoolOfProfile,
   type PoolCapacityProbe,
 } from './pool-capacity-observer.js';
@@ -55,7 +56,7 @@ import {
   type PlanDeliberationArtifact,
 } from '../../src/planner/deliberation.js';
 import { capabilityInputOf } from './project-run.js';
-import { capabilityOf } from '../../src/routing/index.js';
+import { capabilityOf, providerFactsOf } from '../../src/routing/index.js';
 
 export interface EnsureGeneratedProjectPlanInput {
   readonly paths: HarnessPaths;
@@ -65,7 +66,7 @@ export interface EnsureGeneratedProjectPlanInput {
   readonly planningWorker: () => Promise<PlanningWorkerPort>;
   readonly onProgress?: LabProgressListener;
   /** Só para evidência de falha: qual profile o planner usaria. */
-  readonly plannerProfileId?: string;
+  readonly plannerProfileId?: string | undefined;
   /** Lazy como o planner: `max_turns: 0` não constrói porta nem chama provider. */
   readonly deliberation?: () => Promise<ReviewedPathDeliberation>;
 }
@@ -74,6 +75,11 @@ export interface EnsuredGeneratedProjectPlan {
   readonly origin: 'GENERATED' | 'REUSED';
   readonly planFile: string;
   readonly taskCount: number;
+  /**
+   * Planner que de fato originou o PlanFile. No REUSED vem do
+   * `generated_from` persistido — nunca da seleção atual.
+   */
+  readonly planner_profile_id: string | null;
   /** `null` quando a deliberação não foi pedida ou o plano foi reusado. */
   readonly deliberation: PlanDeliberationArtifact | null;
   readonly deliberationArtifactFile: string | null;
@@ -140,6 +146,7 @@ export async function ensureGeneratedProjectPlan(
       origin: 'REUSED',
       planFile: input.paths.planFile,
       taskCount: loaded.plan.tasks.length,
+      planner_profile_id: loaded.plan.generated_from?.planner_profile_id ?? null,
       deliberation: null,
       deliberationArtifactFile: null,
     };
@@ -252,6 +259,7 @@ export async function ensureGeneratedProjectPlan(
     origin: 'GENERATED',
     planFile: input.paths.planFile,
     taskCount: projection.tasks.length,
+    planner_profile_id: projection.generated_from.planner_profile_id ?? null,
     deliberation: planned.deliberation,
     deliberationArtifactFile,
   };
@@ -289,7 +297,7 @@ function planningSnapshotOf(
     billing_mode: profile.billing_mode,
     capability_rank: capabilityRank,
     capability_tier: profile.capability_prior?.tier ?? null,
-    planner_compatible: capability.role_compatibility.planner.value !== false,
+    planner_compatible: capability.role_compatibility.planner.value,
     credential_available: facts.credential.availability,
     quota_available: facts.quota.availability,
   };
@@ -389,7 +397,7 @@ async function deliberatorAssignmentsOf(
     profiles.set(profile.id, profile);
     assignments.push({
       profile_id: profile.id,
-      provider: capability.agent,
+      provider: providerFactsOf(capability).provider,
       model: capability.model,
     });
   }
@@ -455,26 +463,8 @@ export async function runProject(input: ProjectRunInput): Promise<PlanRunResult>
     authorization.profile_policy.profiles.map((entry) => [entry.id, entry.capability_rank]),
   );
 
-  function cheapSnapshots(): PlanningProfileSnapshot[] {
-    const snapshots: PlanningProfileSnapshot[] = [];
-    for (const [id, profile] of roleProfiles) {
-      const rank = rankById.get(id);
-      if (rank === undefined) continue;
-      snapshots.push(
-        planningSnapshotOf(profile, rank, {
-          credential: { availability: true },
-          quota: { availability: null },
-        }),
-      );
-    }
-    return snapshots;
-  }
-
   const plannerRef = {
-    id: assertPlanningSelection(
-      plannerProfileIdOf(authorization, input.plannerProfileId, cheapSnapshots()),
-      authorization,
-    ).profile_id,
+    id: undefined as string | undefined,
     provider: undefined as string | undefined,
   };
 
@@ -562,16 +552,12 @@ export async function runProject(input: ProjectRunInput): Promise<PlanRunResult>
         authorization,
       );
       plannerRef.id = selection.profile_id;
-      const selectedProfile = roleProfiles.get(selection.profile_id);
-      if (selectedProfile !== undefined) plannerRef.provider = selectedProfile.agent;
       return createPlanningFailoverPort({
         ranked_profile_ids: selection.ranked_profile_ids,
         invokeWith: async (profileId, invocation) => {
           const profile = await loadPlannerProfile(input.paths, authorization, profileId);
           const facts = await roleLaunchFacts(profile, 'planner-homes');
           input.onProgress?.({ stage: 'PLANNER_RUNNING', detail: profile.id });
-          plannerRef.id = profile.id;
-          plannerRef.provider = profile.agent;
           const worker = createLaunchedPlanningWorker({
             paths: input.paths,
             profile,
@@ -582,7 +568,12 @@ export async function runProject(input: ProjectRunInput): Promise<PlanRunResult>
             quota: facts.quota,
             port: createProviderRoleInvocationPort(),
           });
-          return worker.invoke(invocation);
+          const result = await worker.invoke(invocation);
+          if (result.outcome === 'DRAFT_RETURNED') {
+            plannerRef.id = profile.id;
+            plannerRef.provider = planningDiversityProviderOf(profile);
+          }
+          return result;
         },
       });
     },
@@ -604,7 +595,9 @@ export async function runProject(input: ProjectRunInput): Promise<PlanRunResult>
       generated_plan: {
         origin: ensured.origin,
         file: ensured.planFile,
-        planner_profile_id: plannerRef.id,
+        ...(ensured.planner_profile_id === null && plannerRef.id === undefined
+          ? {}
+          : { planner_profile_id: ensured.planner_profile_id ?? plannerRef.id }),
         ...(ensured.deliberation === null
           ? {}
           : {

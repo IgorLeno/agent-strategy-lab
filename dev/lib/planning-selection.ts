@@ -15,7 +15,7 @@ import type {
 } from '../../src/planner/draft.js';
 import type { CapabilityTier } from '../../src/routing/index.js';
 
-/** Cold-start declarado. Histórico comparável de planning pode superá-lo. */
+/** Cold-start declarado. História comparável de planning é FUTURO, não política atual. */
 export const PLANNING_COLD_START_TOP_TIER_PROFILE_IDS = [
   'claude-build-worker-subscription-opus5-high-v3',
   'codex-build-worker-subscription-sol-high-v2',
@@ -24,21 +24,11 @@ export const PLANNING_COLD_START_TOP_TIER_PROFILE_IDS = [
 export type PlanningColdStartProfileId =
   (typeof PLANNING_COLD_START_TOP_TIER_PROFILE_IDS)[number];
 
-/** Sem amostra comparável dos dois lados, o prior de cold-start permanece. */
-export const MIN_COMPARABLE_PLANNING_SAMPLE = 3;
-
 const TIER_STRENGTH: Readonly<Record<CapabilityTier, number>> = {
   economy: 0,
   intermediate: 1,
   advanced: 2,
 };
-
-export interface PlanningHistoryObservation {
-  readonly profile_id: string;
-  readonly comparable_n: number;
-  /** Maior é melhor. Só comparado quando os dois lados têm amostra suficiente. */
-  readonly quality: number;
-}
 
 export interface PlanningProfileSnapshot {
   readonly id: string;
@@ -47,7 +37,11 @@ export interface PlanningProfileSnapshot {
   readonly billing_mode: string;
   readonly capability_rank: number;
   readonly capability_tier: CapabilityTier | null;
-  readonly planner_compatible: boolean;
+  /**
+   * `true` provado, `false` provado incompatível, `null` UNKNOWN.
+   * UNKNOWN não afirma capacidade de planning.
+   */
+  readonly planner_compatible: boolean | null;
   /** `true` provado, `false` recusado, `null` UNKNOWN — UNKNOWN bloqueia. */
   readonly credential_available: boolean | null;
   /** `true` disponível, `false` EXHAUSTED, `null` UNKNOWN — UNKNOWN NÃO bloqueia. */
@@ -103,7 +97,9 @@ export function planningIneligibilityReason(
     return `billing_mode ${snapshot.billing_mode} fora da autorização da run`;
   }
   if (snapshot.planner_compatible !== true) {
-    return `profile ${snapshot.id} não é planner-compatible`;
+    return snapshot.planner_compatible === false
+      ? `profile ${snapshot.id} não é planner-compatible`
+      : `planner compatibility de ${snapshot.id} UNKNOWN: não afirmar capacidade que não foi provada`;
   }
   if (snapshot.credential_available !== true) {
     return snapshot.credential_available === false
@@ -123,42 +119,22 @@ export function isPlanningEligible(
   return planningIneligibilityReason(snapshot, policy) === null;
 }
 
-function historyOf(
-  observations: readonly PlanningHistoryObservation[],
-  profileId: string,
-): PlanningHistoryObservation | null {
-  return observations.find((entry) => entry.profile_id === profileId) ?? null;
-}
-
 /**
- * Ordem de PLANNING: menor retorno = mais preferido.
+ * Ordem de PLANNING: menor retorno = mais preferido. Ordem total:
  *
- * 1. história comparável (ambos com amostra suficiente);
- * 2. cold-start top-tier (Opus, depois Sol);
- * 3. capability_tier (advanced > intermediate > economy) — prior, não verdade;
- * 4. capability_rank da policy, DESC (degrau mais capaz primeiro);
- * 5. profile_id, determinístico e auditável.
+ * 1. cold-start top-tier (Opus, depois Sol);
+ * 2. capability_tier (advanced > intermediate > economy) — prior, não verdade;
+ * 3. capability_rank da policy, DESC (degrau mais capaz primeiro);
+ * 4. profile_id, determinístico e auditável.
  *
- * GLM/Qwen/Kimi/MiniMax/DeepSeek Pro não recebem ordem inventada entre si:
- * empatam no prior de tier e desempata o rank da policy + id.
+ * História comparável de planning é FUTURO: não governa produção até existir
+ * evidência canônica. GLM/Qwen/Kimi/MiniMax/DeepSeek Pro não recebem ordem
+ * inventada entre si.
  */
 export function comparePlanningPreference(
   left: PlanningProfileSnapshot,
   right: PlanningProfileSnapshot,
-  history: readonly PlanningHistoryObservation[] = [],
 ): number {
-  const leftHistory = historyOf(history, left.id);
-  const rightHistory = historyOf(history, right.id);
-  const leftComparable =
-    leftHistory !== null && leftHistory.comparable_n >= MIN_COMPARABLE_PLANNING_SAMPLE;
-  const rightComparable =
-    rightHistory !== null && rightHistory.comparable_n >= MIN_COMPARABLE_PLANNING_SAMPLE;
-  if (leftComparable && rightComparable && leftHistory !== null && rightHistory !== null) {
-    if (leftHistory.quality !== rightHistory.quality) {
-      return rightHistory.quality - leftHistory.quality;
-    }
-  }
-
   const leftCold = coldStartRank(left.id);
   const rightCold = coldStartRank(right.id);
   if (leftCold !== null || rightCold !== null) {
@@ -179,18 +155,15 @@ export function comparePlanningPreference(
 
 export function rankPlanningCandidates(
   candidates: readonly PlanningProfileSnapshot[],
-  history: readonly PlanningHistoryObservation[] = [],
 ): PlanningProfileSnapshot[] {
-  return [...candidates].sort((left, right) => comparePlanningPreference(left, right, history));
+  return [...candidates].sort((left, right) => comparePlanningPreference(left, right));
 }
 
 export function selectPlanningProfile(input: {
   readonly snapshots: readonly PlanningProfileSnapshot[];
   readonly policy: PlanningPolicyContext;
   readonly requested_profile_id?: string;
-  readonly history?: readonly PlanningHistoryObservation[];
 }): PlanningSelectionOutcome {
-  const history = input.history ?? [];
   const byId = new Map(input.snapshots.map((snapshot) => [snapshot.id, snapshot]));
 
   if (input.requested_profile_id !== undefined) {
@@ -234,7 +207,7 @@ export function selectPlanningProfile(input: {
     };
   }
 
-  const ranked = rankPlanningCandidates(eligible, history);
+  const ranked = rankPlanningCandidates(eligible);
   const first = ranked[0];
   if (first === undefined) {
     return { outcome: 'NONE_ELIGIBLE', reason: 'nenhum profile elegível para o planner.' };
@@ -271,11 +244,10 @@ function planningSelectionReason(
 
 const RETRYABLE_PLANNING_FAILURE_CODES = new Set([
   'PROVIDER_INVOCATION_FAILED',
-  'PLANNING_LAUNCH_HUMAN_REQUIRED',
-  'DELIBERATION_LAUNCH_HUMAN_REQUIRED',
-  'BILLING_PREFLIGHT_REFUSED',
-  'TRANSPORT_MALFORMED',
   'PROVIDER_TERMINAL_FAILURE',
+  'TRANSPORT_MALFORMED',
+  'PLANNING_QUOTA_EXHAUSTED',
+  'DELIBERATION_QUOTA_EXHAUSTED',
 ]);
 
 export function isRetryablePlanningInvocationFailure(code: string): boolean {
@@ -301,7 +273,7 @@ export function createPlanningFailoverPort(input: {
         const result = await input.invokeWith(profileId, invocation);
         last = result;
         if (result.outcome !== 'INVOCATION_FAILED') return result;
-        if (!result.failure.retryable && !isRetryablePlanningInvocationFailure(result.failure.code)) {
+        if (!isRetryablePlanningInvocationFailure(result.failure.code)) {
           return result;
         }
       }

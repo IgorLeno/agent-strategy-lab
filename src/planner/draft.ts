@@ -267,6 +267,10 @@ const InvocationIdentity = {
   invocation_id: boundedText(500),
   provider_id: boundedText(200),
   model: boundedText(500),
+  /** Profile que de fato produziu este resultado. Ausente em fixtures legados. */
+  profile_id: boundedText(200).optional(),
+  /** Upstream autoritativo (`providerFactsOf`), não scaffold. */
+  upstream_provider: boundedText(200).optional(),
 };
 
 export const PlanningWorkerInvocationResult = z.discriminatedUnion('outcome', [
@@ -299,6 +303,8 @@ export type PlanningWorkerInvocationResult =
       readonly invocation_id: string;
       readonly provider_id: string;
       readonly model: string;
+      readonly profile_id?: string;
+      readonly upstream_provider?: string;
       readonly draft: unknown;
     }
   | {
@@ -306,6 +312,8 @@ export type PlanningWorkerInvocationResult =
       readonly invocation_id: string;
       readonly provider_id: string;
       readonly model: string;
+      readonly profile_id?: string;
+      readonly upstream_provider?: string;
       readonly failure: {
         readonly code: string;
         readonly message: string;

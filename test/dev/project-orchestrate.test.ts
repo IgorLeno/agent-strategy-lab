@@ -49,6 +49,7 @@ import type {
 } from '../../src/planner/draft.js';
 import type { PlannedTask } from '../../src/planner/task.js';
 import type { FailureDiagnosis } from '../../src/routing/diagnosis.js';
+import { createPlanningFailoverPort, PLANNING_COLD_START_TOP_TIER_PROFILE_IDS } from '../../dev/lib/planning-selection.js';
 import { REPO_ROOT, runDevCli } from './helpers.js';
 
 const HEAD_SHA = 'a'.repeat(40);
@@ -1076,9 +1077,25 @@ describe('adapter real da PlanningWorkerPort', () => {
 
     expect(result.outcome).toBe('INVOCATION_FAILED');
     if (result.outcome !== 'INVOCATION_FAILED') return;
-    expect(result.failure.code).toBe('PLANNING_LAUNCH_HUMAN_REQUIRED');
+    expect(result.failure.code).toBe('PLANNING_QUOTA_EXHAUSTED');
     expect(result.failure.message).toContain('openai_chatgpt_subscription');
     expect(invoked).toBe(false);
+  });
+
+  it('esgotamento de quota é tipado PLANNING_QUOTA_EXHAUSTED, não HUMAN_REQUIRED genérico', async () => {
+    const port = await worker({
+      quota: {
+        availability: false,
+        provenance: 'pool openai_chatgpt_subscription declarado EXHAUSTED pelo provider',
+      },
+      providerEnabled: true,
+      dryRun: false,
+    });
+    const result = await port.invoke(invocation());
+    expect(result.outcome).toBe('INVOCATION_FAILED');
+    if (result.outcome !== 'INVOCATION_FAILED') return;
+    expect(result.failure.code).toBe('PLANNING_QUOTA_EXHAUSTED');
+    expect(result.failure.code).not.toBe('PLANNING_LAUNCH_HUMAN_REQUIRED');
   });
 
   /**
@@ -1233,6 +1250,127 @@ describe('caminho REVIEWED', () => {
     expect(result.outcome).toBe('REJECTED');
     if (result.outcome !== 'REJECTED') return;
     expect(result.issues.join(' ')).toContain('acceptance_contract');
+  });
+
+  it('deliberação usa o planner que devolveu DRAFT_RETURNED, não o selecionado que falhou', async () => {
+    const opus = PLANNING_COLD_START_TOP_TIER_PROFILE_IDS[0];
+    const sol = PLANNING_COLD_START_TOP_TIER_PROFILE_IDS[1];
+    const planning = createPlanningFailoverPort({
+      ranked_profile_ids: [opus, sol],
+      invokeWith: async (profileId) => {
+        if (profileId === opus) {
+          return {
+            outcome: 'INVOCATION_FAILED',
+            invocation_id: profileId,
+            provider_id: 'claude',
+            model: profileId,
+            profile_id: opus,
+            upstream_provider: 'anthropic',
+            failure: {
+              code: 'PROVIDER_INVOCATION_FAILED',
+              message: 'Unexpected server error',
+              retryable: true,
+            },
+          };
+        }
+        return {
+          outcome: 'DRAFT_RETURNED',
+          invocation_id: profileId,
+          provider_id: 'codex',
+          model: sol,
+          profile_id: sol,
+          upstream_provider: 'openai',
+          draft: { schema_version: 1, tasks: [plannedTask()] },
+        };
+      },
+    });
+    const result = await runReviewedPath({
+      intake: intake(),
+      inspection: inspection(),
+      authorizationScope: authorizationScope(),
+      planningWorker: planning,
+      deliberation: {
+        maxTurns: 2,
+        diversity: 'cross_provider_preferred',
+        plannerProvider: 'anthropic',
+        deliberators: [
+          { profile_id: opus, provider: 'anthropic', model: 'opus-5' },
+          { profile_id: sol, provider: 'openai', model: 'gpt-5.6-sol' },
+        ],
+        humanRequest: intake().user_request,
+        worker: {
+          async invoke() {
+            return {
+              outcome: 'VERDICT_RETURNED',
+              verdict: {
+                decision: 'ACCEPT',
+                material_objections: [],
+                material_changes: [],
+                rationale: 'plano adequado',
+                revised_plan: null,
+              },
+            };
+          },
+        },
+      },
+    });
+    expect(result.outcome).toBe('PLANNED');
+    if (result.outcome !== 'PLANNED') return;
+    expect(result.plan.source.planner_profile_id).toBe(sol);
+    expect(result.plan.source.planner_upstream).toBe('openai');
+    expect(result.deliberation?.turns[0]?.profile_id).toBe(opus);
+    expect(result.deliberation?.turns[0]?.provider).toBe('anthropic');
+  });
+
+  it('caso inverso: Opus gera, deliberador preferencial é Sol', async () => {
+    const opus = PLANNING_COLD_START_TOP_TIER_PROFILE_IDS[0];
+    const sol = PLANNING_COLD_START_TOP_TIER_PROFILE_IDS[1];
+    const result = await runReviewedPath({
+      intake: intake(),
+      inspection: inspection(),
+      authorizationScope: authorizationScope(),
+      planningWorker: {
+        async invoke() {
+          return {
+            outcome: 'DRAFT_RETURNED',
+            invocation_id: opus,
+            provider_id: 'claude',
+            model: opus,
+            profile_id: opus,
+            upstream_provider: 'anthropic',
+            draft: { schema_version: 1, tasks: [plannedTask()] },
+          };
+        },
+      },
+      deliberation: {
+        maxTurns: 1,
+        diversity: 'cross_provider_preferred',
+        plannerProvider: 'openai',
+        deliberators: [
+          { profile_id: opus, provider: 'anthropic', model: 'opus-5' },
+          { profile_id: sol, provider: 'openai', model: 'gpt-5.6-sol' },
+        ],
+        humanRequest: intake().user_request,
+        worker: {
+          async invoke() {
+            return {
+              outcome: 'VERDICT_RETURNED',
+              verdict: {
+                decision: 'ACCEPT',
+                material_objections: [],
+                material_changes: [],
+                rationale: 'plano adequado',
+                revised_plan: null,
+              },
+            };
+          },
+        },
+      },
+    });
+    expect(result.outcome).toBe('PLANNED');
+    if (result.outcome !== 'PLANNED') return;
+    expect(result.plan.source.planner_profile_id).toBe(opus);
+    expect(result.deliberation?.turns[0]?.profile_id).toBe(sol);
   });
 });
 

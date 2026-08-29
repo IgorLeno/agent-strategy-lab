@@ -1133,7 +1133,21 @@ não classificam path.
 [2026-08-28] Context: planner default da run era o menor capability_rank da
 policy — o baseline de IMPLEMENTATION, não o modelo mais capaz.
 Mistake: reutilizar a ladder de implementação como seleção de PLANNING.
-Rule: PLANNING tem seleção de papel própria: qualidade/capacidade primeiro,
-cold-start Opus então Sol, quota EXHAUSTED faz failover, UNKNOWN não bloqueia,
-pedido explícito falha fechado, OpenRouter/API nunca entra por fallback
-implícito. Implementation routing permanece intacto.
+Rule: PLANNING tem seleção de papel própria: cold-start Opus então Sol, depois
+tier e rank DESC. Quota EXHAUSTED (código tipado) faz failover; HUMAN_REQUIRED
+e billing não. UNKNOWN de quota não bloqueia; UNKNOWN de role capability não
+afirma planner-compatible. Pedido explícito falha fechado. OpenRouter/API
+nunca entra por fallback implícito. História comparável de planning permanece
+FUTURO até existir evidência canônica — não governa produção. Implementation
+routing permanece intacto.
+
+[2026-08-28] Context: failover de planning tratava HUMAN_REQUIRED e billing
+como retryable; deliberação capturava o planner selecionado antes do sucesso.
+Mistake: gate humano virou "tente outro profile"; identidade do planner veio
+da seleção, não do DRAFT_RETURNED.
+Rule: HUMAN_REQUIRED e BILLING_PREFLIGHT_REFUSED encerram a cadeia. Failover
+só em códigos tipados de INFRA/quota. Provenance do planner é o SUCCESS
+factual (profile_id + upstream de providerFactsOf) persistido em
+generated_from; REUSED lê isso e não re-seleciona. Diversidade compara
+upstream, não scaffold: Codex/OpenAI e OpenCode/OpenAI não são dois
+providers.

@@ -154,6 +154,18 @@ export function quotaPoolOfProfile(profile: LauncherProfile): string | null {
   return profileIdentityOf(profile)?.quota_pool ?? null;
 }
 
+/**
+ * Upstream autoritativo para diversidade de PLANNING/deliberação.
+ * Scaffold diferente com o mesmo upstream (Codex/OpenAI vs OpenCode/OpenAI)
+ * NÃO é diversidade.
+ */
+export function planningDiversityProviderOf(profile: LauncherProfile): string {
+  const identity = profileIdentityOf(profile);
+  if (identity !== null) return identity.provider;
+  const doubled = profile.test_double_of?.agent;
+  return `scaffold:${doubled ?? profile.agent}`;
+}
+
 function profileIdentityOf(profile: LauncherProfile) {
   // Test doubles não representam credencial ou franquia real. O routing pode
   // usá-los como capability, mas o observer nunca fabrica pool para eles.
