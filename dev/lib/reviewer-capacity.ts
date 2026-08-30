@@ -37,6 +37,13 @@ export interface ReviewerCapacitySelection {
   readonly cause: ReviewerUnavailabilityCause | null;
 }
 
+export interface ReviewerFailureDomain {
+  readonly scope: 'PROFILE' | 'POOL' | 'PROVIDER';
+  readonly id: string;
+  /** UNKNOWN é evidência observacional e nunca exclui outros reviewers. */
+  readonly status: 'PROVEN' | 'UNKNOWN';
+}
+
 export function isRetryableReviewerInvocationFailure(code: string): boolean {
   return code === 'REVIEW_INVOCATION_FAILED';
 }
@@ -53,12 +60,17 @@ export function selectReviewerProfileForFreshCapacity(input: {
     readonly capability_rank: number;
   }[];
   readonly poolOf: (profileId: string) => string | null;
+  readonly providerOf?: (profileId: string) => string | null;
   readonly capacityByPool: ReadonlyMap<string, { readonly status: string }>;
   readonly excludedProfileIds?: readonly string[];
+  readonly unavailableFailureDomains?: readonly ReviewerFailureDomain[];
   readonly implementerProfileId?: string;
   readonly diversityRequirement?: string;
 }): ReviewerCapacitySelection {
   const excluded = new Set(input.excludedProfileIds ?? []);
+  const provenDomains = (input.unavailableFailureDomains ?? []).filter(
+    (domain) => domain.status === 'PROVEN',
+  );
   const diversityBlocked =
     input.diversityRequirement === 'required' ? (input.implementerProfileId ?? null) : null;
   const exhausted = (profileId: string): boolean => {
@@ -66,8 +78,22 @@ export function selectReviewerProfileForFreshCapacity(input: {
     if (pool === null) return false;
     return input.capacityByPool.get(pool)?.status === CapacityStatus.EXHAUSTED;
   };
+  const provenUnavailable = (profileId: string): boolean =>
+    provenDomains.some((domain) => {
+      switch (domain.scope) {
+        case 'PROFILE':
+          return domain.id === profileId;
+        case 'POOL':
+          return domain.id === input.poolOf(profileId);
+        case 'PROVIDER':
+          return domain.id === input.providerOf?.(profileId);
+      }
+    });
   const ineligible = (profileId: string): boolean =>
-    excluded.has(profileId) || exhausted(profileId) || profileId === diversityBlocked;
+    excluded.has(profileId) ||
+    provenUnavailable(profileId) ||
+    exhausted(profileId) ||
+    profileId === diversityBlocked;
 
   if (!ineligible(input.pinnedProfileId)) {
     return {
@@ -84,6 +110,7 @@ export function selectReviewerProfileForFreshCapacity(input: {
   const alternative = ordered.find((entry) => !ineligible(entry.id));
   if (alternative === undefined) {
     const infra = [...excluded].join(', ');
+    const domains = provenDomains.map((domain) => `${domain.scope}:${domain.id}`).join(', ');
     const diversityReason =
       diversityBlocked !== null
         ? `diversity=required exclui o implementer ${diversityBlocked}`
@@ -92,14 +119,14 @@ export function selectReviewerProfileForFreshCapacity(input: {
       profileId: null,
       rerouted: false,
       cause:
-        excluded.size > 0
+        excluded.size > 0 || provenDomains.length > 0
           ? 'ALL_CANDIDATES_FAILED_INFRA'
           : diversityReason !== null
             ? 'DIVERSITY_POLICY_HAS_NO_ALTERNATIVE'
             : 'ALL_POOLS_EXHAUSTED',
       reason:
-        excluded.size > 0
-          ? `nenhum reviewer restante na policy: INFRA em [${infra}] e os demais pools estão EXHAUSTED ou também excluídos`
+        excluded.size > 0 || provenDomains.length > 0
+          ? `nenhum reviewer restante na policy: INFRA em profiles [${infra}], failure domains PROVEN [${domains}] e os demais pools estão EXHAUSTED ou também excluídos`
           : diversityReason !== null
             ? `reviewer pinado ${input.pinnedProfileId} coincide com o implementer e nenhum outro profile da policy satisfaz diversity=required`
             : `reviewer pinado ${input.pinnedProfileId} está EXHAUSTED e nenhum outro profile ` +
@@ -107,12 +134,15 @@ export function selectReviewerProfileForFreshCapacity(input: {
     };
   }
   const diversityReroute = input.pinnedProfileId === diversityBlocked;
+  const pinnedDomainUnavailable = provenUnavailable(input.pinnedProfileId);
   return {
     profileId: alternative.id,
     rerouted: true,
     cause: null,
     reason: excluded.has(input.pinnedProfileId)
       ? `reviewer pinado ${input.pinnedProfileId} falhou por INFRA; rerroteado para ${alternative.id} dentro da policy autorizada`
+      : pinnedDomainUnavailable
+        ? `failure domain PROVEN exclui ${input.pinnedProfileId}; rerroteado para ${alternative.id} dentro da policy autorizada`
       : diversityReroute
         ? `reviewer pinado ${input.pinnedProfileId} coincide com o implementer e diversity=required; rerroteado para ${alternative.id} dentro da policy autorizada`
         : `reviewer pinado ${input.pinnedProfileId} EXHAUSTED; rerroteado para ${alternative.id} ` +

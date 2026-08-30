@@ -347,6 +347,7 @@ describe('assessExecution — review requirement', () => {
     expect(result.verification_strength.value).toBe('strong');
     expect(result.confidence.value).not.toBe('low');
     expect(result.review_requirement.independent_review_required).toBe(false);
+    expect(result.review_requirement.reasons).toEqual([]);
   });
 
   it('feature normal de risco médio com validação adequada não exige reviewer independente', () => {
@@ -373,9 +374,10 @@ describe('assessExecution — review requirement', () => {
     );
     expect(result.verification_strength.value).toBe('weak');
     expect(result.review_requirement.independent_review_required).toBe(true);
+    expect(result.review_requirement.reasons).toContain('verification_strength=weak');
   });
 
-  it('risco alto exige reviewer mesmo com evidência forte', () => {
+  it('risco alto com verificação forte e confiança não-baixa NÃO exige reviewer', () => {
     const result = assessExecution(
       coherentTask({
         risk: 'high',
@@ -384,10 +386,70 @@ describe('assessExecution — review requirement', () => {
       { inspection: readyInspection(), expectedBaseRevisionSha: HEAD_SHA },
     );
     expect(result.verification_strength.value).toBe('strong');
-    expect(result.review_requirement.independent_review_required).toBe(true);
+    expect(result.confidence.value).not.toBe('low');
+    expect(result.review_requirement.independent_review_required).toBe(false);
+    expect(result.review_requirement.reasons).toEqual([]);
   });
 
-  it('review independente exigido em risco crítico mesmo com evidência forte', () => {
+  it('risco alto com verificação partial e confiança não-baixa NÃO exige reviewer', () => {
+    const result = assessExecution(
+      coherentTask({
+        risk: 'high',
+        taxonomy: validTaxonomy({
+          complexity: 'local',
+          ambiguity: 'low',
+          verification: 'partially_deterministic',
+        }),
+      }),
+      { inspection: readyInspection(), expectedBaseRevisionSha: HEAD_SHA },
+    );
+    expect(result.verification_strength.value).toBe('partial');
+    expect(result.confidence.value).not.toBe('low');
+    expect(result.review_requirement.independent_review_required).toBe(false);
+    expect(result.review_requirement.reasons).toEqual([]);
+  });
+
+  it('risco alto com verificação fraca exige reviewer, e a razão é a verificação — não o label', () => {
+    const result = assessExecution(
+      coherentTask({
+        risk: 'high',
+        taxonomy: validTaxonomy({ complexity: 'local', ambiguity: 'low', verification: 'subjective' }),
+      }),
+      { inspection: readyInspection(), expectedBaseRevisionSha: HEAD_SHA },
+    );
+    expect(result.verification_strength.value).toBe('weak');
+    expect(result.review_requirement.independent_review_required).toBe(true);
+    expect(result.review_requirement.reasons).toEqual(['verification_strength=weak']);
+    expect(result.review_requirement.diversity_requirement).toBe('preferred');
+  });
+
+  it('risco alto com confiança baixa exige reviewer, e a razão é a confiança — não o label', () => {
+    const result = assessExecution(
+      coherentTask({
+        risk: 'high',
+        taxonomy: validTaxonomy({ complexity: 'local', ambiguity: 'low', verification: 'deterministic' }),
+      }),
+    );
+    expect(result.confidence.value).toBe('low');
+    expect(result.review_requirement.independent_review_required).toBe(true);
+    expect(result.review_requirement.reasons).toEqual(['confidence=low']);
+    expect(result.review_requirement.diversity_requirement).toBe('preferred');
+  });
+
+  it('risk=high nunca é razão de review por si só, em nenhuma combinação', () => {
+    for (const verification of ['deterministic', 'partially_deterministic', 'subjective'] as const) {
+      const result = assessExecution(
+        coherentTask({
+          risk: 'high',
+          taxonomy: validTaxonomy({ complexity: 'local', ambiguity: 'low', verification }),
+        }),
+        { inspection: readyInspection(), expectedBaseRevisionSha: HEAD_SHA },
+      );
+      expect(result.review_requirement.reasons).not.toContain('risk=high');
+    }
+  });
+
+  it('review independente exigido em risco crítico mesmo com evidência forte e confiança alta', () => {
     const inspection = readyInspection();
     const result = assessExecution(
       coherentTask({
@@ -398,6 +460,7 @@ describe('assessExecution — review requirement', () => {
     );
     expect(result.review_requirement.independent_review_required).toBe(true);
     expect(result.review_requirement.diversity_requirement).toBe('required');
+    expect(result.review_requirement.reasons).toEqual(['risk=critical']);
   });
 
   it('MOPAC-like: risco científico critical continua exigindo review e diversidade, sem virar categoria de autorização', () => {

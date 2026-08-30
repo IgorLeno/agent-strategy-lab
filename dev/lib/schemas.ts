@@ -2151,7 +2151,193 @@ export const CommitMessage = z.string().superRefine((message, ctx) => {
  * memória. Campo OPCIONAL: sua ausência significa "nenhuma review exigida", que
  * é exatamente o histórico de todo record gravado antes desta manutenção.
  */
-export const CandidateReviewRequirement = z
+export const ReviewFindingSeverity = z.enum(['BLOCKING', 'ADVISORY']);
+export type ReviewFindingSeverity = z.infer<typeof ReviewFindingSeverity>;
+
+/**
+ * `basis` é a ÚNICA descrição de finding que o reviewer controla. A severidade
+ * efetiva — a que a lifecycle obedece — é DERIVADA dela pelo control plane.
+ *
+ * O modelo descreve O QUE achou; quem decide se aquela CLASSE é capaz de
+ * bloquear é o control plane. Sem essa separação, `severity` autoral tem
+ * autoridade de execução: `ADVISORY` + `ACCEPTANCE_VIOLATION` aceitaria um
+ * defeito real, e `BLOCKING` + `OPTIONAL_REFACTOR` recriaria exatamente o
+ * churn de repair por preferência que esta política existe para remover.
+ *
+ * `SCOPE_EXPANSION` foi dividida porque conflatava dois casos opostos:
+ * sugestão de escopo FUTURO (advisory) e candidate que EXCEDEU o escopo/
+ * requisito autorizado agora (blocking-capable — a disposição declarada
+ * continua decidindo se isso é defeito reparável ou fronteira humana do PR A).
+ */
+export const ReviewFindingBasis = z.enum([
+  'ACCEPTANCE_VIOLATION',
+  'CORRECTNESS_DEFECT',
+  'INTEGRITY_VIOLATION',
+  'SECURITY_OR_SAFETY_DEFECT',
+  'REQUIRED_SURFACE_UNVERIFIED',
+  'SCOPE_OR_REQUIREMENT_VIOLATION',
+  'OPTIONAL_REFACTOR',
+  'STYLE_PREFERENCE',
+  'PERFORMANCE_NOT_REQUIRED',
+  'UNRELATED_TECHNICAL_DEBT',
+  'OPTIONAL_SCOPE_EXPANSION',
+]);
+export type ReviewFindingBasis = z.infer<typeof ReviewFindingBasis>;
+
+export const REVIEW_FINDING_BASIS_AUTHORITY: Readonly<
+  Record<ReviewFindingBasis, ReviewFindingSeverity>
+> = {
+  ACCEPTANCE_VIOLATION: 'BLOCKING',
+  CORRECTNESS_DEFECT: 'BLOCKING',
+  INTEGRITY_VIOLATION: 'BLOCKING',
+  SECURITY_OR_SAFETY_DEFECT: 'BLOCKING',
+  REQUIRED_SURFACE_UNVERIFIED: 'BLOCKING',
+  SCOPE_OR_REQUIREMENT_VIOLATION: 'BLOCKING',
+  OPTIONAL_REFACTOR: 'ADVISORY',
+  STYLE_PREFERENCE: 'ADVISORY',
+  PERFORMANCE_NOT_REQUIRED: 'ADVISORY',
+  UNRELATED_TECHNICAL_DEBT: 'ADVISORY',
+  OPTIONAL_SCOPE_EXPANSION: 'ADVISORY',
+};
+
+export const BLOCKING_CAPABLE_REVIEW_FINDING_BASES: readonly ReviewFindingBasis[] =
+  ReviewFindingBasis.options.filter(
+    (basis) => REVIEW_FINDING_BASIS_AUTHORITY[basis] === 'BLOCKING',
+  );
+
+export function effectiveFindingSeverity(basis: ReviewFindingBasis): ReviewFindingSeverity {
+  return REVIEW_FINDING_BASIS_AUTHORITY[basis];
+}
+
+export const ReviewFindingRelationship = z.enum([
+  'CURRENT_CANDIDATE',
+  'ORIGINAL_FINDING',
+  'AFFECTED_ACCEPTANCE',
+  'REPAIR_REGRESSION',
+  'NEW_CRITICAL_DEFECT',
+  'UNRELATED',
+]);
+export type ReviewFindingRelationship = z.infer<typeof ReviewFindingRelationship>;
+
+/** Modo da review exigida. GENERAL revisa o candidate; FOCUSED_REREVIEW, o reparo. */
+export const ReviewMode = z.enum(['GENERAL', 'FOCUSED_REREVIEW']);
+export type ReviewMode = z.infer<typeof ReviewMode>;
+
+/**
+ * Quais RELACIONAMENTOS participam de autoridade de bloqueio em cada modo.
+ *
+ * `basis` diz O QUE foi achado; `relationship` diz o que aquilo tem a ver com
+ * o trabalho corrente. Sem esta segunda dimensão, um defeito real de OUTRO
+ * subsistema reinicia a work unit atual — exatamente o loop que a review
+ * focada existe para eliminar: review, defeito A, reparo, re-review, defeito B
+ * não relacionado, reparo, ...
+ *
+ * GENERAL revisa o candidate inteiro, então todo relacionamento COM o
+ * candidate está em escopo; só `UNRELATED` fica fora — ele é evidência
+ * advisory para trabalho futuro, nunca gate do trabalho atual.
+ *
+ * FOCUSED_REREVIEW é o codificado das quatro perguntas do prompt: o finding
+ * original foi corrigido, a acceptance afetada continua válida, o reparo
+ * regrediu algo, o reparo introduziu defeito novo CRÍTICO. `CURRENT_CANDIDATE`
+ * fica DE FORA de propósito: ele é o rótulo genérico da review geral, e
+ * aceitá-lo aqui devolveria ao reviewer o poder de reabrir o candidate inteiro
+ * durante uma re-review focada. Problema causado pelo reparo tem rótulo
+ * próprio — REPAIR_REGRESSION ou NEW_CRITICAL_DEFECT.
+ */
+export const IN_SCOPE_BLOCKING_RELATIONSHIPS: Readonly<
+  Record<ReviewMode, readonly ReviewFindingRelationship[]>
+> = {
+  GENERAL: ReviewFindingRelationship.options.filter(
+    (relationship) => relationship !== 'UNRELATED',
+  ),
+  FOCUSED_REREVIEW: [
+    'ORIGINAL_FINDING',
+    'AFFECTED_ACCEPTANCE',
+    'REPAIR_REGRESSION',
+    'NEW_CRITICAL_DEFECT',
+  ],
+};
+
+/**
+ * ÚNICA autoridade de bloqueio da lifecycle, determinística em `basis` +
+ * `relationship` + modo. É uma conjunção, nunca uma disjunção: a CLASSE do
+ * achado precisa ser capaz de bloquear E o achado precisa estar em escopo.
+ *
+ * Isso fecha os dois abusos simétricos. `OPTIONAL_REFACTOR` +
+ * `NEW_CRITICAL_DEFECT` não vira gate porque o relacionamento soa grave — o
+ * relacionamento não cria autoridade que a base não tem. E `CORRECTNESS_DEFECT`
+ * + `UNRELATED` não reinicia esta work unit — a base é capaz de bloquear, mas
+ * não este trabalho.
+ */
+export function effectiveFindingAuthority(
+  finding: {
+    readonly basis: ReviewFindingBasis;
+    readonly relationship: ReviewFindingRelationship;
+  },
+  mode: ReviewMode,
+): ReviewFindingSeverity {
+  if (effectiveFindingSeverity(finding.basis) !== 'BLOCKING') return 'ADVISORY';
+  return IN_SCOPE_BLOCKING_RELATIONSHIPS[mode].includes(finding.relationship)
+    ? 'BLOCKING'
+    : 'ADVISORY';
+}
+
+export function isBlockingFinding(
+  finding: {
+    readonly basis: ReviewFindingBasis;
+    readonly relationship: ReviewFindingRelationship;
+  },
+  mode: ReviewMode,
+): boolean {
+  return effectiveFindingAuthority(finding, mode) === 'BLOCKING';
+}
+
+/**
+ * `severity` declarada pelo reviewer é ACEITA e IGNORADA: aceita para não
+ * transformar metadado supérfluo em ciclo de correção protocolar caro,
+ * ignorada porque a severidade persistida é sempre a derivada de `basis`.
+ * Nenhuma string escolhida pelo modelo promove uma base advisory a gate
+ * blocking nem rebaixa uma base blocking-capable a advisory.
+ *
+ * `severity` persistida é a capacidade da CLASSE do achado, não o veredito de
+ * escopo: ela não conhece o modo da review. Quem a lifecycle obedece é
+ * `effectiveFindingAuthority(finding, mode)`, que exige também um
+ * `relationship` em escopo — por isso um finding pode ficar gravado como
+ * `BLOCKING` dentro de um ACCEPT legítimo quando ele é `UNRELATED`.
+ */
+export const ReviewFinding = z
+  .object({
+    severity: ReviewFindingSeverity.optional(),
+    basis: ReviewFindingBasis,
+    relationship: ReviewFindingRelationship,
+    summary: nonEmpty,
+    acceptance_criterion: nonEmpty.optional(),
+    impacted_files: z.array(nonEmpty).optional(),
+  })
+  .strict()
+  .transform((finding) => ({
+    ...finding,
+    severity: effectiveFindingSeverity(finding.basis),
+  }));
+export type ReviewFinding = z.infer<typeof ReviewFinding>;
+
+const FocusedReviewContext = z
+  .object({
+    source_attempt: z.number().int().positive(),
+    rejected_candidate_sha: shaHex,
+    rejection_disposition: z.literal('IMPLEMENTATION_DEFECT'),
+    original_review_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    original_finalization_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    blocking_finding: nonEmpty,
+    blocking_findings: z.array(ReviewFinding).min(1).optional(),
+    impacted_files: z.array(nonEmpty).min(1),
+    relevant_acceptance: z.array(nonEmpty).min(1),
+  })
+  .strict();
+
+export type CandidateReviewFocusedContext = z.infer<typeof FocusedReviewContext>;
+
+const CandidateReviewRequirementV1 = z
   .object({
     required: z.literal(true),
     reviewer_profile_id: nonEmpty,
@@ -2160,6 +2346,40 @@ export const CandidateReviewRequirement = z
     policy_provenance: nonEmpty,
   })
   .strict();
+
+const CandidateReviewRequirementV2 = z
+  .object({
+    schema_version: z.literal(2),
+    required: z.literal(true),
+    reviewer_profile_id: nonEmpty,
+    diversity_requirement: nonEmpty,
+    policy_provenance: nonEmpty,
+    reasons: z.array(nonEmpty).min(1),
+    mode: ReviewMode,
+    task_acceptance_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    focused_review: FocusedReviewContext.optional(),
+  })
+  .strict()
+  .superRefine((record, ctx) => {
+    if (record.mode === 'FOCUSED_REREVIEW' && record.focused_review === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'FOCUSED_REREVIEW exige contexto do REJECT original',
+      });
+    }
+    if (record.mode === 'GENERAL' && record.focused_review !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'GENERAL não pode declarar contexto de focused re-review',
+      });
+    }
+  });
+
+/** V1 histórico continua legível; todo requirement novo é V2 explicável. */
+export const CandidateReviewRequirement = z.union([
+  CandidateReviewRequirementV2,
+  CandidateReviewRequirementV1,
+]);
 export type CandidateReviewRequirement = z.infer<typeof CandidateReviewRequirement>;
 
 export const OrchestratedFinalizationRecord = z
@@ -2354,6 +2574,14 @@ export const CandidateReviewRecord = z
     implementer_gaps: z.array(nonEmpty).optional(),
     /** Declarada pelo reviewer. OBRIGATÓRIA para um ACCEPT válido. */
     coverage: CandidateReviewCoverage.optional(),
+    /** Findings estruturados; ausente apenas em records históricos V1. */
+    findings: z.array(ReviewFinding).optional(),
+    /**
+     * Modo em que a review nasceu, copiado do requirement v2. Decide o escopo
+     * de `relationship` que tem autoridade sobre ESTE record. Ausente = record
+     * histórico ou requirement v1: ambos são review GENERAL.
+     */
+    review_mode: ReviewMode.optional(),
     decision: z.enum(['ACCEPT', 'REJECT']),
     /** Ausente somente em records legados anteriores a esta classificação. */
     rejection_disposition: ReviewRejectionDisposition.optional(),
@@ -2366,6 +2594,44 @@ export const CandidateReviewRecord = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: 'ACCEPT não pode declarar rejection_disposition',
+      });
+    }
+    // Defesa em profundidade contra o mesmo contra-senso que o adapter recusa
+    // na leitura do veredito: um ACCEPT persistido não pode carregar finding
+    // que a autoridade canônica classifica como BLOCKING NESTE modo. A
+    // autoridade é `isBlockingFinding` — nenhuma segunda tabela aqui. Records
+    // históricos sem `findings` continuam legíveis: lista ausente não afirma
+    // nada; sem `review_mode`, o modo é GENERAL, como todo record anterior.
+    const mode = record.review_mode ?? 'GENERAL';
+    if (record.decision === 'ACCEPT') {
+      const blocking = (record.findings ?? []).filter((finding) =>
+        isBlockingFinding(finding, mode),
+      );
+      if (blocking.length > 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            'ACCEPT não pode conter finding blocking: ' +
+            blocking.map((finding) => finding.basis).join(', '),
+        });
+      }
+    }
+    // O simétrico: um REJECT de DEFEITO DE IMPLEMENTAÇÃO que declara
+    // EXPLICITAMENTE zero findings nomeou zero motivos para reprovar. Ele não
+    // pode autorizar bounded repair a partir de prosa livre — o escopo do
+    // reparo e da re-review focada sai dos findings blocking, não do `reason`.
+    // Lista AUSENTE continua legível: record histórico não afirma "nenhum
+    // finding", ele apenas antecede o contrato.
+    if (
+      record.decision === 'REJECT' &&
+      record.rejection_disposition === 'IMPLEMENTATION_DEFECT' &&
+      record.findings !== undefined &&
+      record.findings.length === 0
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          'REJECT IMPLEMENTATION_DEFECT com findings=[] não nomeia nenhum defeito bloqueante',
       });
     }
     const declared = record.implementer_gaps ?? [];
@@ -2938,6 +3204,8 @@ export const ReviewRejectedAttemptRecord = z
     rejection_classification_sha256: sha256Hex,
     rejection_disposition: z.literal('IMPLEMENTATION_DEFECT'),
     review_reason: nonEmpty,
+    /** Findings blocking do verdict que autorizou este bounded repair. */
+    blocking_findings: z.array(ReviewFinding).min(1).optional(),
     changed_files: z.array(nonEmpty).min(1),
     original_validation_results: z.array(ValidationResult).min(1),
     original_validation_evidence: z.array(ValidationEvidence).optional(),

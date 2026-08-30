@@ -18,6 +18,7 @@ import {
   readCandidateReview,
   readCompletion,
   readHandoff,
+  readOrchestratedFinalization,
   readReviewRejectedAttempt,
   readReviewRejectionClassification,
   writePacket,
@@ -88,6 +89,18 @@ const AUTHORIZATION = [
 ].join('\n');
 
 /**
+ * Review independente é PROPORCIONAL: `risk: high` sozinho deixou de exigir
+ * reviewer. O que a exige aqui é uma razão concreta e verificável —
+ * `verification: subjective`, isto é, PASS/FAIL não objetivamente
+ * determinável — para que estes testes de fronteira exercitem o caminho
+ * REVIEWED sem depender de um label de risco sem autoridade própria.
+ */
+const REVIEW_REQUIRED_AUTHORIZATION = AUTHORIZATION.replace(
+  '    verification: deterministic',
+  '    verification: subjective',
+);
+
+/**
  * Plano de uma tarefa só: a validação oficial exige o arquivo que o worker
  * REALMENTE consegue versionar, e nada mais.
  */
@@ -143,9 +156,10 @@ async function setup(
     gitignore?: string;
     extraProfileIds?: readonly string[];
     reasoningEffort?: string;
+    plan?: string;
   } = {},
 ): Promise<Fixture> {
-  const sandbox = await makeSandboxRepo(PLAN);
+  const sandbox = await makeSandboxRepo(options.plan ?? PLAN);
   roots.push(sandbox.root);
   const paths = resolveHarnessPaths(sandbox.root);
   const effort = options.reasoningEffort ?? 'medium';
@@ -197,15 +211,16 @@ function orchestrate(fixture: Fixture, mode: string, maxIterations = 1) {
 }
 
 describe('fronteiras operacionais — Onda 1', () => {
-  it('REJECT de implementation defect aciona um único repair e exige nova review', async () => {
+  it('REJECT de implementation defect aciona repair e a segunda review é focada no finding original', async () => {
     const fixture = await setup();
     const loaded = await loadPlan(fixture.paths.planFile);
     const outside = await mkdtemp(path.join(os.tmpdir(), 'agentlab-review-repair-'));
     roots.push(outside);
     const authorizationFile = path.join(outside, 'agentlab-run.yaml');
-    await writeFile(authorizationFile, AUTHORIZATION.replace('risk: low', 'risk: high'), 'utf8');
+    await writeFile(authorizationFile, REVIEW_REQUIRED_AUTHORIZATION, 'utf8');
     const authorization = await loadProjectRunAuthorization(authorizationFile);
     let reviewInvocations = 0;
+    const reviewPrompts: string[] = [];
     const controlPlane = await createProjectControlPlane({
       paths: fixture.paths,
       loaded,
@@ -213,18 +228,30 @@ describe('fronteiras operacionais — Onda 1', () => {
       authorizationFile: authorization.source_file,
       historyLabRoot: outside,
       reviewerPort: {
-        async run() {
+        async run(input) {
           reviewInvocations += 1;
+          reviewPrompts.push(input.prompt);
           return JSON.stringify(
             reviewInvocations === 1
               ? {
                   decision: 'REJECT',
                   rejection_disposition: 'IMPLEMENTATION_DEFECT',
                   reason: 'candidate viola acceptance já definido',
+                  findings: [
+                    {
+                      severity: 'BLOCKING',
+                      basis: 'ACCEPTANCE_VIOLATION',
+                      relationship: 'CURRENT_CANDIDATE',
+                      summary: 'arquivo criado não contém o conteúdo exigido',
+                      acceptance_criterion: 'arquivo criado',
+                      impacted_files: ['src/t1.txt'],
+                    },
+                  ],
                 }
               : {
                   decision: 'ACCEPT',
                   reason: 'repair satisfaz acceptance',
+                  findings: [],
                   coverage: {
                     files: ['src/t1.txt'],
                     validations: [['test', '-f', 'src/t1.txt']],
@@ -260,10 +287,92 @@ describe('fronteiras operacionais — Onda 1', () => {
     expect(result.stop.status, JSON.stringify(result, null, 2)).toBe('ALL_DONE');
     expect(result.iterationCount).toBe(2);
     expect(reviewInvocations).toBe(2);
+    expect(reviewPrompts[0]).toContain('"review_mode": "GENERAL"');
+    expect(reviewPrompts[1]).toContain('"review_mode": "FOCUSED_REREVIEW"');
+    expect(reviewPrompts[1]).toContain('arquivo criado não contém o conteúdo exigido');
+    expect(reviewPrompts[1]).toMatch(/não.*revis.*inteir|não.*arquitetura.*do zero/i);
     expect(await readReviewRejectedAttempt(fixture.paths, 'T1', 1)).toMatchObject({
       rejection_disposition: 'IMPLEMENTATION_DEFECT',
       profile_id: PROFILE,
+      blocking_findings: [
+        expect.objectContaining({
+          severity: 'BLOCKING',
+          basis: 'ACCEPTANCE_VIOLATION',
+        }),
+      ],
     });
+    expect(
+      (await readOrchestratedFinalization(fixture.paths, 'T1', 2))?.review_requirement,
+    ).toMatchObject({
+      schema_version: 2,
+      mode: 'FOCUSED_REREVIEW',
+      reasons: expect.arrayContaining(['unresolved_review_reject=attempt 1']),
+      focused_review: expect.objectContaining({
+        source_attempt: 1,
+        blocking_finding: 'arquivo criado não contém o conteúdo exigido',
+      }),
+    });
+    expect(await readCandidateReview(fixture.paths, 'T1', 2)).toMatchObject({
+      candidate_sha: expect.any(String),
+      finalization_record_sha256: expect.any(String),
+      validation_results_sha256: expect.any(String),
+      decision: 'ACCEPT',
+    });
+    expect((await readState(fixture.paths)).tasks[0]).toMatchObject({
+      status: 'PASS',
+      attempts: 2,
+    });
+  }, 90_000);
+
+  it('LOW validation FAIL + bounded repair PASS não lança reviewer só por ser repair', async () => {
+    const repairPlan = PLAN.replace(
+      "['test', '-f', 'src/t1.txt']",
+      "['grep', '-qx', 'repaired', 'src/t1.txt']",
+    );
+    const fixture = await setup({ plan: repairPlan });
+    const loaded = await loadPlan(fixture.paths.planFile);
+    const outside = await mkdtemp(path.join(os.tmpdir(), 'agentlab-low-repair-no-review-'));
+    roots.push(outside);
+    const authorizationFile = path.join(outside, 'agentlab-run.yaml');
+    await writeFile(authorizationFile, AUTHORIZATION, 'utf8');
+    const authorization = await loadProjectRunAuthorization(authorizationFile);
+    let reviewerCalls = 0;
+    const controlPlane = await createProjectControlPlane({
+      paths: fixture.paths,
+      loaded,
+      authorization: authorization.file,
+      authorizationFile: authorization.source_file,
+      historyLabRoot: outside,
+      reviewerPort: {
+        async run() {
+          reviewerCalls += 1;
+          throw new Error('reviewer não deveria ser lançado');
+        },
+      },
+    });
+    const previousMode = process.env['AGENTLAB_FAKE_MODE'];
+    process.env['AGENTLAB_FAKE_MODE'] = 'official-fail-then-repair';
+    let result;
+    try {
+      result = await runOrchestrate({
+        paths: fixture.paths,
+        loaded,
+        profileId: PROFILE,
+        maxIterations: 1,
+        controlPlane,
+      });
+    } finally {
+      if (previousMode === undefined) delete process.env['AGENTLAB_FAKE_MODE'];
+      else process.env['AGENTLAB_FAKE_MODE'] = previousMode;
+    }
+
+    expect(result.stop.status, JSON.stringify(result, null, 2)).toBe('ALL_DONE');
+    expect(result.iterationCount).toBe(2);
+    expect(reviewerCalls).toBe(0);
+    expect(controlPlane.snapshot().work_units.map((unit) => unit.review.required)).toEqual([
+      false,
+      false,
+    ]);
     expect((await readState(fixture.paths)).tasks[0]).toMatchObject({
       status: 'PASS',
       attempts: 2,
@@ -276,7 +385,7 @@ describe('fronteiras operacionais — Onda 1', () => {
     const outside = await mkdtemp(path.join(os.tmpdir(), 'agentlab-review-human-'));
     roots.push(outside);
     const authorizationFile = path.join(outside, 'agentlab-run.yaml');
-    await writeFile(authorizationFile, AUTHORIZATION.replace('risk: low', 'risk: high'), 'utf8');
+    await writeFile(authorizationFile, REVIEW_REQUIRED_AUTHORIZATION, 'utf8');
     const authorization = await loadProjectRunAuthorization(authorizationFile);
     const controlPlane = await createProjectControlPlane({
       paths: fixture.paths,
@@ -324,7 +433,7 @@ describe('fronteiras operacionais — Onda 1', () => {
     const outside = await mkdtemp(path.join(os.tmpdir(), 'agentlab-review-unparseable-'));
     roots.push(outside);
     const authorizationFile = path.join(outside, 'agentlab-run.yaml');
-    await writeFile(authorizationFile, AUTHORIZATION.replace('risk: low', 'risk: high'), 'utf8');
+    await writeFile(authorizationFile, REVIEW_REQUIRED_AUTHORIZATION, 'utf8');
     const authorization = await loadProjectRunAuthorization(authorizationFile);
     const leakedSecret = 'sk-ant-api03-FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE0123456789AA';
     const unparseableStdout =
@@ -418,7 +527,7 @@ describe('fronteiras operacionais — Onda 1', () => {
     const outside = await mkdtemp(path.join(os.tmpdir(), 'agentlab-review-exit1-'));
     roots.push(outside);
     const authorizationFile = path.join(outside, 'agentlab-run.yaml');
-    await writeFile(authorizationFile, AUTHORIZATION.replace('risk: low', 'risk: high'), 'utf8');
+    await writeFile(authorizationFile, REVIEW_REQUIRED_AUTHORIZATION, 'utf8');
     const authorization = await loadProjectRunAuthorization(authorizationFile);
     const leakedSecret = 'sk-ant-api03-FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE0123456789AA';
     const stdout = `{"is_error":true,"result":"Claude session limit reached ${leakedSecret}"}`;
@@ -504,7 +613,7 @@ describe('fronteiras operacionais — Onda 1', () => {
     const authorizationFile = path.join(outside, 'agentlab-run.yaml');
     await writeFile(
       authorizationFile,
-      AUTHORIZATION.replace('risk: low', 'risk: high').replace(
+      REVIEW_REQUIRED_AUTHORIZATION.replace(
         `      rationale: degrau único declarado pela policy\n`,
         [
           '      rationale: degrau único declarado pela policy',
@@ -657,7 +766,7 @@ describe('fronteiras operacionais — Onda 1', () => {
     const authorizationFile = path.join(outside, 'agentlab-run.yaml');
     await writeFile(
       authorizationFile,
-      AUTHORIZATION.replace('risk: low', 'risk: high').replace('  - BOUNDED_REPAIR\n', ''),
+      REVIEW_REQUIRED_AUTHORIZATION.replace('  - BOUNDED_REPAIR\n', ''),
       'utf8',
     );
     const authorization = await loadProjectRunAuthorization(authorizationFile);
@@ -708,7 +817,7 @@ describe('fronteiras operacionais — Onda 1', () => {
     const outside = await mkdtemp(path.join(os.tmpdir(), 'agentlab-review-legacy-'));
     roots.push(outside);
     const authorizationFile = path.join(outside, 'agentlab-run.yaml');
-    await writeFile(authorizationFile, AUTHORIZATION.replace('risk: low', 'risk: high'), 'utf8');
+    await writeFile(authorizationFile, REVIEW_REQUIRED_AUTHORIZATION, 'utf8');
     const authorization = await loadProjectRunAuthorization(authorizationFile);
     const firstControlPlane = await createProjectControlPlane({
       paths: fixture.paths,

@@ -1248,3 +1248,17 @@ validação aproximada ainda deixava evidência inválida derrubar o draft intei
 Rule: todo campo normalizado escolhe uma classe semântica. Prosa
 não-autoritativa pode ter omissão visível; ponteiro é validado pelo schema
 canônico e permanece byte-idêntico ou a referência inteira é descartada.
+
+[2026-08-30] Context: review proporcional removeu repair e escalation como
+razões autônomas, mas manteve `risk=high` como razão suficiente — e toda
+finalization da baseline histórica era high ou critical.
+Mistake: medir a mudança pelo que foi removido do código em vez de contra a
+carga histórica real; e deixar `severity` autorada pelo modelo decidir se um
+REJECT vira ACCEPT, sem relação estrutural com `basis`.
+Rule: uma razão de review precisa ser ausência de evidência de acerto, não
+consequência de errar — `risk=high` sozinho não exige reviewer; critical,
+verificação fraca e confiança baixa exigem. Toda política nova é validada por
+counterfactual sobre os registros persistidos, e UNKNOWN não persistido
+permanece UNKNOWN. Rótulo escolhido pelo modelo nunca tem autoridade de
+execução: o modelo descreve a CLASSE do achado e o control plane deriva
+determinísticamente se aquela classe pode bloquear.

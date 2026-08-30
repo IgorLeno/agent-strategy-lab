@@ -174,6 +174,145 @@ describe('cobertura estrutural da review', () => {
     expect(result.success).toBe(false);
     expect(JSON.stringify(result)).toMatch(/ACCEPT não pode declarar rejection_disposition/);
   });
+
+  function finding(basis: string) {
+    return {
+      basis,
+      relationship: 'CURRENT_CANDIDATE',
+      summary: `finding de base ${basis}`,
+    };
+  }
+
+  // Defesa em profundidade: mesmo que algum caminho futuro escape do adapter,
+  // o registro persistido não pode afirmar aceite e defeito bloqueante juntos.
+  for (const basis of [
+    'ACCEPTANCE_VIOLATION',
+    'CORRECTNESS_DEFECT',
+    'INTEGRITY_VIOLATION',
+    'SECURITY_OR_SAFETY_DEFECT',
+    'REQUIRED_SURFACE_UNVERIFIED',
+    'SCOPE_OR_REQUIREMENT_VIOLATION',
+  ]) {
+    it(`ACCEPT com finding de base ${basis} é recusado pelo schema`, () => {
+      const result = CandidateReviewRecord.safeParse(review({ findings: [finding(basis)] }));
+      expect(result.success).toBe(false);
+      expect(JSON.stringify(result)).toMatch(/ACCEPT não pode conter finding blocking/);
+    });
+  }
+
+  it('ACCEPT com findings advisory e coverage válida continua aceito', () => {
+    const parsed = CandidateReviewRecord.parse(
+      review({ findings: [finding('OPTIONAL_REFACTOR'), finding('STYLE_PREFERENCE')] }),
+    );
+    expect(parsed.decision).toBe('ACCEPT');
+    expect(parsed.findings?.map((entry) => entry.severity)).toEqual(['ADVISORY', 'ADVISORY']);
+  });
+
+  it('REJECT com finding blocking permanece válido', () => {
+    const { coverage: _omitted, ...withoutCoverage } = review();
+    const parsed = CandidateReviewRecord.parse({
+      ...withoutCoverage,
+      decision: 'REJECT',
+      rejection_disposition: 'IMPLEMENTATION_DEFECT',
+      reason: 'o candidate viola o acceptance já declarado',
+      findings: [finding('ACCEPTANCE_VIOLATION')],
+    });
+    expect(parsed.findings?.[0]?.severity).toBe('BLOCKING');
+  });
+
+  it('record histórico sem findings continua legível', () => {
+    const parsed = CandidateReviewRecord.parse(review());
+    expect(parsed.findings).toBeUndefined();
+  });
+
+  // O record só pode recusar o que o adapter também recusaria: autoridade de
+  // bloqueio é `basis` E `relationship` E modo, e as duas camadas leem a mesma
+  // função. Sem isso, um ACCEPT legítimo do adapter seria impersistível.
+  it('ACCEPT com defeito de correctness UNRELATED é gravável como evidência advisory', () => {
+    const parsed = CandidateReviewRecord.parse(
+      review({
+        findings: [
+          {
+            basis: 'CORRECTNESS_DEFECT',
+            relationship: 'UNRELATED',
+            summary: 'bug pré-existente em outro subsistema',
+          },
+        ],
+      }),
+    );
+    expect(parsed.decision).toBe('ACCEPT');
+    expect(parsed.findings?.[0]?.relationship).toBe('UNRELATED');
+  });
+
+  it('ACCEPT focado com CURRENT_CANDIDATE não é impersistível: lá ele é advisory', () => {
+    const parsed = CandidateReviewRecord.parse(
+      review({
+        review_mode: 'FOCUSED_REREVIEW',
+        findings: [
+          {
+            basis: 'CORRECTNESS_DEFECT',
+            relationship: 'CURRENT_CANDIDATE',
+            summary: 'observação ampla fora das quatro perguntas focadas',
+          },
+        ],
+      }),
+    );
+    expect(parsed.review_mode).toBe('FOCUSED_REREVIEW');
+  });
+
+  it('ACCEPT focado com REPAIR_REGRESSION blocking continua recusado', () => {
+    const result = CandidateReviewRecord.safeParse(
+      review({
+        review_mode: 'FOCUSED_REREVIEW',
+        findings: [
+          {
+            basis: 'CORRECTNESS_DEFECT',
+            relationship: 'REPAIR_REGRESSION',
+            summary: 'o reparo quebrou o caminho vizinho',
+          },
+        ],
+      }),
+    );
+    expect(result.success).toBe(false);
+    expect(JSON.stringify(result)).toMatch(/ACCEPT não pode conter finding blocking/);
+  });
+
+  it('REJECT IMPLEMENTATION_DEFECT com findings=[] é recusado pelo schema', () => {
+    const { coverage: _omitted, ...withoutCoverage } = review();
+    const result = CandidateReviewRecord.safeParse({
+      ...withoutCoverage,
+      decision: 'REJECT',
+      rejection_disposition: 'IMPLEMENTATION_DEFECT',
+      reason: 'tem alguma coisa errada aí',
+      findings: [],
+    });
+    expect(result.success).toBe(false);
+    expect(JSON.stringify(result)).toMatch(/findings=\[\] não nomeia nenhum defeito bloqueante/);
+  });
+
+  it('REJECT de decisão humana com findings=[] continua válido', () => {
+    const { coverage: _omitted, ...withoutCoverage } = review();
+    const parsed = CandidateReviewRecord.parse({
+      ...withoutCoverage,
+      decision: 'REJECT',
+      rejection_disposition: 'REQUIREMENT_OR_SCOPE_DECISION',
+      reason: 'o escopo exige decisão humana',
+      findings: [],
+    });
+    expect(parsed.findings).toEqual([]);
+  });
+
+  it('REJECT IMPLEMENTATION_DEFECT com finding em escopo segue no caminho normal', () => {
+    const { coverage: _omitted, ...withoutCoverage } = review();
+    const parsed = CandidateReviewRecord.parse({
+      ...withoutCoverage,
+      decision: 'REJECT',
+      rejection_disposition: 'IMPLEMENTATION_DEFECT',
+      reason: 'aceitação declarada não foi atendida',
+      findings: [finding('ACCEPTANCE_VIOLATION')],
+    });
+    expect(parsed.findings?.[0]?.severity).toBe('BLOCKING');
+  });
 });
 
 describe('endereçamento de what_i_did_not_check', () => {
