@@ -30,8 +30,8 @@
  *
  * Review requirement expressa DUAS dimensões independentes:
  * `independent_review_required` — PROPORCIONAL: exigido só quando há razão
- * concreta (risco alto/crítico, evidência de verificação fraca ou confiança
- * baixa), nunca por default — e `diversity_requirement` (diversidade de profile/model/provider
+ * concreta (risco crítico, evidência de verificação fraca ou confiança baixa),
+ * nunca por default e nunca pelo label `risk=high` sozinho — e `diversity_requirement` (diversidade de profile/model/provider
  * — PROPORCIONAL ao risco: `not_required` em risco baixo/médio, `preferred`
  * em risco alto, `required` em risco crítico). Diversidade nunca é condição
  * universal de independência — risco baixo/médio pode ter revisão
@@ -547,16 +547,26 @@ export type ReviewRequirementAssessment = z.infer<typeof ReviewRequirementAssess
  * concreto, não pelo fato de a task não ser trivial.
  *
  * Exige reviewer quando, e somente quando, houver uma razão concreta:
- * - `risk` high ou critical (risco de execução; security-sensitive é
- *   categoria de autorização distinta, não derivada deste label);
+ * - `risk` critical — e SÓ critical (security-sensitive é categoria de
+ *   autorização distinta, não derivada deste label);
  * - `verification_strength` weak — validação ausente ou subjetiva, isto é,
  *   PASS/FAIL não é objetivamente determinável;
  * - `confidence` low — os fatos que sustentam a avaliação estão faltando.
  *
- * Risco baixo/médio com validação oficial forte ou razoável (partial) e
- * confiança não-baixa NÃO exige reviewer: a validação oficial do orquestrador
- * já é a evidência. Repair e escalation são fatos do lifecycle, não razões de
- * review do candidate atual.
+ * `risk=high` SOZINHO não exige reviewer. Um label de risco alto descreve a
+ * consequência de errar, não a ausência de evidência de acerto: com validação
+ * determinística forte ou razoável (partial) e confiança não-baixa, quem prova
+ * o candidate é a validação oficial do orquestrador, e um segundo LLM não
+ * acrescenta evidência de correctness — acrescenta custo. `high` combinado com
+ * verificação fraca ou confiança baixa continua exigindo reviewer, mas a razão
+ * registrada é a fraqueza concreta, nunca o label. Historicamente era `high`
+ * que tornava a review universal: toda finalização da baseline Semi-Imperium
+ * era high ou critical, então remover repair/escalation como razões não teria
+ * removido nenhuma review inicial.
+ *
+ * Qualquer risco com validação oficial forte ou razoável (partial) e confiança
+ * não-baixa NÃO exige reviewer, exceto critical. Repair e escalation são fatos
+ * do lifecycle, não razões de review do candidate atual.
  */
 function assessReviewRequirement(
   risk: TaskRisk,
@@ -564,7 +574,7 @@ function assessReviewRequirement(
   confidence: ConfidenceLevel,
 ): ReviewRequirementAssessment {
   const concreteReasons: string[] = [];
-  if (risk === 'high' || risk === 'critical') concreteReasons.push(`risk=${risk}`);
+  if (risk === 'critical') concreteReasons.push('risk=critical');
   if (verificationStrength === 'weak') concreteReasons.push('verification_strength=weak');
   if (confidence === 'low') concreteReasons.push('confidence=low');
   const independentReviewRequired = concreteReasons.length > 0;
@@ -573,8 +583,8 @@ function assessReviewRequirement(
     risk === 'critical' ? 'required' : risk === 'high' ? 'preferred' : 'not_required';
 
   const rationale = independentReviewRequired
-    ? `revisão independente com contexto fresco exigida por razão concreta de risco: ${concreteReasons.join(', ')}`
-    : `nenhuma razão concreta de risco (risk=${risk}, verification_strength=${verificationStrength}, confidence=${confidence}) — a validação oficial do orquestrador é a evidência; reviewer independente não é exigido`;
+    ? `revisão independente com contexto fresco exigida por razão concreta: ${concreteReasons.join(', ')}`
+    : `nenhuma razão concreta (risk=${risk}, verification_strength=${verificationStrength}, confidence=${confidence}) — a validação oficial do orquestrador é a evidência; reviewer independente não é exigido`;
 
   return {
     independent_review_required: independentReviewRequired,

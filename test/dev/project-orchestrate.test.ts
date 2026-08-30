@@ -1711,7 +1711,7 @@ describe('G — reviewer não ganha autorização mais fraca que o implementer',
             findings: [
               {
                 severity: 'ADVISORY',
-                basis: 'SCOPE_EXPANSION',
+                basis: 'SCOPE_OR_REQUIREMENT_VIOLATION',
                 relationship: 'CURRENT_CANDIDATE',
                 summary: 'funcionalidade nova fora do pedido',
               },
@@ -1805,6 +1805,67 @@ describe('G — reviewer não ganha autorização mais fraca que o implementer',
       findings: [{ severity: 'BLOCKING', basis: 'ACCEPTANCE_VIOLATION' }],
     });
   });
+
+  /**
+   * Autoridade de bloqueio é do CONTROL PLANE, derivada de `basis`. O reviewer
+   * descreve o que achou; a severidade que a lifecycle obedece é derivada.
+   */
+  async function verdictOf(payload: Record<string, unknown>) {
+    const profile = await loadProfile(REPO_ROOT, CODEX_PROFILE_ID);
+    return launchProjectReviewer({
+      paths,
+      profile,
+      scope: authorizationScope(),
+      implementerProfileId: CLAUDE_PROFILE_ID,
+      diversityRequirement: 'required',
+      risk: 'critical',
+      credential: { availability: true, provenance: 'probe local provou a assinatura' },
+      quota: { availability: null, provenance: 'quota desconhecida' },
+      packet: reviewerPacketV2(),
+      port: { run: async () => codexStream(payload) },
+    });
+  }
+
+  function finding(basis: string, severity: 'BLOCKING' | 'ADVISORY') {
+    return {
+      severity,
+      basis,
+      relationship: 'CURRENT_CANDIDATE',
+      summary: `finding de base ${basis}`,
+    };
+  }
+
+  for (const basis of ['OPTIONAL_REFACTOR', 'STYLE_PREFERENCE', 'PERFORMANCE_NOT_REQUIRED', 'UNRELATED_TECHNICAL_DEBT', 'OPTIONAL_SCOPE_EXPANSION']) {
+    it(`basis advisory-only ${basis} não vira gate blocking porque o reviewer escreveu BLOCKING`, async () => {
+      const result = await verdictOf({
+        decision: 'REJECT',
+        rejection_disposition: 'IMPLEMENTATION_DEFECT',
+        reason: 'eu preferiria outra forma',
+        findings: [finding(basis, 'BLOCKING')],
+        coverage: validCoverage,
+      });
+      expect(result).toMatchObject({
+        outcome: 'ACCEPT',
+        findings: [{ basis, severity: 'ADVISORY' }],
+      });
+    });
+  }
+
+  for (const basis of ['ACCEPTANCE_VIOLATION', 'CORRECTNESS_DEFECT', 'INTEGRITY_VIOLATION', 'SECURITY_OR_SAFETY_DEFECT', 'REQUIRED_SURFACE_UNVERIFIED', 'SCOPE_OR_REQUIREMENT_VIOLATION']) {
+    it(`basis blocking-capable ${basis} não vira ACCEPT porque o reviewer escreveu ADVISORY`, async () => {
+      const result = await verdictOf({
+        decision: 'REJECT',
+        rejection_disposition: 'IMPLEMENTATION_DEFECT',
+        reason: 'defeito concreto no candidate',
+        findings: [finding(basis, 'ADVISORY')],
+      });
+      expect(result).toMatchObject({
+        outcome: 'REJECT',
+        rejection_disposition: 'IMPLEMENTATION_DEFECT',
+        findings: [{ basis, severity: 'BLOCKING' }],
+      });
+    });
+  }
 
   it('focused re-review aceita finding original corrigido e mantém sugestão não relacionada advisory', async () => {
     const profile = await loadProfile(REPO_ROOT, CODEX_PROFILE_ID);

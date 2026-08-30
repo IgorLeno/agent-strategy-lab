@@ -2154,19 +2154,64 @@ export const CommitMessage = z.string().superRefine((message, ctx) => {
 export const ReviewFindingSeverity = z.enum(['BLOCKING', 'ADVISORY']);
 export type ReviewFindingSeverity = z.infer<typeof ReviewFindingSeverity>;
 
+/**
+ * `basis` é a ÚNICA descrição de finding que o reviewer controla. A severidade
+ * efetiva — a que a lifecycle obedece — é DERIVADA dela pelo control plane.
+ *
+ * O modelo descreve O QUE achou; quem decide se aquela CLASSE é capaz de
+ * bloquear é o control plane. Sem essa separação, `severity` autoral tem
+ * autoridade de execução: `ADVISORY` + `ACCEPTANCE_VIOLATION` aceitaria um
+ * defeito real, e `BLOCKING` + `OPTIONAL_REFACTOR` recriaria exatamente o
+ * churn de repair por preferência que esta política existe para remover.
+ *
+ * `SCOPE_EXPANSION` foi dividida porque conflatava dois casos opostos:
+ * sugestão de escopo FUTURO (advisory) e candidate que EXCEDEU o escopo/
+ * requisito autorizado agora (blocking-capable — a disposição declarada
+ * continua decidindo se isso é defeito reparável ou fronteira humana do PR A).
+ */
 export const ReviewFindingBasis = z.enum([
   'ACCEPTANCE_VIOLATION',
   'CORRECTNESS_DEFECT',
   'INTEGRITY_VIOLATION',
   'SECURITY_OR_SAFETY_DEFECT',
   'REQUIRED_SURFACE_UNVERIFIED',
+  'SCOPE_OR_REQUIREMENT_VIOLATION',
   'OPTIONAL_REFACTOR',
   'STYLE_PREFERENCE',
   'PERFORMANCE_NOT_REQUIRED',
   'UNRELATED_TECHNICAL_DEBT',
-  'SCOPE_EXPANSION',
+  'OPTIONAL_SCOPE_EXPANSION',
 ]);
 export type ReviewFindingBasis = z.infer<typeof ReviewFindingBasis>;
+
+export const REVIEW_FINDING_BASIS_AUTHORITY: Readonly<
+  Record<ReviewFindingBasis, ReviewFindingSeverity>
+> = {
+  ACCEPTANCE_VIOLATION: 'BLOCKING',
+  CORRECTNESS_DEFECT: 'BLOCKING',
+  INTEGRITY_VIOLATION: 'BLOCKING',
+  SECURITY_OR_SAFETY_DEFECT: 'BLOCKING',
+  REQUIRED_SURFACE_UNVERIFIED: 'BLOCKING',
+  SCOPE_OR_REQUIREMENT_VIOLATION: 'BLOCKING',
+  OPTIONAL_REFACTOR: 'ADVISORY',
+  STYLE_PREFERENCE: 'ADVISORY',
+  PERFORMANCE_NOT_REQUIRED: 'ADVISORY',
+  UNRELATED_TECHNICAL_DEBT: 'ADVISORY',
+  OPTIONAL_SCOPE_EXPANSION: 'ADVISORY',
+};
+
+export const BLOCKING_CAPABLE_REVIEW_FINDING_BASES: readonly ReviewFindingBasis[] =
+  ReviewFindingBasis.options.filter(
+    (basis) => REVIEW_FINDING_BASIS_AUTHORITY[basis] === 'BLOCKING',
+  );
+
+export function effectiveFindingSeverity(basis: ReviewFindingBasis): ReviewFindingSeverity {
+  return REVIEW_FINDING_BASIS_AUTHORITY[basis];
+}
+
+export function isBlockingFinding(finding: { readonly basis: ReviewFindingBasis }): boolean {
+  return effectiveFindingSeverity(finding.basis) === 'BLOCKING';
+}
 
 export const ReviewFindingRelationship = z.enum([
   'CURRENT_CANDIDATE',
@@ -2178,16 +2223,27 @@ export const ReviewFindingRelationship = z.enum([
 ]);
 export type ReviewFindingRelationship = z.infer<typeof ReviewFindingRelationship>;
 
+/**
+ * `severity` declarada pelo reviewer é ACEITA e IGNORADA: aceita para não
+ * transformar metadado supérfluo em ciclo de correção protocolar caro,
+ * ignorada porque a severidade persistida e obedecida é sempre a derivada de
+ * `basis`. Nenhuma string escolhida pelo modelo promove uma base advisory a
+ * gate blocking nem rebaixa uma base blocking-capable a advisory.
+ */
 export const ReviewFinding = z
   .object({
-    severity: ReviewFindingSeverity,
+    severity: ReviewFindingSeverity.optional(),
     basis: ReviewFindingBasis,
     relationship: ReviewFindingRelationship,
     summary: nonEmpty,
     acceptance_criterion: nonEmpty.optional(),
     impacted_files: z.array(nonEmpty).optional(),
   })
-  .strict();
+  .strict()
+  .transform((finding) => ({
+    ...finding,
+    severity: effectiveFindingSeverity(finding.basis),
+  }));
 export type ReviewFinding = z.infer<typeof ReviewFinding>;
 
 const FocusedReviewContext = z

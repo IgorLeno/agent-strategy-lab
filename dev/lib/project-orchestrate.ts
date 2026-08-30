@@ -77,6 +77,7 @@ import { PlannedTask, type TaskRisk } from '../../src/planner/task.js';
 import {
   CandidateReviewCoverage,
   ReviewFinding,
+  isBlockingFinding,
   ReviewRejectionDisposition,
   type HandoffConfidenceLevel,
   type ReviewFinding as ReviewFindingType,
@@ -1806,31 +1807,41 @@ export function buildReviewerPrompt(packet: ProjectReviewPacket): string {
 }
 
 /**
- * BLOCKING vs ADVISORY. Um reviewer não é fonte ilimitada de escopo novo: o
- * que reprova é defeito CONCRETO de acceptance/correctness/integridade do
- * candidate atual; preferência, refactor opcional e dívida não relacionada são
- * observações úteis que NÃO movem a definição de pronto.
+ * O reviewer declara `basis` — O QUE ele achou. A severidade efetiva é
+ * DERIVADA por `effectiveFindingSeverity`, não escolhida pelo modelo: um
+ * reviewer não é fonte ilimitada de escopo novo, e escrever "BLOCKING" numa
+ * preferência de estilo não pode reprovar candidate nenhum. O prompt descreve
+ * a partição para que a base escolhida seja a certa, mas a autoridade está no
+ * código, não na instrução.
  */
 function reviewFindingsContract(): readonly string[] {
   return [
     '',
     'Declare também findings estruturados:',
-    '"findings":[{"severity":"BLOCKING|ADVISORY",',
-    ' "basis":"ACCEPTANCE_VIOLATION|CORRECTNESS_DEFECT|INTEGRITY_VIOLATION|SECURITY_OR_SAFETY_DEFECT|',
-    '  REQUIRED_SURFACE_UNVERIFIED|OPTIONAL_REFACTOR|STYLE_PREFERENCE|PERFORMANCE_NOT_REQUIRED|',
-    '  UNRELATED_TECHNICAL_DEBT|SCOPE_EXPANSION",',
+    '"findings":[{"basis":"ACCEPTANCE_VIOLATION|CORRECTNESS_DEFECT|INTEGRITY_VIOLATION|',
+    '  SECURITY_OR_SAFETY_DEFECT|REQUIRED_SURFACE_UNVERIFIED|SCOPE_OR_REQUIREMENT_VIOLATION|',
+    '  OPTIONAL_REFACTOR|STYLE_PREFERENCE|PERFORMANCE_NOT_REQUIRED|UNRELATED_TECHNICAL_DEBT|',
+    '  OPTIONAL_SCOPE_EXPANSION",',
     ' "relationship":"CURRENT_CANDIDATE|ORIGINAL_FINDING|AFFECTED_ACCEPTANCE|REPAIR_REGRESSION|',
     '  NEW_CRITICAL_DEFECT|UNRELATED",',
     ' "summary":"...","acceptance_criterion":"...","impacted_files":["..."]}]',
-    'BLOCKING exige defeito concreto e presente: acceptance violado, comportamento',
-    'exigido ausente, defeito de correctness, regressão causada por este candidate,',
-    'problema crítico de segurança, violação de integridade de candidate/base, ou uma',
-    'superfície de review exigida que você não conseguiu verificar.',
-    'Preferência de nome, refactor opcional, arquitetura alternativa sem acceptance',
-    'violado, robustez especulativa, estilo já aceito pelos checks determinísticos,',
-    'dívida técnica não relacionada, performance não exigida e escopo novo são ADVISORY.',
-    'Um REJECT sem nenhum finding BLOCKING não reprova nada: se você só tem findings',
-    'ADVISORY, responda ACCEPT com a coverage exigida e registre as observações.',
+    'NÃO declare severity: ela é derivada de basis pelo control plane e qualquer',
+    'valor que você escrever é ignorado. Escolha a basis correta, não o rótulo.',
+    'Bases que reprovam exigem defeito concreto e presente: acceptance violado,',
+    'comportamento exigido ausente, defeito de correctness, regressão causada por este',
+    'candidate, problema crítico de segurança, violação de integridade de candidate/base,',
+    'superfície de review exigida que você não conseguiu verificar, ou candidate que',
+    'excedeu o escopo/requisito autorizado AGORA (SCOPE_OR_REQUIREMENT_VIOLATION).',
+    'Bases advisory: preferência de nome, refactor opcional, arquitetura alternativa sem',
+    'acceptance violado, robustez especulativa, estilo já aceito pelos checks',
+    'determinísticos, dívida técnica não relacionada, performance não exigida e sugestão',
+    'de escopo FUTURO ("seria útil exportar PDF depois" = OPTIONAL_SCOPE_EXPANSION).',
+    'Escopo não escolhe sozinho a disposição: trabalho fora do pedido que já está NO',
+    'candidate é SCOPE_OR_REQUIREMENT_VIOLATION, e a disposição declarada continua sendo',
+    'sua — IMPLEMENTATION_DEFECT se é removível por reparo, REQUIREMENT_OR_SCOPE_DECISION',
+    'se exige decisão humana.',
+    'Um REJECT cujos findings são todos advisory não reprova nada: se você só tem',
+    'findings advisory, responda ACCEPT com a coverage exigida e registre as observações.',
   ];
 }
 
@@ -1931,7 +1942,7 @@ function assessExtractedReviewerVerdict(parsed: unknown): ReviewerVerdictAssessm
     declaredDisposition.data === 'IMPLEMENTATION_DEFECT' &&
     findings !== null &&
     findings.length > 0 &&
-    !findings.some((finding) => finding.severity === 'BLOCKING');
+    !findings.some((finding) => isBlockingFinding(finding));
   const decision = advisoryOnlyReject ? 'ACCEPT' : declared;
   if (decision !== 'ACCEPT' && decision !== 'REJECT') {
     corrections.push(

@@ -137,6 +137,12 @@ function planYaml(options: {
 interface AuthorizationOptions {
   readonly profiles?: readonly { readonly id: string; readonly rank: number }[];
   readonly risk?: string;
+  /**
+   * Review independente é PROPORCIONAL: `risk: high` sozinho não a exige.
+   * Verificação subjetiva é a razão concreta que estes e2e usam para
+   * exercitar o caminho REVIEWED.
+   */
+  readonly verification?: string;
   readonly boundary?: readonly string[];
   readonly reviewerProfileId?: string;
 }
@@ -190,7 +196,7 @@ function authorizationYaml(options: AuthorizationOptions = {}): string {
     `    risk: ${options.risk ?? 'low'}`,
     '    complexity: local',
     '    ambiguity: low',
-    '    verification: deterministic',
+    `    verification: ${options.verification ?? 'deterministic'}`,
     '    resource_envelope:',
     '      duration_ms: {expected: 20000, maximum: 60000}',
     '      tokens: {expected: 30000, maximum: 90000}',
@@ -592,7 +598,7 @@ describe('external plan run — dev-run-plan pelo lifecycle universal', () => {
   it('REVIEW — quando a policy exige, a review roda em invocação nova e read-only', async () => {
     const target = await fixture(
       planYaml({ secondValidation: "['true']" }),
-      authorizationYaml({ risk: 'high' }),
+      authorizationYaml({ risk: 'high', verification: 'subjective' }),
     );
 
     const result = await runPlan(target, 'orchestrator-success');
@@ -612,7 +618,7 @@ describe('external plan run — dev-run-plan pelo lifecycle universal', () => {
   it('REVIEW ACCEPT — PASS só existe DEPOIS do veredito durável, e então libera T2', async () => {
     const target = await fixture(
       planYaml({ secondValidation: "['true']" }),
-      authorizationYaml({ risk: 'high' }),
+      authorizationYaml({ risk: 'high', verification: 'subjective' }),
     );
 
     const result = await runPlan(target, 'orchestrator-success');
@@ -663,7 +669,7 @@ describe('external plan run — dev-run-plan pelo lifecycle universal', () => {
   it('REVIEW — ACCEPT sem cobertura mínima não promove nada', async () => {
     const target = await fixture(
       planYaml({ secondValidation: "['true']" }),
-      authorizationYaml({ risk: 'high' }),
+      authorizationYaml({ risk: 'high', verification: 'subjective' }),
     );
 
     const result = await runPlan(target, 'orchestrator-success', [], {
@@ -685,7 +691,7 @@ describe('external plan run — dev-run-plan pelo lifecycle universal', () => {
   it('REVIEW — veredito REJECT para a automação com gate humano, sem PASS silencioso', async () => {
     const target = await fixture(
       planYaml({ secondValidation: "['true']" }),
-      authorizationYaml({ risk: 'high' }),
+      authorizationYaml({ risk: 'high', verification: 'subjective' }),
     );
 
     const result = await runPlan(target, 'orchestrator-success', [], {
@@ -728,7 +734,7 @@ describe('external plan run — dev-run-plan pelo lifecycle universal', () => {
   it('REVIEW REJECT — rerun do mesmo comando continua HUMAN_REQUIRED, sem novo launch', async () => {
     const target = await fixture(
       planYaml({ secondValidation: "['true']" }),
-      authorizationYaml({ risk: 'high' }),
+      authorizationYaml({ risk: 'high', verification: 'subjective' }),
     );
 
     const first = await runPlan(target, 'orchestrator-success', [], {
@@ -763,7 +769,7 @@ describe('external plan run — dev-run-plan pelo lifecycle universal', () => {
   it('REVIEW pendente — crash antes do veredito retoma a review, sem repetir o implementer', async () => {
     const target = await fixture(
       planYaml({ secondValidation: "['true']" }),
-      authorizationYaml({ risk: 'high' }),
+      authorizationYaml({ risk: 'high', verification: 'subjective' }),
     );
 
     // Review exigida que não pôde ser CONCLUÍDA: o candidate fica preparado e
@@ -959,7 +965,7 @@ describe('external plan run — dev-run-plan pelo lifecycle universal', () => {
   }, 120_000);
 
   it('J — dry-run REVIEWED antecipa a exigência de review e o reviewer escolhido', async () => {
-    const target = await fixture(singleTaskPlanYaml(), authorizationYaml({ risk: 'high' }));
+    const target = await fixture(singleTaskPlanYaml(), authorizationYaml({ risk: 'high', verification: 'subjective' }));
 
     const result = await runPlan(target, 'orchestrator-success', ['--dry-run']);
     expect(result.exitCode, result.stderr).toBe(0);
@@ -1004,7 +1010,7 @@ describe('external plan run — dev-run-plan pelo lifecycle universal', () => {
   it('L — dry-run com REVIEW REJECT durável reporta o gate, sem fingir READY', async () => {
     const target = await fixture(
       planYaml({ secondValidation: "['true']" }),
-      authorizationYaml({ risk: 'high' }),
+      authorizationYaml({ risk: 'high', verification: 'subjective' }),
     );
 
     const first = await runPlan(target, 'orchestrator-success', [], {

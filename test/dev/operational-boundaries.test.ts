@@ -89,6 +89,18 @@ const AUTHORIZATION = [
 ].join('\n');
 
 /**
+ * Review independente é PROPORCIONAL: `risk: high` sozinho deixou de exigir
+ * reviewer. O que a exige aqui é uma razão concreta e verificável —
+ * `verification: subjective`, isto é, PASS/FAIL não objetivamente
+ * determinável — para que estes testes de fronteira exercitem o caminho
+ * REVIEWED sem depender de um label de risco sem autoridade própria.
+ */
+const REVIEW_REQUIRED_AUTHORIZATION = AUTHORIZATION.replace(
+  '    verification: deterministic',
+  '    verification: subjective',
+);
+
+/**
  * Plano de uma tarefa só: a validação oficial exige o arquivo que o worker
  * REALMENTE consegue versionar, e nada mais.
  */
@@ -205,7 +217,7 @@ describe('fronteiras operacionais — Onda 1', () => {
     const outside = await mkdtemp(path.join(os.tmpdir(), 'agentlab-review-repair-'));
     roots.push(outside);
     const authorizationFile = path.join(outside, 'agentlab-run.yaml');
-    await writeFile(authorizationFile, AUTHORIZATION.replace('risk: low', 'risk: high'), 'utf8');
+    await writeFile(authorizationFile, REVIEW_REQUIRED_AUTHORIZATION, 'utf8');
     const authorization = await loadProjectRunAuthorization(authorizationFile);
     let reviewInvocations = 0;
     const reviewPrompts: string[] = [];
@@ -373,7 +385,7 @@ describe('fronteiras operacionais — Onda 1', () => {
     const outside = await mkdtemp(path.join(os.tmpdir(), 'agentlab-review-human-'));
     roots.push(outside);
     const authorizationFile = path.join(outside, 'agentlab-run.yaml');
-    await writeFile(authorizationFile, AUTHORIZATION.replace('risk: low', 'risk: high'), 'utf8');
+    await writeFile(authorizationFile, REVIEW_REQUIRED_AUTHORIZATION, 'utf8');
     const authorization = await loadProjectRunAuthorization(authorizationFile);
     const controlPlane = await createProjectControlPlane({
       paths: fixture.paths,
@@ -421,7 +433,7 @@ describe('fronteiras operacionais — Onda 1', () => {
     const outside = await mkdtemp(path.join(os.tmpdir(), 'agentlab-review-unparseable-'));
     roots.push(outside);
     const authorizationFile = path.join(outside, 'agentlab-run.yaml');
-    await writeFile(authorizationFile, AUTHORIZATION.replace('risk: low', 'risk: high'), 'utf8');
+    await writeFile(authorizationFile, REVIEW_REQUIRED_AUTHORIZATION, 'utf8');
     const authorization = await loadProjectRunAuthorization(authorizationFile);
     const leakedSecret = 'sk-ant-api03-FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE0123456789AA';
     const unparseableStdout =
@@ -515,7 +527,7 @@ describe('fronteiras operacionais — Onda 1', () => {
     const outside = await mkdtemp(path.join(os.tmpdir(), 'agentlab-review-exit1-'));
     roots.push(outside);
     const authorizationFile = path.join(outside, 'agentlab-run.yaml');
-    await writeFile(authorizationFile, AUTHORIZATION.replace('risk: low', 'risk: high'), 'utf8');
+    await writeFile(authorizationFile, REVIEW_REQUIRED_AUTHORIZATION, 'utf8');
     const authorization = await loadProjectRunAuthorization(authorizationFile);
     const leakedSecret = 'sk-ant-api03-FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE0123456789AA';
     const stdout = `{"is_error":true,"result":"Claude session limit reached ${leakedSecret}"}`;
@@ -601,7 +613,7 @@ describe('fronteiras operacionais — Onda 1', () => {
     const authorizationFile = path.join(outside, 'agentlab-run.yaml');
     await writeFile(
       authorizationFile,
-      AUTHORIZATION.replace('risk: low', 'risk: high').replace(
+      REVIEW_REQUIRED_AUTHORIZATION.replace(
         `      rationale: degrau único declarado pela policy\n`,
         [
           '      rationale: degrau único declarado pela policy',
@@ -754,7 +766,7 @@ describe('fronteiras operacionais — Onda 1', () => {
     const authorizationFile = path.join(outside, 'agentlab-run.yaml');
     await writeFile(
       authorizationFile,
-      AUTHORIZATION.replace('risk: low', 'risk: high').replace('  - BOUNDED_REPAIR\n', ''),
+      REVIEW_REQUIRED_AUTHORIZATION.replace('  - BOUNDED_REPAIR\n', ''),
       'utf8',
     );
     const authorization = await loadProjectRunAuthorization(authorizationFile);
@@ -805,7 +817,7 @@ describe('fronteiras operacionais — Onda 1', () => {
     const outside = await mkdtemp(path.join(os.tmpdir(), 'agentlab-review-legacy-'));
     roots.push(outside);
     const authorizationFile = path.join(outside, 'agentlab-run.yaml');
-    await writeFile(authorizationFile, AUTHORIZATION.replace('risk: low', 'risk: high'), 'utf8');
+    await writeFile(authorizationFile, REVIEW_REQUIRED_AUTHORIZATION, 'utf8');
     const authorization = await loadProjectRunAuthorization(authorizationFile);
     const firstControlPlane = await createProjectControlPlane({
       paths: fixture.paths,

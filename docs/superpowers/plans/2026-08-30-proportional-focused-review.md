@@ -126,3 +126,78 @@ Regra: ao remover uma condicao que forcava um gate, enumerar o que aquela
 condicao garantia na pratica e reancorar cada garantia em fato proprio antes de
 apagar a condicao.
 ```
+
+## 5. Reparo focado da review externa da PR #18 (2026-08-30)
+
+Review externa do diff de producao: `REJECT — IMPLEMENTATION_DEFECT`, dois
+findings blocking. Design geral aceito; nenhuma reabertura de arquitetura.
+
+### Finding 1 — `risk=high` mantinha review universal na classe piloto
+
+`assess.ts` ainda exigia review por `risk === 'high' || risk === 'critical'`,
+mesmo com `verification_strength` strong/partial e `confidence` nao-baixa. Como
+toda finalization historica da baseline era high ou critical, remover repair e
+escalacao nao teria removido NENHUMA review inicial daquela run.
+
+Politica corrigida: razoes concretas sao `risk=critical`,
+`verification_strength=weak` e `confidence=low`. `risk=high` sozinho perdeu
+autoridade de review; combinado com verificacao fraca ou confianca baixa a
+review continua exigida, mas a razao registrada e a fraqueza concreta.
+Diversidade ficou inalterada (`required` em critical, `preferred` em high,
+`not_required` em low/medium) e nunca cria review por si.
+
+Nenhum gatilho novo foi inventado. As propriedades factuais que provam
+sensibilidade real — `human_gated_capabilities`, boundary de execucao
+autonoma, billing, credenciais, acao destrutiva, deploy, efeito externo,
+integridade de recovered work — continuam sendo fronteiras de AUTORIZACAO do
+control plane (PR A / PR #16), que param para humano; nenhuma delas foi
+convertida em razao de review.
+
+### Counterfactual de politica — `semi-imperium-real-01` (read-only)
+
+| fato | valor |
+| --- | --- |
+| finalizations com `review_requirement` persistida | 11 |
+| `required: true` persistido | 11/11 |
+| risk critical (`mopac_minimum_workflow`) | 2 finalizations |
+| risk high (5 tasks restantes) | 9 finalizations |
+| entre as high, verification weak | 0 — plano declara `deterministic` ou `partially_deterministic` e validation nao vazia em todas |
+| entre as high, confidence low | UNKNOWN — `review_requirement` v1 nao persiste `reasons` nem readiness |
+| reviews exigidas pela politica ANTIGA (high OR critical OR weak OR low) | 11 |
+| reviews exigidas pela politica NOVA (critical OR weak OR low) | 2 garantidas; ate 11 se toda confianca fosse baixa |
+
+Counterfactual de POLITICA apenas: nenhum provider foi lancado e nenhuma
+economia de tokens foi medida. Conta reviews INICIAIS por finalization; a
+re-review focada obrigatoria por `unresolved_review_reject` e consequencia de
+um REJECT que, no contrafactual, poderia nao ter existido.
+
+### Finding 2 — `severity` autoral tinha autoridade de execucao
+
+`ReviewFinding.severity` era escolhida pelo modelo e `severity === 'BLOCKING'`
+decidia se um REJECT `IMPLEMENTATION_DEFECT` virava ACCEPT. Combinacoes
+contraditorias eram aceitas: `ADVISORY` + `ACCEPTANCE_VIOLATION` aceitava
+defeito real; `BLOCKING` + `OPTIONAL_REFACTOR` recriava churn de repair.
+
+Autoridade agora e derivada de `basis` pelo control plane
+(`effectiveFindingSeverity` / `isBlockingFinding`). `severity` declarada e
+aceita e ignorada — aceita para nao transformar metadado supérfluo em ciclo de
+correcao protocolar, ignorada porque a severidade persistida e sempre a
+derivada. `SCOPE_EXPANSION` foi dividida: `OPTIONAL_SCOPE_EXPANSION` (sugestao
+de escopo futuro, advisory) e `SCOPE_OR_REQUIREMENT_VIOLATION` (candidate
+excedeu escopo/requisito autorizado AGORA, blocking-capable) — a disposicao
+declarada continua decidindo entre reparo e fronteira humana.
+
+Findings malformados continuam preservando o REJECT declarado, sem redecisao e
+sem segunda invocacao de reviewer.
+
+### Status de producao dos failure domains
+
+- `PROFILE` / `PROVEN`: unico produtor de producao —
+  `dev/lib/project-run.ts` ao classificar `REVIEW_INVOCATION_FAILED`.
+- `POOL`: sem produtor de producao; existe como representacao e capacidade de
+  selecao.
+- `PROVIDER`: sem produtor de producao; existe como representacao e capacidade
+  de selecao.
+
+Dedup provider-wide NAO esta operacional: nenhum fato positivo de producao
+estabelece `PROVIDER`/`PROVEN` hoje.

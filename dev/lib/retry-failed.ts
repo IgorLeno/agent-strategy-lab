@@ -62,6 +62,7 @@ import {
   ReviewRejectedAttemptRecord,
   ValidationFailedAttemptReasonCode,
   ValidationFailedAttemptRecord,
+  isBlockingFinding,
   parseHandoffDraft,
   type PreviousAttemptDiagnostics,
   type PreviousAttemptFailedValidation,
@@ -1010,9 +1011,7 @@ export async function retryReviewRejectedAttempt(
       ...(review.findings === undefined
         ? {}
         : (() => {
-            const blocking = review.findings.filter(
-              (finding) => finding.severity === 'BLOCKING',
-            );
+            const blocking = review.findings.filter((finding) => isBlockingFinding(finding));
             return blocking.length === 0 ? {} : { blocking_findings: blocking };
           })()),
       changed_files: files,
