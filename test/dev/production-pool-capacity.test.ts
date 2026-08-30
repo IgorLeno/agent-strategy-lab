@@ -73,6 +73,12 @@ function knownCapacity(input: {
   readonly used: number;
   readonly windowInstance?: string;
   readonly source?: string;
+  /**
+   * Instante da LEITURA. Importa para a identidade da janela: uma janela só
+   * pode ter virado se a leitura posterior aconteceu depois do reset que a
+   * anterior declarou — timestamp futuro reprevisto não é janela nova.
+   */
+  readonly observedAt?: string;
 }): PoolCapacityObservation {
   return PoolCapacityObservation.parse({
     schema_version: 1,
@@ -93,7 +99,7 @@ function knownCapacity(input: {
     plan: null,
     reason: 'provider reportou capacidade atual',
     source: input.source ?? 'fixture:read-only-capacity',
-    observed_at: OBSERVED_AT,
+    observed_at: input.observedAt ?? OBSERVED_AT,
   });
 }
 
@@ -831,10 +837,22 @@ describe('capacidade antes/depois no launch de produção', () => {
 
   it('virada de janela persiste reset e nunca subtrai snapshots incomparáveis', async () => {
     const fixture = await launchFixture();
+    // A leitura posterior acontece DEPOIS do reset que a anterior declarou:
+    // é assim que uma virada de janela real se parece.
     const launched = await launchWithSnapshots(
       fixture,
-      knownCapacity({ pool: 'scaffold:fake', used: 99, windowInstance: '2030-01-01T00:00:00.000Z' }),
-      knownCapacity({ pool: 'scaffold:fake', used: 1, windowInstance: '2030-01-02T00:00:00.000Z' }),
+      knownCapacity({
+        pool: 'scaffold:fake',
+        used: 99,
+        windowInstance: '2030-01-01T00:00:00.000Z',
+        observedAt: '2029-12-31T23:50:00.000Z',
+      }),
+      knownCapacity({
+        pool: 'scaffold:fake',
+        used: 1,
+        windowInstance: '2030-01-02T00:00:00.000Z',
+        observedAt: '2030-01-01T00:05:00.000Z',
+      }),
     );
 
     expect(launched.record?.pool_capacity?.deltas).toMatchObject([

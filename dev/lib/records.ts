@@ -32,6 +32,7 @@ import {
   ValidationFailedAttemptRecord,
   type HandoffDraft,
   type HandoffRecord,
+  type InfraFailedAttemptRecordInput,
   type LaunchRecordInput,
   type TaskPacket,
   parseHandoffDraft,
@@ -934,7 +935,7 @@ export const readInfraFailedAttempt = (
 
 export const writeInfraFailedAttempt = (
   paths: HarnessPaths,
-  record: InfraFailedAttemptRecord,
+  record: InfraFailedAttemptRecordInput,
 ): Promise<void> =>
   writeJsonOnce(
     infraFailedAttemptPath(paths, record.task_id, record.attempt),

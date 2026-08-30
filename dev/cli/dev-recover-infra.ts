@@ -40,6 +40,17 @@ async function main(): Promise<void> {
     source_base_sha: result.record.source_base_sha,
     head_sha: result.record.head_sha,
     head_mode: result.headMode,
+    // RECOVERABLE_UNFINALIZED_PATCH: nunca candidate, nunca aceito, nunca PASS.
+    recoverable_unfinalized_patch:
+      result.recoverable === null
+        ? null
+        : {
+            attempt: result.recoverable.attempt,
+            changed_files: result.recoverable.changed_files,
+            patch_path: result.recoverable.ref.patch_path,
+            manifest_path: result.recoverable.ref.manifest_path,
+            patch_size_bytes: result.recoverable.ref.patch_size_bytes,
+          },
     adopted_maintenance: result.adoptedMaintenance,
     authorized_head_sha: result.state.authorized_head_sha,
   });

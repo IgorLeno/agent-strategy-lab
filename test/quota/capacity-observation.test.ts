@@ -463,3 +463,196 @@ describe('Anthropic — mecanismo preservado, formato generalizado', () => {
     expect(poolUnavailable(observation)).toBe(true);
   });
 });
+
+/**
+ * Incidente real do piloto Semi-Imperium (launch
+ * d1bb96da-b46b-48f3-8ead-7098ba96e829, perfil
+ * codex-build-worker-subscription-sol-high-v2).
+ *
+ * O provider moveu o reset previsto da janela primary em UM segundo entre as
+ * duas leituras — 12:51:08 -> 12:51:09 — enquanto as duas observações
+ * (08:11 e 08:22) aconteceram HORAS antes desse reset. Identificar a janela
+ * pela igualdade exata do timestamp futuro transformou deriva do provider em
+ * troca de janela, e 17 pontos percentuais realmente consumidos viraram
+ * `consumed_pp: null` com `window_reset: true`.
+ */
+describe('deriva do timestamp de reset não é troca de janela', () => {
+  function openAiObservation(input: {
+    readonly observedAt: string;
+    readonly primaryUsed: number;
+    readonly primaryResetsAt: string;
+    readonly secondaryUsed: number;
+    readonly secondaryResetsAt: string;
+  }) {
+    const window = (id: string, used: number, resetsAt: string | null) => ({
+      window_id: id,
+      used_percent: used,
+      remaining_percent: remainingPercentOf(used),
+      precision: CapacityPrecision.COARSE_INTEGER_PERCENT,
+      window_seconds: id === 'primary' ? 18000 : 604800,
+      window_instance: resetsAt,
+      resets_at: resetsAt,
+    });
+    return PoolCapacityObservation.parse({
+      schema_version: 1,
+      quota_pool: 'openai_chatgpt_subscription',
+      status: CapacityStatus.KNOWN,
+      windows: [
+        window('primary', input.primaryUsed, input.primaryResetsAt),
+        window('secondary', input.secondaryUsed, input.secondaryResetsAt),
+      ],
+      balance: null,
+      plan: 'plus',
+      reason: 'janelas de uso reportadas pelo provider',
+      source: 'https://chatgpt.com/backend-api/wham/usage',
+      observed_at: input.observedAt,
+    });
+  }
+
+  const INCIDENT_BEFORE = openAiObservation({
+    observedAt: '2026-08-29T08:11:10.813Z',
+    primaryUsed: 83,
+    primaryResetsAt: '2026-08-29T12:51:08.000Z',
+    secondaryUsed: 76,
+    secondaryResetsAt: '2026-09-03T19:49:15.000Z',
+  });
+  const INCIDENT_AFTER = openAiObservation({
+    observedAt: '2026-08-29T08:22:36.696Z',
+    primaryUsed: 100,
+    primaryResetsAt: '2026-08-29T12:51:09.000Z',
+    secondaryUsed: 78,
+    secondaryResetsAt: '2026-09-03T19:49:15.000Z',
+  });
+
+  it('primary 83 -> 100 com reset deslocado 1s é a MESMA janela: 17 pp consumidos', () => {
+    const [primary] = windowDeltas(INCIDENT_BEFORE, INCIDENT_AFTER);
+    expect(primary?.window_id).toBe('primary');
+    expect(primary?.same_window).toBe(true);
+    expect(primary?.window_reset).toBe(false);
+    expect(primary?.consumed_pp).toBe(17);
+  });
+
+  it('secondary 76 -> 78, instância idêntica, continua com 2 pp — sem regressão', () => {
+    const secondary = windowDeltas(INCIDENT_BEFORE, INCIDENT_AFTER)[1];
+    expect(secondary?.window_id).toBe('secondary');
+    expect(secondary?.same_window).toBe(true);
+    expect(secondary?.window_reset).toBe(false);
+    expect(secondary?.consumed_pp).toBe(2);
+  });
+
+  it('deriva GRANDE também não inventa reset enquanto o reset declarado não chegou', () => {
+    const after = openAiObservation({
+      observedAt: '2026-08-29T08:22:36.696Z',
+      primaryUsed: 100,
+      // Uma hora de deriva: continua horas antes do reset declarado no before.
+      primaryResetsAt: '2026-08-29T13:51:08.000Z',
+      secondaryUsed: 78,
+      secondaryResetsAt: '2026-09-03T19:49:15.000Z',
+    });
+    const [primary] = windowDeltas(INCIDENT_BEFORE, after);
+    expect(primary?.same_window).toBe(true);
+    expect(primary?.consumed_pp).toBe(17);
+  });
+
+  it('intervalo que ATRAVESSA o reset declarado permanece window_reset sem delta', () => {
+    const before = openAiObservation({
+      observedAt: '2026-08-29T12:40:00.000Z',
+      primaryUsed: 96,
+      primaryResetsAt: '2026-08-29T12:51:08.000Z',
+      secondaryUsed: 76,
+      secondaryResetsAt: '2026-09-03T19:49:15.000Z',
+    });
+    const after = openAiObservation({
+      // Depois do reset declarado no before: a janela virou de verdade.
+      observedAt: '2026-08-29T13:05:00.000Z',
+      primaryUsed: 3,
+      primaryResetsAt: '2026-08-29T17:51:08.000Z',
+      secondaryUsed: 77,
+      secondaryResetsAt: '2026-09-03T19:49:15.000Z',
+    });
+    const [primary] = windowDeltas(before, after);
+    expect(primary?.same_window).toBe(false);
+    expect(primary?.window_reset).toBe(true);
+    expect(primary?.consumed_pp).toBeNull();
+  });
+
+  it('instância diferente sem resets_at datável mantém a semântica UNKNOWN-segura de reset', () => {
+    const rotulada = (used: number, label: string, observedAt: string) =>
+      PoolCapacityObservation.parse({
+        schema_version: 1,
+        quota_pool: 'anthropic_subscription',
+        status: CapacityStatus.KNOWN,
+        windows: [
+          {
+            window_id: 'five_hour',
+            used_percent: used,
+            remaining_percent: remainingPercentOf(used),
+            precision: CapacityPrecision.FRACTIONAL_PERCENT,
+            window_seconds: null,
+            window_instance: label,
+            resets_at: null,
+          },
+        ],
+        balance: null,
+        plan: null,
+        reason: 'claude -p /usage',
+        source: 'claude_print_usage',
+        observed_at: observedAt,
+      });
+    const [delta] = windowDeltas(
+      rotulada(80, 'Aug 29, 9am', '2026-08-29T08:11:10.813Z'),
+      rotulada(2, 'Aug 29, 2pm', '2026-08-29T09:11:10.813Z'),
+    );
+    expect(delta?.same_window).toBe(false);
+    expect(delta?.window_reset).toBe(true);
+    expect(delta?.consumed_pp).toBeNull();
+  });
+
+  it('window_instance ausente continua UNKNOWN: nem mesma janela, nem reset', () => {
+    const semInstancia = (used: number, observedAt: string) =>
+      PoolCapacityObservation.parse({
+        schema_version: 1,
+        quota_pool: 'openai_chatgpt_subscription',
+        status: CapacityStatus.KNOWN,
+        windows: [
+          {
+            window_id: 'primary',
+            used_percent: used,
+            remaining_percent: remainingPercentOf(used),
+            precision: CapacityPrecision.COARSE_INTEGER_PERCENT,
+            window_seconds: 18000,
+            window_instance: null,
+            resets_at: null,
+          },
+        ],
+        balance: null,
+        plan: null,
+        reason: 'teste',
+        source: 'teste',
+        observed_at: observedAt,
+      });
+    const [delta] = windowDeltas(
+      semInstancia(83, '2026-08-29T08:11:10.813Z'),
+      semInstancia(100, '2026-08-29T08:22:36.696Z'),
+    );
+    expect(delta?.same_window).toBeNull();
+    expect(delta?.window_reset).toBe(false);
+    expect(delta?.consumed_pp).toBe(17);
+  });
+
+  it('instância trocada ANTES do reset declarado mas com uso CAINDO é contradição: UNKNOWN', () => {
+    const after = openAiObservation({
+      observedAt: '2026-08-29T08:22:36.696Z',
+      // Uso despencou: a evidência numérica contradiz "a janela não resetou".
+      primaryUsed: 4,
+      primaryResetsAt: '2026-08-29T13:51:08.000Z',
+      secondaryUsed: 78,
+      secondaryResetsAt: '2026-09-03T19:49:15.000Z',
+    });
+    const [primary] = windowDeltas(INCIDENT_BEFORE, after);
+    // Nem consumo negativo inventado, nem reset inventado.
+    expect(primary?.same_window).toBeNull();
+    expect(primary?.window_reset).toBe(false);
+    expect(primary?.consumed_pp).toBeNull();
+  });
+});

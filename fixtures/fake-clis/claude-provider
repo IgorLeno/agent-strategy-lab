@@ -10,6 +10,7 @@
 // isso o cenário é obrigatório — sem `AGENTLAB_FAKE_STREAM` esta CLI também
 // recusa, para que nenhum teste "quase pago" passe despercebido.
 import { spawnSync } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 const args = process.argv.slice(2);
@@ -21,6 +22,27 @@ if (args.includes('--help') || args[0] === 'help') {
 }
 
 if (args[0] === 'auth' && args[1] === 'status') {
+  // Observação OPCIONAL do alvo no instante do preflight de credencial. Este
+  // probe roda pré-spawn: o que ele enxerga é a working tree depois de tudo
+  // que o launcher preparou e antes de qualquer worker nascer.
+  const observe = process.env.AGENTLAB_FAKE_AUTH_OBSERVE;
+  if (observe) {
+    const repoRoot = process.env.AGENTLAB_REPO_ROOT ?? process.cwd();
+    // `-uall`: diretório novo precisa aparecer como os arquivos que ele tem,
+    // e não colapsado — a observação é sobre ARQUIVOS reidratados.
+    const status = spawnSync('git', ['-C', repoRoot, 'status', '--porcelain', '-uall'], {
+      encoding: 'utf8',
+    });
+    writeFileSync(observe, status.stdout ?? '');
+  }
+  // Credencial de API declarada: o preflight de cobrança recusa o lançamento
+  // ANTES do spawn, sem nunca chamar o provider.
+  if (process.env.AGENTLAB_FAKE_AUTH === 'api-key') {
+    process.stdout.write(
+      `${JSON.stringify({ loggedIn: true, authMethod: 'apiKey', apiProvider: 'console' }, null, 2)}\n`,
+    );
+    process.exit(0);
+  }
   process.stdout.write(
     `${JSON.stringify(
       {
@@ -62,5 +84,7 @@ if (!scenario) {
 // O stream em si é o mesmo fixture usado pelos testes de transporte: um único
 // lugar descreve o que a CLI emite.
 const stream = path.join(process.env.AGENTLAB_REPO_ROOT ?? process.cwd(), 'fixtures', 'fake-claude-stream.mjs');
-const run = spawnSync(process.execPath, [stream], { stdio: 'inherit', env: process.env });
+// O argv do run é repassado: o cenário de continuação precisa enxergar o
+// prompt que o launcher realmente entregou, e não uma reconstrução do teste.
+const run = spawnSync(process.execPath, [stream, ...args], { stdio: 'inherit', env: process.env });
 process.exit(run.status ?? 70);

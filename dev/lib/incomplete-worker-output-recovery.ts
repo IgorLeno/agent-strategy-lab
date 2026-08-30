@@ -1,4 +1,4 @@
-import { lstat, readFile, rm, rmdir } from 'node:fs/promises';
+import { lstat, readFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { writeFileOnce, writeJsonOnce } from './atomic.js';
 import { canonicalJson, sha256Hex } from './canonical.js';
@@ -14,6 +14,7 @@ import {
 import {
   assertRepoRelativePath,
   preserveFailedAttemptBundle,
+  pruneEmptyParentDirectories,
   resetFilesToBase,
   type PreservedBundle,
 } from './failed-attempt-bundle.js';
@@ -159,31 +160,6 @@ async function readIfPresent(file: string): Promise<Buffer | null> {
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
     throw error;
-  }
-}
-
-async function pruneEmptyParentDirectories(
-  repoRoot: string,
-  files: readonly string[],
-): Promise<void> {
-  const starts = [...new Set(files.map((file) => path.dirname(file)))]
-    .filter((dir) => dir !== '.' && dir !== '')
-    .sort((a, b) => b.length - a.length);
-  for (const start of starts) {
-    let current = start;
-    while (current !== '.' && current !== '') {
-      try {
-        await rmdir(path.join(repoRoot, current));
-      } catch (error) {
-        const code = (error as NodeJS.ErrnoException).code;
-        if (code === 'ENOENT') {
-          current = path.dirname(current);
-          continue;
-        }
-        break;
-      }
-      current = path.dirname(current);
-    }
   }
 }
 

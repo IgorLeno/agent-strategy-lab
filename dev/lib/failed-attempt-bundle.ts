@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import { rm } from 'node:fs/promises';
+import { readFile, rm, rmdir } from 'node:fs/promises';
 import path from 'node:path';
 import { writeFileOnce } from './atomic.js';
 import { canonicalJson, sha256Hex } from './canonical.js';
 import {
+  applyPreservedPatch,
   currentFileContent,
   pathsPresentIn,
   removeFilesFromIndex,
@@ -11,6 +12,7 @@ import {
   scopedPatch,
   treeEntries,
   treeNameStatus,
+  workingTreeFiles,
   writeScopedTree,
 } from './git.js';
 import type { HarnessPaths } from './paths.js';
@@ -229,6 +231,167 @@ export async function preserveFailedAttemptBundle(
     manifest,
     ref: refFrom(paths, manifest, manifestBytes(manifest)),
     alreadyPreserved: existing !== null,
+  };
+}
+
+/**
+ * Diretório que só existia por causa de um arquivo ADDED do worker não é um
+ * path que o Git conheça: o reset path-scoped remove o arquivo e deixa a pasta
+ * vazia para trás. `readdir` ainda a enxerga, e scaffold recém-criado passa a
+ * parecer presente numa árvore git-limpa.
+ */
+export async function pruneEmptyParentDirectories(
+  repoRoot: string,
+  files: readonly string[],
+): Promise<void> {
+  const starts = [...new Set(files.map((file) => path.dirname(file)))]
+    .filter((dir) => dir !== '.' && dir !== '')
+    .sort((a, b) => b.length - a.length);
+  for (const start of starts) {
+    let current = start;
+    while (current !== '.' && current !== '') {
+      try {
+        await rmdir(path.join(repoRoot, current));
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === 'ENOENT') {
+          current = path.dirname(current);
+          continue;
+        }
+        break;
+      }
+      current = path.dirname(current);
+    }
+  }
+}
+
+/**
+ * Ref do bundle JÁ publicado, com os hashes lidos dos BYTES em disco.
+ *
+ * Recalcular o manifesto a partir do objeto reparseado poderia divergir dos
+ * bytes gravados; a evidência é o arquivo, então é dele que o hash sai.
+ */
+export async function readPreservedBundleRef(
+  paths: HarnessPaths,
+  taskId: string,
+  attempt: number,
+): Promise<PreservedChangeBundleRef | null> {
+  const manifest = await readPreservedBundleManifest(paths, taskId, attempt);
+  if (manifest === null) return null;
+  const bytes = await readFile(preservedBundleManifestPath(paths, taskId, attempt));
+  return refFrom(paths, manifest, bytes);
+}
+
+export interface RehydratePreservedBundleInput {
+  readonly paths: HarnessPaths;
+  readonly taskId: string;
+  readonly attempt: number;
+  /** Base sobre a qual o patch foi tirado E sobre a qual ele será reaplicado. */
+  readonly baseSha: string;
+}
+
+export interface RehydratedBundle {
+  readonly manifest: PreservedChangeBundleManifest;
+  readonly ref: PreservedChangeBundleRef;
+  readonly files: readonly string[];
+}
+
+/**
+ * Desfaz uma reidratação, devolvendo EXATAMENTE `files` ao base.
+ *
+ * Não é `resetFilesToBase` cru: a poda de diretórios que só passaram a existir
+ * por causa de um arquivo ADDED faz parte do desfazer. Sem ela o alvo fica
+ * git-limpo mas com scaffold fantasma, e o próximo attempt enxerga estrutura
+ * que o base não tem.
+ */
+export async function undoRehydration(
+  repoRoot: string,
+  baseSha: string,
+  files: readonly string[],
+): Promise<void> {
+  const scope = [...new Set(files)].sort();
+  if (scope.length === 0) return;
+  await resetFilesToBase({ repoRoot, baseSha, files: scope });
+  await pruneEmptyParentDirectories(repoRoot, scope);
+}
+
+/**
+ * Devolve ao alvo o patch preservado de um attempt anterior — o inverso exato
+ * de `resetFilesToBase`, com as mesmas garantias e a mesma paranoia.
+ *
+ * Determinismo é VERIFICADO, não presumido: depois de aplicar, a working tree
+ * precisa conter exatamente os arquivos que o manifesto declara, com os hashes
+ * que o manifesto declara. Reidratação parcial ou contaminada é recusada antes
+ * de qualquer worker nascer — um alvo que ninguém consegue descrever é pior do
+ * que um alvo vazio.
+ *
+ * Pré-condição: árvore limpa em `baseSha`. Quem chama já provou isso pela
+ * guarda de base; aqui ela é reconferida porque aplicar patch sobre sujeira
+ * alheia misturaria trabalho de origens diferentes sem deixar rastro.
+ */
+export async function rehydratePreservedBundle(
+  input: RehydratePreservedBundleInput,
+): Promise<RehydratedBundle> {
+  const { paths, taskId, attempt, baseSha } = input;
+  const manifest = await readPreservedBundleManifest(paths, taskId, attempt);
+  if (manifest === null) {
+    throw new FailedAttemptBundleError(`attempt ${attempt} de ${taskId} não tem bundle preservado`);
+  }
+  if (manifest.base_sha !== baseSha) {
+    throw new FailedAttemptBundleError(
+      `bundle do attempt ${attempt} foi tirado de ${manifest.base_sha}, e a base atual é ${baseSha}`,
+    );
+  }
+  for (const file of manifest.changed_files) assertRepoRelativePath(file);
+
+  const patchFile = preservedBundlePatchPath(paths, taskId, attempt);
+  const patchBytes = await readFile(patchFile);
+  if (sha256Hex(patchBytes) !== manifest.patch_sha256) {
+    throw new FailedAttemptBundleError(`patch preservado do attempt ${attempt} foi alterado`);
+  }
+  if ((await workingTreeFiles(paths.repoRoot)).length > 0) {
+    throw new FailedAttemptBundleError('reidratação exige working tree limpa na base do attempt');
+  }
+
+  await applyPreservedPatch(paths.repoRoot, patchFile);
+
+  // Daqui em diante o alvo já está tocado, então TODA recusa desfaz o que
+  // acabou de aplicar. Reidratação é preparação de continuação, e preparação
+  // ou acontece inteira ou não acontece: uma árvore meio reidratada, que
+  // ninguém consegue descrever, travaria o próximo resume por sujeira.
+  try {
+    // O que ficou no alvo tem que ser EXATAMENTE o que o manifesto descreve.
+    const applied = await workingTreeFiles(paths.repoRoot);
+    if (canonicalJson(applied) !== canonicalJson([...manifest.changed_files])) {
+      throw new FailedAttemptBundleError(
+        `reidratação produziu [${applied.join(', ')}], manifesto declara [${manifest.changed_files.join(', ')}]`,
+      );
+    }
+    for (const file of manifest.files) {
+      if (file.status === 'deleted') continue;
+      const content = await currentFileContent(paths.repoRoot, file.path);
+      if (content === null || content.sha256 !== file.sha256) {
+        throw new FailedAttemptBundleError(
+          `reidratação divergiu do manifesto em ${file.path}`,
+        );
+      }
+    }
+  } catch (error) {
+    // O escopo do desfazer é a UNIÃO do que o manifesto declara com o que a
+    // aplicação de fato deixou na árvore: a pré-condição provou a árvore limpa
+    // logo acima, então tudo que está sujo agora veio deste `git apply`.
+    await undoRehydration(paths.repoRoot, baseSha, [
+      ...manifest.changed_files,
+      ...(await workingTreeFiles(paths.repoRoot)),
+    ]);
+    throw error;
+  }
+
+  const manifestFile = preservedBundleManifestPath(paths, taskId, attempt);
+  return {
+    manifest,
+    ref: refFrom(paths, manifest, await readFile(manifestFile)),
+    files: manifest.changed_files,
   };
 }
 

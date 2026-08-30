@@ -2,6 +2,7 @@
 import { inspectProgressionBase } from '../lib/base-guard.js';
 import { emit, isVerbose, parseArgs, runMain } from '../lib/cli.js';
 import { headSha } from '../lib/git.js';
+import { resolveRecoveredWork } from '../lib/steps.js';
 import { buildTaskPacket } from '../lib/packet.js';
 import { resolveHarnessPaths } from '../lib/paths.js';
 import { loadPlan } from '../lib/plan.js';
@@ -55,12 +56,21 @@ async function main(): Promise<void> {
   );
   const progressionBase = await inspectProgressionBase(paths, state);
   const baseSha = await headSha(paths.repoRoot);
+  // Trabalho que sobreviveu à morte do provider num attempt anterior. Sai da
+  // MESMA derivação que o orquestrador usa para montar o packet de verdade —
+  // dev-next imprime o que seria lançado, e não uma segunda opinião.
+  const recoveredWork = await resolveRecoveredWork(paths, selection.task.id, state, baseSha);
   const packet = buildTaskPacket({
     task: selection.task,
     baseSha,
     previousHandoff,
     previousAttemptDiagnostics,
+    recoveredWork,
   });
+  const recoverableOutput =
+    packet.recovered_work === undefined
+      ? {}
+      : { recovered_work: packet.recovered_work };
   const readyToLaunch = progressionBase.blocker === null;
 
   if (isVerbose(args)) {
@@ -70,6 +80,7 @@ async function main(): Promise<void> {
       packet,
       ready_to_launch: readyToLaunch,
       authorized_head_sha: state.authorized_head_sha,
+      ...recoverableOutput,
     });
     return;
   }
@@ -83,6 +94,7 @@ async function main(): Promise<void> {
     attempt_kind: previousAttemptDiagnostics === null ? 'FIRST_PASS' : 'REPAIR',
     base_sha: baseSha,
     authorized_head_sha: state.authorized_head_sha,
+    ...recoverableOutput,
     ...(progressionBase.blocker === null ? {} : { blocker: progressionBase.blocker }),
   });
 }

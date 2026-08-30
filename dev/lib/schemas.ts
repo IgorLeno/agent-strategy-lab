@@ -50,6 +50,7 @@ const identifier = z
   .string()
   .regex(/^[A-Za-z0-9][A-Za-z0-9_-]*$/, 'id deve ser alfanumérico com - ou _');
 const shaHex = z.string().regex(/^[0-9a-f]{40}$/, 'esperado SHA-1 de commit em hex minúsculo');
+const sha256Hex = z.string().regex(/^[0-9a-f]{64}$/);
 
 // ---------------------------------------------------------------------------
 // Validação estruturada: argv, nunca shell — precisa ser re-executável pelo
@@ -610,6 +611,37 @@ export const PreviousAttemptDiagnostics = z
   });
 export type PreviousAttemptDiagnostics = z.infer<typeof PreviousAttemptDiagnostics>;
 
+/**
+ * AVISO DE CONTINUAÇÃO: a working tree do alvo JÁ contém trabalho de um attempt
+ * anterior desta mesma tarefa, reidratado pelo orquestrador a partir do
+ * `RECOVERABLE_UNFINALIZED_PATCH` que sobreviveu à morte do provider.
+ *
+ * É o oposto do `previous_attempt_diagnostics`, e por isso é um campo separado:
+ * lá o patch anterior NÃO está em disco e a solução foi reprovada; aqui o patch
+ * ESTÁ em disco e ninguém o julgou. Colapsar os dois faria o worker tratar
+ * trabalho não avaliado como trabalho reprovado.
+ *
+ * Reaproveitar não é confiar: o conteúdo continua não validado, não é candidate
+ * e não é PASS.
+ */
+export const RecoveredWorkNotice = z
+  .object({
+    source_attempt: z.number().int().positive(),
+    /** Arquivos reidratados, únicos e ordenados. */
+    changed_files: z.array(nonEmpty).min(1),
+    /** Caminhos relativos ao devDir — evidência auditável do que foi aplicado. */
+    patch_path: nonEmpty,
+    patch_sha256: sha256Hex,
+  })
+  .strict()
+  .superRefine((notice, ctx) => {
+    const sorted = [...new Set(notice.changed_files)].sort();
+    if (JSON.stringify(sorted) !== JSON.stringify(notice.changed_files)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'changed_files deve ser único e ordenado' });
+    }
+  });
+export type RecoveredWorkNotice = z.infer<typeof RecoveredWorkNotice>;
+
 export const TaskPacket = z
   .object({
     schema_version: z.literal(DEV_SCHEMA_VERSION),
@@ -624,6 +656,11 @@ export const TaskPacket = z
     previous_handoff: HandoffRecord.nullable(),
     /** Só existe em attempt de reparo; ausente em packet legado e no attempt 1. */
     previous_attempt_diagnostics: PreviousAttemptDiagnostics.optional(),
+    /**
+     * Só existe quando o orquestrador reidratou trabalho de um attempt morto
+     * por falha terminal do provider. Ausente é o caso normal.
+     */
+    recovered_work: RecoveredWorkNotice.optional(),
     generated_at: z.string().datetime(),
   })
   .strict();
@@ -1099,6 +1136,69 @@ export const OpenCodeLaunchTelemetry = z
   .strict();
 export type OpenCodeLaunchTelemetry = z.infer<typeof OpenCodeLaunchTelemetry>;
 
+/**
+ * ESTADO DA WORKING TREE do alvo no instante ANTERIOR ao spawn.
+ *
+ * Existe por uma pergunta que só pode ser respondida antes do worker nascer:
+ * quando um attempt morre com a árvore suja, QUAIS arquivos são atribuíveis a
+ * ele? Sem este baseline a resposta é adivinhação, e adivinhar absorveria
+ * trabalho alheio — edição do humano, manutenção do harness — para dentro da
+ * evidência da task.
+ *
+ * `null` em todo record gravado antes deste campo: ausência é ausência, e
+ * nunca "a árvore estava limpa".
+ */
+export const PreLaunchWorkingTree = z
+  .object({
+    clean: z.boolean(),
+    /** Caminhos já sujos antes do spawn, únicos e ordenados. */
+    files: z.array(nonEmpty),
+  })
+  .strict()
+  .superRefine((tree, ctx) => {
+    if (tree.clean !== (tree.files.length === 0)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'clean precisa concordar com a lista observada',
+      });
+    }
+    const sorted = [...new Set(tree.files)].sort();
+    if (JSON.stringify(sorted) !== JSON.stringify(tree.files)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'files deve ser único e ordenado' });
+    }
+  });
+export type PreLaunchWorkingTree = z.infer<typeof PreLaunchWorkingTree>;
+
+/**
+ * O que o ORQUESTRADOR colocou no alvo antes deste launch, e de onde veio.
+ *
+ * Sem este registro a reidratação seria indistinguível de trabalho do worker —
+ * e a atribuição do attempt seguinte, que subtrai o que já estava sujo, jogaria
+ * fora justamente o trabalho recuperado. Aqui a proveniência fica explícita:
+ * estes arquivos são desta tarefa, vieram do attempt `source_attempt`, e nunca
+ * foram validados.
+ */
+export const LaunchContinuation = z
+  .object({
+    source_attempt: z.number().int().positive(),
+    /** Arquivos reaplicados no alvo, únicos e ordenados. */
+    rehydrated_files: z.array(nonEmpty).min(1),
+    patch_path: nonEmpty,
+    patch_sha256: sha256Hex,
+    rehydrated_at: z.string().datetime(),
+  })
+  .strict()
+  .superRefine((continuation, ctx) => {
+    const sorted = [...new Set(continuation.rehydrated_files)].sort();
+    if (JSON.stringify(sorted) !== JSON.stringify(continuation.rehydrated_files)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'rehydrated_files deve ser único e ordenado',
+      });
+    }
+  });
+export type LaunchContinuation = z.infer<typeof LaunchContinuation>;
+
 export const LaunchRecord = z
   .object({
     schema_version: z.literal(DEV_SCHEMA_VERSION),
@@ -1184,8 +1284,34 @@ export const LaunchRecord = z
      * nunca é reescrita como zero.
      */
     observed_tokens: ObservedWorkerTokensRecord.nullable().default(null),
+    /**
+     * Baseline de atribuição: o que já estava sujo antes de o worker nascer.
+     * `null` em todo record anterior ao campo — e ali a atribuição de um patch
+     * não finalizado deixa de ser demonstrável, então ela é RECUSADA em vez de
+     * inferida.
+     */
+    pre_launch_working_tree: PreLaunchWorkingTree.nullable().default(null),
+    /**
+     * Trabalho de um attempt anterior reidratado no alvo POR ESTE launch.
+     * `null` no caso normal e em todo record anterior ao campo. Os arquivos
+     * listados aqui aparecem em `pre_launch_working_tree` — eles estavam mesmo
+     * lá antes do spawn —, e é este campo que diz que a origem é a tarefa.
+     */
+    continuation: LaunchContinuation.nullable().default(null),
   })
-  .strict();
+  .strict()
+  .superRefine((record, ctx) => {
+    if (record.continuation === null) return;
+    const present = new Set(record.pre_launch_working_tree?.files ?? []);
+    const missing = record.continuation.rehydrated_files.filter((file) => !present.has(file));
+    if (missing.length > 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `continuação declara arquivo ausente da árvore observada: ${missing.join(', ')}`,
+        path: ['continuation'],
+      });
+    }
+  });
 export type LaunchRecord = z.infer<typeof LaunchRecord>;
 export type LaunchRecordInput = z.input<typeof LaunchRecord>;
 
@@ -2567,7 +2693,6 @@ export type RecoveredFinalizationRecord = z.infer<typeof RecoveredFinalizationRe
 // (.dev/failed-attempts/<task>/attempt-<n>/…)
 // ---------------------------------------------------------------------------
 
-const sha256Hex = z.string().regex(/^[0-9a-f]{64}$/);
 
 /**
  * Como o arquivo chegou à working tree do worker, relativo ao base autorizado.
@@ -2877,7 +3002,16 @@ export type ProviderExpansionAuthorizationRecord = z.infer<
  * Motivos pelos quais um attempt é arquivado SEM solução nenhuma para preservar.
  * Append-only, como os demais códigos.
  */
-export const INFRA_FAILED_ATTEMPT_REASON_CODES = ['PROVIDER_TERMINAL_FAILURE'] as const;
+/**
+ * `PROVIDER_TERMINAL_FAILURE_WITH_RECOVERABLE_PATCH` é o mesmo incidente com um
+ * fato a mais: o worker já tinha mudado o alvo quando o provider morreu, e essas
+ * mudanças foram preservadas. Não é veredito de capacidade, não é candidate e
+ * não é PASS — é trabalho não finalizado que sobreviveu à morte do provider.
+ */
+export const INFRA_FAILED_ATTEMPT_REASON_CODES = [
+  'PROVIDER_TERMINAL_FAILURE',
+  'PROVIDER_TERMINAL_FAILURE_WITH_RECOVERABLE_PATCH',
+] as const;
 export const InfraFailedAttemptReasonCode = z.enum(INFRA_FAILED_ATTEMPT_REASON_CODES);
 export type InfraFailedAttemptReasonCode = z.infer<typeof InfraFailedAttemptReasonCode>;
 
@@ -2936,15 +3070,68 @@ export const InfraFailedAttemptRecord = z
     /** Sem report e sem handoff: o protocolo do worker não chegou a começar. */
     worker_output_present: z.literal(false),
     candidate_commit: z.literal(null),
+    /** Verificado DEPOIS da preservação: a árvore volta ao base, sempre. */
     working_tree_clean: z.literal(true),
     head_sha: shaHex,
+    /**
+     * RECOVERABLE_UNFINALIZED_PATCH: mudanças que o worker já tinha feito no
+     * alvo quando o provider morreu, preservadas append-only.
+     *
+     * Deliberadamente NÃO é `change_bundle` como no `ValidationFailedAttemptRecord`:
+     * lá o bundle é uma solução que o worker declarou pronta e o gate oficial
+     * reprovou. Aqui ninguém declarou nada e nada foi medido — o trabalho ainda
+     * precisa de protocolo de conclusão, validation oficial e review. `null`
+     * quando o alvo estava intocado: ausência de patch nunca vira patch vazio.
+     */
+    recoverable_patch: PreservedChangeBundleRef.nullable().default(null),
+    /** Arquivos atribuíveis a ESTE attempt, únicos e ordenados. */
+    recoverable_changed_files: z.array(nonEmpty).default([]),
+    /** Fingerprint da árvore preservada; `null` quando não houve patch. */
+    recoverable_patch_fingerprint: sha256Hex.nullable().default(null),
     evidence: z.array(ArchivedEvidenceFile).min(1),
     reason_code: InfraFailedAttemptReasonCode,
     reason: nonEmpty,
     archived_at: z.string().datetime(),
   })
-  .strict();
+  .strict()
+  .superRefine((record, ctx) => {
+    const hasPatch = record.recoverable_patch !== null;
+    const expected = hasPatch
+      ? 'PROVIDER_TERMINAL_FAILURE_WITH_RECOVERABLE_PATCH'
+      : 'PROVIDER_TERMINAL_FAILURE';
+    if (record.reason_code !== expected) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `reason_code ${record.reason_code} não corresponde à presença de patch recuperável`,
+        path: ['reason_code'],
+      });
+    }
+    if (hasPatch !== (record.recoverable_patch_fingerprint !== null)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'patch recuperável exige fingerprint, e fingerprint exige patch',
+        path: ['recoverable_patch_fingerprint'],
+      });
+    }
+    if (hasPatch !== (record.recoverable_changed_files.length > 0)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'patch recuperável exige arquivos declarados, e vice-versa',
+        path: ['recoverable_changed_files'],
+      });
+    }
+    const sorted = [...new Set(record.recoverable_changed_files)].sort();
+    if (JSON.stringify(sorted) !== JSON.stringify(record.recoverable_changed_files)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'recoverable_changed_files deve ser único e ordenado',
+        path: ['recoverable_changed_files'],
+      });
+    }
+  });
 export type InfraFailedAttemptRecord = z.infer<typeof InfraFailedAttemptRecord>;
+/** Forma ACEITA na escrita: os campos com default podem vir omitidos. */
+export type InfraFailedAttemptRecordInput = z.input<typeof InfraFailedAttemptRecord>;
 
 /** Conteúdo individual do patch preservado para auditoria byte a byte. */
 export const ProtocolInvalidPatchFile = z

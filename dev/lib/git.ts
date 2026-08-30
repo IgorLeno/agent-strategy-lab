@@ -297,6 +297,20 @@ export async function scopedPatch(
   return gitOrThrow(repoRoot, [...PRESERVED_PATCH_ARGS, from, to, '--', ...files]);
 }
 
+/**
+ * Reaplica um patch preservado sobre a árvore atual.
+ *
+ * `--check` primeiro: aplicar meio patch deixaria o alvo num estado que não é
+ * nem o base nem o attempt anterior, e nenhum record poderia descrevê-lo.
+ * Só working tree, nunca o índice — o worker recebe o alvo como um worker o
+ * deixaria, com as mudanças por commitar.
+ */
+export async function applyPreservedPatch(repoRoot: string, patchFile: string): Promise<void> {
+  const args = ['apply', '--whitespace=nowarn', '--', patchFile];
+  await gitOrThrow(repoRoot, ['apply', '--check', '--whitespace=nowarn', '--', patchFile]);
+  await gitOrThrow(repoRoot, args);
+}
+
 /** Caminhos de `files` que existem em `treeish`. */
 export async function pathsPresentIn(
   repoRoot: string,
