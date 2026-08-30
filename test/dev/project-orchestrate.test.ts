@@ -608,6 +608,7 @@ describe('review independente proporcional ao risco concreto', () => {
       {
         independent_review_required: true,
         diversity_requirement: 'not_required',
+        reasons: ['risk=high'],
         rationale: 'policy exige review',
         provenance: 'test',
       },
@@ -620,6 +621,7 @@ describe('review independente proporcional ao risco concreto', () => {
       {
         independent_review_required: false,
         diversity_requirement: 'not_required',
+        reasons: [],
         rationale: 'evidência forte',
         provenance: 'test',
       },
@@ -628,19 +630,35 @@ describe('review independente proporcional ao risco concreto', () => {
     expect(reviewed.review_required).toBe(false);
   });
 
-  it('repair e escalation do lifecycle exigem review mesmo sem razão concreta no assessment', () => {
+  it('repair e escalation do lifecycle não inventam razão de review ausente no assessment', () => {
     const repaired = combineWorkflowAndReview(
       { outcome: 'REVIEWED_REQUIRED', task_id: 'T1', unmet_criteria: [], reason: 'faltam fatos' },
       {
         independent_review_required: false,
         diversity_requirement: 'not_required',
+        reasons: [],
         rationale: 'evidência forte',
         provenance: 'test',
       },
-      { required: true, reason: 'candidate produzido por BOUNDED_REPAIR' },
     );
-    expect(repaired.review_required).toBe(true);
-    expect(repaired.rationale.join(' ')).toContain('BOUNDED_REPAIR');
+    expect(repaired.review_required).toBe(false);
+    expect(repaired.rationale.join(' ')).not.toContain('BOUNDED_REPAIR');
+  });
+
+  it('REJECT de implementação ainda não verificado exige review mesmo sem razão no assessment', () => {
+    const pending = combineWorkflowAndReview(
+      { outcome: 'REVIEWED_REQUIRED', task_id: 'T1', unmet_criteria: [], reason: 'faltam fatos' },
+      {
+        independent_review_required: false,
+        diversity_requirement: 'not_required',
+        reasons: [],
+        rationale: 'evidência forte',
+        provenance: 'test',
+      },
+      { source_attempt: 1 },
+    );
+    expect(pending.review_required).toBe(true);
+    expect(pending.rationale.join(' ')).toContain('unresolved_review_reject=attempt 1');
   });
 });
 
@@ -1605,6 +1623,261 @@ describe('G — reviewer não ganha autorização mais fraca que o implementer',
       },
     };
   }
+
+  function reviewerPacketV2(reviewMode: 'GENERAL' | 'FOCUSED_REREVIEW' = 'GENERAL') {
+    return {
+      ...reviewerPacket(),
+      review_contract_version: 2 as const,
+      review_mode: reviewMode,
+      review_reasons: ['risk=critical'],
+      ...(reviewMode === 'FOCUSED_REREVIEW'
+        ? {
+            focused_review: {
+              source_attempt: 1,
+              rejected_candidate_sha: 'a'.repeat(40),
+              rejection_disposition: 'IMPLEMENTATION_DEFECT' as const,
+              original_review_sha256: 'b'.repeat(64),
+              original_finalization_sha256: 'c'.repeat(64),
+              blocking_finding: 'arquivo obrigatório ausente',
+              impacted_files: ['src/greet.ts'],
+              relevant_acceptance: ['aceitação declarada'],
+            },
+          }
+        : {}),
+    };
+  }
+
+  it('finding apenas advisory não transforma ACCEPT em REJECT nem cria repair', async () => {
+    const profile = await loadProfile(REPO_ROOT, CODEX_PROFILE_ID);
+    let invocations = 0;
+    const result = await launchProjectReviewer({
+      paths,
+      profile,
+      scope: authorizationScope(),
+      implementerProfileId: CLAUDE_PROFILE_ID,
+      diversityRequirement: 'required',
+      risk: 'critical',
+      credential: { availability: true, provenance: 'probe local provou a assinatura' },
+      quota: { availability: null, provenance: 'quota desconhecida' },
+      packet: reviewerPacketV2(),
+      port: {
+        run: async () => {
+          invocations += 1;
+          return codexStream({
+            decision: 'REJECT',
+            rejection_disposition: 'IMPLEMENTATION_DEFECT',
+            reason: 'eu preferiria extrair um helper',
+            findings: [
+              {
+                severity: 'ADVISORY',
+                basis: 'OPTIONAL_REFACTOR',
+                relationship: 'CURRENT_CANDIDATE',
+                summary: 'extrair helper para estilo',
+              },
+            ],
+            coverage: validCoverage,
+          });
+        },
+      },
+    });
+
+    expect(invocations).toBe(1);
+    expect(result).toMatchObject({
+      outcome: 'ACCEPT',
+      findings: [{ severity: 'ADVISORY', basis: 'OPTIONAL_REFACTOR' }],
+    });
+  });
+
+  it('REJECT de decisão humana não é convertido em ACCEPT por findings advisory', async () => {
+    const profile = await loadProfile(REPO_ROOT, CODEX_PROFILE_ID);
+    let invocations = 0;
+    const result = await launchProjectReviewer({
+      paths,
+      profile,
+      scope: authorizationScope(),
+      implementerProfileId: CLAUDE_PROFILE_ID,
+      diversityRequirement: 'required',
+      risk: 'critical',
+      credential: { availability: true, provenance: 'probe local provou a assinatura' },
+      quota: { availability: null, provenance: 'quota desconhecida' },
+      packet: reviewerPacketV2(),
+      port: {
+        run: async () => {
+          invocations += 1;
+          return codexStream({
+            decision: 'REJECT',
+            rejection_disposition: 'REQUIREMENT_OR_SCOPE_DECISION',
+            reason: 'o candidate amplia o escopo autorizado',
+            findings: [
+              {
+                severity: 'ADVISORY',
+                basis: 'SCOPE_EXPANSION',
+                relationship: 'CURRENT_CANDIDATE',
+                summary: 'funcionalidade nova fora do pedido',
+              },
+            ],
+            coverage: validCoverage,
+          });
+        },
+      },
+    });
+
+    expect(invocations).toBe(1);
+    expect(result).toMatchObject({
+      outcome: 'REJECT',
+      rejection_disposition: 'REQUIREMENT_OR_SCOPE_DECISION',
+    });
+  });
+
+  it('findings malformados não descartam um REJECT válido nem provocam redecisão', async () => {
+    const profile = await loadProfile(REPO_ROOT, CODEX_PROFILE_ID);
+    let invocations = 0;
+    const result = await launchProjectReviewer({
+      paths,
+      profile,
+      scope: authorizationScope(),
+      implementerProfileId: CLAUDE_PROFILE_ID,
+      diversityRequirement: 'required',
+      risk: 'critical',
+      credential: { availability: true, provenance: 'probe local provou a assinatura' },
+      quota: { availability: null, provenance: 'quota desconhecida' },
+      packet: reviewerPacketV2(),
+      port: {
+        run: async () => {
+          invocations += 1;
+          return codexStream({
+            decision: 'REJECT',
+            rejection_disposition: 'IMPLEMENTATION_DEFECT',
+            reason: 'aceitação declarada não foi atendida',
+            findings: [{ severity: 'BLOCKING', summary: 'sem basis nem relationship' }],
+          });
+        },
+      },
+    });
+
+    expect(invocations).toBe(1);
+    expect(result).toMatchObject({
+      outcome: 'REJECT',
+      rejection_disposition: 'IMPLEMENTATION_DEFECT',
+      findings: null,
+    });
+  });
+
+  it('violação de acceptance permanece finding blocking e REJECT definitivo', async () => {
+    const profile = await loadProfile(REPO_ROOT, CODEX_PROFILE_ID);
+    let invocations = 0;
+    const result = await launchProjectReviewer({
+      paths,
+      profile,
+      scope: authorizationScope(),
+      implementerProfileId: CLAUDE_PROFILE_ID,
+      diversityRequirement: 'required',
+      risk: 'critical',
+      credential: { availability: true, provenance: 'probe local provou a assinatura' },
+      quota: { availability: null, provenance: 'quota desconhecida' },
+      packet: reviewerPacketV2(),
+      port: {
+        run: async () => {
+          invocations += 1;
+          return codexStream({
+            decision: 'REJECT',
+            rejection_disposition: 'IMPLEMENTATION_DEFECT',
+            reason: 'aceitação declarada não foi atendida',
+            findings: [
+              {
+                severity: 'BLOCKING',
+                basis: 'ACCEPTANCE_VIOLATION',
+                relationship: 'CURRENT_CANDIDATE',
+                summary: 'arquivo obrigatório ausente',
+                acceptance_criterion: 'aceitação declarada',
+                impacted_files: ['src/greet.ts'],
+              },
+            ],
+          });
+        },
+      },
+    });
+
+    expect(invocations).toBe(1);
+    expect(result).toMatchObject({
+      outcome: 'REJECT',
+      rejection_disposition: 'IMPLEMENTATION_DEFECT',
+      findings: [{ severity: 'BLOCKING', basis: 'ACCEPTANCE_VIOLATION' }],
+    });
+  });
+
+  it('focused re-review aceita finding original corrigido e mantém sugestão não relacionada advisory', async () => {
+    const profile = await loadProfile(REPO_ROOT, CODEX_PROFILE_ID);
+    let prompt = '';
+    const result = await launchProjectReviewer({
+      paths,
+      profile,
+      scope: authorizationScope(),
+      implementerProfileId: CLAUDE_PROFILE_ID,
+      diversityRequirement: 'required',
+      risk: 'critical',
+      credential: { availability: true, provenance: 'probe local provou a assinatura' },
+      quota: { availability: null, provenance: 'quota desconhecida' },
+      packet: reviewerPacketV2('FOCUSED_REREVIEW'),
+      port: {
+        run: async (input) => {
+          prompt = input.prompt;
+          return codexStream({
+            decision: 'ACCEPT',
+            reason: 'finding original corrigido; aceitação afetada preservada',
+            findings: [
+              {
+                severity: 'ADVISORY',
+                basis: 'UNRELATED_TECHNICAL_DEBT',
+                relationship: 'UNRELATED',
+                summary: 'nome histórico poderia mudar em outro trabalho',
+              },
+            ],
+            coverage: validCoverage,
+          });
+        },
+      },
+    });
+
+    expect(prompt).toContain('FOCUSED_REREVIEW');
+    expect(prompt).toContain('arquivo obrigatório ausente');
+    expect(prompt).toMatch(/não.*revis.*inteir|não.*arquitetura.*do zero/i);
+    expect(result).toMatchObject({ outcome: 'ACCEPT' });
+  });
+
+  it('focused re-review permite REJECT para regressão de correctness introduzida pelo repair', async () => {
+    const profile = await loadProfile(REPO_ROOT, CODEX_PROFILE_ID);
+    const result = await launchProjectReviewer({
+      paths,
+      profile,
+      scope: authorizationScope(),
+      implementerProfileId: CLAUDE_PROFILE_ID,
+      diversityRequirement: 'required',
+      risk: 'critical',
+      credential: { availability: true, provenance: 'probe local provou a assinatura' },
+      quota: { availability: null, provenance: 'quota desconhecida' },
+      packet: reviewerPacketV2('FOCUSED_REREVIEW'),
+      port: {
+        run: async () =>
+          codexStream({
+            decision: 'REJECT',
+            rejection_disposition: 'IMPLEMENTATION_DEFECT',
+            reason: 'repair introduziu regressão de correctness',
+            findings: [
+              {
+                severity: 'BLOCKING',
+                basis: 'CORRECTNESS_DEFECT',
+                relationship: 'REPAIR_REGRESSION',
+                summary: 'caminho reparado agora devolve resultado incorreto',
+                impacted_files: ['src/greet.ts'],
+              },
+            ],
+          }),
+      },
+    });
+
+    expect(result).toMatchObject({ outcome: 'REJECT' });
+  });
 
   it('Claude reviewer em target externo prova o argv resolvido e alcança a porta do provider', async () => {
     const target = await makeTemporaryDir();

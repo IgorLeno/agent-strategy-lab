@@ -76,8 +76,10 @@ import {
 import { PlannedTask, type TaskRisk } from '../../src/planner/task.js';
 import {
   CandidateReviewCoverage,
+  ReviewFinding,
   ReviewRejectionDisposition,
   type HandoffConfidenceLevel,
+  type ReviewFinding as ReviewFindingType,
   type ReviewParseFailureOutcome,
   type ReviewRejectionDisposition as ReviewRejectionDispositionType,
 } from './schemas.js';
@@ -374,11 +376,18 @@ export interface ProjectWorkflowDecision {
 export function combineWorkflowAndReview(
   workflow: TaskWorkflowVerdict,
   reviewRequirement: ReviewRequirementAssessment,
-  escalatedReview?: { readonly required: boolean; readonly reason: string },
+  /**
+   * REJECT de defeito de implementação cujo conserto ainda não foi verificado
+   * por ninguém. NÃO é "o attempt foi um repair": é a task carregando um
+   * defeito bloqueante conhecido e não provado corrigido. Enquanto isso for
+   * verdade, a review continua exigida mesmo que o assessment do attempt
+   * seguinte não encontre razão própria.
+   */
+  unresolvedReviewReject?: { readonly source_attempt: number } | null,
 ): ProjectWorkflowDecision {
   const directAllowed = workflow.outcome === 'DIRECT_ALLOWED';
-  const lifecycleReview = escalatedReview?.required === true;
-  const reviewRequired = reviewRequirement.independent_review_required || lifecycleReview;
+  const unresolved = unresolvedReviewReject ?? null;
+  const reviewRequired = reviewRequirement.independent_review_required || unresolved !== null;
   return {
     path: directAllowed ? 'DIRECT' : 'REVIEWED',
     review_required: reviewRequired,
@@ -389,7 +398,9 @@ export function combineWorkflowAndReview(
       `workflow=${workflow.outcome}`,
       `independent_review_required=${reviewRequirement.independent_review_required}`,
       `diversity_requirement=${reviewRequirement.diversity_requirement}`,
-      ...(lifecycleReview ? [`lifecycle_review=${escalatedReview?.reason ?? 'exigida pelo lifecycle'}`] : []),
+      ...(unresolved === null
+        ? []
+        : [`unresolved_review_reject=attempt ${unresolved.source_attempt}`]),
       'review independente é proporcional ao risco concreto; o caminho REVIEWED por si só não a exige',
     ],
   };
@@ -1721,6 +1732,37 @@ export interface ProjectReviewPacket {
   } | null;
   /** REJECT legado a classificar; presente, o reviewer não pode substituí-lo. */
   readonly prior_rejection_reason?: string;
+  /**
+   * Contrato v2 do packet: findings estruturados, modo de review explicável e,
+   * em re-review, o escopo focado herdado do REJECT anterior. Ausente = packet
+   * histórico v1, que continua legível e continua sendo review GENERAL.
+   */
+  readonly review_contract_version?: 2;
+  readonly review_mode?: ProjectReviewMode;
+  /**
+   * As razões CONCRETAS de policy que tornaram esta review obrigatória. É
+   * observabilidade determinística — nunca prosa gerada por modelo.
+   */
+  readonly review_reasons?: readonly string[];
+  readonly focused_review?: ProjectFocusedReviewScope;
+}
+
+export type ProjectReviewMode = 'GENERAL' | 'FOCUSED_REREVIEW';
+
+/**
+ * Fatos DURÁVEIS do REJECT que autorizou o bounded repair. Nunca transcript e
+ * nunca raciocínio do reviewer anterior: só o que já está gravado em record.
+ */
+export interface ProjectFocusedReviewScope {
+  readonly source_attempt: number;
+  readonly rejected_candidate_sha: string;
+  readonly rejection_disposition: 'IMPLEMENTATION_DEFECT';
+  readonly original_review_sha256: string;
+  readonly original_finalization_sha256: string;
+  readonly blocking_finding: string;
+  readonly blocking_findings?: readonly ReviewFindingType[] | undefined;
+  readonly impacted_files: readonly string[];
+  readonly relevant_acceptance: readonly string[];
 }
 
 export function buildReviewerPrompt(packet: ProjectReviewPacket): string {
@@ -1751,6 +1793,8 @@ export function buildReviewerPrompt(packet: ProjectReviewPacket): string {
     'Em ACCEPT, omita rejection_disposition. Em REJECT, ela é obrigatória:',
     'IMPLEMENTATION_DEFECT significa violação concreta de acceptance/constraints já',
     'definidos; as demais categorias significam decisão humana ou evidência insuficiente.',
+    ...reviewFindingsContract(),
+    ...focusedReviewContract(packet),
     ...(packet.prior_rejection_reason === undefined
       ? []
       : [
@@ -1759,6 +1803,57 @@ export function buildReviewerPrompt(packet: ProjectReviewPacket): string {
           'da rejeição anterior em rejection_disposition, usando a evidência atual.',
         ]),
   ].join('\n');
+}
+
+/**
+ * BLOCKING vs ADVISORY. Um reviewer não é fonte ilimitada de escopo novo: o
+ * que reprova é defeito CONCRETO de acceptance/correctness/integridade do
+ * candidate atual; preferência, refactor opcional e dívida não relacionada são
+ * observações úteis que NÃO movem a definição de pronto.
+ */
+function reviewFindingsContract(): readonly string[] {
+  return [
+    '',
+    'Declare também findings estruturados:',
+    '"findings":[{"severity":"BLOCKING|ADVISORY",',
+    ' "basis":"ACCEPTANCE_VIOLATION|CORRECTNESS_DEFECT|INTEGRITY_VIOLATION|SECURITY_OR_SAFETY_DEFECT|',
+    '  REQUIRED_SURFACE_UNVERIFIED|OPTIONAL_REFACTOR|STYLE_PREFERENCE|PERFORMANCE_NOT_REQUIRED|',
+    '  UNRELATED_TECHNICAL_DEBT|SCOPE_EXPANSION",',
+    ' "relationship":"CURRENT_CANDIDATE|ORIGINAL_FINDING|AFFECTED_ACCEPTANCE|REPAIR_REGRESSION|',
+    '  NEW_CRITICAL_DEFECT|UNRELATED",',
+    ' "summary":"...","acceptance_criterion":"...","impacted_files":["..."]}]',
+    'BLOCKING exige defeito concreto e presente: acceptance violado, comportamento',
+    'exigido ausente, defeito de correctness, regressão causada por este candidate,',
+    'problema crítico de segurança, violação de integridade de candidate/base, ou uma',
+    'superfície de review exigida que você não conseguiu verificar.',
+    'Preferência de nome, refactor opcional, arquitetura alternativa sem acceptance',
+    'violado, robustez especulativa, estilo já aceito pelos checks determinísticos,',
+    'dívida técnica não relacionada, performance não exigida e escopo novo são ADVISORY.',
+    'Um REJECT sem nenhum finding BLOCKING não reprova nada: se você só tem findings',
+    'ADVISORY, responda ACCEPT com a coverage exigida e registre as observações.',
+  ];
+}
+
+/**
+ * Re-review depois de bounded repair é FOCADA por construção. O loop
+ * patológico — review geral, finding novo, repair, review geral de novo — é o
+ * que move a definição de pronto indefinidamente.
+ */
+function focusedReviewContract(packet: ProjectReviewPacket): readonly string[] {
+  const focused = packet.focused_review;
+  if (packet.review_mode !== 'FOCUSED_REREVIEW' || focused === undefined) return [];
+  return [
+    '',
+    'MODO FOCUSED_REREVIEW — este candidate é o REPARO do REJECT descrito em focused_review.',
+    'Seu escopo é EXATAMENTE quatro perguntas:',
+    `1. O finding blocking original foi de fato corrigido? ("${focused.blocking_finding}")`,
+    '2. Os acceptance criteria diretamente afetados por esse reparo continuam válidos?',
+    '3. O reparo causou regressão na superfície impactada?',
+    '4. O reparo introduziu defeito novo CRÍTICO de correctness ou segurança?',
+    'Você NÃO deve revisar o repositório inteiro nem reavaliar a arquitetura do zero.',
+    'Sugestão nova e não relacionada, não crítica, é ADVISORY e não reprova.',
+    'Defeito genuinamente INTRODUZIDO pelo reparo continua BLOCKING.',
+  ];
 }
 
 function buildReviewerCorrectionPrompt(
@@ -1792,6 +1887,7 @@ interface ReviewerVerdictAssessment {
     readonly reason: string;
     readonly rejectionDisposition: ReviewRejectionDispositionType | null;
     readonly coverage: CandidateReviewCoverage | null;
+    readonly findings: readonly ReviewFindingType[] | null;
   } | null;
   readonly corrections: readonly string[];
 }
@@ -1802,9 +1898,41 @@ function assessExtractedReviewerVerdict(parsed: unknown): ReviewerVerdictAssessm
     rejection_disposition?: unknown;
     reason?: unknown;
     coverage?: unknown;
+    findings?: unknown;
   } | null;
-  const decision = value?.decision;
   const corrections: string[] = [];
+  // Findings são observabilidade ADITIVA. Ausentes, o veredito é histórico;
+  // malformados, valem como ausentes. Em nenhum dos dois casos eles descartam
+  // um veredito que já satisfaz o contrato: pedir repetição de um REJECT
+  // válido por causa de um erro de forma na lista abriria uma redecisão que o
+  // reviewer não pediu — e uma redecisão é exatamente onde um REJECT vira
+  // ACCEPT sem que ninguém tenha consertado nada.
+  const parsedFindings =
+    value?.findings === undefined
+      ? null
+      : ReviewFinding.array().safeParse(value.findings);
+  const findings = parsedFindings?.success === true ? parsedFindings.data : null;
+  const declared = value?.decision;
+  const declaredDisposition = ReviewRejectionDisposition.safeParse(
+    value?.rejection_disposition,
+  );
+  // Um REJECT de DEFEITO DE IMPLEMENTAÇÃO que não nomeia nenhum finding
+  // blocking não reprovou nada: ele é uma lista de observações. Advisory nunca
+  // vira repair, nunca reinicia o lifecycle e nunca bloqueia PASS — a decisão
+  // efetiva é ACCEPT, e o ACCEPT continua devendo a mesma coverage.
+  //
+  // As OUTRAS disposições não são leitura técnica do candidate: são fronteira
+  // humana (escopo, produto, segurança, autorização) ou evidência insuficiente.
+  // Nenhuma severidade de finding autoriza convertê-las em aceite — quem decide
+  // ali é uma pessoa, e essa fronteira é do PR A.
+  const advisoryOnlyReject =
+    declared === 'REJECT' &&
+    declaredDisposition.success &&
+    declaredDisposition.data === 'IMPLEMENTATION_DEFECT' &&
+    findings !== null &&
+    findings.length > 0 &&
+    !findings.some((finding) => finding.severity === 'BLOCKING');
+  const decision = advisoryOnlyReject ? 'ACCEPT' : declared;
   if (decision !== 'ACCEPT' && decision !== 'REJECT') {
     corrections.push(
       'decision ausente ou inválida: responda exatamente "ACCEPT" ou "REJECT"',
@@ -1816,16 +1944,14 @@ function assessExtractedReviewerVerdict(parsed: unknown): ReviewerVerdictAssessm
       'reason ausente ou vazio: a fundamentação textual é obrigatória e não pode ser deduzida da coverage',
     );
   }
-  const rejectionDisposition = ReviewRejectionDisposition.safeParse(
-    value?.rejection_disposition,
-  );
+  const rejectionDisposition = declaredDisposition;
   if (decision === 'REJECT' && !rejectionDisposition.success) {
     corrections.push(
       'REJECT exige rejection_disposition estruturada reconhecida: ' +
         'IMPLEMENTATION_DEFECT|REQUIREMENT_OR_SCOPE_DECISION|SAFETY_OR_AUTHORIZATION_DECISION|INSUFFICIENT_EVIDENCE',
     );
   }
-  if (decision === 'ACCEPT' && value?.rejection_disposition !== undefined) {
+  if (declared === 'ACCEPT' && value?.rejection_disposition !== undefined) {
     corrections.push('ACCEPT não pode declarar rejection_disposition');
   }
   const coverage = CandidateReviewCoverage.safeParse(value?.coverage);
@@ -1843,7 +1969,7 @@ function assessExtractedReviewerVerdict(parsed: unknown): ReviewerVerdictAssessm
   const blocking =
     reason === '' ||
     (decision === 'REJECT' && !rejectionDisposition.success) ||
-    (decision === 'ACCEPT' && value?.rejection_disposition !== undefined);
+    (declared === 'ACCEPT' && value?.rejection_disposition !== undefined);
   if (blocking) {
     return { verdict: null, corrections };
   }
@@ -1853,6 +1979,7 @@ function assessExtractedReviewerVerdict(parsed: unknown): ReviewerVerdictAssessm
       reason,
       rejectionDisposition: decision === 'REJECT' ? rejectionDisposition.data! : null,
       coverage: coverage.success ? coverage.data : null,
+      findings,
     },
     corrections,
   };
@@ -1889,6 +2016,11 @@ interface ProjectReviewVerdict<Outcome extends 'ACCEPT' | 'REJECT'> {
    * basta para um ACCEPT é o schema do `CandidateReviewRecord`.
    */
   readonly coverage: CandidateReviewCoverage | null;
+  /**
+   * Findings estruturados como o reviewer os declarou. `null` é o veredito
+   * histórico sem contrato de findings — nunca "nenhum finding".
+   */
+  readonly findings: readonly ReviewFindingType[] | null;
   readonly policy: ReviewerInvocationPolicy;
   readonly argv: readonly string[];
   /**
@@ -2100,6 +2232,7 @@ export async function launchProjectReviewer(
       // Evidência malformada não é completada pelo adapter. Depois da única
       // repetição, null continua chegando ao schema append-only e falha fechado.
       coverage: verdict.coverage,
+      findings: verdict.findings,
       policy: plan.policy,
       argv,
       workspace_access: overlay.workspace_access,

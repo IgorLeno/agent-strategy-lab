@@ -107,6 +107,7 @@ import {
   isRetryableReviewerInvocationFailure,
   isRetryableReviewerUnavailability,
   selectReviewerProfileForFreshCapacity,
+  type ReviewerFailureDomain,
   type ReviewerUnavailabilityCause,
 } from './reviewer-capacity.js';
 import {
@@ -166,6 +167,7 @@ import {
   writeReviewRejectionClassification,
 } from './records.js';
 import type {
+  CandidateReviewFocusedContext,
   CandidateReviewRequirement,
   OrchestratedFinalizationRecord,
   ReviewParseFailureRecord,
@@ -1168,6 +1170,83 @@ export async function createProjectControlPlane(
    * `workUnits`, `active`, `reviewRequirementByTask`, `blockedReview` e
    * `controlPlaneHalt` pertencem exclusivamente ao chamador com efeitos.
    */
+  /** `null` quando o runtime ainda não tem state — não é erro, é ausência. */
+  async function readStateIfInitialized(
+    target: HarnessPaths,
+  ): Promise<Awaited<ReturnType<typeof readState>> | null> {
+    try {
+      return await readState(target);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw error;
+    }
+  }
+
+  /**
+   * Escopo FOCADO herdado do REJECT que autorizou este bounded repair.
+   *
+   * Um repair depois de review REJECT não merece outra review geral: a review
+   * geral já aconteceu sobre a mesma work unit, e repeti-la é exatamente o
+   * mecanismo que move a definição de pronto indefinidamente. O que a segunda
+   * review precisa decidir é bem menor e vem inteiro de records duráveis —
+   * nunca de transcript nem do raciocínio do reviewer anterior.
+   *
+   * `null` significa "sem REJECT anterior": repair de validação oficial, ou
+   * primeiro attempt. Nesse caso a review, se exigida, é GENERAL.
+   */
+  async function focusedReviewScopeFor(
+    request: WorkUnitRequest,
+    acceptance: readonly string[],
+  ): Promise<CandidateReviewFocusedContext | null> {
+    // Dry-run e pré-inicialização não têm state: sem attempt registrado não
+    // existe REJECT pendente, e adivinhar um seria inventar exigência.
+    const state = await readStateIfInitialized(paths);
+    if (state === null) return null;
+    const taskState = getTaskState(state, request.taskId);
+    // Caminha para trás como os demais consumidores de lifecycle records: um
+    // attempt INFRA ou uma falha de validação NO MEIO não resolve o REJECT
+    // anterior, e perder o rastro ali seria perder exatamente a exigência que
+    // este escopo existe para carregar. Um ACCEPT durável encerra a busca.
+    let rejected: Awaited<ReturnType<typeof readReviewRejectedAttempt>> = null;
+    for (let attempt = taskState.attempts; attempt >= 1; attempt -= 1) {
+      const accepted = await readCandidateReview(paths, request.taskId, attempt);
+      if (accepted?.decision === 'ACCEPT') break;
+      rejected = await readReviewRejectedAttempt(paths, request.taskId, attempt);
+      if (rejected !== null) break;
+    }
+    if (rejected === null) return null;
+    const blockingFindings = rejected.blocking_findings ?? [];
+    const impacted = [
+      ...new Set([
+        ...blockingFindings.flatMap((finding) => finding.impacted_files ?? []),
+        ...rejected.changed_files,
+      ]),
+    ];
+    const relevantAcceptance = [
+      ...new Set(
+        blockingFindings.flatMap((finding) =>
+          finding.acceptance_criterion === undefined ? [] : [finding.acceptance_criterion],
+        ),
+      ),
+    ];
+    return {
+      source_attempt: rejected.attempt,
+      rejected_candidate_sha: rejected.candidate_sha,
+      rejection_disposition: 'IMPLEMENTATION_DEFECT',
+      original_review_sha256: rejected.review_record_sha256,
+      original_finalization_sha256: rejected.finalization_record_sha256,
+      // Findings estruturados são a formulação mais precisa do que reprovou;
+      // o reason textual é o fallback dos vereditos sem contrato de findings.
+      blocking_finding:
+        blockingFindings.length === 0
+          ? rejected.review_reason
+          : blockingFindings.map((finding) => finding.summary).join('; '),
+      ...(blockingFindings.length === 0 ? {} : { blocking_findings: blockingFindings }),
+      impacted_files: impacted,
+      relevant_acceptance: relevantAcceptance.length === 0 ? [...acceptance] : relevantAcceptance,
+    };
+  }
+
   async function assessWorkUnit(request: WorkUnitRequest): Promise<WorkUnitAssessment> {
     const blocked = (gate: WorkUnitGate): WorkUnitAssessment => ({
       outcome: 'HALT',
@@ -1233,19 +1312,18 @@ export async function createProjectControlPlane(
         evidencePaths: [paths.planFile],
       });
     }
-    // Repair e escalation são fatos do lifecycle: um candidate produzido depois
-    // de a validação oficial ter reprovado o attempt anterior, ou por um degrau
-    // de escalation, é concretamente mais arriscado que um first pass.
-    const escalatedAttempt =
-      request.attemptKind === 'REPAIR'
-        ? { required: true, reason: 'candidate produzido por BOUNDED_REPAIR' }
-        : escalatedProfileByTask.has(request.taskId)
-          ? { required: true, reason: 'candidate produzido por degrau de escalation' }
-          : { required: false, reason: 'first pass' };
+    // Repair e escalation descrevem COMO o candidate foi produzido. A review
+    // continua derivada somente dos fatos concretos do candidate/task atual.
+    // Um REJECT de defeito de implementação ainda NÃO verificado é fato
+    // concreto da task, não do jeito como o candidate foi produzido: enquanto
+    // ninguém provar que o defeito bloqueante foi corrigido, ele continua
+    // exigindo review — mesmo que o assessment do attempt seguinte, com outra
+    // inspeção fresca, deixe de encontrar razão própria.
+    const focusedScope = await focusedReviewScopeFor(request, planTask.acceptance);
     const decision = combineWorkflowAndReview(
       workflow,
       assessment.review_requirement,
-      escalatedAttempt,
+      focusedScope === null ? null : { source_attempt: focusedScope.source_attempt },
     );
     const environment = evaluateEnvironmentReadiness(assessment.environment_readiness);
 
@@ -1413,10 +1491,22 @@ export async function createProjectControlPlane(
     // aceite silencioso.
     const reviewRequirement: CandidateReviewRequirement | null = decision.review_required
       ? {
+          schema_version: 2,
           required: true,
           reviewer_profile_id: reviewerProfileId,
           diversity_requirement: decision.diversity_requirement,
           policy_provenance: `assessment.review_requirement + ${input.authorizationFile}`,
+          // Observabilidade determinística: a review obrigatória sempre sabe
+          // dizer QUAL fato concreto de policy a tornou obrigatória.
+          reasons: [
+            ...assessment.review_requirement.reasons,
+            ...(focusedScope === null
+              ? []
+              : [`unresolved_review_reject=attempt ${focusedScope.source_attempt}`]),
+          ],
+          mode: focusedScope === null ? 'GENERAL' : 'FOCUSED_REREVIEW',
+          task_acceptance_sha256: canonicalSha256([...planTask.acceptance]),
+          ...(focusedScope === null ? {} : { focused_review: focusedScope }),
         }
       : null;
 
@@ -2198,6 +2288,9 @@ export async function createProjectControlPlane(
     }
 
     const requirement = lookup.requirement as CandidateReviewRequirement;
+    // V1 é o requirement histórico: sem razões, sem modo e sempre GENERAL.
+    const requirementV2 =
+      'schema_version' in requirement && requirement.schema_version === 2 ? requirement : null;
     const pinnedReviewerId = requirement.reviewer_profile_id;
     const freshCapacityByPool = await observeEligiblePoolCapacities(
       [...profiles.values()],
@@ -2241,6 +2334,10 @@ export async function createProjectControlPlane(
           .map((entry) => entry.profile_id),
       ),
     ];
+    // Indisponibilidade PROVADA, e só ela, exclui reviewers. Uma falha
+    // profile-local prova o profile, não o provider: nada aqui infere outage
+    // mais amplo do que a evidência sustenta.
+    const provenFailureDomains: ReviewerFailureDomain[] = [];
     const persistedEvidence: string[] = [];
     let lastSelectionReason = '';
     let lastSelectionCause: ReviewerUnavailabilityCause | null = null;
@@ -2254,8 +2351,10 @@ export async function createProjectControlPlane(
         pinnedProfileId: pinnedReviewerId,
         policyProfiles: authorization.profile_policy.profiles,
         poolOf: quotaPoolOf,
+        providerOf: (profileId) => profiles.get(profileId)?.provider ?? null,
         capacityByPool: freshCapacityByPool,
         excludedProfileIds,
+        unavailableFailureDomains: provenFailureDomains,
         implementerProfileId: record.profile_id,
         diversityRequirement: requirement.diversity_requirement,
       });
@@ -2306,6 +2405,16 @@ export async function createProjectControlPlane(
           evidence_paths: [paths.validationLogsDir],
           implementer_gaps: implementerGaps,
           implementer_confidence: implementerConfidence,
+          ...(requirementV2 === null
+            ? {}
+            : {
+                review_contract_version: 2 as const,
+                review_mode: requirementV2.mode,
+                review_reasons: requirementV2.reasons,
+                ...(requirementV2.focused_review === undefined
+                  ? {}
+                  : { focused_review: requirementV2.focused_review }),
+              }),
           ...(legacyRejectedReview === null
             ? {}
             : { prior_rejection_reason: legacyRejectedReview.reason }),
@@ -2334,7 +2443,18 @@ export async function createProjectControlPlane(
         );
       }
       if (isRetryableReviewerUnavailability(verdict.code)) {
-        excludedProfileIds.push(reviewerProfile.id);
+        // Falha de invocação é indisponibilidade PROVADA daquele profile;
+        // conflito de diversidade é policy, não falha, e continua exclusão
+        // simples. Nenhum dos dois autoriza concluir nada sobre o provider.
+        if (isRetryableReviewerInvocationFailure(verdict.code)) {
+          provenFailureDomains.push({
+            scope: 'PROFILE',
+            id: reviewerProfile.id,
+            status: 'PROVEN',
+          });
+        } else {
+          excludedProfileIds.push(reviewerProfile.id);
+        }
         lastInvocationFailureReason = verdict.reason;
         continue;
       }
@@ -2473,6 +2593,7 @@ export async function createProjectControlPlane(
         },
         ...(implementerGaps === null ? {} : { implementer_gaps: implementerGaps }),
         ...(verdict.coverage === null ? {} : { coverage: verdict.coverage }),
+        ...(verdict.findings === null ? {} : { findings: [...verdict.findings] }),
         decision: verdict.outcome,
         ...(verdict.outcome === 'REJECT'
           ? { rejection_disposition: verdict.rejection_disposition }

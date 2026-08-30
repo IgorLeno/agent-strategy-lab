@@ -458,7 +458,7 @@ describe('external plan run — dev-run-plan pelo lifecycle universal', () => {
   it('CAPABILITY — FAIL, repair FAIL, diagnosis, escalation autorizada e PASS sem gate humano', async () => {
     const target = await fixture(
       planYaml({ secondValidation: "['grep', '-qx', 'repaired', 'src/t2.txt']" }),
-      authorizationYaml(),
+      authorizationYaml({ risk: 'medium' }),
     );
 
     const result = await runPlan(target, 'official-fail-until-escalation');
@@ -483,6 +483,7 @@ describe('external plan run — dev-run-plan pelo lifecycle universal', () => {
     ]);
     expect(t2.map((unit) => unit.validation_outcome)).toEqual(['FAIL', 'FAIL', 'PASS']);
     expect(t2[1]?.diagnosis).toBe('CAPABILITY');
+    expect(t2.map((unit) => unit.review.required)).toEqual([false, false, false]);
 
     expect(output.project_lifecycle.escalations).toEqual([
       {
@@ -500,6 +501,7 @@ describe('external plan run — dev-run-plan pelo lifecycle universal', () => {
 
     const paths = resolveHarnessPaths(target.target, { planFile: target.plan });
     expect((await readState(paths)).tasks.map((task) => task.status)).toEqual(['PASS', 'PASS']);
+    expect(await exists(candidateReviewPath(paths, 'T2', 3))).toBe(false);
   }, 180_000);
 
   it('MAX-ITERATIONS — escalation da MESMA task cabe no ciclo primário; T2 não lança', async () => {

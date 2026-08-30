@@ -2151,7 +2151,62 @@ export const CommitMessage = z.string().superRefine((message, ctx) => {
  * memória. Campo OPCIONAL: sua ausência significa "nenhuma review exigida", que
  * é exatamente o histórico de todo record gravado antes desta manutenção.
  */
-export const CandidateReviewRequirement = z
+export const ReviewFindingSeverity = z.enum(['BLOCKING', 'ADVISORY']);
+export type ReviewFindingSeverity = z.infer<typeof ReviewFindingSeverity>;
+
+export const ReviewFindingBasis = z.enum([
+  'ACCEPTANCE_VIOLATION',
+  'CORRECTNESS_DEFECT',
+  'INTEGRITY_VIOLATION',
+  'SECURITY_OR_SAFETY_DEFECT',
+  'REQUIRED_SURFACE_UNVERIFIED',
+  'OPTIONAL_REFACTOR',
+  'STYLE_PREFERENCE',
+  'PERFORMANCE_NOT_REQUIRED',
+  'UNRELATED_TECHNICAL_DEBT',
+  'SCOPE_EXPANSION',
+]);
+export type ReviewFindingBasis = z.infer<typeof ReviewFindingBasis>;
+
+export const ReviewFindingRelationship = z.enum([
+  'CURRENT_CANDIDATE',
+  'ORIGINAL_FINDING',
+  'AFFECTED_ACCEPTANCE',
+  'REPAIR_REGRESSION',
+  'NEW_CRITICAL_DEFECT',
+  'UNRELATED',
+]);
+export type ReviewFindingRelationship = z.infer<typeof ReviewFindingRelationship>;
+
+export const ReviewFinding = z
+  .object({
+    severity: ReviewFindingSeverity,
+    basis: ReviewFindingBasis,
+    relationship: ReviewFindingRelationship,
+    summary: nonEmpty,
+    acceptance_criterion: nonEmpty.optional(),
+    impacted_files: z.array(nonEmpty).optional(),
+  })
+  .strict();
+export type ReviewFinding = z.infer<typeof ReviewFinding>;
+
+const FocusedReviewContext = z
+  .object({
+    source_attempt: z.number().int().positive(),
+    rejected_candidate_sha: shaHex,
+    rejection_disposition: z.literal('IMPLEMENTATION_DEFECT'),
+    original_review_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    original_finalization_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    blocking_finding: nonEmpty,
+    blocking_findings: z.array(ReviewFinding).min(1).optional(),
+    impacted_files: z.array(nonEmpty).min(1),
+    relevant_acceptance: z.array(nonEmpty).min(1),
+  })
+  .strict();
+
+export type CandidateReviewFocusedContext = z.infer<typeof FocusedReviewContext>;
+
+const CandidateReviewRequirementV1 = z
   .object({
     required: z.literal(true),
     reviewer_profile_id: nonEmpty,
@@ -2160,6 +2215,40 @@ export const CandidateReviewRequirement = z
     policy_provenance: nonEmpty,
   })
   .strict();
+
+const CandidateReviewRequirementV2 = z
+  .object({
+    schema_version: z.literal(2),
+    required: z.literal(true),
+    reviewer_profile_id: nonEmpty,
+    diversity_requirement: nonEmpty,
+    policy_provenance: nonEmpty,
+    reasons: z.array(nonEmpty).min(1),
+    mode: z.enum(['GENERAL', 'FOCUSED_REREVIEW']),
+    task_acceptance_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    focused_review: FocusedReviewContext.optional(),
+  })
+  .strict()
+  .superRefine((record, ctx) => {
+    if (record.mode === 'FOCUSED_REREVIEW' && record.focused_review === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'FOCUSED_REREVIEW exige contexto do REJECT original',
+      });
+    }
+    if (record.mode === 'GENERAL' && record.focused_review !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'GENERAL não pode declarar contexto de focused re-review',
+      });
+    }
+  });
+
+/** V1 histórico continua legível; todo requirement novo é V2 explicável. */
+export const CandidateReviewRequirement = z.union([
+  CandidateReviewRequirementV2,
+  CandidateReviewRequirementV1,
+]);
 export type CandidateReviewRequirement = z.infer<typeof CandidateReviewRequirement>;
 
 export const OrchestratedFinalizationRecord = z
@@ -2354,6 +2443,8 @@ export const CandidateReviewRecord = z
     implementer_gaps: z.array(nonEmpty).optional(),
     /** Declarada pelo reviewer. OBRIGATÓRIA para um ACCEPT válido. */
     coverage: CandidateReviewCoverage.optional(),
+    /** Findings estruturados; ausente apenas em records históricos V1. */
+    findings: z.array(ReviewFinding).optional(),
     decision: z.enum(['ACCEPT', 'REJECT']),
     /** Ausente somente em records legados anteriores a esta classificação. */
     rejection_disposition: ReviewRejectionDisposition.optional(),
@@ -2938,6 +3029,8 @@ export const ReviewRejectedAttemptRecord = z
     rejection_classification_sha256: sha256Hex,
     rejection_disposition: z.literal('IMPLEMENTATION_DEFECT'),
     review_reason: nonEmpty,
+    /** Findings blocking do verdict que autorizou este bounded repair. */
+    blocking_findings: z.array(ReviewFinding).min(1).optional(),
     changed_files: z.array(nonEmpty).min(1),
     original_validation_results: z.array(ValidationResult).min(1),
     original_validation_evidence: z.array(ValidationEvidence).optional(),

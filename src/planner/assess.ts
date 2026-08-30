@@ -533,6 +533,8 @@ export const ReviewRequirementAssessment = z
   .object({
     independent_review_required: z.boolean(),
     diversity_requirement: DiversityRequirement,
+    /** Razões concretas e determinísticas; vazio quando review não é exigida. */
+    reasons: z.array(nonEmpty),
     rationale: nonEmpty,
     provenance: nonEmpty,
   })
@@ -553,8 +555,8 @@ export type ReviewRequirementAssessment = z.infer<typeof ReviewRequirementAssess
  *
  * Risco baixo/médio com validação oficial forte ou razoável (partial) e
  * confiança não-baixa NÃO exige reviewer: a validação oficial do orquestrador
- * já é a evidência. Repair significativo, escalation e evidência inconsistente
- * são conhecidos só pelo lifecycle e entram lá, sobre este resultado.
+ * já é a evidência. Repair e escalation são fatos do lifecycle, não razões de
+ * review do candidate atual.
  */
 function assessReviewRequirement(
   risk: TaskRisk,
@@ -577,6 +579,7 @@ function assessReviewRequirement(
   return {
     independent_review_required: independentReviewRequired,
     diversity_requirement: diversityRequirement,
+    reasons: concreteReasons,
     rationale: `${rationale}. Diversidade de profile/model/provider é PROPORCIONAL ao risco (${diversityRequirement}) — não é condição universal de independência: em risco baixo/médio o mesmo profile pode revisar, desde que invocação e contexto sejam independentes.`,
     provenance: 'task.risk,verification_strength,confidence',
   };

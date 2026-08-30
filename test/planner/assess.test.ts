@@ -347,6 +347,7 @@ describe('assessExecution — review requirement', () => {
     expect(result.verification_strength.value).toBe('strong');
     expect(result.confidence.value).not.toBe('low');
     expect(result.review_requirement.independent_review_required).toBe(false);
+    expect(result.review_requirement.reasons).toEqual([]);
   });
 
   it('feature normal de risco médio com validação adequada não exige reviewer independente', () => {
@@ -373,6 +374,7 @@ describe('assessExecution — review requirement', () => {
     );
     expect(result.verification_strength.value).toBe('weak');
     expect(result.review_requirement.independent_review_required).toBe(true);
+    expect(result.review_requirement.reasons).toContain('verification_strength=weak');
   });
 
   it('risco alto exige reviewer mesmo com evidência forte', () => {
@@ -385,6 +387,7 @@ describe('assessExecution — review requirement', () => {
     );
     expect(result.verification_strength.value).toBe('strong');
     expect(result.review_requirement.independent_review_required).toBe(true);
+    expect(result.review_requirement.reasons).toEqual(['risk=high']);
   });
 
   it('review independente exigido em risco crítico mesmo com evidência forte', () => {
@@ -398,6 +401,7 @@ describe('assessExecution — review requirement', () => {
     );
     expect(result.review_requirement.independent_review_required).toBe(true);
     expect(result.review_requirement.diversity_requirement).toBe('required');
+    expect(result.review_requirement.reasons).toEqual(['risk=critical']);
   });
 
   it('MOPAC-like: risco científico critical continua exigindo review e diversidade, sem virar categoria de autorização', () => {

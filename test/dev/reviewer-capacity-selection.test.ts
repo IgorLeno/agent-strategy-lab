@@ -9,6 +9,13 @@ const POLICY = [
   { id: 'opencode-go-kimi', capability_rank: 4 },
 ] as const;
 
+function providerOf(profileId: string): string | null {
+  if (profileId.startsWith('codex')) return 'openai';
+  if (profileId.startsWith('claude')) return 'anthropic';
+  if (profileId.startsWith('opencode-go')) return 'opencode_go';
+  return null;
+}
+
 function poolOf(profileId: string): string | null {
   if (profileId.startsWith('codex')) return 'openai_chatgpt_subscription';
   if (profileId.startsWith('claude')) return 'anthropic_subscription';
@@ -168,6 +175,51 @@ describe('reviewer — pool EXHAUSTED do profile pinado não bloqueia outro auto
     });
     expect(selected.profileId).toBe('opencode-go-pro');
     expect(selected.rerouted).toBe(true);
+  });
+
+  it('failure domain de provider PROVEN evita chamadas redundantes no mesmo provider', () => {
+    const selected = selectReviewerProfileForFreshCapacity({
+      pinnedProfileId: 'codex-sol',
+      policyProfiles: [
+        { id: 'codex-sol', capability_rank: 2 },
+        { id: 'opencode-go-flash', capability_rank: 4 },
+        { id: 'opencode-go-pro', capability_rank: 5 },
+        { id: 'claude-opus', capability_rank: 6 },
+      ],
+      poolOf,
+      providerOf,
+      capacityByPool: new Map([
+        ['openai_chatgpt_subscription', capacity(CapacityStatus.EXHAUSTED)],
+        ['opencode_go_subscription', capacity(CapacityStatus.KNOWN)],
+        ['anthropic_subscription', capacity(CapacityStatus.KNOWN)],
+      ]),
+      unavailableFailureDomains: [
+        { scope: 'PROVIDER', id: 'opencode_go', status: 'PROVEN' },
+      ],
+    });
+    expect(selected.profileId).toBe('claude-opus');
+  });
+
+  it('failure domain UNKNOWN não exclui alternativas do mesmo provider', () => {
+    const selected = selectReviewerProfileForFreshCapacity({
+      pinnedProfileId: 'codex-sol',
+      policyProfiles: [
+        { id: 'codex-sol', capability_rank: 2 },
+        { id: 'opencode-go-flash', capability_rank: 4 },
+        { id: 'opencode-go-pro', capability_rank: 5 },
+      ],
+      poolOf,
+      providerOf,
+      capacityByPool: new Map([
+        ['openai_chatgpt_subscription', capacity(CapacityStatus.EXHAUSTED)],
+        ['opencode_go_subscription', capacity(CapacityStatus.KNOWN)],
+      ]),
+      excludedProfileIds: ['opencode-go-flash'],
+      unavailableFailureDomains: [
+        { scope: 'PROVIDER', id: 'opencode_go', status: 'UNKNOWN' },
+      ],
+    });
+    expect(selected.profileId).toBe('opencode-go-pro');
   });
   /**
    * A run histórica `semi-imperium-real-01` parou quatro vezes por "intervenção

@@ -1005,6 +1005,16 @@ export async function retryReviewRejectedAttempt(
       rejection_classification_sha256: classificationFingerprint,
       rejection_disposition: disposition,
       review_reason: review.reason,
+      // Findings blocking do veredito que autorizou o reparo. É o que define o
+      // escopo da re-review focada: sem eles, ela só teria o reason textual.
+      ...(review.findings === undefined
+        ? {}
+        : (() => {
+            const blocking = review.findings.filter(
+              (finding) => finding.severity === 'BLOCKING',
+            );
+            return blocking.length === 0 ? {} : { blocking_findings: blocking };
+          })()),
       changed_files: files,
       original_validation_results: finalization.validation_results,
       ...(finalization.validation_evidence === undefined
