@@ -107,6 +107,7 @@ import {
   isRetryableReviewerInvocationFailure,
   isRetryableReviewerUnavailability,
   selectReviewerProfileForFreshCapacity,
+  type ReviewerUnavailabilityCause,
 } from './reviewer-capacity.js';
 import {
   classificationFor,
@@ -121,6 +122,7 @@ import {
   launchProjectReviewer,
   resolveFailureFollowUp,
   toHumanRequiredOutput,
+  toTechnicalBlockedOutput,
   type EnvironmentReadinessGate,
   type ProjectLifecyclePathName,
   type ProjectReviewResult,
@@ -170,7 +172,13 @@ import type {
 } from './schemas.js';
 import { isHandoffDraftV2, readHandoffConfidence } from './schemas.js';
 import { retryFailedAttempt, retryReviewRejectedAttempt } from './retry-failed.js';
-import type { HumanRequiredOutput } from './routine-autonomy.js';
+import {
+  type ControlPlaneHalt,
+  type HumanAuthority,
+  type TechnicalBlocker,
+  createHumanRequired,
+  createTechnicalBlocked,
+} from './control-plane-halt.js';
 import { getTaskState, readState } from './state.js';
 
 export const PROJECT_RUN_SCHEMA_VERSION = 1;
@@ -421,7 +429,12 @@ export interface ProjectLifecycleReport {
   readonly human_gated_capabilities: readonly string[];
   readonly work_units: readonly ProjectWorkUnitReport[];
   readonly escalations: readonly ProjectEscalationReport[];
-  readonly human_gate: HumanRequiredOutput | null;
+  /**
+   * A parada do control plane: `HUMAN_REQUIRED` com autoridade nomeada, ou
+   * `BLOCKED` com blocker técnico tipado. Substitui `human_gate`, que dava a
+   * TODA parada a aparência de decisão humana.
+   */
+  readonly halt: ControlPlaneHalt | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -442,20 +455,29 @@ export type WorkUnitDecision =
       /** Snapshot do assessment e observer pós-execução do mesmo pool. */
       readonly pool_capacity: PoolCapacityLaunchContext;
     }
-  | { readonly outcome: 'HUMAN_REQUIRED'; readonly human_required: HumanRequiredOutput };
+  | { readonly outcome: 'HALT'; readonly halt: ControlPlaneHalt };
 
-/** Gate humano ainda NÃO publicado: descrição pura, sem efeito em memória. */
-interface WorkUnitGate {
+/**
+ * Parada ainda NÃO publicada: descrição pura, sem efeito em memória.
+ *
+ * O discriminante `authority`/`blocker` é obrigatório justamente para que
+ * nenhuma descrição de parada possa ser escrita sem dizer, ali mesmo, se
+ * existe autoridade humana ou se o caso é um defeito técnico.
+ */
+type WorkUnitGate = {
   readonly incidentId: string;
   readonly decisionNeeded: string;
   readonly why: string;
   readonly options: readonly string[];
   readonly evidencePaths: readonly string[];
-}
+} & (
+  | { readonly authority: HumanAuthority; readonly blocker?: undefined }
+  | { readonly blocker: TechnicalBlocker; readonly authority?: undefined }
+);
 
 /** Resultado da avaliação read-only compartilhada por runtime real e preview. */
 interface WorkUnitAssessment {
-  readonly outcome: 'LAUNCH' | 'HUMAN_REQUIRED';
+  readonly outcome: 'LAUNCH' | 'HALT';
   readonly gate: WorkUnitGate | null;
   /** `null` quando a avaliação parou antes de existir uma work unit avaliada. */
   readonly report: ProjectWorkUnitReport | null;
@@ -477,7 +499,13 @@ interface WorkUnitMaterializationContext {
 
 /** Projeção read-only da próxima ação; nada aqui foi decidido nem gravado. */
 export interface ProjectWorkUnitPreview {
-  readonly status: 'READY' | 'HUMAN_REQUIRED';
+  readonly status: 'READY' | 'HALT';
+  /**
+   * QUE TIPO de parada o runtime real tomaria. O dry-run precisa provar a
+   * decisão real, e "existe autoridade humana" contra "é defeito técnico" é
+   * exatamente a parte da decisão que este PR passou a distinguir.
+   */
+  readonly halt_status: 'HUMAN_REQUIRED' | 'BLOCKED' | null;
   readonly task_id: string | null;
   readonly blocked_by: string | null;
   readonly reason: string | null;
@@ -511,7 +539,7 @@ export interface WorkUnitObservation {
 export type WorkUnitFollowUp =
   | { readonly status: 'CONTINUE' }
   | { readonly status: 'REPAIR_READY'; readonly task_id: string; readonly source_attempt: number }
-  | { readonly status: 'HUMAN_REQUIRED'; readonly human_required: HumanRequiredOutput };
+  | { readonly status: 'HALT'; readonly halt: ControlPlaneHalt };
 
 /**
  * Decisão da autoridade de review sobre UM candidate preparado e validado.
@@ -522,14 +550,14 @@ export type CandidateAcceptanceDecision =
   | { readonly status: 'ACCEPTED'; readonly reason: string }
   | { readonly status: 'REPAIRABLE'; readonly reason: string }
   | {
-      readonly status: 'HUMAN_REQUIRED';
+      readonly status: 'HALT';
       readonly code: string;
-      readonly human_required: HumanRequiredOutput;
+      readonly halt: ControlPlaneHalt;
     };
 
 export type RepairExhaustedFollowUp =
   | { readonly status: 'ESCALATED'; readonly profile_id: string }
-  | { readonly status: 'HUMAN_REQUIRED'; readonly human_required: HumanRequiredOutput }
+  | { readonly status: 'HALT'; readonly halt: ControlPlaneHalt }
   | { readonly status: 'NOT_APPLICABLE'; readonly reason: string };
 
 /**
@@ -974,7 +1002,7 @@ export async function createProjectControlPlane(
   const priorAuthorizations: EscalationAuthorization[] = [];
   /** Relatório da work unit em curso — o único estado por-launch do control plane. */
   let active: ProjectWorkUnitReport | null = null;
-  let humanGate: HumanRequiredOutput | null = null;
+  let controlPlaneHalt: ControlPlaneHalt | null = null;
   /**
    * Exigência de review POR TASK, decidida uma vez em `beforeWorkUnit` e
    * consumida pela finalização do mesmo attempt. Fica num mapa por task, e não
@@ -983,7 +1011,7 @@ export async function createProjectControlPlane(
    */
   const reviewRequirementByTask = new Map<string, CandidateReviewRequirement>();
   /** Gate humano do último candidate recusado pela review, lido por `afterWorkUnit`. */
-  let blockedReview: HumanRequiredOutput | null = null;
+  let blockedReview: ControlPlaneHalt | null = null;
   const historySnapshotByTask = new Map<string, PerformanceHistoryQueryResultV2>();
   /**
    * Attempts que ESTE processo observou de ponta a ponta. É a única prova
@@ -1106,22 +1134,24 @@ export async function createProjectControlPlane(
     });
   }
 
-  function humanRequired(
-    incidentId: string,
-    decisionNeeded: string,
-    why: string,
-    options: readonly string[],
-    evidencePaths: readonly string[],
-  ): HumanRequiredOutput {
-    const output: HumanRequiredOutput = {
-      status: 'HUMAN_REQUIRED',
-      incident_id: incidentId,
-      decision_needed: decisionNeeded,
-      why_automation_stopped: why,
-      options: [...options],
-      evidence_paths: [...evidencePaths],
+  /**
+   * PONTO ÚNICO de publicação de uma parada do control plane. Nenhum caller
+   * monta um halt à mão: `gate.authority` ou `gate.blocker` decide o tipo, e o
+   * construtor central valida a autoridade contra o enum fechado.
+   */
+  function publishHalt(gate: WorkUnitGate): ControlPlaneHalt {
+    const body = {
+      incident_id: gate.incidentId,
+      decision_needed: gate.decisionNeeded,
+      why_automation_stopped: gate.why,
+      options: [...gate.options],
+      evidence_paths: [...gate.evidencePaths],
     };
-    humanGate = output;
+    const output =
+      gate.authority === undefined
+        ? createTechnicalBlocked({ blocker: gate.blocker, ...body })
+        : createHumanRequired({ human_authority: gate.authority, ...body });
+    controlPlaneHalt = output;
     return output;
   }
 
@@ -1136,11 +1166,11 @@ export async function createProjectControlPlane(
    * importa. Aqui roda inspeção, M75, M76, readiness, routing, budget e o gate
    * de launch com fatos honestos; o que NÃO roda é o registro de nada:
    * `workUnits`, `active`, `reviewRequirementByTask`, `blockedReview` e
-   * `humanGate` pertencem exclusivamente ao chamador com efeitos.
+   * `controlPlaneHalt` pertencem exclusivamente ao chamador com efeitos.
    */
   async function assessWorkUnit(request: WorkUnitRequest): Promise<WorkUnitAssessment> {
     const blocked = (gate: WorkUnitGate): WorkUnitAssessment => ({
-      outcome: 'HUMAN_REQUIRED',
+      outcome: 'HALT',
       gate,
       report: null,
       selectedProfileId: null,
@@ -1152,7 +1182,10 @@ export async function createProjectControlPlane(
 
     const planTask = loaded.byId.get(request.taskId);
     if (planTask === undefined) {
+      // Plano e runtime discordam sobre quais tasks existem: incoerência de
+      // configuração, não autorização que alguém precise conceder.
       return blocked({
+        blocker: 'RUNTIME_CONFIGURATION_INVALID',
         incidentId: `project:${request.taskId}:unknown-task`,
         decisionNeeded: 'reconciliar plano e runtime antes de novo launch',
         why: `task ${request.taskId} selecionada pelo runtime não existe no PlanFile carregado`,
@@ -1192,6 +1225,7 @@ export async function createProjectControlPlane(
     });
     if (workflow === undefined) {
       return blocked({
+        blocker: 'RUNTIME_CONFIGURATION_INVALID',
         incidentId: `project:${request.taskId}:workflow`,
         decisionNeeded: 'revisar a work unit antes de novo launch',
         why: `workflow de ${request.taskId} não pôde ser avaliado`,
@@ -1217,7 +1251,10 @@ export async function createProjectControlPlane(
 
     const requestedPin = request.pinnedProfileId ?? escalatedProfileByTask.get(request.taskId) ?? null;
     if (requestedPin !== null && !profiles.has(requestedPin)) {
+      // AQUI existe autoridade humana de verdade: o runtime exige um profile
+      // que a policy autorizada não contém, e só o operador amplia a policy.
       return blocked({
+        authority: 'PROFILE_OR_PROVIDER_OUTSIDE_POLICY',
         incidentId: `project:${request.taskId}:profile-outside-policy`,
         decisionNeeded: 'usar somente profiles da policy autorizada',
         why: `profile ${requestedPin} exigido pelo runtime está fora da profile policy ${authorization.profile_policy.id}`,
@@ -1308,9 +1345,13 @@ export async function createProjectControlPlane(
         routingDecision === null
           ? 'routing histórico/base não produziu decisão aplicável'
           : 'routing não produziu profile executável';
+      // Nenhum profile elegível AGORA. Isto NÃO é autoridade humana: a causa
+      // pode ser quota temporariamente esgotada, classificação da work unit ou
+      // um candidate inválido — e todas se resolvem sem ampliar autorização.
       return blocked({
+        blocker: 'NO_ELIGIBLE_EXECUTOR',
         incidentId: `project:${request.taskId}:routing`,
-        decisionNeeded: 'ampliar ou corrigir a profile policy autorizada',
+        decisionNeeded: 'corrigir a elegibilidade de routing antes de novo launch',
         why: `routing não encontrou profile elegível dentro da policy: ${reason}`,
         options: [
           'declarar um profile compatível na profile_policy',
@@ -1325,6 +1366,7 @@ export async function createProjectControlPlane(
     const profile = profiles.get(selectedProfileId);
     if (profile === undefined) {
       return blocked({
+        authority: 'PROFILE_OR_PROVIDER_OUTSIDE_POLICY',
         incidentId: `project:${request.taskId}:profile-outside-policy`,
         decisionNeeded: 'usar somente profiles da policy autorizada',
         why: `profile ${selectedProfileId} exigido pelo runtime está fora da profile policy ${authorization.profile_policy.id}`,
@@ -1463,9 +1505,15 @@ export async function createProjectControlPlane(
       escalation: escalatedProfileByTask.get(request.taskId) ?? null,
     };
 
+    // As DUAS paradas de launch, separadas na origem:
+    //  - autorização negada nomeia a capability human-gated que falta;
+    //  - recusa técnica (quota esgotada) e ambiente não pronto não nomeiam
+    //    autoridade nenhuma — consertar o ambiente e esperar o reset da janela
+    //    são ações técnicas, não decisões de operador.
     const gate: WorkUnitGate | null =
       launchAuthorization.outcome === 'HUMAN_REQUIRED'
         ? {
+            authority: launchAuthorization.gated_capability,
             incidentId: `project:${request.taskId}:launch-authorization`,
             decisionNeeded: 'autorizar explicitamente a capability exigida por esta work unit',
             why: launchAuthorization.reason,
@@ -1476,19 +1524,32 @@ export async function createProjectControlPlane(
             ],
             evidencePaths: [input.authorizationFile],
           }
-        : environment.outcome !== 'READY'
+        : launchAuthorization.outcome === 'BLOCKED'
           ? {
-              incidentId: `project:${request.taskId}:environment`,
-              decisionNeeded: 'preparar o ambiente do repositório alvo antes de novo launch',
-              why: `${environment.outcome}: ${environment.reason}`,
-              options: ['remediar o ambiente', 'declarar os requisitos ausentes'],
-              evidencePaths: [paths.repoRoot],
+              blocker: launchAuthorization.blocker,
+              incidentId: `project:${request.taskId}:launch-blocked`,
+              decisionNeeded: 'restabelecer capacidade de execução antes de novo launch',
+              why: launchAuthorization.reason,
+              options: [
+                'aguardar o reset da janela de quota',
+                'inspecionar a observação fresca de capacidade',
+              ],
+              evidencePaths: [input.authorizationFile],
             }
-          : null;
+          : environment.outcome !== 'READY'
+            ? {
+                blocker: 'RUNTIME_CONFIGURATION_INVALID',
+                incidentId: `project:${request.taskId}:environment`,
+                decisionNeeded: 'preparar o ambiente do repositório alvo antes de novo launch',
+                why: `${environment.outcome}: ${environment.reason}`,
+                options: ['remediar o ambiente', 'declarar os requisitos ausentes'],
+                evidencePaths: [paths.repoRoot],
+              }
+            : null;
 
     const instructionInventory = await fingerprintProjectInstructions(paths.repoRoot, inspection);
     return {
-      outcome: gate === null ? 'LAUNCH' : 'HUMAN_REQUIRED',
+      outcome: gate === null ? 'LAUNCH' : 'HALT',
       gate,
       report,
       selectedProfileId,
@@ -1563,17 +1624,7 @@ export async function createProjectControlPlane(
     const gate = assessment.gate;
 
     if (assessment.report === null) {
-      const blocking = gate as WorkUnitGate;
-      return {
-        outcome: 'HUMAN_REQUIRED',
-        human_required: humanRequired(
-          blocking.incidentId,
-          blocking.decisionNeeded,
-          blocking.why,
-          blocking.options,
-          blocking.evidencePaths,
-        ),
-      };
+      return { outcome: 'HALT', halt: publishHalt(gate as WorkUnitGate) };
     }
 
     blockedReview = null;
@@ -1586,16 +1637,7 @@ export async function createProjectControlPlane(
     active = assessment.report;
 
     if (gate !== null) {
-      return {
-        outcome: 'HUMAN_REQUIRED',
-        human_required: humanRequired(
-          gate.incidentId,
-          gate.decisionNeeded,
-          gate.why,
-          gate.options,
-          gate.evidencePaths,
-        ),
-      };
+      return { outcome: 'HALT', halt: publishHalt(gate) };
     }
 
     if (assessment.history !== null && !historySnapshotByTask.has(request.taskId)) {
@@ -1669,7 +1711,10 @@ export async function createProjectControlPlane(
       if (!accepted) {
         if (lookup.status === 'REJECTED' && lookup.record?.rejection_disposition === undefined) {
           return {
-            status: 'HUMAN_REQUIRED',
+            status: 'HALT',
+            // Classificar um REJECT legado é execução read-only de um
+            // classificador, não autorização de ninguém.
+            halt_status: 'BLOCKED',
             task_id: pending.taskId,
             blocked_by: 'REVIEW_REJECTION_CLASSIFICATION_REQUIRED',
             reason:
@@ -1686,6 +1731,7 @@ export async function createProjectControlPlane(
         ) {
           return {
             status: 'READY',
+            halt_status: null,
             task_id: pending.taskId,
             blocked_by: 'REVIEW_REPAIR_READY',
             reason: 'próxima ação segura é arquivar o REJECT e abrir o bounded repair',
@@ -1695,7 +1741,10 @@ export async function createProjectControlPlane(
           };
         }
         return {
-          status: 'HUMAN_REQUIRED',
+          status: 'HALT',
+          // Só um REJECT já emitido é decisão humana; review indisponível,
+          // divergente ou sem cobertura é defeito técnico.
+          halt_status: lookup.status === 'REJECTED' ? 'HUMAN_REQUIRED' : 'BLOCKED',
           task_id: pending.taskId,
           blocked_by: `CANDIDATE_REVIEW_${lookup.status}`,
           reason: lookup.reason,
@@ -1709,6 +1758,7 @@ export async function createProjectControlPlane(
     if (request.taskId === null) {
       return {
         status: 'READY',
+        halt_status: null,
         task_id: null,
         blocked_by: null,
         reason: 'nenhuma work unit selecionável pelo runtime neste momento',
@@ -1724,7 +1774,13 @@ export async function createProjectControlPlane(
       pinnedProfileId: null,
     });
     return {
-      status: assessment.outcome === 'LAUNCH' ? 'READY' : 'HUMAN_REQUIRED',
+      status: assessment.outcome === 'LAUNCH' ? 'READY' : 'HALT',
+      halt_status:
+        assessment.gate === null
+          ? null
+          : assessment.gate.authority === undefined
+            ? 'BLOCKED'
+            : 'HUMAN_REQUIRED',
       task_id: request.taskId,
       blocked_by: assessment.gate === null ? null : assessment.gate.incidentId,
       reason: assessment.gate === null ? null : assessment.gate.why,
@@ -1922,8 +1978,25 @@ export async function createProjectControlPlane(
     return reviewRequirementByTask.get(taskId) ?? null;
   }
 
+  /**
+   * Parada da autoridade de review. `kind` é obrigatório e discrimina as duas
+   * causas que antes eram a mesma coisa:
+   *
+   *  - `authority` — o veredito humano JÁ EXISTE e reprovou por algo que só um
+   *    humano decide (escopo, arquitetura, produto). Reabrir a task é decisão
+   *    de operador.
+   *  - `blocker` — a review não pôde ser CONCLUÍDA, ou a evidência não amarra
+   *    ao candidate. Isso é defeito técnico: reviewer inexecutável, veredito
+   *    ilegível, cobertura ausente, quota esgotada. Nenhuma autorização
+   *    conserta, e continuar sem review nunca foi opção.
+   *
+   * As duas continuam fail-closed: nada é promovido em nenhum dos casos.
+   * Esta função NÃO decide se review é exigida, quem revisa, nem se um REJECT
+   * bloqueia — só nomeia corretamente a parada que já acontecia.
+   */
   function reviewBlocked(
     taskId: string,
+    kind: { readonly authority: HumanAuthority } | { readonly blocker: TechnicalBlocker },
     code: string,
     outcome: string,
     reason: string,
@@ -1933,15 +2006,20 @@ export async function createProjectControlPlane(
   ): CandidateAcceptanceDecision {
     const report = reportFor(taskId);
     if (report !== undefined) report.review = { ...report.review, outcome, reason };
-    const output = humanRequired(
-      `project:${taskId}:review`,
+    const body = {
+      incidentId: `project:${taskId}:review`,
       decisionNeeded,
-      reason,
+      why: reason,
       options,
       evidencePaths,
+    };
+    const output = publishHalt(
+      'authority' in kind
+        ? { authority: kind.authority, ...body }
+        : { blocker: kind.blocker, ...body },
     );
     blockedReview = output;
-    return { status: 'HUMAN_REQUIRED', code, human_required: output };
+    return { status: 'HALT', code, halt: output };
   }
 
   async function existingEvidencePaths(candidates: readonly string[]): Promise<string[]> {
@@ -2028,8 +2106,9 @@ export async function createProjectControlPlane(
           existingClassification.review_record_sha256 !== canonicalSha256(legacyRejectedReview)
         ) {
           return reviewBlocked(
-            taskId,
-            'LEGACY_REJECTION_CLASSIFICATION_DIVERGENT',
+   taskId,
+   { blocker: 'INCONSISTENT_EVIDENCE' },
+   'LEGACY_REJECTION_CLASSIFICATION_DIVERGENT',
             'REVIEW_EVIDENCE_DIVERGENT',
             'classificação persistida não corresponde ao candidate/REJECT legado',
             'reconciliar manualmente a classificação e o REJECT preservados',
@@ -2046,8 +2125,9 @@ export async function createProjectControlPlane(
           };
         }
         return reviewBlocked(
-          taskId,
-          'REVIEW_REJECTED_HUMAN_DECISION',
+   taskId,
+   { authority: 'UNRESOLVED_ARCHITECTURE_OR_PRODUCT_DECISION' },
+   'REVIEW_REJECTED_HUMAN_DECISION',
           'REJECT',
           `REJECT legado classificado como ${existingClassification.disposition}: ${existingClassification.reason}`,
           'resolver a decisão humana indicada pela classificação estruturada',
@@ -2079,8 +2159,9 @@ export async function createProjectControlPlane(
         };
       }
       return reviewBlocked(
-        taskId,
-        'REVIEW_REJECTED',
+   taskId,
+   { authority: 'UNRESOLVED_ARCHITECTURE_OR_PRODUCT_DECISION' },
+   'REVIEW_REJECTED',
         'REJECT',
         `review independente não aceitou a mudança: ${lookup.reason}`,
         'decidir sobre a mudança reprovada pela review independente',
@@ -2090,8 +2171,9 @@ export async function createProjectControlPlane(
     }
     if (lookup.status === 'DIVERGENT') {
       return reviewBlocked(
-        taskId,
-        'REVIEW_EVIDENCE_DIVERGENT',
+   taskId,
+   { blocker: 'INCONSISTENT_EVIDENCE' },
+   'REVIEW_EVIDENCE_DIVERGENT',
         'REVIEW_EVIDENCE_DIVERGENT',
         `veredito de review não corresponde ao candidate preparado: ${lookup.reason}`,
         'reconciliar manualmente veredito e candidate antes de qualquer promoção',
@@ -2104,8 +2186,9 @@ export async function createProjectControlPlane(
     // um veredito já publicado — o record é append-only.
     if (lookup.status === 'INVALID') {
       return reviewBlocked(
-        taskId,
-        'REVIEW_COVERAGE_INSUFFICIENT',
+   taskId,
+   { blocker: 'INSUFFICIENT_EVIDENCE' },
+   'REVIEW_COVERAGE_INSUFFICIENT',
         'REVIEW_COVERAGE_INSUFFICIENT',
         `veredito de review não satisfaz o contrato de cobertura: ${lookup.reason}`,
         'refazer a review com cobertura explícita antes de qualquer promoção',
@@ -2124,8 +2207,9 @@ export async function createProjectControlPlane(
     const planTask = loaded.byId.get(taskId);
     if (planTask === undefined) {
       return reviewBlocked(
-        taskId,
-        'REVIEW_TASK_OUTSIDE_PLAN',
+   taskId,
+   { blocker: 'RUNTIME_CONFIGURATION_INVALID' },
+   'REVIEW_TASK_OUTSIDE_PLAN',
         'UNAVAILABLE',
         `task ${taskId} do candidate não existe no PlanFile carregado`,
         'reconciliar plano e runtime antes de qualquer promoção',
@@ -2159,6 +2243,7 @@ export async function createProjectControlPlane(
     ];
     const persistedEvidence: string[] = [];
     let lastSelectionReason = '';
+    let lastSelectionCause: ReviewerUnavailabilityCause | null = null;
     let lastInvocationFailureReason: string | null = null;
     let reviewerProfile: LauncherProfile | null = null;
     let verdict: ProjectReviewResult | null = null;
@@ -2175,14 +2260,16 @@ export async function createProjectControlPlane(
         diversityRequirement: requirement.diversity_requirement,
       });
       lastSelectionReason = selectedReviewer.reason;
+      lastSelectionCause = selectedReviewer.cause;
       if (selectedReviewer.profileId === null) {
         break;
       }
       const found = profiles.get(selectedReviewer.profileId) ?? null;
       if (found === null) {
         return reviewBlocked(
-          taskId,
-          'REVIEW_PROFILE_OUTSIDE_POLICY',
+   taskId,
+   { authority: 'PROFILE_OR_PROVIDER_OUTSIDE_POLICY' },
+   'REVIEW_PROFILE_OUTSIDE_POLICY',
           'UNAVAILABLE',
           `a policy exigiu review independente e o reviewer ${selectedReviewer.profileId} não pertence à profile policy`,
           'declarar um reviewer elegível na profile policy',
@@ -2251,12 +2338,24 @@ export async function createProjectControlPlane(
         lastInvocationFailureReason = verdict.reason;
         continue;
       }
+      // Review EXIGIDA que não pôde ser concluída. O reviewer não emitiu
+      // veredito: nada foi decidido, nem a favor nem contra. Isso é defeito de
+      // invocação/protocolo — não existe autorização humana que o conserte, e
+      // continuar sem review permanece proibido.
+      //
+      // A ÚNICA exceção é o launch recusado por autorização: ali a fronteira
+      // humana é real e a autoridade é nomeada pela própria autorização.
       return reviewBlocked(
         taskId,
+        verdict.code === 'REVIEW_LAUNCH_HUMAN_REQUIRED'
+          ? { authority: 'SCOPE_EXPANSION' }
+          : verdict.code === 'REVIEW_LAUNCH_QUOTA_EXHAUSTED'
+            ? { blocker: 'NO_ELIGIBLE_EXECUTOR' }
+            : { blocker: 'PROVIDER_OR_INFRA_FAILURE' },
         verdict.code,
         verdict.code,
         `review independente não pôde ser concluída: ${verdict.reason}`,
-        'tornar a review independente executável ou decidir manualmente',
+        'tornar a review independente executável antes de qualquer promoção',
         ['corrigir a configuração do reviewer', 'inspecionar o candidate preparado'],
         await existingEvidencePaths([...persistedEvidence, paths.validationLogsDir]),
       );
@@ -2269,8 +2368,9 @@ export async function createProjectControlPlane(
     ) {
       if (lastInvocationFailureReason !== null) {
         return reviewBlocked(
-          taskId,
-          'REVIEW_INVOCATION_FAILED',
+   taskId,
+   { blocker: 'PROVIDER_OR_INFRA_FAILURE' },
+   'REVIEW_INVOCATION_FAILED',
           'REVIEW_INVOCATION_FAILED',
           `review independente não pôde ser concluída: ${lastInvocationFailureReason}`,
           'tornar a review independente executável ou decidir manualmente',
@@ -2278,13 +2378,25 @@ export async function createProjectControlPlane(
           await existingEvidencePaths([...persistedEvidence, paths.validationLogsDir]),
         );
       }
+      // A causa decide o TIPO da parada, e só uma das três é autoridade
+      // humana: uma policy sem nenhum profile capaz de satisfazer a
+      // diversidade exigida só é resolvida por alguém ampliando a policy.
+      // Pool esgotado e INFRA se resolvem no reset da janela ou no conserto.
+      const diversityGap = lastSelectionCause === 'DIVERSITY_POLICY_HAS_NO_ALTERNATIVE';
       return reviewBlocked(
         taskId,
-        'REVIEW_LAUNCH_HUMAN_REQUIRED',
+        diversityGap
+          ? { authority: 'PROFILE_OR_PROVIDER_OUTSIDE_POLICY' }
+          : { blocker: 'NO_ELIGIBLE_EXECUTOR' },
+        'REVIEW_LAUNCH_UNAVAILABLE',
         'UNAVAILABLE',
         lastSelectionReason,
-        'autorizar outro pool subscription-only ou esperar o reset da quota',
-        ['inspecionar a observação fresca de capacidade', 'inspecionar o candidate preparado'],
+        diversityGap
+          ? 'declarar na profile policy um reviewer que satisfaça a diversidade exigida'
+          : 'restabelecer capacidade de review antes de qualquer promoção',
+        diversityGap
+          ? ['declarar outro profile na profile_policy', 'reduzir o risco declarado da work unit']
+          : ['inspecionar a observação fresca de capacidade', 'aguardar o reset da quota'],
         [input.authorizationFile],
       );
     }
@@ -2292,8 +2404,9 @@ export async function createProjectControlPlane(
     if (legacyRejectedReview !== null) {
       if (verdict.outcome !== 'REJECT') {
         return reviewBlocked(
-          taskId,
-          'LEGACY_REJECTION_CLASSIFICATION_INVALID',
+   taskId,
+   { blocker: 'INCONSISTENT_EVIDENCE' },
+   'LEGACY_REJECTION_CLASSIFICATION_INVALID',
           'UNAVAILABLE',
           'classificador tentou substituir o REJECT legado em vez de classificá-lo',
           'classificar a natureza do REJECT legado sem redecidir o veredito',
@@ -2327,8 +2440,9 @@ export async function createProjectControlPlane(
         };
       }
       return reviewBlocked(
-        taskId,
-        'REVIEW_REJECTED_HUMAN_DECISION',
+   taskId,
+   { authority: 'UNRESOLVED_ARCHITECTURE_OR_PRODUCT_DECISION' },
+   'REVIEW_REJECTED_HUMAN_DECISION',
         'REJECT',
         `REJECT legado classificado como ${verdict.rejection_disposition}: ${verdict.reason}`,
         'resolver a decisão humana indicada pela classificação estruturada',
@@ -2369,8 +2483,9 @@ export async function createProjectControlPlane(
     } catch (error) {
       if (!(error instanceof ZodError)) throw error;
       return reviewBlocked(
-        taskId,
-        'REVIEW_COVERAGE_INSUFFICIENT',
+   taskId,
+   { blocker: 'INSUFFICIENT_EVIDENCE' },
+   'REVIEW_COVERAGE_INSUFFICIENT',
         'REVIEW_COVERAGE_INSUFFICIENT',
         `veredito de review não satisfaz o contrato de cobertura: ${error.issues
           .map((issue) => issue.message)
@@ -2399,8 +2514,9 @@ export async function createProjectControlPlane(
       };
     }
     return reviewBlocked(
-      taskId,
-      'REVIEW_REJECTED',
+   taskId,
+   { authority: 'UNRESOLVED_ARCHITECTURE_OR_PRODUCT_DECISION' },
+   'REVIEW_REJECTED',
       'REJECT',
       `review independente não aceitou a mudança: ${verdict.reason}`,
       'decidir sobre a mudança reprovada pela review independente',
@@ -2421,7 +2537,7 @@ export async function createProjectControlPlane(
             reason:
               decision.status === 'REPAIRABLE'
                 ? decision.reason
-                : decision.human_required.why_automation_stopped,
+                : decision.halt.why_automation_stopped,
           };
     },
   };
@@ -2437,21 +2553,26 @@ export async function createProjectControlPlane(
         taskId: pending.taskId,
         record: pending.record,
       });
-      if (decision.status === 'HUMAN_REQUIRED') {
-        return { status: 'HUMAN_REQUIRED', human_required: decision.human_required };
+      if (decision.status === 'HALT') {
+        return { status: 'HALT', halt: decision.halt };
       }
       if (decision.status !== 'REPAIRABLE') return { status: 'CONTINUE' };
     }
     if (!authorization.autonomous_execution_boundary.includes('BOUNDED_REPAIR')) {
-      const output = humanRequired(
-        `project:${pending.taskId}:review-repair-authorization`,
-        'autorizar explicitamente BOUNDED_REPAIR ou decidir manualmente',
-        'review encontrou defeito de implementação, mas a run não autoriza bounded repair',
-        ['adicionar BOUNDED_REPAIR ao autonomous_execution_boundary', 'inspecionar o candidate'],
-        [input.authorizationFile, pending.review.evidence_path],
-      );
+      // AUTORIDADE REAL: ampliar o boundary autônomo da run é do operador.
+      const output = publishHalt({
+        authority: 'SCOPE_EXPANSION',
+        incidentId: `project:${pending.taskId}:review-repair-authorization`,
+        decisionNeeded: 'autorizar explicitamente BOUNDED_REPAIR ou decidir manualmente',
+        why: 'review encontrou defeito de implementação, mas a run não autoriza bounded repair',
+        options: [
+          'adicionar BOUNDED_REPAIR ao autonomous_execution_boundary',
+          'inspecionar o candidate',
+        ],
+        evidencePaths: [input.authorizationFile, pending.review.evidence_path],
+      });
       blockedReview = output;
-      return { status: 'HUMAN_REQUIRED', human_required: output };
+      return { status: 'HALT', halt: output };
     }
     await retryReviewRejectedAttempt({
       paths,
@@ -2506,7 +2627,12 @@ export async function createProjectControlPlane(
       validation_outcome: report.validation_outcome,
       repair_source_attempt: null,
       escalated_from_profile_id: escalatedProfileByTask.get(observation.taskId) ?? null,
-      human_intervention: humanGate?.why_automation_stopped ?? null,
+      // Só uma parada com AUTORIDADE HUMANA conta como intervenção humana no
+      // plano operacional. Um blocker técnico não é intervenção de ninguém.
+      human_intervention:
+        controlPlaneHalt?.status === 'HUMAN_REQUIRED'
+          ? controlPlaneHalt.why_automation_stopped
+          : null,
       telemetry_status: telemetry.status,
       telemetry_reason: telemetry.reason,
       observed_at: (input.now?.() ?? new Date()).toISOString(),
@@ -2550,7 +2676,7 @@ export async function createProjectControlPlane(
     // A review já aconteceu — na FRONTEIRA DE ACEITAÇÃO, antes de o candidate
     // virar PASS. Aqui só resta propagar o gate humano que ela produziu.
     if (blockedReview !== null) {
-      return { status: 'HUMAN_REQUIRED', human_required: blockedReview };
+      return { status: 'HALT', halt: blockedReview };
     }
     const reviewRepair = await reconcilePendingReviewRejection();
     if (reviewRepair.status !== 'CONTINUE') return reviewRepair;
@@ -2611,27 +2737,30 @@ export async function createProjectControlPlane(
       diagnosis,
       incidentId: `project:${request.taskId}:diagnosis`,
     });
-    if (followUp.human_required !== null) {
-      humanGate = followUp.human_required;
-      return { status: 'HUMAN_REQUIRED', human_required: followUp.human_required };
+    if (followUp.halt !== null) {
+      controlPlaneHalt = followUp.halt;
+      return { status: 'HALT', halt: followUp.halt };
     }
     if (!followUp.escalates || initialProfileId === null) {
       return { status: 'NOT_APPLICABLE', reason: followUp.rationale };
     }
 
     if (ladderSteps.length < 2) {
-      const output = humanRequired(
-        `project:${request.taskId}:escalation`,
-        'autorizar explicitamente um profile adicional para escalar',
-        `diagnosis CAPABILITY exige escalation, mas a policy ${authorization.profile_policy.id} declara um único profile elegível`,
-        [
+      // AUTORIDADE REAL: a ladder autorizada tem um degrau só, e ampliá-la
+      // é ampliar a policy de profiles — decisão do operador.
+      const output = publishHalt({
+        authority: 'PROFILE_OR_PROVIDER_OUTSIDE_POLICY',
+        incidentId: `project:${request.taskId}:escalation`,
+        decisionNeeded: 'autorizar explicitamente um profile adicional para escalar',
+        why: `diagnosis CAPABILITY exige escalation, mas a policy ${authorization.profile_policy.id} declara um único profile elegível`,
+        options: [
           'declarar outro profile na profile_policy',
           'aceitar o resultado do profile fixado pelo experimento',
         ],
-        [...evidencePaths, input.authorizationFile],
-      );
+        evidencePaths: [...evidencePaths, input.authorizationFile],
+      });
       if (report !== undefined) report.escalation = 'HUMAN_REQUIRED';
-      return { status: 'HUMAN_REQUIRED', human_required: output };
+      return { status: 'HALT', halt: output };
     }
 
     const ladder: EscalationLadder = {
@@ -2699,19 +2828,35 @@ export async function createProjectControlPlane(
     });
 
     if (escalation.outcome !== 'ESCALATE') {
-      const output =
-        escalation.human_required === null
-          ? humanRequired(
-              `project:${request.taskId}:escalation`,
-              'decidir manualmente o próximo passo da task bloqueada',
-              `escalation não autorizada: ${escalation.classification}`,
-              ['inspecionar a evidência preservada'],
-              [...evidencePaths],
-            )
-          : toHumanRequiredOutput(escalation.human_required, `project:${request.taskId}:escalation`);
-      humanGate = output;
-      if (report !== undefined) report.escalation = 'HUMAN_REQUIRED';
-      return { status: 'HUMAN_REQUIRED', human_required: output };
+      // O tipo da parada vem da DECISÃO de escalation, não de um default.
+      // `HUMAN_REQUIRED` só chega aqui carregando a autoridade que M79 nomeou;
+      // `TECHNICAL_BLOCKER` e `NO_ESCALATION` são defeitos de evidência ou
+      // diagnósticos não escaláveis, e nenhum dos dois pede autorização.
+      const incidentId = `project:${request.taskId}:escalation`;
+      const output: ControlPlaneHalt =
+        escalation.outcome === 'HUMAN_REQUIRED'
+          ? toHumanRequiredOutput(escalation.human_required, incidentId)
+          : escalation.outcome === 'TECHNICAL_BLOCKER'
+            ? toTechnicalBlockedOutput(
+                {
+                  blocker: escalation.blocker,
+                  classification: escalation.classification,
+                  rationale: escalation.rationale,
+                  evidence_paths: [...escalation.evidence_paths, ...evidencePaths],
+                },
+                incidentId,
+              )
+            : createTechnicalBlocked({
+                blocker: 'INSUFFICIENT_EVIDENCE',
+                incident_id: incidentId,
+                decision_needed: 'inspecionar a evidência preservada da task bloqueada',
+                why_automation_stopped: `escalation não aplicável: ${escalation.classification}`,
+                options: ['inspecionar a evidência preservada'],
+                evidence_paths: [...evidencePaths],
+              });
+      controlPlaneHalt = output;
+      if (report !== undefined) report.escalation = output.status;
+      return { status: 'HALT', halt: output };
     }
 
     // O control plane reabre a task pela primitive OFICIAL — a mesma que o
@@ -2759,7 +2904,7 @@ export async function createProjectControlPlane(
         human_gated_capabilities: [...authorization.human_gated_capabilities],
         work_units: workUnits.map((unit) => ({ ...unit })),
         escalations: [...escalations],
-        human_gate: humanGate,
+        halt: controlPlaneHalt,
       };
     },
   };

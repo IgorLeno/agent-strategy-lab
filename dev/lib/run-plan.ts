@@ -301,7 +301,11 @@ export async function runPlan(input: PlanRunInput): Promise<PlanRunResult> {
         ? null
         : await previewPlane.previewNextAction({ taskId: nextTask });
     const status =
-      preview === null ? runtimeStatus : preview.status === 'READY' ? 'READY' : 'HUMAN_REQUIRED';
+      preview === null
+        ? runtimeStatus
+        : preview.status === 'READY'
+          ? 'READY'
+          : (preview.halt_status ?? 'BLOCKED');
 
     return {
       payload: {
@@ -363,7 +367,12 @@ export async function runPlan(input: PlanRunInput): Promise<PlanRunResult> {
       ? { stage: 'ALL_DONE' }
       : terminal === 'HUMAN_REQUIRED'
         ? { stage: 'HUMAN_REQUIRED', detail: orchestrated.stop.reason }
-        : { stage: 'FAILURE', detail: `${terminal}: ${orchestrated.stop.reason}` },
+        : // Parada TÉCNICA fail-closed não é reprovação do trabalho e não é
+          // decisão humana pendente: tem estágio próprio para não mentir em
+          // nenhuma das duas direções.
+          terminal === 'BLOCKED'
+          ? { stage: 'BLOCKED', detail: orchestrated.stop.reason }
+          : { stage: 'FAILURE', detail: `${terminal}: ${orchestrated.stop.reason}` },
   );
 
   return {

@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+import { HumanAuthority, TechnicalBlocker } from '../intake/index.js';
+
 const nonEmpty = z.string().trim().min(1);
 
 /**
@@ -54,6 +56,12 @@ export type FailureDiagnosis = z.infer<typeof FailureDiagnosis>;
 export const HumanInterventionDecision = z
   .object({
     status: z.literal('HUMAN_REQUIRED'),
+    /**
+     * A autoridade que FALTA, nomeada estruturalmente. Sem ela o output não é
+     * `HUMAN_REQUIRED`: `decision_needed` e `why_automation_stopped` são texto
+     * livre e sozinhos nunca provaram que existia uma decisão humana.
+     */
+    human_authority: HumanAuthority,
     classification: FailureDiagnosisClassification,
     decision_needed: nonEmpty,
     why_automation_stopped: nonEmpty,
@@ -87,20 +95,34 @@ const AutomatedFailureIntervention = z
   })
   .strict();
 
+/**
+ * NENHUMA classificação de failure diagnosis nomeia uma autoridade humana.
+ *
+ * "a automação não sabe o que fazer" e "a ferramenta está quebrada e não há
+ * primitive de remediação" descrevem o estado da automação, não um poder que
+ * só o operador detém. Antes desta mudança as duas viravam `HUMAN_REQUIRED` e
+ * paravam a run pedindo uma decisão inexistente. Agora são BLOQUEIOS TÉCNICOS
+ * tipados: continuam fail-closed — nada é promovido, nenhum provider é
+ * lançado, nenhum degrau de escalation é consumido — mas não inventam
+ * autoridade de execução.
+ */
+const TechnicalBlockerIntervention = z
+  .object({
+    status: z.literal('TECHNICAL_BLOCKER'),
+    classification: FailureDiagnosisClassification,
+    action: z.literal('NONE'),
+    blocker: TechnicalBlocker,
+    rationale: nonEmpty,
+    boundary: nonEmpty,
+    consumes_escalation_step: z.literal(false),
+    changes_profile: z.literal(false),
+    human_required: z.null(),
+  })
+  .strict();
+
 export const FailureInterventionDecision = z.union([
   AutomatedFailureIntervention,
-  z
-    .object({
-      status: z.literal('HUMAN_REQUIRED'),
-      classification: FailureDiagnosisClassification,
-      action: z.literal('NONE'),
-      rationale: nonEmpty,
-      boundary: nonEmpty,
-      consumes_escalation_step: z.literal(false),
-      changes_profile: z.literal(false),
-      human_required: HumanInterventionDecision,
-    })
-    .strict(),
+  TechnicalBlockerIntervention,
 ]);
 export type FailureInterventionDecision = z.infer<typeof FailureInterventionDecision>;
 
@@ -109,24 +131,20 @@ export interface FailureInterventionOptions {
   readonly harness_remediation_available?: boolean;
 }
 
-function humanRequired(diagnosis: FailureDiagnosis): FailureInterventionDecision {
+function technicalBlocker(
+  diagnosis: FailureDiagnosis,
+  blocker: TechnicalBlocker,
+): FailureInterventionDecision {
   return {
-    status: 'HUMAN_REQUIRED',
+    status: 'TECHNICAL_BLOCKER',
     classification: diagnosis.classification,
     action: 'NONE',
+    blocker,
     rationale: diagnosis.rationale,
     boundary: diagnosis.boundary,
     consumes_escalation_step: false,
     changes_profile: false,
-    human_required: {
-      status: 'HUMAN_REQUIRED',
-      classification: diagnosis.classification,
-      decision_needed: diagnosis.decision_needed,
-      why_automation_stopped: diagnosis.why_automation_stopped,
-      options: [...diagnosis.options],
-      evidence_paths: [...diagnosis.evidence_paths],
-      provenance: [...diagnosis.provenance],
-    },
+    human_required: null,
   };
 }
 
@@ -168,10 +186,10 @@ export function decideFailureIntervention(
     case 'VALIDATION_OR_TOOLING_GAP':
       return options.harness_remediation_available
         ? action(diagnosis, 'REPAIR_HARNESS_OR_TOOLING')
-        : humanRequired(diagnosis);
+        : technicalBlocker(diagnosis, 'VALIDATION_OR_TOOLING_GAP');
     case 'CAPABILITY':
       return action(diagnosis, 'ESCALATION_ELIGIBLE', true);
     case 'UNKNOWN_INSUFFICIENT_EVIDENCE':
-      return humanRequired(diagnosis);
+      return technicalBlocker(diagnosis, 'INSUFFICIENT_EVIDENCE');
   }
 }

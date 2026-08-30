@@ -660,7 +660,7 @@ describe('M85 — External Project Fake E2E', () => {
     const followUp = resolveFailureFollowUp({ diagnosis: groundedDiagnosis, incidentId: 'INC-CAPABILITY' });
     expect(followUp.escalates).toBe(true);
     expect(followUp.action).toBe('ESCALATION_ELIGIBLE');
-    expect(followUp.human_required).toBeNull();
+    expect(followUp.halt).toBeNull();
 
     // escalation decidida pelo control plane — MESMO provider, degrau seguinte da ladder.
     const escalation = decideEscalation({
@@ -801,7 +801,7 @@ describe('M85 — External Project Fake E2E', () => {
     const followUp = resolveFailureFollowUp({ diagnosis: infraDiagnosis, incidentId: 'INC-INFRA' });
     expect(followUp.action).toBe('RETRY_INFRA_SAME_PROFILE');
     expect(followUp.escalates).toBe(false);
-    expect(followUp.human_required).toBeNull();
+    expect(followUp.halt).toBeNull();
   }, 60_000);
 
   // -------------------------------------------------------------------------
@@ -841,7 +841,7 @@ describe('M85 — External Project Fake E2E', () => {
     });
     expect(followUp.action).toBe('REMEDIATE_ENVIRONMENT');
     expect(followUp.escalates).toBe(false);
-    expect(followUp.human_required).toBeNull();
+    expect(followUp.halt).toBeNull();
     expect(followUp.rationale).toContain('environment readiness');
   });
 
@@ -882,7 +882,7 @@ describe('M85 — External Project Fake E2E', () => {
     });
     expect(broadFollowUp.action).toBe('REPLAN_OR_DECOMPOSE');
     expect(broadFollowUp.escalates).toBe(false);
-    expect(broadFollowUp.human_required).toBeNull();
+    expect(broadFollowUp.halt).toBeNull();
 
     const pressureFollowUp = resolveFailureFollowUp({
       diagnosis: diagnosis({ classification: 'CONTEXT_PRESSURE' }),
@@ -890,7 +890,7 @@ describe('M85 — External Project Fake E2E', () => {
     });
     expect(pressureFollowUp.action).toBe('RESCOPE_CONTEXT');
     expect(pressureFollowUp.escalates).toBe(false);
-    expect(pressureFollowUp.human_required).toBeNull();
+    expect(pressureFollowUp.halt).toBeNull();
   });
 
   // -------------------------------------------------------------------------
@@ -1059,27 +1059,32 @@ describe('M85 — External Project Fake E2E', () => {
       }),
       incidentId: 'INC-HUMAN-GATE',
     });
-    expect(insufficientEvidence.human_required).not.toBeNull();
-    const humanRequired = insufficientEvidence.human_required!;
-    expect(humanRequired.status).toBe('HUMAN_REQUIRED');
-    expect(humanRequired.decision_needed).toBe('decidir se a ação de risco crítico deve prosseguir');
-    expect(humanRequired.options).toEqual(['autorizar manualmente', 'recusar e replanejar']);
-    expect(humanRequired.evidence_paths.length).toBeGreaterThan(0);
+    // EVIDÊNCIA INSUFICIENTE NÃO É AUTORIDADE HUMANA. O worker podia declarar
+    // `decision_needed` e `options` que soavam como um gate de operador; nada
+    // disso prova que existia uma decisão humana a tomar. A parada continua
+    // acontecendo — como blocker técnico.
+    expect(insufficientEvidence.halt).not.toBeNull();
+    const halt = insufficientEvidence.halt!;
+    expect(halt.status).toBe('BLOCKED');
+    expect(halt.evidence_paths.length).toBeGreaterThan(0);
 
+    // O adapter de HUMAN_REQUIRED continua existindo — e agora exige que a
+    // autoridade seja nomeada estruturalmente para poder ser usado.
     const adapted = toHumanRequiredOutput(
       {
         status: 'HUMAN_REQUIRED',
+        human_authority: 'UNRESOLVED_ARCHITECTURE_OR_PRODUCT_DECISION',
         classification: 'CAPABILITY',
-        decision_needed: humanRequired.decision_needed,
-        why_automation_stopped: humanRequired.why_automation_stopped,
-        options: [...humanRequired.options],
-        evidence_paths: [...humanRequired.evidence_paths],
+        decision_needed: 'decidir se a ação de risco crítico deve prosseguir',
+        why_automation_stopped: halt.why_automation_stopped,
+        options: ['autorizar manualmente', 'recusar e replanejar'],
+        evidence_paths: [...halt.evidence_paths],
         provenance: ['launch_record'],
       },
       'INC-HUMAN-GATE',
     );
-    expect(adapted.decision_needed).toBe(humanRequired.decision_needed);
-    expect(adapted.options).toEqual(humanRequired.options);
+    expect(adapted.human_authority).toBe('UNRESOLVED_ARCHITECTURE_OR_PRODUCT_DECISION');
+    expect(adapted.options).toEqual(['autorizar manualmente', 'recusar e replanejar']);
 
     // PARADA na fronteira: tentativa de escalation cross-provider sem o
     // boundary autorizar essa capability — HUMAN_REQUIRED, zero spawn depois.

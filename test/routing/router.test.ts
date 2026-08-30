@@ -364,8 +364,8 @@ describe('routeInitialProfile — a previsão de runtime NÃO tem autoridade', (
     const result = routeInitialProfile(
       input(workUnit(oversizedTask()), [luna], [candidate(luna.profile_id)]),
     );
-    expect(result.outcome).toBe('HUMAN_REQUIRED');
-    if (result.outcome !== 'HUMAN_REQUIRED') throw new Error('unreachable');
+    expect(result.outcome).toBe('BLOCKED');
+    if (result.outcome !== 'BLOCKED') throw new Error('unreachable');
     expect(result.candidates_considered).toContainEqual(
       expect.objectContaining({
         profile_id: 'luna-medium',
@@ -456,8 +456,8 @@ describe('routeInitialProfile — fatos e compatibilidade bloqueiam defaults sil
       filesystem_permissions: { known: true, value: { readable: true, writable: false }, provenance: 'fs' },
     });
     const result = routeInitialProfile(input(workUnit(task(), facts)));
-    expect(result).toMatchObject({ outcome: 'HUMAN_REQUIRED' });
-    if (result.outcome !== 'HUMAN_REQUIRED') throw new Error('unreachable');
+    expect(result).toMatchObject({ outcome: 'BLOCKED' });
+    if (result.outcome !== 'BLOCKED') throw new Error('unreachable');
     expect(result.reason).toContain('environment_readiness=NOT_READY');
   });
 
@@ -496,8 +496,8 @@ describe('routeInitialProfile — fatos e compatibilidade bloqueiam defaults sil
       ...malformed,
       work_unit: { objective: 'request cru' } as unknown as StructuredWorkUnit,
     });
-    expect(result).toMatchObject({ outcome: 'HUMAN_REQUIRED' });
-    if (result.outcome !== 'HUMAN_REQUIRED') throw new Error('unreachable');
+    expect(result).toMatchObject({ outcome: 'BLOCKED' });
+    if (result.outcome !== 'BLOCKED') throw new Error('unreachable');
     expect(result.reason).toContain('work unit inválida');
   });
 });
@@ -705,7 +705,7 @@ describe('routeInitialProfile — validation budget pertence ao stage que o exec
     // Um profile intermediate não se torna elegível por causa do budget menor.
     const intermediate = capability('terra-medium', 'gpt-5.6-terra', 'medium');
     const rejected = routeWith(intermediate, heavyTask());
-    expect(rejected.outcome).toBe('HUMAN_REQUIRED');
+    expect(rejected.outcome).toBe('BLOCKED');
   });
 
   it('I — a provenance diz se a validação foi observada e excluída, ou incluída', () => {

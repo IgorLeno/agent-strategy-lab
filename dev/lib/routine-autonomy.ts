@@ -8,6 +8,11 @@ import {
   readProtocolInvalidAttempt,
   readValidationFailedAttempt,
 } from './records.js';
+import {
+  type ControlPlaneHalt,
+  type TechnicalBlocker,
+  createTechnicalBlocked,
+} from './control-plane-halt.js';
 import type { PreflightResult } from './orchestrate-preflight.js';
 import type { ValidationResult } from './schemas.js';
 import { readState } from './state.js';
@@ -34,6 +39,18 @@ export type IncidentClassification =
   | 'AUTO_RECOVER'
   | 'AUTO_MAINTENANCE'
   | 'TASK_REPAIR'
+  /**
+   * Incidente de routine que a automação não resolve. Nenhum caminho de
+   * routine autonomy nomeia uma autoridade humana — evidência inconsistente,
+   * lifecycle records simultâneos e blocker desconhecido são todos defeitos
+   * técnicos —, então é isto que os incidentes novos gravam.
+   */
+  | 'BLOCKED'
+  /**
+   * LEGADO, sem produtor. Records históricos gravaram esta classificação
+   * quando bloqueio técnico e decisão humana eram a mesma coisa; leitores
+   * continuam aceitando-a e nada aqui reescreve o passado.
+   */
   | 'HUMAN_REQUIRED';
 
 export type RoutineRecipeId =
@@ -46,7 +63,7 @@ export type RoutineRecipeId =
 export interface RoutineRecipe {
   readonly id: RoutineRecipeId;
   readonly incident_phase: 'PRE_FLIGHT' | 'POST_LAUNCH';
-  readonly classification: Exclude<IncidentClassification, 'HUMAN_REQUIRED'>;
+  readonly classification: Exclude<IncidentClassification, 'HUMAN_REQUIRED' | 'BLOCKED'>;
   readonly action: string;
   readonly boundary: string;
   readonly targeted_tests: readonly string[];
@@ -141,6 +158,8 @@ export interface RoutineTriage {
   readonly action: string;
   readonly reason: string;
   readonly recipe_id: RoutineRecipeId | null;
+  /** Presente exatamente quando `classification` é `BLOCKED`. */
+  readonly blocker: TechnicalBlocker | null;
 }
 
 function knownRecipe(id: RoutineRecipeId): RoutineRecipe {
@@ -156,11 +175,18 @@ function triageFromRecipe(id: RoutineRecipeId, reason: string): RoutineTriage {
     action: recipe.action,
     reason,
     recipe_id: recipe.id,
+    blocker: null,
   };
 }
 
-function humanTriage(reason: string): RoutineTriage {
-  return { classification: 'HUMAN_REQUIRED', action: 'NONE', reason, recipe_id: null };
+/**
+ * Incidente terminal de routine. É um BLOQUEIO TÉCNICO tipado, não um gate
+ * humano: evidência que não pôde ser verificada, records de lifecycle
+ * incompatíveis e blocker desconhecido são defeitos que se resolvem
+ * consertando a evidência — não autorizando nada. Continua fail-closed.
+ */
+function blockedTriage(reason: string, blocker: TechnicalBlocker): RoutineTriage {
+  return { classification: 'BLOCKED', action: 'NONE', reason, recipe_id: null, blocker };
 }
 
 function existingTaskRepairTriage(reason: string): RoutineTriage {
@@ -169,6 +195,7 @@ function existingTaskRepairTriage(reason: string): RoutineTriage {
     action: 'USE_EXISTING_TASK_REPAIR_POLICY',
     reason,
     recipe_id: null,
+    blocker: null,
   };
 }
 
@@ -231,14 +258,7 @@ export interface RoutinePostLaunchDriver {
   ): Promise<{ readonly action: string; readonly skip_retry?: boolean }>;
 }
 
-export interface HumanRequiredOutput {
-  readonly status: 'HUMAN_REQUIRED';
-  readonly incident_id: string;
-  readonly decision_needed: string;
-  readonly why_automation_stopped: string;
-  readonly options: readonly string[];
-  readonly evidence_paths: readonly string[];
-}
+export type { ControlPlaneHalt, HumanRequiredOutput } from './control-plane-halt.js';
 
 export interface RoutineIncidentRecord {
   readonly incident_id: string;
@@ -258,17 +278,32 @@ export interface RoutineIncidentRecord {
   readonly retry_result: string | null;
   readonly human_required: boolean;
   readonly human_reason: string | null;
+  /**
+   * Blocker técnico TIPADO do incidente (`blocker` acima continua sendo o nome
+   * cru do bloqueio de preflight). Opcional porque records históricos foram
+   * gravados antes deste contrato — ausência é proveniência legada, nunca
+   * autoridade inventada.
+   */
+  readonly technical_blocker?: TechnicalBlocker | null;
   readonly phase?: 'PRE_FLIGHT' | 'POST_LAUNCH';
   readonly outcome?: string;
   readonly recipe_id?: RoutineRecipeId | null;
 }
 
-export type RoutineResolution = {
-  readonly status: 'RECOVERED' | 'HUMAN_REQUIRED';
-  readonly preflight: PreflightResult;
-  readonly record: RoutineIncidentRecord;
-  readonly human_required: HumanRequiredOutput | null;
-};
+/** União discriminada: `BLOCKED` SEMPRE carrega a parada tipada. */
+export type RoutineResolution =
+  | {
+      readonly status: 'RECOVERED';
+      readonly preflight: PreflightResult;
+      readonly record: RoutineIncidentRecord;
+      readonly halt: null;
+    }
+  | {
+      readonly status: 'BLOCKED';
+      readonly preflight: PreflightResult;
+      readonly record: RoutineIncidentRecord;
+      readonly halt: ControlPlaneHalt;
+    };
 
 /**
  * Separação explícita entre HARNESS SELF-MAINTENANCE e PROJECT REMEDIATION.
@@ -315,19 +350,19 @@ export type RoutinePostLaunchResolution<T> =
       readonly status: 'RETRIED';
       readonly retry: T;
       readonly record: RoutineIncidentRecord;
-      readonly human_required: null;
+      readonly halt: null;
     }
   | {
       readonly status: 'RECOVERED';
       readonly retry: null;
       readonly record: RoutineIncidentRecord;
-      readonly human_required: null;
+      readonly halt: null;
     }
   | {
-      readonly status: 'HUMAN_REQUIRED';
+      readonly status: 'BLOCKED';
       readonly retry: null;
       readonly record: RoutineIncidentRecord;
-      readonly human_required: HumanRequiredOutput;
+      readonly halt: ControlPlaneHalt;
     };
 
 function blockerOf(context: RoutineIncidentContext): string {
@@ -337,13 +372,19 @@ function blockerOf(context: RoutineIncidentContext): string {
 export function classifyRoutineIncident(context: RoutineIncidentContext): RoutineTriage {
   const blocker = blockerOf(context);
   if (context.evidence_error) {
-    return humanTriage(`evidência não pôde ser verificada: ${context.evidence_error}`);
+    return blockedTriage(
+      `evidência não pôde ser verificada: ${context.evidence_error}`,
+      'INCONSISTENT_EVIDENCE',
+    );
   }
   if (blocker === 'INCONSISTENT_EVIDENCE' || blocker === 'INVALID_EVIDENCE') {
-    return humanTriage(context.preflight.reason ?? blocker);
+    return blockedTriage(context.preflight.reason ?? blocker, 'INCONSISTENT_EVIDENCE');
   }
   if (context.lifecycle_records.length > 1) {
-    return humanTriage('lifecycle records incompatíveis simultâneos; normalização automática recusada');
+    return blockedTriage(
+      'lifecycle records incompatíveis simultâneos; normalização automática recusada',
+      'INCONSISTENT_EVIDENCE',
+    );
   }
   if (blocker === 'AUTOMATIC_REPAIR_PROFILE_MISMATCH') {
     return existingTaskRepairTriage(context.preflight.reason ?? blocker);
@@ -373,14 +414,17 @@ export function classifyRoutineIncident(context: RoutineIncidentContext): Routin
       'record capability-neutral existe e o history walker conhecido não o reconhece',
     );
   }
-  return humanTriage(context.preflight.reason ?? blocker);
+  return blockedTriage(context.preflight.reason ?? blocker, 'INSUFFICIENT_EVIDENCE');
 }
 
 export function classifyRoutinePostLaunchIncident(
   incident: RoutinePostLaunchIncident,
 ): RoutineTriage {
   if (incident.capability_verdict && incident.outcome !== 'FAIL') {
-    return humanTriage('incidente operacional contém capability verdict incompatível');
+    return blockedTriage(
+      'incidente operacional contém capability verdict incompatível',
+      'INCONSISTENT_EVIDENCE',
+    );
   }
   if (incident.outcome === 'FAIL' && incident.official_validation_failure) {
     return triageFromRecipe('official-validation-repair', incident.reason);
@@ -411,7 +455,7 @@ export function classifyRoutinePostLaunchIncident(
       'launcher classificou INFRA_ERROR sem capability verdict; primitive oficial decidirá recoverability',
     );
   }
-  return humanTriage(incident.reason);
+  return blockedTriage(incident.reason, 'PROVIDER_OR_INFRA_FAILURE');
 }
 
 function isGreen(result: ValidationResult): boolean {
@@ -579,20 +623,26 @@ function automationFailure(stage: string, error: unknown): string {
   return `${stage} recusou ou falhou: ${detail}`;
 }
 
-function humanOutput(
+/**
+ * As opções deixaram de oferecer "autorizar uma mudança fora das fronteiras":
+ * nenhum incidente de routine autonomy é resolvido por autorização, e oferecer
+ * uma era o que fazia um defeito técnico parecer decisão humana.
+ */
+function blockedOutput(
   incidentId: string,
   reason: string,
   evidencePaths: readonly string[],
-  decision = 'Revisar a evidência e escolher a intervenção explícita.',
-): HumanRequiredOutput {
-  return {
-    status: 'HUMAN_REQUIRED',
+  blocker: TechnicalBlocker,
+  decision = 'Corrigir o defeito técnico apontado pela evidência preservada.',
+): ControlPlaneHalt {
+  return createTechnicalBlocked({
+    blocker,
     incident_id: incidentId,
     decision_needed: decision,
     why_automation_stopped: reason,
-    options: ['corrigir a evidência externamente e rerodar', 'autorizar uma mudança fora das fronteiras'],
+    options: ['corrigir a evidência externamente e rerodar', 'inspecionar a evidência preservada'],
     evidence_paths: [...evidencePaths],
-  };
+  });
 }
 
 function baseRecord(
@@ -609,6 +659,7 @@ function baseRecord(
   | 'human_reason'
 > {
   return {
+    technical_blocker: triage.blocker ?? 'AUTOMATED_REMEDIATION_FAILED',
     incident_id: incidentId,
     detected_at: (input.now ?? (() => new Date().toISOString()))(),
     phase: 'PRE_FLIGHT',
@@ -657,10 +708,16 @@ async function finishHuman(
     ...(input.incident.evidence_paths ?? []),
   ];
   return {
-    status: 'HUMAN_REQUIRED',
+    status: 'BLOCKED',
     preflight,
     record,
-    human_required: humanOutput(base.incident_id, reason, evidence, decision),
+    halt: blockedOutput(
+      base.incident_id,
+      reason,
+      evidence,
+      base.technical_blocker ?? 'INSUFFICIENT_EVIDENCE',
+      ...(decision === undefined ? [] : ([decision] as const)),
+    ),
   };
 }
 
@@ -682,7 +739,7 @@ async function finishRecovered(
     human_reason: null,
   };
   await writeTerminalRecord(input.paths, record);
-  return { status: 'RECOVERED', preflight, record, human_required: null };
+  return { status: 'RECOVERED', preflight, record, halt: null };
 }
 
 export async function resolveRoutinePreflight(
@@ -691,15 +748,21 @@ export async function resolveRoutinePreflight(
   const incidentId = routineIncidentId(input.incident);
   const previous = await readTerminalRecord(input.paths, incidentId);
   if (previous) {
-    const human = previous.human_required
-      ? humanOutput(incidentId, previous.human_reason ?? 'intervenção humana necessária', [])
+    // Replay de um incidente terminal já gravado. Um record LEGADO diz apenas
+    // `human_required: true` e não declara blocker tipado: a proveniência
+    // ausente é reportada como o blocker mais fraco possível, nunca como uma
+    // autoridade humana que o record nunca nomeou.
+    const halt = previous.human_required
+      ? blockedOutput(
+          incidentId,
+          previous.human_reason ?? 'incidente terminal já processado; replay automático recusado',
+          [],
+          previous.technical_blocker ?? 'INSUFFICIENT_EVIDENCE',
+        )
       : null;
-    return {
-      status: previous.human_required ? 'HUMAN_REQUIRED' : 'RECOVERED',
-      preflight: input.incident.preflight,
-      record: previous,
-      human_required: human,
-    };
+    return halt === null
+      ? { status: 'RECOVERED', preflight: input.incident.preflight, record: previous, halt: null }
+      : { status: 'BLOCKED', preflight: input.incident.preflight, record: previous, halt };
   }
 
   const triage = classifyRoutineIncident(input.incident);
@@ -1040,6 +1103,14 @@ function postLaunchBaseRecord(
     task_id: input.incident.task_id,
     attempt: input.incident.attempt,
     blocker: input.incident.outcome,
+    // Quando a triage não nomeou o blocker (recipe conhecida que não
+    // convergiu), o desfecho do incidente é a fonte mais específica: INFRA de
+    // provider é INFRA de provider, e não "a remediação falhou".
+    technical_blocker:
+      triage.blocker ??
+      (input.incident.outcome === 'INFRA_ERROR'
+        ? 'PROVIDER_OR_INFRA_FAILURE'
+        : 'AUTOMATED_REMEDIATION_FAILED'),
     classification: triage.classification,
     authorized_head_before: input.incident.authorized_head_before,
     triage_reason: triage.reason,
@@ -1070,10 +1141,15 @@ async function finishPostLaunchHuman<T>(
     ...input.incident.evidence_paths,
   ];
   return {
-    status: 'HUMAN_REQUIRED',
+    status: 'BLOCKED',
     retry: null,
     record,
-    human_required: humanOutput(base.incident_id, reason, evidence),
+    halt: blockedOutput(
+      base.incident_id,
+      reason,
+      evidence,
+      base.technical_blocker ?? 'PROVIDER_OR_INFRA_FAILURE',
+    ),
   };
 }
 
@@ -1093,7 +1169,7 @@ async function finishPostLaunchRetried<T>(
     human_reason: null,
   };
   await writeTerminalRecord(input.paths, record);
-  return { status: 'RETRIED', retry, record, human_required: null };
+  return { status: 'RETRIED', retry, record, halt: null };
 }
 
 async function finishPostLaunchRecovered<T>(
@@ -1110,7 +1186,7 @@ async function finishPostLaunchRecovered<T>(
     human_reason: null,
   };
   await writeTerminalRecord(input.paths, record);
-  return { status: 'RECOVERED', retry: null, record, human_required: null };
+  return { status: 'RECOVERED', retry: null, record, halt: null };
 }
 
 export async function resolveRoutinePostLaunch<T>(
@@ -1121,10 +1197,15 @@ export async function resolveRoutinePostLaunch<T>(
   if (previous) {
     const reason = previous.human_reason ?? 'incidente pós-launch já processado; replay automático recusado';
     return {
-      status: 'HUMAN_REQUIRED',
+      status: 'BLOCKED',
       retry: null,
       record: previous,
-      human_required: humanOutput(incidentId, reason, input.incident.evidence_paths),
+      halt: blockedOutput(
+        incidentId,
+        reason,
+        input.incident.evidence_paths,
+        'INCONSISTENT_EVIDENCE',
+      ),
     };
   }
 

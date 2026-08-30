@@ -13,17 +13,19 @@ export const MAXIMUM_PREAMBLE_BYTES = 5_120;
  */
 const HANDOFF_DRAFT_CONTRACT = `{"schema_version":2,"task_id":"<id do packet>","result":"PASS"|"FAIL",
  "changed_files":[<≤50>],"validations":[<mesmo formato acima>],
- "decisions":[<≤5>],"lessons":[<≤3>],"next_relevant_files":[<≤5>],
- "what_i_did_not_check":[<≤5 itens curtos>],
+ "decisions":[<≤5>],"lessons":[<≤3>],"next_relevant_files":[<caminhos>],
+ "what_i_did_not_check":[<itens curtos>],
  "evidence":[{"kind":"file","path":"<caminho>","lines":"<N-M>","claim":"<frase>"}
-  |{"kind":"command","argv":[<comando>],"claim":"<frase>"}] (≤8, opcional),
- "open_questions":[<≤5>] (opcional),"confidence":"<uma frase sua>" (opcional)}
+  |{"kind":"command","argv":[<comando>],"claim":"<frase>"}] (opcional),
+ "open_questions":[<itens>] (opcional),"confidence":"<uma frase sua>" (opcional)}
 
    what_i_did_not_check é OBRIGATÓRIO: liste os aspectos relevantes que você
    reconhece NÃO ter verificado. [] é uma afirmação positiva — você olhou e não
    identificou nenhum — e NÃO significa campo ignorado; omitir o campo invalida
    o arquivo inteiro. evidence APONTA para a evidência (caminho+linhas ou
    comando): nunca conteúdo de arquivo, diff, stdout, stderr ou transcript.
+   Em todo ponteiro, copie path, argv e identidade de record exatamente: nunca
+   abrevie, trunque nem insira marcador de omissão dentro da identidade.
    Seja conciso e relevante: uma frase por item, fato que o próximo worker
    precisa. NÃO existe teto de bytes — trabalho grande produz draft grande, e
    truncar fato para caber em número nenhum é pior que o arquivo extenso.`
@@ -93,7 +95,7 @@ ${io.reportPath}
  "changed_files":[<≤50 caminhos>],
  "validations":[{"argv":[<comando>],"exit_code":<int|null>,
    "timed_out":<bool>,"duration_ms":<int≥0>}] (≤20),
- "decisions":[<≤5>],"lessons":[<≤3>],"relevant_files":[<≤5>]}
+ "decisions":[<≤5>],"lessons":[<≤3>],"relevant_files":[<caminhos>]}
 
 ${io.handoffDraftPath}
 ${HANDOFF_DRAFT_CONTRACT}
@@ -126,7 +128,7 @@ ${io.reportPath}
  "candidate_commit":null,"changed_files":[<≤50 caminhos>],
  "validations":[{"argv":[<comando>],"exit_code":<int|null>,
    "timed_out":<bool>,"duration_ms":<int≥0>}] (≤20),
- "decisions":[<≤5>],"lessons":[<≤3>],"relevant_files":[<≤5>]}
+ "decisions":[<≤5>],"lessons":[<≤3>],"relevant_files":[<caminhos>]}
 
    SUCCESS significa "patch pronto para validação oficial".
    candidate_commit deve ser null. changed_files deve descrever exatamente os

@@ -8,6 +8,7 @@ import { CapacityStatus } from '../../src/quota/index.js';
 import {
   createHumanInstruction,
   HUMAN_GATE_GRANT_PATH,
+  type HumanAuthority,
   DETERMINISTIC_INTAKE_COMPILER_PROFILE,
   deterministicIntakeCompiler,
   humanInstructionBody,
@@ -182,7 +183,7 @@ function describe(error: unknown): string {
  * never-grantable jamais recebe uma opção impossível.
  */
 function humanRequiredPayload(
-  capability: keyof typeof HUMAN_GATE_GRANT_PATH,
+  capability: HumanAuthority,
   runtimeDir: string,
   why: string,
 ): Record<string, unknown> {
@@ -197,6 +198,9 @@ function humanRequiredPayload(
         ];
   return {
     status: 'HUMAN_REQUIRED',
+    // A autoridade que falta, nomeada estruturalmente — e não só embutida em
+    // `decision_needed`, que é texto e sozinho nunca provou nada.
+    human_authority: capability,
     incident_id: `lab-gate-${capability.toLowerCase()}`,
     decision_needed: capability,
     why_automation_stopped: why,

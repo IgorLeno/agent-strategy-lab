@@ -33,6 +33,7 @@ export const LAB_TASK_STATES = [
   'ESCALATED',
   'FAILED',
   'HUMAN_REQUIRED',
+  'BLOCKED',
 ] as const;
 export type LabTaskState = (typeof LAB_TASK_STATES)[number];
 
@@ -108,7 +109,7 @@ export interface LabRunProjection {
   readonly providers: readonly LabProviderProjection[];
   readonly pools: readonly LabPoolProjection[];
   readonly deliberation: LabDeliberationProjection | null;
-  readonly terminal: 'ALL_DONE' | 'HUMAN_REQUIRED' | 'FAILURE' | null;
+  readonly terminal: 'ALL_DONE' | 'HUMAN_REQUIRED' | 'BLOCKED' | 'FAILURE' | null;
 }
 
 interface MutableTask {
@@ -349,6 +350,10 @@ export function createLabProjection(now: () => number = Date.now): LabProjection
           finish(task, 'HUMAN_REQUIRED', observedNow);
           break;
         }
+        case 'BLOCKED': {
+          finish(task, 'BLOCKED', observedNow);
+          break;
+        }
         default:
           break;
       }
@@ -384,6 +389,7 @@ export function createLabProjection(now: () => number = Date.now): LabProjection
 
     if (event.stage === 'ALL_DONE') terminal = 'ALL_DONE';
     if (event.stage === 'HUMAN_REQUIRED') terminal = 'HUMAN_REQUIRED';
+    if (event.stage === 'BLOCKED') terminal = 'BLOCKED';
     if (event.stage === 'FAILURE') terminal = 'FAILURE';
   };
 

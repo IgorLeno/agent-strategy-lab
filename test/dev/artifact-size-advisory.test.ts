@@ -426,7 +426,10 @@ describe('lifecycle — um draft acima do alvo advisório fecha a tarefa', () =>
     const persisted = await readCompletion(paths, 'T1');
     const bytes = persisted?.protocol_artifact_bytes;
     expect(bytes?.advisory_threshold_exceeded).toBe(true);
-    expect(bytes?.handoff_draft_bytes).toBe(byteSize(draft));
+    // A telemetria mede o draft COMO PERSISTIDO, isto é, depois da
+    // normalização de opinião — não o objeto cru de teste. Medir o cru
+    // reportaria bytes que nunca existiram em disco.
+    expect(bytes?.handoff_draft_bytes).toBe(byteSize(parseHandoffDraft(draft)));
     expect(bytes?.advisory_handoff_draft_threshold_bytes).toBe(ADVISORY_HANDOFF_DRAFT_BYTES);
     expect(bytes?.task_packet_bytes).toBeGreaterThan(0);
     // E o rótulo convive com PASS: excedido não é reprovado.

@@ -311,13 +311,16 @@ describe('routine autonomy classification', () => {
       classifyRoutineIncident(
         context({ lifecycle_records: ['ProtocolInvalidAttemptRecord', 'ValidationFailedAttemptRecord'] }),
       ),
-    ).toMatchObject({ classification: 'HUMAN_REQUIRED' });
+    ).toMatchObject({ classification: 'BLOCKED', blocker: 'INCONSISTENT_EVIDENCE' });
     expect(
       classifyRoutineIncident(context({ preflight: blockedPreflight('INCONSISTENT_EVIDENCE') })),
-    ).toMatchObject({ classification: 'HUMAN_REQUIRED' });
+    ).toMatchObject({ classification: 'BLOCKED', blocker: 'INCONSISTENT_EVIDENCE' });
   });
 
-  it('erro textual aparentemente simples sem recipe permanece HUMAN_REQUIRED', () => {
+  // A prosa do erro NUNCA concede autonomia. O que mudou é só o nome honesto
+  // da parada: um blocker que nenhuma recipe reconhece é defeito técnico, não
+  // uma decisão que só um humano pode tomar.
+  it('erro textual aparentemente simples sem recipe permanece parada terminal', () => {
     expect(
       classifyRoutineIncident(
         context({
@@ -325,7 +328,11 @@ describe('routine autonomy classification', () => {
           lifecycle_records: [],
         }),
       ),
-    ).toMatchObject({ classification: 'HUMAN_REQUIRED', recipe_id: null });
+    ).toMatchObject({
+      classification: 'BLOCKED',
+      recipe_id: null,
+      blocker: 'INSUFFICIENT_EVIDENCE',
+    });
   });
 });
 
@@ -413,21 +420,21 @@ describe('routine autonomy state machine', () => {
 
     const result = await resolveRoutinePreflight({ paths, incident: context(), driver, now: () => NOW });
 
-    expect(result.status).toBe('HUMAN_REQUIRED');
-    expect(result.human_required?.decision_needed).toMatch(/segunda revisão/i);
+    expect(result.status).toBe('BLOCKED');
+    expect(result.halt?.decision_needed).toMatch(/segunda revisão/i);
     expect(driver.calls.some((call) => call.endsWith(':adopt'))).toBe(false);
     expect(driver.calls.some((call) => call.endsWith(':retry'))).toBe(false);
   });
 
-  it('mesmo blocker após adoption vira HUMAN_REQUIRED e o retry ocorre uma vez', async () => {
+  it('mesmo blocker após adoption vira BLOCKED terminal e o retry ocorre uma vez', async () => {
     const { paths } = await fixture();
     const driver = new FakeDriver();
     driver.retries = [blockedPreflight('HISTORICAL_GAP')];
 
     const result = await resolveRoutinePreflight({ paths, incident: context(), driver, now: () => NOW });
 
-    expect(result.status).toBe('HUMAN_REQUIRED');
-    expect(result.human_required?.why_automation_stopped).toMatch(/reapareceu/i);
+    expect(result.status).toBe('BLOCKED');
+    expect(result.halt?.why_automation_stopped).toMatch(/reapareceu/i);
     expect(driver.calls.filter((call) => call.endsWith(':retry'))).toHaveLength(1);
   });
 
@@ -438,7 +445,7 @@ describe('routine autonomy state machine', () => {
 
     const result = await resolveRoutinePreflight({ paths, incident: context(), driver, now: () => NOW });
 
-    expect(result.status).toBe('HUMAN_REQUIRED');
+    expect(result.status).toBe('BLOCKED');
     expect(driver.calls.some((call) => call.includes(':review:'))).toBe(false);
   });
 
@@ -451,11 +458,11 @@ describe('routine autonomy state machine', () => {
 
     const result = await resolveRoutinePreflight({ paths, incident: context(), driver, now: () => NOW });
 
-    expect(result.status).toBe('HUMAN_REQUIRED');
-    expect(result.human_required?.why_automation_stopped).toMatch(/dev-adopt-maintenance recusou/);
+    expect(result.status).toBe('BLOCKED');
+    expect(result.halt?.why_automation_stopped).toMatch(/dev-adopt-maintenance recusou/);
   });
 
-  it('recusas de recovery, maintainer, reviewer e retry sempre viram HUMAN_REQUIRED terminal', async () => {
+  it('recusas de recovery, maintainer, reviewer e retry sempre viram BLOCKED terminal', async () => {
     const scenarios: Array<{
       readonly label: string;
       readonly incident: RoutineIncidentContext;
@@ -501,8 +508,8 @@ describe('routine autonomy state machine', () => {
         driver,
         now: () => NOW,
       });
-      expect(result.status, scenario.label).toBe('HUMAN_REQUIRED');
-      expect(result.human_required?.why_automation_stopped, scenario.label).toMatch(/recus|indisponível|ambíguo/);
+      expect(result.status, scenario.label).toBe('BLOCKED');
+      expect(result.halt?.why_automation_stopped, scenario.label).toMatch(/recus|indisponível|ambíguo/);
       expect(
         await exists(path.join(paths.devDir, 'autonomy', 'incidents', `${result.record.incident_id}.json`)),
         scenario.label,
@@ -632,10 +639,10 @@ async function postAutonomyModule() {
       }>;
       now?: () => string;
     }): Promise<{
-      status: 'RETRIED' | 'RECOVERED' | 'HUMAN_REQUIRED';
+      status: 'RETRIED' | 'RECOVERED' | 'BLOCKED';
       retry: T | null;
       record: { phase?: string; outcome?: string; recipe_id?: string | null };
-      human_required: { why_automation_stopped: string } | null;
+      halt: { status: string; why_automation_stopped: string } | null;
     }>;
   };
 }
@@ -652,7 +659,7 @@ describe('post-launch known incident autonomy', () => {
       module.classifyRoutinePostLaunchIncident(
         postIncident({ reason: 'parece simples', commit_owner: 'worker' }),
       ),
-    ).toMatchObject({ classification: 'HUMAN_REQUIRED', recipe_id: null });
+    ).toMatchObject({ classification: 'BLOCKED', recipe_id: null });
     expect(
       module.classifyRoutinePostLaunchIncident(
         postIncident({
@@ -661,7 +668,7 @@ describe('post-launch known incident autonomy', () => {
         }),
       ),
     ).toMatchObject({
-      classification: 'HUMAN_REQUIRED',
+      classification: 'BLOCKED',
       recipe_id: null,
       reason: 'candidate reprovado pela review independente',
     });
@@ -727,8 +734,8 @@ describe('post-launch known incident autonomy', () => {
       },
     });
 
-    expect(result.status).toBe('HUMAN_REQUIRED');
-    expect(result.human_required?.why_automation_stopped).toMatch(/contrato estreito recusado/);
+    expect(result.status).toBe('BLOCKED');
+    expect(result.halt?.why_automation_stopped).toMatch(/contrato estreito recusado/);
     expect(retries).toBe(0);
   });
 
@@ -842,8 +849,8 @@ describe('post-launch known incident autonomy', () => {
       },
     });
 
-    expect(result.status).toBe('HUMAN_REQUIRED');
-    expect(result.human_required?.why_automation_stopped).toMatch(/retry|reapareceu|budget/i);
+    expect(result.status).toBe('BLOCKED');
+    expect(result.halt?.why_automation_stopped).toMatch(/retry|reapareceu|budget/i);
     expect(calls.filter((call) => call.startsWith('infra:'))).toHaveLength(1);
     expect(calls.filter((call) => call.startsWith('retry:'))).toHaveLength(1);
   });
@@ -880,8 +887,8 @@ describe('post-launch known incident autonomy', () => {
       },
     });
 
-    expect(result.status).toBe('HUMAN_REQUIRED');
-    expect(result.human_required?.why_automation_stopped).toMatch(/restart|replay|retry/i);
+    expect(result.status).toBe('BLOCKED');
+    expect(result.halt?.why_automation_stopped).toMatch(/restart|replay|retry/i);
     expect(retries).toBe(0);
   });
 
@@ -1233,7 +1240,9 @@ describe('dev-orchestrate --autonomy routine', () => {
 
     expect(result.exitCode).toBe(9);
     const output = JSON.parse(result.stdout) as Record<string, unknown>;
-    expect(output['stopped_by']).toBe('HUMAN_REQUIRED');
+    // A primitive oficial recusou e nada foi lançado por cima dela. Recusa de
+    // primitive é defeito técnico, não autorização pendente.
+    expect(output['stopped_by']).toBe('BLOCKED');
     expect(output['iteration_count']).toBe(1);
     expect(output['why_automation_stopped']).toMatch(/protocol-output-recovery|patch normalizado|recus/i);
     expect((await readState(paths)).tasks[0]).toMatchObject({ status: 'RUNNING', attempts: 1 });
@@ -1259,7 +1268,10 @@ describe('dev-orchestrate --autonomy routine', () => {
 
     expect(result.exitCode, result.stderr).toBe(9);
     const output = JSON.parse(result.stdout) as Record<string, unknown>;
-    expect(output['stopped_by']).toBe('HUMAN_REQUIRED');
+    // Continua parando sem retry genérico — mas INFRA de provider sem prova
+    // não é decisão de operador: é blocker técnico tipado.
+    expect(output['stopped_by']).toBe('BLOCKED');
+    expect(output['blocker']).toBe('PROVIDER_OR_INFRA_FAILURE');
     expect(output['iteration_count']).toBe(1);
     expect(output['why_automation_stopped']).toMatch(/LaunchRecord|provider|stream-json/);
     expect((await readState(paths)).tasks[0]).toMatchObject({ attempts: 1 });
@@ -1316,7 +1328,7 @@ describe('dev-orchestrate --autonomy routine', () => {
     expect(await readProtocolInvalidAttempt(paths, 'T1', 1)).toBeNull();
   }, 60_000);
 
-  it('blocker fora da allowlist emite HUMAN_REQUIRED estruturado sem lançar provider', async () => {
+  it('blocker fora da allowlist emite parada TÉCNICA estruturada sem lançar provider', async () => {
     const sandbox = await makeSandboxRepo();
     roots.push(sandbox.root);
     const paths = resolveHarnessPaths(sandbox.root);
@@ -1334,8 +1346,12 @@ describe('dev-orchestrate --autonomy routine', () => {
 
     expect(result.exitCode).toBe(9);
     const output = JSON.parse(result.stdout) as Record<string, unknown>;
-    expect(output['status']).toBe('HUMAN_REQUIRED');
+    // Working tree sujo fora da allowlist de maintenance é defeito de estado
+    // do repositório, não uma decisão que só um humano pode tomar. A parada
+    // continua estruturada, fail-closed e sem provider.
+    expect(output['status']).toBe('BLOCKED');
     expect(output).toMatchObject({
+      blocker: expect.any(String),
       incident_id: expect.any(String),
       decision_needed: expect.any(String),
       why_automation_stopped: expect.any(String),
@@ -1343,6 +1359,7 @@ describe('dev-orchestrate --autonomy routine', () => {
       evidence_paths: expect.any(Array),
       iteration_count: 0,
     });
+    expect(output).not.toHaveProperty('human_authority');
     expect(await exists(path.join(paths.logsDir, 'T1.launch.json'))).toBe(false);
   });
 

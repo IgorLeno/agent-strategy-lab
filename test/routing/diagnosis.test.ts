@@ -77,28 +77,36 @@ describe('FailureDiagnosis', () => {
     });
   });
 
-  it('encaminha gap para harness quando há primitive e exige humano quando não há', () => {
+  it('encaminha gap para harness quando há primitive e bloqueia tecnicamente quando não há', () => {
     expect(
       decideFailureIntervention(diagnosis('VALIDATION_OR_TOOLING_GAP'), {
         harness_remediation_available: true,
       }),
     ).toMatchObject({ action: 'REPAIR_HARNESS_OR_TOOLING', status: 'ACTION_REQUIRED' });
+    // Sem primitive de remediação a run para — mas ferramenta quebrada não é
+    // uma decisão que só um humano pode tomar, e sim um conserto técnico.
     const blocked = decideFailureIntervention(diagnosis('VALIDATION_OR_TOOLING_GAP'));
-    expect(blocked).toMatchObject({ status: 'HUMAN_REQUIRED', action: 'NONE' });
+    expect(blocked).toMatchObject({
+      status: 'TECHNICAL_BLOCKER',
+      action: 'NONE',
+      blocker: 'VALIDATION_OR_TOOLING_GAP',
+      human_required: null,
+    });
   });
 
-  it('faz fail closed de evidência insuficiente preservando os campos de human intervention', () => {
+  it('faz fail closed de evidência insuficiente como blocker técnico, sem gate humano', () => {
+    // O worker podia declarar `decision_needed` e `options` que soavam como um
+    // gate de operador. Nada disso PROVA que existe uma decisão humana: a
+    // parada é real e continua fail-closed, mas é técnica.
     const decision = decideFailureIntervention(diagnosis('UNKNOWN_INSUFFICIENT_EVIDENCE'));
     expect(decision).toMatchObject({
-      status: 'HUMAN_REQUIRED',
+      status: 'TECHNICAL_BLOCKER',
       action: 'NONE',
-      human_required: {
-        status: 'HUMAN_REQUIRED',
-        decision_needed: 'decidir tratamento para UNKNOWN_INSUFFICIENT_EVIDENCE',
-        why_automation_stopped: 'automation boundary de UNKNOWN_INSUFFICIENT_EVIDENCE',
-        options: ['corrigir a causa', 'pedir decisão humana'],
-        evidence_paths: ['.dev/evidence/failure.json'],
-      },
+      blocker: 'INSUFFICIENT_EVIDENCE',
+      human_required: null,
+      consumes_escalation_step: false,
+      changes_profile: false,
     });
+    expect(decision.rationale).toContain('UNKNOWN_INSUFFICIENT_EVIDENCE');
   });
 });

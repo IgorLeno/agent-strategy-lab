@@ -6,6 +6,10 @@ import {
   byteSize,
 } from './budget.js';
 import { ExecutionPolicy, LEGACY_EXECUTION_POLICY } from './execution-policy.js';
+import {
+  normalizeHandoffOpinion,
+  type HandoffNormalizationSchemas,
+} from './handoff-normalize.js';
 import { PlannerTaskMetadata } from '../../src/planner/task.js';
 
 /**
@@ -46,6 +50,8 @@ export const BLOCKING_STATUSES: readonly TaskStatus[] = [
 ];
 
 const nonEmpty = z.string().min(1);
+/** Identidade textual canônica dos ponteiros livres do protocolo. Sem transform. */
+export const HandoffPointerIdentity = nonEmpty;
 const identifier = z
   .string()
   .regex(/^[A-Za-z0-9][A-Za-z0-9_-]*$/, 'id deve ser alfanumérico com - ou _');
@@ -261,7 +267,7 @@ const handoffEvidenceVariants = z.discriminatedUnion('kind', [
   z
     .object({
       kind: z.literal('file'),
-      path: z.string().min(1).max(200),
+      path: HandoffPointerIdentity,
       lines: evidenceLineRange.optional(),
       claim: evidenceClaim,
     })
@@ -269,7 +275,7 @@ const handoffEvidenceVariants = z.discriminatedUnion('kind', [
   z
     .object({
       kind: z.literal('command'),
-      argv: z.array(nonEmpty).min(1).max(8),
+      argv: z.array(HandoffPointerIdentity).min(1),
       claim: evidenceClaim,
     })
     .strict(),
@@ -295,6 +301,15 @@ export const HandoffEvidenceReference = handoffEvidenceVariants.superRefine((ref
   }
 });
 export type HandoffEvidenceReference = z.infer<typeof HandoffEvidenceReference>;
+
+/**
+ * Os dois parsers canônicos entregues ao normalizador. A dependência é
+ * injetada daqui para evitar ciclo e impedir um validador aproximado paralelo.
+ */
+export const HANDOFF_NORMALIZATION_SCHEMAS = {
+  pointerIdentity: HandoffPointerIdentity,
+  evidenceReference: HandoffEvidenceReference,
+} satisfies HandoffNormalizationSchemas;
 
 // ---------------------------------------------------------------------------
 // Confidence — opinião do worker, lida pessimistamente pelo harness.
@@ -401,15 +416,21 @@ const handoffCommonBody = {
   validations: z.array(ValidationResult),
   decisions: z.array(nonEmpty).max(5),
   lessons: z.array(nonEmpty).max(3),
-  next_relevant_files: z.array(nonEmpty).max(5),
+  next_relevant_files: z.array(HandoffPointerIdentity),
 };
 
 const handoffV2Body = {
   ...handoffCommonBody,
   /** Referências à evidência; nunca a evidência. Opcional = não declarada. */
-  evidence: z.array(HandoffEvidenceReference).max(8).optional(),
-  /** Opcional: ausente significa "não registrado", nunca "não existe". */
-  open_questions: z.array(nonEmpty).max(5).optional(),
+  evidence: z.array(HandoffEvidenceReference).optional(),
+  /**
+   * Opcional: ausente significa "não registrado", nunca "não existe".
+   *
+   * SEM TETO DE CARDINALIDADE. Descartar a sexta pergunta em aberto faria o
+   * handoff parecer mais resolvido do que é — a normalização só pode remover
+   * o que não muda o significado, e esconder incerteza muda.
+   */
+  open_questions: z.array(nonEmpty).optional(),
   /**
    * OBRIGATÓRIO no draft v2. A distinção é o contrato inteiro:
    *   ausente → protocolo inválido (o worker não respondeu à pergunta)
@@ -418,9 +439,16 @@ const handoffV2Body = {
    *   [item]  → o worker reconhece explicitamente uma lacuna
    * Nenhum leitor pode normalizar ausência para lista vazia.
    */
-  what_i_did_not_check: z.array(nonEmpty).max(5),
-  /** Nas palavras do worker. O nível é DERIVADO por `readHandoffConfidence`. */
-  confidence: z.string().min(1).max(200).optional(),
+  what_i_did_not_check: z.array(nonEmpty),
+  /**
+   * Nas palavras do worker. O nível é DERIVADO por `readHandoffConfidence`.
+   *
+   * SEM TETO DE COMPRIMENTO, e por um motivo específico: o nível sai dos
+   * marcadores presentes no texto, então cortar a frase pode remover o
+   * marcador de hesitação e ELEVAR a confiança derivada. Um teto de
+   * conveniência não pode fazer o worker soar mais seguro do que ele disse.
+   */
+  confidence: z.string().min(1).optional(),
 };
 
 const sealedBody = { accepted_commit: shaHex, sealed_at: z.string().datetime() };
@@ -677,11 +705,21 @@ export const AgentCompletionReport = z
     self_reported_result: z.enum(['SUCCESS', 'FAILURE']),
     summary: nonEmpty,
     candidate_commit: shaHex.nullable(),
-    changed_files: z.array(nonEmpty).max(50),
-    validations: z.array(ValidationResult).max(20),
+    /**
+     * SEM TETO DE CARDINALIDADE, e de propósito.
+     *
+     * Estas duas listas são comparadas item a item contra o material derivado
+     * do Git e contra a validação oficial (`compareReportWithEvidence`). Cortar
+     * uma delas fabricaria uma divergência que não existe — seria pior que
+     * inútil. E recusar a nota inteira porque o worker mexeu em 51 arquivos
+     * transformava um número de conveniência em autoridade de execução: quem
+     * decide o que mudou é o Git, não este teto.
+     */
+    changed_files: z.array(nonEmpty),
+    validations: z.array(ValidationResult),
     decisions: z.array(nonEmpty).max(5),
     lessons: z.array(nonEmpty).max(3),
-    relevant_files: z.array(nonEmpty).max(5),
+    relevant_files: z.array(HandoffPointerIdentity),
   })
   .strict();
 export type AgentCompletionReport = z.infer<typeof AgentCompletionReport>;
@@ -2075,7 +2113,9 @@ export const PlannedWorkAdoptionRecord = z
 export type PlannedWorkAdoptionRecord = z.infer<typeof PlannedWorkAdoptionRecord>;
 
 /**
- * Budget OPERACIONAL do subject de commit, em bytes UTF-8. Fonte ÚNICA: quem
+ * INTENTIONAL_POLICY_BOUNDARY do subject de commit, em bytes UTF-8. É uma
+ * convenção interna de legibilidade do Lab, NÃO um máximo externo imposto
+ * pelo Git. Fonte ÚNICA: quem
  * VALIDA (`CommitMessage`) e quem DERIVA uma mensagem a partir de um
  * `PlanTask` (`dev/lib/commit-message.ts`) leem o mesmo número. Duplicar o
  * literal em dois módulos é exatamente como um gerador passa a produzir
@@ -2247,14 +2287,33 @@ export type ReviewedHandoffGap = z.infer<typeof ReviewedHandoffGap>;
  */
 export const CandidateReviewCoverage = z
   .object({
-    /** Arquivos do candidate efetivamente auditados. */
-    files: z.array(nonEmpty).max(50),
-    /** Validações oficiais lidas, pelo argv exato que o orquestrador rodou. */
-    validations: z.array(z.array(nonEmpty).min(1)).max(20),
+    /**
+     * Arquivos do candidate efetivamente auditados.
+     *
+     * SEM TETO: esta lista ESPELHA o tamanho do candidate, que o Git decide.
+     * Um teto fixo recusaria a cobertura de uma review honesta de 60 arquivos
+     * e bloquearia a promoção por CONTAGEM, não por qualidade da review.
+     */
+    files: z.array(nonEmpty),
+    /**
+     * Validações oficiais lidas, pelo argv exato que o orquestrador rodou.
+     *
+     * SEM TETO pelo mesmo motivo: quem define quantos comandos existem é o
+     * plano, não este número.
+     */
+    validations: z.array(z.array(nonEmpty).min(1)),
     /** Aspectos comportamentais nomeados — curtos, não é raciocínio. */
     behaviors: z.array(z.string().min(1).max(160)).max(10),
-    /** Endereçamento item a item das lacunas declaradas pelo implementer. */
-    handoff_gaps: z.array(ReviewedHandoffGap).max(5),
+    /**
+     * Endereçamento item a item das lacunas declaradas pelo implementer.
+     *
+     * SEM TETO DE CARDINALIDADE: esta lista ESPELHA `what_i_did_not_check`, que
+     * também não tem teto. Um número fixo aqui recusaria a cobertura de um
+     * handoff que declarou seis lacunas — bloqueando a promoção por contagem,
+     * não por qualidade da review. A exigência de endereçar CADA item continua
+     * valendo integralmente.
+     */
+    handoff_gaps: z.array(ReviewedHandoffGap),
   })
   .strict();
 export type CandidateReviewCoverage = z.infer<typeof CandidateReviewCoverage>;
@@ -2288,8 +2347,11 @@ export const CandidateReviewRecord = z
      * orquestrador — nunca fornecido pelo reviewer. É contra esta lista que a
      * cobertura é conferida. Ausente = handoff v1 ou draft sem lacunas
      * declaradas (UNKNOWN), e nesse caso não há o que endereçar.
+     *
+     * SEM TETO: é uma CÓPIA derivada de `what_i_did_not_check`. Um teto aqui
+     * recusaria o record de review por um número que o worker escolheu.
      */
-    implementer_gaps: z.array(nonEmpty).max(5).optional(),
+    implementer_gaps: z.array(nonEmpty).optional(),
     /** Declarada pelo reviewer. OBRIGATÓRIA para um ACCEPT válido. */
     coverage: CandidateReviewCoverage.optional(),
     decision: z.enum(['ACCEPT', 'REJECT']),
@@ -3271,9 +3333,17 @@ export function parseTaskPacket(input: unknown): TaskPacket {
  * artifact extenso. O que o protocolo de fato precisa negar continua negado
  * pelo schema: campo não declarado (inclusive transcript/conversa), campo
  * ausente, tipo errado.
+ *
+ * A REPRESENTAÇÃO dos campos de OPINIÃO é normalizada antes da validação.
+ * Identidade, proveniência e fatos autoritativos passam intactos e seguem
+ * sendo validados exatamente como antes: um `task_id` mentiroso, um `result`
+ * inválido ou uma `schema_version` desconhecida continuam derrubando a nota.
+ * O que deixou de derrubá-la é um campo DESCRITIVO acima de um teto de
+ * conveniência — antes disso, um `claim` longo demais apagava o handoff
+ * inteiro e levava junto todo o contexto do worker.
  */
 export function parseHandoffDraft(input: unknown): HandoffDraft {
-  return HandoffDraft.parse(input);
+  return HandoffDraft.parse(normalizeHandoffOpinion(input, HANDOFF_NORMALIZATION_SCHEMAS));
 }
 
 /**

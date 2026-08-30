@@ -661,7 +661,7 @@ describe('routeInitialProfileWithHistory', () => {
     const result = routeInitialProfileWithHistory(value);
 
     expect(result.source).toBe('M78_FALLBACK');
-    expect(result.fallback?.outcome).toBe('HUMAN_REQUIRED');
+    expect(result.fallback?.outcome).toBe('BLOCKED');
     expect(result.evidence.series_considered[0]?.reason).toContain('M78 recusou');
   });
 

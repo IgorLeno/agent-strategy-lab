@@ -57,6 +57,7 @@ const MARKER: Readonly<Record<LabTaskProjection['state'], string>> = {
   ESCALATED: '[^]',
   FAILED: '[!]',
   HUMAN_REQUIRED: '[H]',
+  BLOCKED: '[B]',
 };
 
 function outcomeOf(task: LabTaskProjection): string | null {
@@ -69,6 +70,7 @@ function outcomeOf(task: LabTaskProjection): string | null {
   }
   if (task.state === 'FAILED') return task.close_kind ?? 'FAILED';
   if (task.state === 'HUMAN_REQUIRED') return 'HUMAN REQUIRED';
+  if (task.state === 'BLOCKED') return 'BLOCKED';
   return null;
 }
 
@@ -114,6 +116,7 @@ function quotaTextOf(quota: LabProgressQuota): string {
 function headlineOf(projection: LabRunProjection): string {
   if (projection.terminal === 'ALL_DONE') return 'ALL DONE';
   if (projection.terminal === 'HUMAN_REQUIRED') return 'HUMAN REQUIRED';
+  if (projection.terminal === 'BLOCKED') return 'BLOCKED';
   if (projection.terminal === 'FAILURE') return 'FAILURE';
   return projection.stage;
 }
@@ -178,7 +181,10 @@ export function renderLabFrame(
     const outcome = outcomeOf(task);
     const label = `${MARKER[task.state]} ${String(task.index).padStart(width, '0')} ${task.title}`;
     const suffix =
-      task.state === 'ACCEPTED' || task.state === 'FAILED' || task.state === 'HUMAN_REQUIRED'
+      task.state === 'ACCEPTED' ||
+      task.state === 'FAILED' ||
+      task.state === 'HUMAN_REQUIRED' ||
+      task.state === 'BLOCKED'
         ? `${task.duration_ms === null ? 'duração UNKNOWN' : formatDuration(task.duration_ms)}${
             outcome === null ? '' : ` · ${outcome}`
           }`

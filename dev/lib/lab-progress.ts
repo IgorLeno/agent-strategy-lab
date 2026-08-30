@@ -31,6 +31,13 @@ export const LAB_PROGRESS_STAGES = [
   'INTEGRATING',
   'PUBLISHED',
   'HUMAN_REQUIRED',
+  /**
+   * PARADA TÉCNICA fail-closed: o loop parou, nada foi promovido e nenhum
+   * provider foi lançado — mas nenhuma autoridade humana está em falta. Existe
+   * separada de `HUMAN_REQUIRED` (que pediria uma decisão inexistente) e de
+   * `FAILURE` (que sugeriria que o trabalho foi reprovado).
+   */
+  'BLOCKED',
   'ALL_DONE',
   'FAILURE',
 ] as const;

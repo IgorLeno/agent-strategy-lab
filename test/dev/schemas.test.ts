@@ -419,9 +419,18 @@ describe('Handoff', () => {
     expect(parseHandoffDraft(inflated).task_id).toBe('M01');
   });
 
-  it('limita decisões a 5 e lessons a 3', () => {
-    expect(() => parseHandoffDraft(validDraft({ decisions: ['a', 'b', 'c', 'd', 'e', 'f'] }))).toThrow();
-    expect(() => parseHandoffDraft(validDraft({ lessons: ['a', 'b', 'c', 'd'] }))).toThrow();
+  // Antes, estourar o teto de conveniência de `decisions`/`lessons` derrubava a
+  // NOTA INTEIRA — o worker perdia todo o contexto por causa de uma lista
+  // descritiva longa. O teto continua existindo como cardinalidade PERSISTIDA,
+  // mas agora é aplicado por normalização, com a omissão declarada.
+  it('cardinalidade de decisões/lessons é normalizada, não usada para recusar a nota', () => {
+    const many = parseHandoffDraft(validDraft({ decisions: ['a', 'b', 'c', 'd', 'e', 'f'] }));
+    expect(many.decisions).toHaveLength(5);
+    expect(many.decisions.at(-1)).toContain('omitido');
+    expect(many.task_id).toBe(validDraft().task_id);
+
+    const lessons = parseHandoffDraft(validDraft({ lessons: ['a', 'b', 'c', 'd'] }));
+    expect(lessons.lessons).toHaveLength(3);
   });
 
   it('handoff v1 persistido continua parseável sem migração', () => {
@@ -491,27 +500,28 @@ describe('Handoff v2', () => {
     ]);
   });
 
-  it('evidence recusa campos de payload e referência mal formada', () => {
-    // conteúdo embutido: campo desconhecido em schema estrito
-    expect(() =>
-      parseHandoffDraft(
-        validDraftV2({
-          evidence: [{ kind: 'file', path: 'dev/lib/schemas.ts', claim: 'x', content: 'export const' }],
-        }),
-      ),
-    ).toThrow();
-    // string livre no lugar da referência tipada
-    expect(() =>
-      parseHandoffDraft(validDraftV2({ evidence: [{ kind: 'file', ref: 'a.ts:1-2', claim: 'x' }] })),
-    ).toThrow();
-    expect(() =>
-      parseHandoffDraft(
-        validDraftV2({ evidence: [{ kind: 'file', path: 'a.ts', lines: '148-120', claim: 'x' }] }),
-      ),
-    ).toThrow();
-    expect(() =>
-      parseHandoffDraft(validDraftV2({ evidence: [{ kind: 'transcript', claim: 'x' }] })),
-    ).toThrow();
+  // A regra continua com dentes: payload e referência mal formada NUNCA entram
+  // no handoff. O que mudou é o raio do estrago — a referência inválida sai
+  // sozinha, em vez de levar junto o resto da nota (inclusive as lacunas
+  // declaradas, que são justamente o que a review precisa ler).
+  it('evidence nunca aceita payload nem referência mal formada', () => {
+    const rejected: readonly Record<string, unknown>[] = [
+      // conteúdo embutido: chave fora da forma do kind
+      { kind: 'file', path: 'dev/lib/schemas.ts', claim: 'x', content: 'export const' },
+      // string livre no lugar da referência tipada
+      { kind: 'file', ref: 'a.ts:1-2', claim: 'x' },
+      // intervalo invertido
+      { kind: 'file', path: 'a.ts', lines: '148-120', claim: 'x' },
+      // kind desconhecido
+      { kind: 'transcript', claim: 'x' },
+    ];
+    for (const reference of rejected) {
+      const draft = parseHandoffDraft(validDraftV2({ evidence: [reference] }));
+      if (!isHandoffDraftV2(draft)) throw new Error('draft v2 esperado');
+      expect(draft.evidence).toEqual([]);
+      // O resto da nota — inclusive a incerteza declarada — sobrevive.
+      expect(draft.what_i_did_not_check).toEqual(['comportamento sob concorrência']);
+    }
   });
 
   it('record selado v2 carrega os campos novos e exige accepted_commit', () => {

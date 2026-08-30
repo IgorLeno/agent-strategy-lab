@@ -7,6 +7,7 @@ import {
   ADVISORY_TASK_PACKET_BYTES,
   byteSize,
   isHandoffRecordV2,
+  isHandoffDraftV2,
   parseHandoffDraft,
   parseHandoffRecord,
   parseTaskPacket,
@@ -457,47 +458,44 @@ describe('HandoffDraft fora do contrato não derruba o leitor de produção', ()
    * `evidence[2].claim` tinha 175 caracteres; Zod estourou o processo e o
    * candidate ficou sem aceitação. A nota malformada é opinião ausente.
    */
-  it('claim acima do teto de campo devolve null em vez de lançar', async () => {
+  it('claim acima do teto de campo preserva a nota inteira, truncando só a claim', async () => {
     const taskId = 'calculate_database_settings_ui';
     const claim =
       'prepare_runs groups executable pairs by signature into one run per ' +
       'effective configuration and save_prepared_runs persists run manifests ' +
       'plus pending records before execution.';
     expect(claim.length).toBeGreaterThan(160);
-    expect(() =>
-      parseHandoffDraft({
-        schema_version: 2,
-        task_id: taskId,
-        result: 'PASS',
-        changed_files: [],
-        validations: [],
-        decisions: [],
-        lessons: [],
-        next_relevant_files: [],
-        what_i_did_not_check: [],
-        evidence: [{ kind: 'command', argv: ['pytest', '-q'], claim }],
-        open_questions: [],
-      }),
-    ).toThrow(/at most 160/);
+    const note = {
+      schema_version: 2,
+      task_id: taskId,
+      result: 'PASS',
+      changed_files: ['src/semi_imperium/workflows/database.py'],
+      validations: [],
+      decisions: ['reusou o resolver existente'],
+      lessons: [],
+      next_relevant_files: [],
+      what_i_did_not_check: ['não exercitei o caminho de rede'],
+      evidence: [{ kind: 'command', argv: ['pytest', '-q'], claim }],
+      open_questions: [],
+    } as const;
+
+    // ANTES: Zod estourava em `at most 160` e a nota inteira virava ausência.
+    // AGORA: a claim é cortada — com marca visível — e todo o resto do handoff
+    // continua legível, inclusive a lacuna declarada que a review precisa ler.
+    const parsed = parseHandoffDraft(note);
+    if (!isHandoffDraftV2(parsed)) throw new Error('draft v2 esperado');
+    expect(parsed.evidence?.[0]?.claim).toContain('…[truncado]');
+    expect((parsed.evidence?.[0]?.claim ?? '').length).toBeLessThanOrEqual(160);
+    expect(parsed.what_i_did_not_check).toEqual(['não exercitei o caminho de rede']);
+    expect(parsed.decisions).toEqual(['reusou o resolver existente']);
+    // Fato autoritativo do worker intocado.
+    expect(parsed.changed_files).toEqual(['src/semi_imperium/workflows/database.py']);
 
     await ensureTaskInbox(paths, taskId);
-    await writeFile(
-      handoffDraftPath(paths, taskId),
-      JSON.stringify({
-        schema_version: 2,
-        task_id: taskId,
-        result: 'PASS',
-        changed_files: [],
-        validations: [],
-        decisions: [],
-        lessons: [],
-        next_relevant_files: [],
-        what_i_did_not_check: [],
-        evidence: [{ kind: 'command', argv: ['pytest', '-q'], claim }],
-        open_questions: [],
-      }),
-    );
+    await writeFile(handoffDraftPath(paths, taskId), JSON.stringify(note));
 
-    await expect(readHandoffDraft(paths, taskId)).resolves.toBeNull();
+    const read = await readHandoffDraft(paths, taskId);
+    expect(read).not.toBeNull();
+    expect(read?.task_id).toBe(taskId);
   });
 });

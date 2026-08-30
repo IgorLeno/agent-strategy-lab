@@ -12,7 +12,7 @@ import {
   classifyImpliedHumanGatedMatches,
   humanInstructionBody,
   type ExecutionAuthorizationScope,
-  type HumanGatedCapability,
+  type HumanAuthority,
   type ImpliedGateMatch,
 } from '../../src/intake/index.js';
 import {
@@ -23,11 +23,11 @@ import {
 } from './lab-runtime.js';
 
 export type ImpliedHumanGatedEvaluation =
-  | { readonly outcome: 'ALLOW'; readonly implied: readonly HumanGatedCapability[] }
+  | { readonly outcome: 'ALLOW'; readonly implied: readonly HumanAuthority[] }
   | {
       readonly outcome: 'HUMAN_REQUIRED';
-      readonly implied: readonly HumanGatedCapability[];
-      readonly capability: HumanGatedCapability;
+      readonly implied: readonly HumanAuthority[];
+      readonly capability: HumanAuthority;
       readonly evidence: string;
       readonly match: ImpliedGateMatch;
     };
@@ -37,7 +37,7 @@ export function evaluateImpliedHumanGatedIntent(input: {
   readonly scope: ExecutionAuthorizationScope;
   readonly publishAllowed: boolean;
 }): ImpliedHumanGatedEvaluation {
-  const implied: HumanGatedCapability[] = [];
+  const implied: HumanAuthority[] = [];
   let first: ImpliedGateMatch | undefined;
   for (const match of classifyImpliedHumanGatedMatches(input.instructionBody)) {
     // INTENT != AUTHORIZATION: a única satisfação possível vem do header
@@ -84,7 +84,7 @@ export function executionScopeFromAuthorization(input: {
 export async function resolveImpliedHumanGatedFromRuntime(
   runtimeDir: string,
   scope: ExecutionAuthorizationScope,
-): Promise<readonly HumanGatedCapability[]> {
+): Promise<readonly HumanAuthority[]> {
   const artifacts = labArtifactPaths(runtimeDir);
   if (!(await pathExists(artifacts.humanInstruction))) return [];
   const instruction = await loadHumanInstruction(artifacts.humanInstruction);

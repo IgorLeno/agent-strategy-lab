@@ -6,8 +6,9 @@ import {
 } from '../billing/index.js';
 import {
   ExecutionAuthorizationScope,
+  HumanAuthority,
+  TechnicalBlocker,
   authorizeExecutionAction,
-  type HumanGatedCapability,
 } from '../intake/index.js';
 import { AttemptRole } from '../performance/attempt-facts.js';
 import { CapabilityRegistry, ProfileCapability, providerFactsOf } from './capability.js';
@@ -204,17 +205,37 @@ export const DiscardedEscalationStep = z
   .strict();
 export type DiscardedEscalationStep = z.infer<typeof DiscardedEscalationStep>;
 
+/**
+ * Motivos em que a escalation esbarra numa FRONTEIRA DE AUTORIZAÇÃO: cada um
+ * nomeia algo que só o operador pode conceder — ampliar a policy, autorizar
+ * cobrança por API, ampliar o escopo autônomo ou ampliar uma ladder
+ * INTENCIONALMENTE esgotada.
+ */
 export const HumanEscalationReason = z.enum([
-  'INVALID_REPAIR_SEQUENCE',
-  'INSUFFICIENT_REGISTRY_EVIDENCE',
   'STEP_OUTSIDE_AUTHORIZED_LADDER',
   'PROFILE_OR_PROVIDER_OUTSIDE_POLICY',
   'UNAUTHORIZED_API_BILLING',
   'ESCALATION_NOT_AUTHORIZED',
   'SAFE_ESCALATION_EXHAUSTED',
-  'INVALID_ESCALATION_HISTORY',
 ]);
 export type HumanEscalationReason = z.infer<typeof HumanEscalationReason>;
+
+/**
+ * Motivos em que a escalation esbarra num DEFEITO DE EVIDÊNCIA. Nenhum deles
+ * pede autorização: pedem evidência íntegra. Antes desta mudança os três
+ * viravam `HUMAN_REQUIRED` — a run parava oferecendo "autorizar explicitamente
+ * a mudança de boundary" para um problema que autorização nenhuma resolve.
+ * Continuam fail-closed: sem ladder resolvida e sem cadeia de autorização
+ * válida, nenhum degrau é concedido e nenhum provider é lançado.
+ */
+export const TechnicalEscalationReason = z.enum([
+  'INVALID_REPAIR_SEQUENCE',
+  'INSUFFICIENT_REGISTRY_EVIDENCE',
+  'INVALID_ESCALATION_HISTORY',
+  /** Diagnóstico nem acionável nem elegível à ladder (tooling/evidência). */
+  'DIAGNOSIS_NOT_ACTIONABLE',
+]);
+export type TechnicalEscalationReason = z.infer<typeof TechnicalEscalationReason>;
 
 const Escalate = z
   .object({
@@ -246,7 +267,12 @@ const EscalationHumanRequired = z
   .object({
     outcome: z.literal('HUMAN_REQUIRED'),
     classification: FailureDiagnosis.shape.classification,
-    reason_code: HumanEscalationReason.nullable(),
+    /**
+     * Deixou de ser nullable: um `HUMAN_REQUIRED` de escalation sem motivo
+     * declarado não conseguia apontar autoridade nenhuma, e era exatamente por
+     * ali que um bloqueio técnico entrava disfarçado de decisão humana.
+     */
+    reason_code: HumanEscalationReason,
     attempt_role: z.null(),
     authorization: z.null(),
     discarded_steps: z.array(DiscardedEscalationStep),
@@ -254,10 +280,26 @@ const EscalationHumanRequired = z
   })
   .strict();
 
+const EscalationTechnicalBlocker = z
+  .object({
+    outcome: z.literal('TECHNICAL_BLOCKER'),
+    classification: FailureDiagnosis.shape.classification,
+    reason_code: TechnicalEscalationReason,
+    blocker: TechnicalBlocker,
+    attempt_role: z.null(),
+    authorization: z.null(),
+    discarded_steps: z.array(DiscardedEscalationStep),
+    rationale: nonEmpty,
+    evidence_paths: z.array(nonEmpty).min(1),
+    human_required: z.null(),
+  })
+  .strict();
+
 export const EscalationDecision = z.discriminatedUnion('outcome', [
   Escalate,
   NoEscalation,
   EscalationHumanRequired,
+  EscalationTechnicalBlocker,
 ]);
 export type EscalationDecision = z.infer<typeof EscalationDecision>;
 
@@ -296,35 +338,12 @@ function unique<Value extends string>(values: readonly Value[]): Value[] {
   return [...new Set(values)];
 }
 
-function human(
-  diagnosis: FailureDiagnosis,
-  reasonCode: HumanEscalationReason | null,
-  why: string,
-  decisionNeeded: string,
-  options: readonly string[],
-  extraEvidence: readonly string[],
-  discardedSteps: readonly DiscardedEscalationStep[] = [],
-): EscalationDecision {
-  return {
-    outcome: 'HUMAN_REQUIRED',
-    classification: diagnosis.classification,
-    reason_code: reasonCode,
-    attempt_role: null,
-    authorization: null,
-    discarded_steps: [...discardedSteps],
-    human_required: {
-      status: 'HUMAN_REQUIRED',
-      classification: diagnosis.classification,
-      decision_needed: decisionNeeded,
-      why_automation_stopped: why,
-      options: [...options],
-      evidence_paths: unique([...diagnosis.evidence_paths, ...extraEvidence]),
-      provenance: [...diagnosis.provenance],
-    },
-  };
-}
-
-function gatedCapabilityFor(reason: HumanEscalationReason): HumanGatedCapability {
+/**
+ * Cada motivo de autorização mapeia para EXATAMENTE UMA autoridade humana. O
+ * switch é exaustivo e sem `default`: um motivo novo não compila até alguém
+ * declarar qual autoridade ele exige.
+ */
+function authorityFor(reason: HumanEscalationReason): HumanAuthority {
   switch (reason) {
     case 'UNAUTHORIZED_API_BILLING':
       return 'UNAUTHORIZED_API_BILLING';
@@ -333,10 +352,21 @@ function gatedCapabilityFor(reason: HumanEscalationReason): HumanGatedCapability
       return 'PROFILE_OR_PROVIDER_OUTSIDE_POLICY';
     case 'SAFE_ESCALATION_EXHAUSTED':
       return 'SAFE_ESCALATION_EXHAUSTED';
-    case 'INVALID_REPAIR_SEQUENCE':
-    case 'INSUFFICIENT_REGISTRY_EVIDENCE':
     case 'ESCALATION_NOT_AUTHORIZED':
+      return 'SCOPE_EXPANSION';
+  }
+}
+
+/** Mesma exaustividade do lado técnico: nenhum motivo fica sem blocker. */
+function blockerFor(reason: TechnicalEscalationReason): TechnicalBlocker {
+  switch (reason) {
+    case 'INVALID_REPAIR_SEQUENCE':
+      return 'INSUFFICIENT_EVIDENCE';
+    case 'INSUFFICIENT_REGISTRY_EVIDENCE':
+      return 'RUNTIME_CONFIGURATION_INVALID';
     case 'INVALID_ESCALATION_HISTORY':
+      return 'INVALID_PROVENANCE';
+    case 'DIAGNOSIS_NOT_ACTIONABLE':
       return 'INSUFFICIENT_EVIDENCE';
   }
 }
@@ -348,15 +378,46 @@ function humanForReason(
   detail: string,
   discardedSteps: readonly DiscardedEscalationStep[] = [],
 ): EscalationDecision {
-  return human(
-    diagnosis,
-    reason,
-    detail,
-    `Decidir sobre ${gatedCapabilityFor(reason)} antes de continuar.`,
-    ['autorizar explicitamente a mudança de boundary', 'replanear sem escalation'],
-    policy.evidence_paths,
-    discardedSteps,
-  );
+  const authority = authorityFor(reason);
+  return {
+    outcome: 'HUMAN_REQUIRED',
+    classification: diagnosis.classification,
+    reason_code: reason,
+    attempt_role: null,
+    authorization: null,
+    discarded_steps: [...discardedSteps],
+    human_required: {
+      status: 'HUMAN_REQUIRED',
+      human_authority: authority,
+      classification: diagnosis.classification,
+      decision_needed: `Decidir sobre ${authority} antes de continuar.`,
+      why_automation_stopped: detail,
+      options: ['autorizar explicitamente a mudança de boundary', 'replanear sem escalation'],
+      evidence_paths: unique([...diagnosis.evidence_paths, ...policy.evidence_paths]),
+      provenance: [...diagnosis.provenance],
+    },
+  };
+}
+
+function technicalForReason(
+  diagnosis: FailureDiagnosis,
+  policy: EscalationExecutionPolicy,
+  reason: TechnicalEscalationReason,
+  detail: string,
+  discardedSteps: readonly DiscardedEscalationStep[] = [],
+): EscalationDecision {
+  return {
+    outcome: 'TECHNICAL_BLOCKER',
+    classification: diagnosis.classification,
+    reason_code: reason,
+    blocker: blockerFor(reason),
+    attempt_role: null,
+    authorization: null,
+    discarded_steps: [...discardedSteps],
+    rationale: detail,
+    evidence_paths: unique([...diagnosis.evidence_paths, ...policy.evidence_paths]),
+    human_required: null,
+  };
 }
 
 function currentProfileFromHistory(
@@ -485,7 +546,7 @@ export function decideEscalation(input: EscalationDecisionInput): EscalationDeci
   const sequence = RepairSequenceEvidence.safeParse(input.repair_sequence);
   const policy = EscalationExecutionPolicy.parse(input.execution_policy);
   if (!sequence.success) {
-    return humanForReason(
+    return technicalForReason(
       diagnosis,
       policy,
       'INVALID_REPAIR_SEQUENCE',
@@ -494,15 +555,20 @@ export function decideEscalation(input: EscalationDecisionInput): EscalationDeci
   }
 
   const intervention = decideFailureIntervention(diagnosis);
-  if (intervention.status === 'HUMAN_REQUIRED') {
+  // Diagnóstico que não é acionável NEM elegível à ladder é um blocker
+  // técnico: para aqui, sem degrau, sem provider e sem inventar autoridade.
+  if (intervention.status === 'TECHNICAL_BLOCKER') {
     return {
-      outcome: 'HUMAN_REQUIRED',
+      outcome: 'TECHNICAL_BLOCKER',
       classification: diagnosis.classification,
-      reason_code: null,
+      reason_code: 'DIAGNOSIS_NOT_ACTIONABLE',
+      blocker: intervention.blocker,
       attempt_role: null,
       authorization: null,
       discarded_steps: [],
-      human_required: intervention.human_required,
+      rationale: intervention.rationale,
+      evidence_paths: unique([...diagnosis.evidence_paths, ...policy.evidence_paths]),
+      human_required: null,
     };
   }
   if (intervention.action !== 'ESCALATION_ELIGIBLE') {
@@ -519,7 +585,7 @@ export function decideEscalation(input: EscalationDecisionInput): EscalationDeci
 
   const resolved = resolveEscalationLadder(input.ladder, input.capability_registry);
   if (!resolved.ok) {
-    return humanForReason(
+    return technicalForReason(
       diagnosis,
       policy,
       'INSUFFICIENT_REGISTRY_EVIDENCE',
@@ -533,7 +599,7 @@ export function decideEscalation(input: EscalationDecisionInput): EscalationDeci
     resolved,
   );
   if (!history.ok) {
-    return humanForReason(diagnosis, policy, 'INVALID_ESCALATION_HISTORY', history.reason);
+    return technicalForReason(diagnosis, policy, 'INVALID_ESCALATION_HISTORY', history.reason);
   }
   const currentIndex = resolved.steps.findIndex((step) => step.profile_id === history.profile_id);
   if (currentIndex < 0) {

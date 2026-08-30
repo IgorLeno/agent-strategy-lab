@@ -105,6 +105,105 @@ export const HumanGatedCapability = z.enum([
 export type HumanGatedCapability = z.infer<typeof HumanGatedCapability>;
 
 /**
+ * AUTORIDADE HUMANA REAL — o subconjunto de `HumanGatedCapability` em que um
+ * humano/operador é a ÚNICA fonte possível da decisão, autorização ou insumo
+ * que falta.
+ *
+ * A distinção existe porque um BLOQUEIO TÉCNICO não é uma DECISÃO HUMANA.
+ * Automação que não sabe o que fazer, evidência que não pôde ser verificada,
+ * telemetria de provider ausente e ferramenta quebrada são todos problemas
+ * técnicos: continuam sendo fail-closed, mas nenhum deles nomeia uma
+ * autoridade que só um humano detém. Nomeá-los `HUMAN_REQUIRED` inventava
+ * autoridade de execução e parava a run pedindo uma decisão que não existia.
+ *
+ * Por isso `INSUFFICIENT_EVIDENCE` — a única categoria de `HumanGatedCapability`
+ * que descreve o estado da automação em vez de um poder do operador — está
+ * DELIBERADAMENTE fora desta lista. Não há `OTHER`, `UNKNOWN`, `GENERIC` nem
+ * `TECHNICAL_PROBLEM`: um caminho novo que não consegue nomear uma destas
+ * autoridades não é `HUMAN_REQUIRED`, é um blocker técnico tipado.
+ */
+export const HumanAuthority = z.enum([
+  /** Cobrança por API fora da assinatura autorizada. */
+  'UNAUTHORIZED_API_BILLING',
+  /** Trocar o modo de cobrança acordado para a run. */
+  'BILLING_MODE_CHANGE',
+  /** Ação destrutiva sobre trabalho, histórico ou dados. */
+  'DESTRUCTIVE_ACTION',
+  /** Deploy ou efeito em produção. */
+  'DEPLOYMENT_OR_PRODUCTION',
+  /** Efeito observável fora do workspace (publicar, notificar, integrar). */
+  'EXTERNAL_SIDE_EFFECT',
+  /** Ampliar o escopo de produto/autorização acordado. */
+  'SCOPE_EXPANSION',
+  /** Conceder uma credencial ou fronteira de credencial nova. */
+  'NEW_CREDENTIAL_BOUNDARY',
+  /** Decisão de produto/arquitetura genuinamente em aberto. */
+  'UNRESOLVED_ARCHITECTURE_OR_PRODUCT_DECISION',
+  /** Ação crítica ou sensível a segurança. */
+  'CRITICAL_OR_SECURITY_SENSITIVE_ACTION',
+  /** Ampliar a policy de profile/provider autorizada. */
+  'PROFILE_OR_PROVIDER_OUTSIDE_POLICY',
+  /** Ampliar a autonomia segura depois de um boundary INTENCIONALMENTE esgotado. */
+  'SAFE_ESCALATION_EXHAUSTED',
+]);
+export type HumanAuthority = z.infer<typeof HumanAuthority>;
+
+/**
+ * `INSUFFICIENT_EVIDENCE` é a diferença exata entre as duas listas. Manter a
+ * prova em tipos impede que uma categoria nova entre em `HumanGatedCapability`
+ * e passe a valer como autoridade humana sem alguém decidir isso.
+ */
+export type NonAuthoritativeHumanGatedCapability = Exclude<
+  HumanGatedCapability,
+  HumanAuthority
+>;
+const _AUTHORITY_IS_SUBSET_OF_GATED: readonly HumanGatedCapability[] = HumanAuthority.options;
+
+type ExactType<Actual, Expected> = [Actual] extends [Expected]
+  ? [Expected] extends [Actual]
+    ? true
+    : false
+  : false;
+
+/**
+ * Prova BIDIRECIONAL: tanto a diferença cabe no literal quanto o literal cabe
+ * na diferença. Se uma capability nova ficar fora de HumanAuthority, este
+ * valor deixa de ter tipo `true` e `pnpm typecheck` falha.
+ */
+const _NON_AUTHORITATIVE_IS_EXACTLY_INSUFFICIENT_EVIDENCE: ExactType<
+  NonAuthoritativeHumanGatedCapability,
+  'INSUFFICIENT_EVIDENCE'
+> = true;
+void _AUTHORITY_IS_SUBSET_OF_GATED;
+void _NON_AUTHORITATIVE_IS_EXACTLY_INSUFFICIENT_EVIDENCE;
+
+/**
+ * BLOQUEIOS TÉCNICOS tipados: a automação para, fail-closed, sem inventar
+ * autoridade humana. Nenhum deles autoriza continuar; todos são recuperáveis
+ * por conserto técnico, novo insumo ou reset de janela — não por decisão de
+ * operador.
+ */
+export const TechnicalBlocker = z.enum([
+  /** Evidência ausente/insuficiente para decidir; nada é promovido. */
+  'INSUFFICIENT_EVIDENCE',
+  /** Evidência autoritativa em contradição consigo mesma. */
+  'INCONSISTENT_EVIDENCE',
+  /** Identidade/proveniência autoritativa inválida (base, candidate, cadeia). */
+  'INVALID_PROVENANCE',
+  /** Ferramenta/validação quebrada sem primitive de remediação conhecida. */
+  'VALIDATION_OR_TOOLING_GAP',
+  /** Falha de provider/infra sem output de protocolo utilizável. */
+  'PROVIDER_OR_INFRA_FAILURE',
+  /** Uma primitive de remediação automática rodou e não resolveu o incidente. */
+  'AUTOMATED_REMEDIATION_FAILED',
+  /** Configuração de runtime/plano incoerente com o que o loop precisa. */
+  'RUNTIME_CONFIGURATION_INVALID',
+  /** Não há profile elegível AGORA (capacidade ou quota); a policy não muda. */
+  'NO_ELIGIBLE_EXECUTOR',
+]);
+export type TechnicalBlocker = z.infer<typeof TechnicalBlocker>;
+
+/**
  * Decisão de autorização de uma ação candidata. `ALLOWED` significa dentro
  * do boundary autônomo aprovado para este escopo/run; `HUMAN_REQUIRED`
  * significa que um gate humano é necessário antes da ação prosseguir.

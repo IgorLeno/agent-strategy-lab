@@ -117,7 +117,7 @@ describe('contrato de handoff v2 no prompt do implementer', () => {
       const prompt = buildWorkerPrompt(PACKET, IO, policy);
 
       expect(prompt).toMatch(/"schema_version":2/);
-      expect(prompt).toMatch(/"what_i_did_not_check":\[<≤5 itens curtos>\]/);
+      expect(prompt).toMatch(/"what_i_did_not_check":\[<itens curtos>\]/);
       expect(prompt).toMatch(
         /what_i_did_not_check é OBRIGATÓRIO: liste os aspectos relevantes que você\s+reconhece NÃO ter verificado/i,
       );
@@ -131,6 +131,10 @@ describe('contrato de handoff v2 no prompt do implementer', () => {
       );
       expect(prompt).toMatch(/"open_questions"/);
       expect(prompt).toMatch(/"confidence"/);
+      expect(prompt).toMatch(/copie path, argv e identidade de record exatamente/i);
+      expect(prompt).not.toMatch(/"next_relevant_files":\[<≤\d+/);
+      expect(prompt).not.toMatch(/"relevant_files":\[<≤\d+/);
+      expect(prompt).not.toMatch(/"evidence"[\s\S]{0,220}\(≤\d+/);
     });
 
     // Artifacts operacionais, não raciocínio: o protocolo NÃO pede análise,
