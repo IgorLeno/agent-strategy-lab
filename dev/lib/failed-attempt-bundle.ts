@@ -297,6 +297,25 @@ export interface RehydratedBundle {
 }
 
 /**
+ * Desfaz uma reidratação, devolvendo EXATAMENTE `files` ao base.
+ *
+ * Não é `resetFilesToBase` cru: a poda de diretórios que só passaram a existir
+ * por causa de um arquivo ADDED faz parte do desfazer. Sem ela o alvo fica
+ * git-limpo mas com scaffold fantasma, e o próximo attempt enxerga estrutura
+ * que o base não tem.
+ */
+export async function undoRehydration(
+  repoRoot: string,
+  baseSha: string,
+  files: readonly string[],
+): Promise<void> {
+  const scope = [...new Set(files)].sort();
+  if (scope.length === 0) return;
+  await resetFilesToBase({ repoRoot, baseSha, files: scope });
+  await pruneEmptyParentDirectories(repoRoot, scope);
+}
+
+/**
  * Devolve ao alvo o patch preservado de um attempt anterior — o inverso exato
  * de `resetFilesToBase`, com as mesmas garantias e a mesma paranoia.
  *
@@ -336,21 +355,36 @@ export async function rehydratePreservedBundle(
 
   await applyPreservedPatch(paths.repoRoot, patchFile);
 
-  // O que ficou no alvo tem que ser EXATAMENTE o que o manifesto descreve.
-  const applied = await workingTreeFiles(paths.repoRoot);
-  if (canonicalJson(applied) !== canonicalJson([...manifest.changed_files])) {
-    throw new FailedAttemptBundleError(
-      `reidratação produziu [${applied.join(', ')}], manifesto declara [${manifest.changed_files.join(', ')}]`,
-    );
-  }
-  for (const file of manifest.files) {
-    if (file.status === 'deleted') continue;
-    const content = await currentFileContent(paths.repoRoot, file.path);
-    if (content === null || content.sha256 !== file.sha256) {
+  // Daqui em diante o alvo já está tocado, então TODA recusa desfaz o que
+  // acabou de aplicar. Reidratação é preparação de continuação, e preparação
+  // ou acontece inteira ou não acontece: uma árvore meio reidratada, que
+  // ninguém consegue descrever, travaria o próximo resume por sujeira.
+  try {
+    // O que ficou no alvo tem que ser EXATAMENTE o que o manifesto descreve.
+    const applied = await workingTreeFiles(paths.repoRoot);
+    if (canonicalJson(applied) !== canonicalJson([...manifest.changed_files])) {
       throw new FailedAttemptBundleError(
-        `reidratação divergiu do manifesto em ${file.path}`,
+        `reidratação produziu [${applied.join(', ')}], manifesto declara [${manifest.changed_files.join(', ')}]`,
       );
     }
+    for (const file of manifest.files) {
+      if (file.status === 'deleted') continue;
+      const content = await currentFileContent(paths.repoRoot, file.path);
+      if (content === null || content.sha256 !== file.sha256) {
+        throw new FailedAttemptBundleError(
+          `reidratação divergiu do manifesto em ${file.path}`,
+        );
+      }
+    }
+  } catch (error) {
+    // O escopo do desfazer é a UNIÃO do que o manifesto declara com o que a
+    // aplicação de fato deixou na árvore: a pré-condição provou a árvore limpa
+    // logo acima, então tudo que está sujo agora veio deste `git apply`.
+    await undoRehydration(paths.repoRoot, baseSha, [
+      ...manifest.changed_files,
+      ...(await workingTreeFiles(paths.repoRoot)),
+    ]);
+    throw error;
   }
 
   const manifestFile = preservedBundleManifestPath(paths, taskId, attempt);

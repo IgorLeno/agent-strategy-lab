@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises';
 import { AccessContractError } from './access-contract.js';
 import type { ActivityObserverOptions } from './activity-observer.js';
 import { checkProgressionBase } from './base-guard.js';
@@ -19,13 +20,15 @@ import {
 } from './pool-capacity-observer.js';
 import { loadProfile } from './profile.js';
 import {
+  preservedBundlePatchPath,
   readHandoff,
   readInfraFailedAttempt,
   readPreservedBundleManifest,
   writePacket,
 } from './records.js';
 import { readRecoverableUnfinalizedPatch } from './infra-recover.js';
-import { rehydratePreservedBundle } from './failed-attempt-bundle.js';
+import { rehydratePreservedBundle, undoRehydration } from './failed-attempt-bundle.js';
+import { sha256Hex } from './canonical.js';
 import { readPreviousAttemptDiagnostics } from './retry-failed.js';
 import { selectNextTask, type Selection } from './select.js';
 import { getTaskState, readState, withTaskState, writeState } from './state.js';
@@ -76,9 +79,9 @@ export async function prepareNextTask(
     getTaskState(state, selection.task.id).attempts,
   );
   const baseSha = await headSha(paths.repoRoot);
-  // Trabalho que sobreviveu à morte do provider num attempt anterior. Só entra
-  // quando ele foi tirado EXATAMENTE desta base: um bundle de outra base não
-  // reaplica, e oferecer o que não se sabe aplicar seria promessa vazia.
+  // Trabalho que sobreviveu à morte do provider num attempt anterior. Bundle
+  // ausente, corrompido ou de outra base NÃO vira "comece do zero": vira
+  // bloqueio, porque o record autoritativo afirma que o trabalho existe.
   const recoveredWork = await resolveRecoveredWork(paths, selection.task.id, state, baseSha);
   const packet = buildTaskPacket({
     task: selection.task,
@@ -92,13 +95,28 @@ export async function prepareNextTask(
 }
 
 /**
+ * A evidência autoritativa declara um RECOVERABLE_UNFINALIZED_PATCH que o
+ * bundle preservado não confirma.
+ *
+ * Não é "não há trabalho": é evidência inconsistente. Nenhum provider nasce
+ * enquanto a contradição existir — começar do base aqui seria mandar o attempt
+ * seguinte reimplementar, do zero, trabalho que o record afirma existir.
+ */
+export class RecoverableEvidenceInconsistentError extends Error {
+  constructor(message: string) {
+    super(`RECOVERABLE_UNFINALIZED_PATCH inconsistente: ${message}`);
+    this.name = 'RecoverableEvidenceInconsistentError';
+  }
+}
+
+/**
  * O aviso de continuação que vai no packet, derivado do
  * `InfraFailedAttemptRecord` e do manifesto — nunca de estado em memória.
  *
- * `null` quando não há patch recuperável, quando ele foi tirado de outra base,
- * ou quando o bundle sumiu. Nos três casos o attempt seguinte simplesmente
- * começa do base, como sempre começou: continuar é uma oportunidade provada,
- * não uma obrigação que possa travar a tarefa.
+ * `null` SÓ quando não existe patch recuperável: aí o attempt seguinte começa
+ * do base, como sempre começou. Quando o record declara um patch recuperável, o
+ * bundle precisa estar presente, íntegro e tirado desta mesma base — a falta de
+ * qualquer uma das três coisas é bloqueio, e nunca ausência de trabalho.
  */
 export async function resolveRecoveredWork(
   paths: HarnessPaths,
@@ -112,8 +130,50 @@ export async function resolveRecoveredWork(
     getTaskState(state, taskId).attempts,
   );
   if (recoverable === null) return null;
-  const manifest = await readPreservedBundleManifest(paths, taskId, recoverable.attempt);
-  if (manifest === null || manifest.base_sha !== baseSha) return null;
+  const where = `attempt ${recoverable.attempt} de ${taskId}`;
+
+  let manifest;
+  try {
+    manifest = await readPreservedBundleManifest(paths, taskId, recoverable.attempt);
+  } catch (error) {
+    throw new RecoverableEvidenceInconsistentError(
+      `manifesto do bundle de ${where} não é legível: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+  if (manifest === null) {
+    throw new RecoverableEvidenceInconsistentError(
+      `o record de ${where} declara patch recuperável, mas o bundle preservado não existe`,
+    );
+  }
+  // A base vem ANTES da integridade: um bundle íntegro de outra base é um
+  // diagnóstico diferente de um bundle corrompido, e confundir os dois manda o
+  // operador consertar a coisa errada.
+  if (manifest.base_sha !== baseSha) {
+    throw new RecoverableEvidenceInconsistentError(
+      `o bundle de ${where} foi tirado da base ${manifest.base_sha}, e a base atual é ${baseSha} — ` +
+        'o patch não reaplica aqui',
+    );
+  }
+  if (manifest.patch_sha256 !== recoverable.ref.patch_sha256) {
+    throw new RecoverableEvidenceInconsistentError(
+      `o manifesto de ${where} aponta um patch diferente do que o record declara`,
+    );
+  }
+  let patchBytes;
+  try {
+    patchBytes = await readFile(preservedBundlePatchPath(paths, taskId, recoverable.attempt));
+  } catch {
+    throw new RecoverableEvidenceInconsistentError(
+      `o patch preservado de ${where} não existe`,
+    );
+  }
+  if (sha256Hex(patchBytes) !== manifest.patch_sha256) {
+    throw new RecoverableEvidenceInconsistentError(
+      `o patch preservado de ${where} foi alterado depois de publicado`,
+    );
+  }
   return {
     source_attempt: recoverable.attempt,
     changed_files: [...recoverable.changed_files],
@@ -256,7 +316,15 @@ export async function launchTask(
   // provider: a guarda exige árvore limpa no base, e é exatamente sobre essa
   // árvore que o patch do attempt anterior reaplica. Falhar aqui deixa a tarefa
   // READY, sem consumir attempt e sem tocar o bundle preservado.
-  const continuation = await rehydrateRecoveredWork(paths, packet);
+  let continuation: LaunchContinuation | null;
+  try {
+    continuation = await rehydrateRecoveredWork(paths, packet);
+  } catch (error) {
+    if (error instanceof ContinuationRehydrationError) {
+      return { classification: 'PREFLIGHT_BLOCKED', reason: error.message, outcome: null };
+    }
+    throw error;
+  }
 
   const startedAt = new Date().toISOString();
   const capacity =
@@ -301,6 +369,13 @@ export async function launchTask(
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     if (isPreSpawnRefusal(error)) {
+      // Recusa ANTES do spawn: nenhum worker nasceu e nenhum attempt foi
+      // consumido, então a preparação inteira precisa desaparecer junto. Deixar
+      // o patch reidratado no alvo travaria o próximo resume por árvore suja —
+      // a continuação ficaria impossível justamente por ter sido preparada.
+      if (continuation !== null) {
+        await undoRehydration(paths.repoRoot, packet.base_sha, continuation.rehydrated_files);
+      }
       return { classification: 'PREFLIGHT_BLOCKED', reason, outcome: null };
     }
     const state = await readState(paths);

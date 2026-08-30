@@ -50,7 +50,12 @@ import type { LaunchRecord } from './schemas.js';
 import { selectNextTask } from './select.js';
 import type { LabProgressListener, LabProgressQuota } from './lab-progress.js';
 import { ensureRuntimeDirs, getTaskState, readState } from './state.js';
-import { launchTask, prepareNextTask, type LaunchStepResult } from './steps.js';
+import {
+  RecoverableEvidenceInconsistentError,
+  launchTask,
+  prepareNextTask,
+  type LaunchStepResult,
+} from './steps.js';
 
 /**
  * Diagnóstico/manutenção APENAS. Pula o pre-flight automático, e com ele a
@@ -186,6 +191,14 @@ async function executeReadyTask(
   } catch (error) {
     if (error instanceof InconsistentAttemptEvidenceError) {
       return { empty: true, stop: { status: 'INCONSISTENT_EVIDENCE', reason: error.message } };
+    }
+    // Evidência de continuação em contradição com o bundle: o loop para AQUI,
+    // antes de qualquer provider. Reconciliar isto é decisão de operador.
+    if (error instanceof RecoverableEvidenceInconsistentError) {
+      return {
+        empty: true,
+        stop: { status: 'RECOVERABLE_EVIDENCE_INCONSISTENT', reason: error.message },
+      };
     }
     throw error;
   }
