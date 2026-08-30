@@ -83,6 +83,7 @@ export {
   EscalationLadder,
   EscalationStep,
   HumanEscalationReason,
+  TechnicalEscalationReason,
   RepairSequenceEvidence,
   decideEscalation,
   resolveEscalationLadder,

@@ -42,7 +42,6 @@ import {
   ProjectIntakeRequest,
   type AutonomousExecutionCapability,
   type ExecutionAuthorizationDecision,
-  type HumanGatedCapability,
 } from '../../src/intake/index.js';
 import { ProjectInspection } from '../../src/inspection/index.js';
 import {
@@ -124,7 +123,15 @@ import {
   type RoleWorkspaceAccess,
 } from './project-roles.js';
 import { machineSafetyCeiling, type MachineSafetyCeiling } from './machine-safety.js';
-import type { HumanRequiredOutput } from './routine-autonomy.js';
+import {
+  type ControlPlaneHalt,
+  type HumanAuthority,
+  type HumanRequiredOutput,
+  type TechnicalBlockedOutput,
+  type TechnicalBlocker,
+  createHumanRequired,
+  createTechnicalBlocked,
+} from './control-plane-halt.js';
 
 export const PROJECT_LIFECYCLE_SCHEMA_VERSION = 1;
 
@@ -137,7 +144,12 @@ export const PROVIDER_PATH_ENABLED_BY_DEFAULT = false;
 
 export interface ProjectLaunchCheck {
   readonly name: string;
-  readonly decision: ExecutionAuthorizationDecision;
+  /**
+   * `BLOCKED` existe além do par binário do intake porque a trilha de checks é
+   * EVIDÊNCIA: registrar uma recusa técnica como `HUMAN_REQUIRED` deixaria no
+   * record exatamente a autoridade falsa que este contrato removeu.
+   */
+  readonly decision: ExecutionAuthorizationDecision | 'BLOCKED';
   readonly reason: string;
   /**
    * Qualidade da evidência por trás do check. Um check pode ser `ALLOWED` com
@@ -154,7 +166,7 @@ export interface ProjectLaunchContext {
   /** A capability autônoma que ESTE launch exerce (worker novo, repair, escalation...). */
   readonly capability: AutonomousExecutionCapability;
   /** Categorias human-gated que a ação implica de fato; `requested_scope` nunca as cobre. */
-  readonly implied_human_gated?: readonly HumanGatedCapability[];
+  readonly implied_human_gated?: readonly HumanAuthority[];
   readonly billing_mode: LauncherProfile['billing_mode'];
   /**
    * Fatos tri-state com proveniência, coletados por
@@ -179,7 +191,18 @@ export type ProjectLaunchAuthorization =
   | {
       readonly outcome: 'HUMAN_REQUIRED';
       readonly checks: readonly ProjectLaunchCheck[];
-      readonly gated_capability: HumanGatedCapability | null;
+      /**
+       * Deixou de ser nullable. O único deny que passava `null` aqui era o de
+       * quota — pool esgotado — e ele não é decisão humana nenhuma: a janela
+       * reseta sozinha. Ele agora é `BLOCKED`.
+       */
+      readonly gated_capability: HumanAuthority;
+      readonly reason: string;
+    }
+  | {
+      readonly outcome: 'BLOCKED';
+      readonly checks: readonly ProjectLaunchCheck[];
+      readonly blocker: TechnicalBlocker;
       readonly reason: string;
     };
 
@@ -195,10 +218,20 @@ export function authorizeProjectLaunch(context: ProjectLaunchContext): ProjectLa
   const deny = (
     name: string,
     reason: string,
-    gated: HumanGatedCapability | null,
+    gated: HumanAuthority,
   ): ProjectLaunchAuthorization => {
     checks.push({ name, decision: 'HUMAN_REQUIRED', reason });
     return { outcome: 'HUMAN_REQUIRED', checks, gated_capability: gated, reason };
+  };
+
+  /** Recusa TÉCNICA: fail-closed idêntico, sem autoridade humana inventada. */
+  const block = (
+    name: string,
+    reason: string,
+    blocker: TechnicalBlocker,
+  ): ProjectLaunchAuthorization => {
+    checks.push({ name, decision: 'BLOCKED', reason });
+    return { outcome: 'BLOCKED', checks, blocker, reason };
   };
 
   const scopeDecision = authorizeExecutionAction(context.scope, {
@@ -241,11 +274,14 @@ export function authorizeProjectLaunch(context: ProjectLaunchContext): ProjectLa
   // Desconhecida ainda NÃO significa suficiente nem insuficiente: falha do
   // instrumento não pode bloquear trabalho. Só evidência POSITIVA de
   // esgotamento real bloqueia aqui.
+  // ESGOTAMENTO DECLARADO PELO PROVIDER. É temporário por construção — a
+  // janela reseta — e não existe autorização humana que o resolva. Continua
+  // fail-closed (nenhum provider é lançado), mas como blocker técnico.
   if (context.quota.availability === false) {
-    return deny(
+    return block(
       'quota',
       `quota da assinatura indisponível para este launch: ${context.quota.provenance}`,
-      null,
+      'NO_ELIGIBLE_EXECUTOR',
     );
   }
   checks.push({
@@ -749,19 +785,42 @@ export function planReviewerInvocation(input: {
  * `HumanRequiredOutput` que o harness já publica. `provenance` não tem campo
  * correspondente e por isso é anexada ao motivo — perder proveniência seria
  * perder a evidência de por que a automação parou.
+ *
+ * `human_authority` atravessa o adapter sem tradução: a autoridade é decidida
+ * onde o boundary é avaliado (M79), não aqui.
  */
 export function toHumanRequiredOutput(
   decision: HumanInterventionDecision,
   incidentId: string,
 ): HumanRequiredOutput {
-  return {
-    status: 'HUMAN_REQUIRED',
+  return createHumanRequired({
+    human_authority: decision.human_authority,
     incident_id: incidentId,
     decision_needed: decision.decision_needed,
     why_automation_stopped: `${decision.why_automation_stopped} (classification=${decision.classification}; provenance: ${decision.provenance.join(', ')})`,
     options: [...decision.options],
     evidence_paths: [...decision.evidence_paths],
-  };
+  });
+}
+
+/** Mesmo adapter, do lado técnico: um blocker tipado não vira gate humano. */
+export function toTechnicalBlockedOutput(
+  input: {
+    readonly blocker: TechnicalBlocker;
+    readonly classification: string;
+    readonly rationale: string;
+    readonly evidence_paths: readonly string[];
+  },
+  incidentId: string,
+): TechnicalBlockedOutput {
+  return createTechnicalBlocked({
+    blocker: input.blocker,
+    incident_id: incidentId,
+    decision_needed: 'Corrigir o defeito técnico apontado pela evidência preservada.',
+    why_automation_stopped: `${input.rationale} (classification=${input.classification})`,
+    options: ['inspecionar a evidência preservada', 'corrigir a causa técnica e rerodar'],
+    evidence_paths: [...input.evidence_paths],
+  });
 }
 
 export interface ProjectFailureFollowUp {
@@ -769,7 +828,8 @@ export interface ProjectFailureFollowUp {
   readonly action: FailureInterventionAction | 'NONE';
   /** Somente CAPABILITY fica elegível à ladder de escalation. */
   readonly escalates: boolean;
-  readonly human_required: HumanRequiredOutput | null;
+  /** A parada tipada quando o diagnóstico não é acionável nem escalável. */
+  readonly halt: ControlPlaneHalt | null;
   readonly rationale: string;
 }
 
@@ -791,7 +851,7 @@ export function resolveFailureFollowUp(input: {
       classification: input.diagnosis.classification,
       action: 'REMEDIATE_ENVIRONMENT',
       escalates: false,
-      human_required: null,
+      halt: null,
       rationale: `environment readiness aplicada antes de capacidade: ${environment.reason}`,
     };
   }
@@ -801,12 +861,23 @@ export function resolveFailureFollowUp(input: {
       ? {}
       : { harness_remediation_available: input.harnessRemediationAvailable }),
   });
-  if (decision.status === 'HUMAN_REQUIRED') {
+  // Diagnóstico sem ação e sem elegibilidade de ladder é BLOQUEIO TÉCNICO.
+  // Antes virava HUMAN_REQUIRED e pedia ao operador uma decisão que nenhuma
+  // autorização resolvia — a causa era tooling quebrada ou evidência ausente.
+  if (decision.status === 'TECHNICAL_BLOCKER') {
     return {
       classification: decision.classification,
       action: 'NONE',
       escalates: false,
-      human_required: toHumanRequiredOutput(decision.human_required, input.incidentId),
+      halt: toTechnicalBlockedOutput(
+        {
+          blocker: decision.blocker,
+          classification: decision.classification,
+          rationale: decision.rationale,
+          evidence_paths: input.diagnosis.evidence_paths,
+        },
+        input.incidentId,
+      ),
       rationale: decision.rationale,
     };
   }
@@ -814,7 +885,7 @@ export function resolveFailureFollowUp(input: {
     classification: decision.classification,
     action: decision.action,
     escalates: decision.action === 'ESCALATION_ELIGIBLE',
-    human_required: null,
+    halt: null,
     rationale: decision.rationale,
   };
 }
@@ -907,7 +978,7 @@ export interface LaunchedPlanningWorkerOptions {
    * significa "nenhuma implicação estruturada neste runtime" — nunca deriva
    * de risk, objective ou requested_scope.
    */
-  readonly implied_human_gated?: readonly HumanGatedCapability[];
+  readonly implied_human_gated?: readonly HumanAuthority[];
   /** Default `false`: o caminho de provider real existe, mas nasce desligado. */
   readonly providerEnabled?: boolean;
   /** Default `true`: dry-run/preflight jamais chama provider. */
@@ -920,7 +991,7 @@ export interface LaunchedPlanningWorkerOptions {
 }
 
 function impliedHumanGatedLaunchField(
-  implied: readonly HumanGatedCapability[] | undefined,
+  implied: readonly HumanAuthority[] | undefined,
 ): Pick<ProjectLaunchContext, 'implied_human_gated'> | Record<string, never> {
   if (implied === undefined || implied.length === 0) return {};
   return { implied_human_gated: implied };
@@ -1100,16 +1171,19 @@ export function createLaunchedPlanningWorker(
         worker_owns_official_validation: options.profile.official_validation_owner !== 'orchestrator',
         ...impliedHumanGatedLaunchField(options.implied_human_gated),
       });
+      // As duas recusas são tratadas EXPLICITAMENTE. Deixar `BLOCKED` cair
+      // fora deste bloco lançaria provider com o pool declarado esgotado —
+      // exatamente o fail-open que a recusa existe para impedir.
+      if (authorization.outcome === 'BLOCKED') {
+        return invocationFailure(
+          options,
+          invocationId,
+          'PLANNING_QUOTA_EXHAUSTED',
+          authorization.reason,
+          true,
+        );
+      }
       if (authorization.outcome === 'HUMAN_REQUIRED') {
-        if (options.quota.availability === false) {
-          return invocationFailure(
-            options,
-            invocationId,
-            'PLANNING_QUOTA_EXHAUSTED',
-            authorization.reason,
-            true,
-          );
-        }
         return invocationFailure(
           options,
           invocationId,
@@ -1338,10 +1412,10 @@ export function createLaunchedDeliberationWorker(
         worker_owns_official_validation: options.profile.official_validation_owner !== 'orchestrator',
         ...impliedHumanGatedLaunchField(options.implied_human_gated),
       });
+      if (authorization.outcome === 'BLOCKED') {
+        return failure('DELIBERATION_QUOTA_EXHAUSTED', authorization.reason, true);
+      }
       if (authorization.outcome === 'HUMAN_REQUIRED') {
-        if (options.quota.availability === false) {
-          return failure('DELIBERATION_QUOTA_EXHAUSTED', authorization.reason, true);
-        }
         return failure('DELIBERATION_LAUNCH_HUMAN_REQUIRED', authorization.reason, false);
       }
 
@@ -1800,7 +1874,7 @@ export interface ProjectReviewerLaunchOptions {
   readonly credential: LaunchFact;
   readonly quota: LaunchFact;
   readonly port?: ProviderRoleInvocationPort;
-  readonly implied_human_gated?: readonly HumanGatedCapability[];
+  readonly implied_human_gated?: readonly HumanAuthority[];
 }
 
 interface ProjectReviewVerdict<Outcome extends 'ACCEPT' | 'REJECT'> {
@@ -1891,6 +1965,12 @@ export async function launchProjectReviewer(
     worker_owns_official_validation: options.profile.official_validation_owner !== 'orchestrator',
     ...impliedHumanGatedLaunchField(options.implied_human_gated),
   });
+  // Recusa TÉCNICA do launch de review (pool esgotado) tem código próprio: a
+  // review continua não acontecendo e nada é promovido, mas o operador não é
+  // convocado para uma decisão que a janela de quota resolve sozinha.
+  if (authorization.outcome === 'BLOCKED') {
+    return reviewUnavailable('REVIEW_LAUNCH_QUOTA_EXHAUSTED', authorization.reason);
+  }
   if (authorization.outcome === 'HUMAN_REQUIRED') {
     return reviewUnavailable('REVIEW_LAUNCH_HUMAN_REQUIRED', authorization.reason);
   }
@@ -2069,7 +2149,7 @@ export interface ProjectLifecyclePlanInput extends DirectPathInput {
   readonly predictedRuntimeMs: number;
   readonly quota: LaunchFact;
   readonly credential: LaunchFact;
-  readonly implied_human_gated?: readonly HumanGatedCapability[];
+  readonly implied_human_gated?: readonly HumanAuthority[];
 }
 
 export type ProjectLifecyclePlanResult =

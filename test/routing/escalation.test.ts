@@ -212,8 +212,10 @@ describe('decideEscalation', () => {
     ['ENVIRONMENT_NOT_READY', 'NO_ESCALATION'],
     ['TASK_DEFINITION_TOO_BROAD', 'NO_ESCALATION'],
     ['CONTEXT_PRESSURE', 'NO_ESCALATION'],
-    ['VALIDATION_OR_TOOLING_GAP', 'HUMAN_REQUIRED'],
-    ['UNKNOWN_INSUFFICIENT_EVIDENCE', 'HUMAN_REQUIRED'],
+    // Nem tooling quebrada nem evidência ausente nomeiam autoridade humana:
+    // as duas param a run como BLOQUEIO TÉCNICO, sem conceder degrau.
+    ['VALIDATION_OR_TOOLING_GAP', 'TECHNICAL_BLOCKER'],
+    ['UNKNOWN_INSUFFICIENT_EVIDENCE', 'TECHNICAL_BLOCKER'],
   ] as const)('não escala diagnóstico %s', (classification, expected) => {
     expect(decideEscalation(input({ diagnosis: diagnosis(classification) }))).toMatchObject({
       outcome: expected,
@@ -275,13 +277,18 @@ describe('decideEscalation', () => {
     });
   });
 
-  it('exige humano se repair não foi um só no mesmo profile', () => {
+  it('bloqueia tecnicamente se repair não foi um só no mesmo profile', () => {
+    // Evidência de repair inconsistente é defeito de evidência, não pedido de
+    // autorização: nenhuma decisão humana repara uma cadeia que não bate.
     const invalid = sequence({
       repair: { ...sequence().repair, profile_id: 'profile-other' },
     });
     expect(decideEscalation(input({ repair_sequence: invalid }))).toMatchObject({
-      outcome: 'HUMAN_REQUIRED',
+      outcome: 'TECHNICAL_BLOCKER',
       reason_code: 'INVALID_REPAIR_SEQUENCE',
+      blocker: 'INSUFFICIENT_EVIDENCE',
+      authorization: null,
+      human_required: null,
     });
   });
 

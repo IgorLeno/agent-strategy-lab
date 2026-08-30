@@ -169,4 +169,55 @@ describe('reviewer — pool EXHAUSTED do profile pinado não bloqueia outro auto
     expect(selected.profileId).toBe('opencode-go-pro');
     expect(selected.rerouted).toBe(true);
   });
+  /**
+   * A run histórica `semi-imperium-real-01` parou quatro vezes por "intervenção
+   * humana", e DUAS delas eram falta de reviewer. Só uma das causas é de fato
+   * autoridade humana — a policy que não contém nenhum profile capaz de
+   * satisfazer a diversidade exigida. Nomear a causa é o que permite parar de
+   * convocar o operador para uma janela de quota que reseta sozinha.
+   */
+  it('nomeia a causa de não haver reviewer, e só a de policy é autoridade humana', () => {
+    const semDiversidade = selectReviewerProfileForFreshCapacity({
+      pinnedProfileId: 'codex-sol',
+      policyProfiles: [{ id: 'codex-sol', capability_rank: 2 }],
+      poolOf,
+      capacityByPool: new Map([['openai_chatgpt_subscription', capacity(CapacityStatus.KNOWN)]]),
+      implementerProfileId: 'codex-sol',
+      diversityRequirement: 'required',
+    });
+    expect(semDiversidade.profileId).toBeNull();
+    expect(semDiversidade.cause).toBe('DIVERSITY_POLICY_HAS_NO_ALTERNATIVE');
+
+    const poolEsgotado = selectReviewerProfileForFreshCapacity({
+      pinnedProfileId: 'codex-sol',
+      policyProfiles: [{ id: 'codex-sol', capability_rank: 2 }],
+      poolOf,
+      capacityByPool: new Map([
+        ['openai_chatgpt_subscription', capacity(CapacityStatus.EXHAUSTED)],
+      ]),
+    });
+    expect(poolEsgotado.profileId).toBeNull();
+    expect(poolEsgotado.cause).toBe('ALL_POOLS_EXHAUSTED');
+
+    const infra = selectReviewerProfileForFreshCapacity({
+      pinnedProfileId: 'codex-sol',
+      policyProfiles: [{ id: 'codex-sol', capability_rank: 2 }],
+      poolOf,
+      capacityByPool: new Map([['openai_chatgpt_subscription', capacity(CapacityStatus.KNOWN)]]),
+      excludedProfileIds: ['codex-sol'],
+    });
+    expect(infra.profileId).toBeNull();
+    expect(infra.cause).toBe('ALL_CANDIDATES_FAILED_INFRA');
+  });
+
+  it('uma seleção bem-sucedida nunca declara causa de indisponibilidade', () => {
+    const selected = selectReviewerProfileForFreshCapacity({
+      pinnedProfileId: 'codex-sol',
+      policyProfiles: [{ id: 'codex-sol', capability_rank: 2 }],
+      poolOf,
+      capacityByPool: new Map([['openai_chatgpt_subscription', capacity(CapacityStatus.KNOWN)]]),
+    });
+    expect(selected.profileId).toBe('codex-sol');
+    expect(selected.cause).toBeNull();
+  });
 });

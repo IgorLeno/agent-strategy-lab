@@ -9,10 +9,32 @@
  */
 import { CapacityStatus } from '../../src/quota/index.js';
 
+/**
+ * POR QUE não sobrou reviewer. Os três casos já existiam — só em prosa, o que
+ * obrigava quem classificava a parada a tratar os três como a mesma coisa.
+ *
+ * A distinção importa porque só UM deles é autoridade humana: uma policy que
+ * não contém nenhum profile capaz de satisfazer `diversity=required` só é
+ * resolvida por alguém ampliando a policy. Pool esgotado e falha de INFRA se
+ * resolvem sozinhos no reset da janela ou com o conserto técnico.
+ *
+ * Nomear a causa NÃO muda a seleção: ordem de failover, exclusões e retry
+ * continuam idênticos.
+ */
+export type ReviewerUnavailabilityCause =
+  /** A policy não oferece nenhum profile que satisfaça a diversidade exigida. */
+  | 'DIVERSITY_POLICY_HAS_NO_ALTERNATIVE'
+  /** Todos os candidatos restantes falharam por INFRA nesta decisão. */
+  | 'ALL_CANDIDATES_FAILED_INFRA'
+  /** Os pools autorizados estão esgotados agora; a janela reseta sozinha. */
+  | 'ALL_POOLS_EXHAUSTED';
+
 export interface ReviewerCapacitySelection {
   readonly profileId: string | null;
   readonly rerouted: boolean;
   readonly reason: string;
+  /** Presente exatamente quando `profileId` é `null`. */
+  readonly cause: ReviewerUnavailabilityCause | null;
 }
 
 export function isRetryableReviewerInvocationFailure(code: string): boolean {
@@ -52,6 +74,7 @@ export function selectReviewerProfileForFreshCapacity(input: {
       profileId: input.pinnedProfileId,
       rerouted: false,
       reason: `reviewer pinado ${input.pinnedProfileId} permanece elegível pela observação fresca`,
+      cause: null,
     };
   }
 
@@ -68,6 +91,12 @@ export function selectReviewerProfileForFreshCapacity(input: {
     return {
       profileId: null,
       rerouted: false,
+      cause:
+        excluded.size > 0
+          ? 'ALL_CANDIDATES_FAILED_INFRA'
+          : diversityReason !== null
+            ? 'DIVERSITY_POLICY_HAS_NO_ALTERNATIVE'
+            : 'ALL_POOLS_EXHAUSTED',
       reason:
         excluded.size > 0
           ? `nenhum reviewer restante na policy: INFRA em [${infra}] e os demais pools estão EXHAUSTED ou também excluídos`
@@ -81,6 +110,7 @@ export function selectReviewerProfileForFreshCapacity(input: {
   return {
     profileId: alternative.id,
     rerouted: true,
+    cause: null,
     reason: excluded.has(input.pinnedProfileId)
       ? `reviewer pinado ${input.pinnedProfileId} falhou por INFRA; rerroteado para ${alternative.id} dentro da policy autorizada`
       : diversityReroute

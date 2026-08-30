@@ -177,6 +177,9 @@ describe('submitRunDirective', () => {
     });
     expect(result.exitCode).toBe(9);
     expect(result.payload['status']).toBe('HUMAN_REQUIRED');
+    // A autoridade que falta agora é ESTRUTURAL, não só a prosa de
+    // `decision_needed`: é ela que prova que existe uma decisão humana aqui.
+    expect(result.payload['human_authority']).toBe('DEPLOYMENT_OR_PRODUCTION');
     expect(result.payload['decision_needed']).toBe('DEPLOYMENT_OR_PRODUCTION');
     expect(String(result.payload['why_automation_stopped'])).toMatch(/texto livre não autoriza/);
     expect(launched).toBe(false);
@@ -350,6 +353,7 @@ describe('preflight de intenção — PROHIBITION != REQUEST e opções verdadei
     ]);
     expect(result.exitCode).toBe(9);
     expect(result.payload['status']).toBe('HUMAN_REQUIRED');
+    expect(result.payload['human_authority']).toBe('DESTRUCTIVE_ACTION');
     expect(result.payload['decision_needed']).toBe('DESTRUCTIVE_ACTION');
     const options = result.payload['options'] as string[];
     expect(options.join('\n')).not.toMatch(/conceder a categoria no header/);

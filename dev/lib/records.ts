@@ -39,6 +39,7 @@ import {
   parseHandoffRecord,
   parseTaskPacket,
 } from './schemas.js';
+import { normalizeHandoffOpinion } from './handoff-normalize.js';
 
 export function packetPath(paths: HarnessPaths, taskId: string): string {
   return path.join(paths.packetsDir, `${taskId}.json`);
@@ -471,11 +472,21 @@ export async function readHandoffDraft(
   }
 }
 
+/**
+ * O report também carrega opinião do worker (`decisions`, `lessons`,
+ * `relevant_files`, `summary`). Um teto de conveniência estourado ali fazia o
+ * report inteiro sumir e o fechamento ficar PENDING — protocolo perdido por
+ * causa de um campo descritivo. Fatos autoritativos do report (`task_id`,
+ * `self_reported_result`, `candidate_commit`, `changed_files`, `validations`)
+ * continuam intocados e continuam sendo confrontados com a evidência do Git.
+ */
 export const readReport = (
   paths: HarnessPaths,
   taskId: string,
 ): Promise<AgentCompletionReport | null> =>
-  readOptional(reportPath(paths, taskId), (input) => AgentCompletionReport.parse(input));
+  readOptional(reportPath(paths, taskId), (input) =>
+    AgentCompletionReport.parse(normalizeHandoffOpinion(input)),
+  );
 
 export const writeCompletion = (
   paths: HarnessPaths,

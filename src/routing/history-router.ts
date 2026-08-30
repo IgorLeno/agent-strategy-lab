@@ -366,7 +366,7 @@ function compatibilityReason(
     capability_registry: input.capability_registry,
     candidates: [candidate],
   });
-  if (isolatedBase.outcome === 'HUMAN_REQUIRED') {
+  if (isolatedBase.outcome === 'BLOCKED') {
     return `M78 recusou o profile isolado: ${isolatedBase.reason}`;
   }
   return null;
@@ -495,7 +495,7 @@ export function routeInitialProfileWithHistory(input: HistoryRoutingInput): Hist
             ? {}
             : { evidence_balance: input.evidence_balance }),
         });
-        return isolated.outcome !== 'HUMAN_REQUIRED';
+        return isolated.outcome !== 'BLOCKED';
       })
       .map((candidate) => candidate.profile_id),
   );

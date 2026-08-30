@@ -288,7 +288,10 @@ interface RunOutput {
       readonly to_profile_id: string;
       readonly decision_owner: string;
     }[];
-    readonly human_gate: {
+    readonly halt: {
+      readonly status: 'HUMAN_REQUIRED' | 'BLOCKED';
+      readonly human_authority?: string;
+      readonly blocker?: string;
       readonly decision_needed: string;
       readonly why_automation_stopped: string;
       readonly options: readonly string[];
@@ -298,6 +301,7 @@ interface RunOutput {
 
 interface DryRunPreviewOutput {
   readonly status: string;
+  readonly halt_status: string | null;
   readonly task_id: string | null;
   readonly blocked_by: string | null;
   readonly reason: string | null;
@@ -491,7 +495,7 @@ describe('external plan run — dev-run-plan pelo lifecycle universal', () => {
       },
     ]);
     // zero gate humano dentro da ladder autorizada.
-    expect(output.project_lifecycle.human_gate).toBeNull();
+    expect(output.project_lifecycle.halt).toBeNull();
     expect(JSON.stringify(output)).not.toContain('HUMAN_REQUIRED');
 
     const paths = resolveHarnessPaths(target.target, { planFile: target.plan });
@@ -569,10 +573,16 @@ describe('external plan run — dev-run-plan pelo lifecycle universal', () => {
     expect(units.some((unit) => unit.validation_outcome === 'FAIL')).toBe(true);
     expect(units.some((unit) => unit.diagnosis === 'CAPABILITY')).toBe(true);
     expect(output.project_lifecycle.escalations).toEqual([]);
-    expect(output.project_lifecycle.human_gate?.why_automation_stopped).toContain(
+    // Ladder de um degrau só: escalar exige AMPLIAR a policy de profiles, e
+    // isso é autoridade humana de verdade.
+    expect(output.project_lifecycle.halt?.status).toBe('HUMAN_REQUIRED');
+    expect(output.project_lifecycle.halt?.human_authority).toBe(
+      'PROFILE_OR_PROVIDER_OUTSIDE_POLICY',
+    );
+    expect(output.project_lifecycle.halt?.why_automation_stopped).toContain(
       'único profile elegível',
     );
-    expect(output.project_lifecycle.human_gate?.options.join(' ')).toContain(
+    expect(output.project_lifecycle.halt?.options.join(' ')).toContain(
       'aceitar o resultado do profile fixado pelo experimento',
     );
   }, 180_000);
@@ -683,7 +693,13 @@ describe('external plan run — dev-run-plan pelo lifecycle universal', () => {
     const output = parse(result);
     expect(output.stopped_by).toBe('HUMAN_REQUIRED');
     expect(output.project_lifecycle.work_units[0]?.review.outcome).toBe('REJECT');
-    expect(output.project_lifecycle.human_gate?.why_automation_stopped).toContain(
+    // REJECT emitido por uma review independente é decisão de produto: a
+    // autoridade humana é REAL e vem nomeada.
+    expect(output.project_lifecycle.halt?.status).toBe('HUMAN_REQUIRED');
+    expect(output.project_lifecycle.halt?.human_authority).toBe(
+      'UNRESOLVED_ARCHITECTURE_OR_PRODUCT_DECISION',
+    );
+    expect(output.project_lifecycle.halt?.why_automation_stopped).toContain(
       'review independente não aceitou a mudança',
     );
 
@@ -967,8 +983,11 @@ describe('external plan run — dev-run-plan pelo lifecycle universal', () => {
     const result = await runPlan(target, 'orchestrator-success', ['--dry-run']);
     expect(result.exitCode).toBe(9);
     const output = JSON.parse(result.stdout) as DryRunOutput;
+    // O dry-run prova a decisão REAL: o runtime pararia, e pararia pedindo
+    // uma autorização que só o operador concede.
     expect(output.status).toBe('HUMAN_REQUIRED');
-    expect(output.project_lifecycle_preview.status).toBe('HUMAN_REQUIRED');
+    expect(output.project_lifecycle_preview.status).toBe('HALT');
+    expect(output.project_lifecycle_preview.halt_status).toBe('HUMAN_REQUIRED');
     expect(output.project_lifecycle_preview.reason).toContain(
       'fora do autonomous_execution_boundary',
     );
@@ -998,8 +1017,11 @@ describe('external plan run — dev-run-plan pelo lifecycle universal', () => {
     const dry = await runPlan(target, 'orchestrator-success', ['--dry-run']);
     expect(dry.exitCode).toBe(9);
     const output = JSON.parse(dry.stdout) as DryRunOutput;
+    // REJECT durável é decisão humana de verdade, e o preview a reporta como
+    // tal em vez de fingir READY.
     expect(output.status).toBe('HUMAN_REQUIRED');
-    expect(output.project_lifecycle_preview.status).toBe('HUMAN_REQUIRED');
+    expect(output.project_lifecycle_preview.status).toBe('HALT');
+    expect(output.project_lifecycle_preview.halt_status).toBe('HUMAN_REQUIRED');
     expect(output.project_lifecycle_preview.blocked_by).toBe('CANDIDATE_REVIEW_REJECTED');
     expect(output.project_lifecycle_preview.task_id).toBe('T1');
     expect(output.project_lifecycle_preview.work_unit).toBeNull();
@@ -1028,7 +1050,10 @@ describe('external plan run — dev-run-plan pelo lifecycle universal', () => {
     expect(output.stopped_by).toBe('HUMAN_REQUIRED');
     expect(output.iteration_count).toBe(0);
     expect(output.project_lifecycle.work_units[0]?.launch_authorization).toBe('HUMAN_REQUIRED');
-    expect(output.project_lifecycle.human_gate?.why_automation_stopped).toContain(
+    // Ampliar o boundary autônomo é do operador: autoridade nomeada.
+    expect(output.project_lifecycle.halt?.status).toBe('HUMAN_REQUIRED');
+    expect(output.project_lifecycle.halt?.human_authority).toBe('SCOPE_EXPANSION');
+    expect(output.project_lifecycle.halt?.why_automation_stopped).toContain(
       'fora do autonomous_execution_boundary',
     );
 

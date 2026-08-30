@@ -772,9 +772,9 @@ describe('harness self-maintenance nunca é aplicada num repositório alvo', () 
       },
     });
 
-    expect(result.status).toBe('HUMAN_REQUIRED');
-    expect(result.human_required?.why_automation_stopped).toContain('HARNESS SELF-MAINTENANCE');
-    expect(result.human_required?.why_automation_stopped).toContain(
+    expect(result.status).toBe('BLOCKED');
+    expect(result.halt?.why_automation_stopped).toContain('HARNESS SELF-MAINTENANCE');
+    expect(result.halt?.why_automation_stopped).toContain(
       'Remediação de projeto pertence ao alvo',
     );
     expect(driver.calls.some((call) => call.includes('maintain'))).toBe(false);
@@ -796,7 +796,7 @@ describe('harness self-maintenance nunca é aplicada num repositório alvo', () 
 
     // A recipe roda: o maintainer é chamado (e o duplo recusa de propósito),
     // provando que o gate anterior era a única coisa impedindo a maintenance.
-    expect(result.status).toBe('HUMAN_REQUIRED');
+    expect(result.status).toBe('BLOCKED');
     expect(driver.calls.some((call) => call.includes('maintain'))).toBe(true);
   });
 

@@ -31,6 +31,7 @@
 
 import { z } from 'zod';
 
+import { TechnicalBlocker } from '../intake/index.js';
 import { ProjectInspection } from '../inspection/index.js';
 import { ExecutionAssessment, PlannedTask } from '../planner/index.js';
 import { CapabilityRegistry, ProfileCapability, providerFactsOf } from './capability.js';
@@ -293,12 +294,29 @@ export const RoutingDecision = z
   .strict();
 export type RoutingDecision = z.infer<typeof RoutingDecision>;
 
+/**
+ * ROUTING BLOQUEADO É PROBLEMA TÉCNICO, NÃO DECISÃO HUMANA.
+ *
+ * Todo caminho que produz este resultado — role inválido, work unit inválida,
+ * ambiente não pronto, candidate inválido, lista de candidatos vazia, previsão
+ * aritmeticamente irrepresentável, nenhum profile com tier suficiente — é uma
+ * incoerência de runtime ou de configuração. Nenhum deles nomeia uma
+ * autorização, cobrança, escopo ou decisão de produto que só um humano pode
+ * dar; o que resolve todos é corrigir a entrada ou replanejar.
+ *
+ * Marcá-los `HUMAN_REQUIRED` inventava autoridade de execução: a run parava
+ * pedindo uma decisão humana que não existia, e `HUMAN_REQUIRED` também
+ * aparecia como "próximo passo permitido" — um bloqueio técnico se oferecendo
+ * como decisão humana. Continua fail-closed: `BLOCKED` não roteia nada e
+ * nenhum provider é lançado.
+ */
 export const RoutingBlocked = z
   .object({
-    outcome: z.literal('HUMAN_REQUIRED'),
+    outcome: z.literal('BLOCKED'),
+    blocker: TechnicalBlocker,
     reason: nonEmpty,
     candidates_considered: z.array(CandidateConsideration),
-    allowed_next_steps: z.array(z.enum(['RECONFIGURE_RUNTIME', 'REPLAN', 'HUMAN_REQUIRED'])).min(1),
+    allowed_next_steps: z.array(z.enum(['RECONFIGURE_RUNTIME', 'REPLAN'])).min(1),
     provenance: z.array(nonEmpty).min(1),
   })
   .strict();
@@ -648,12 +666,18 @@ function roleCompatibility(capability: ProfileCapability, role: WorkerRole) {
   return capability.role_compatibility[role];
 }
 
-function block(reason: string, provenance: string, considered: CandidateConsideration[] = []): RoutingBlocked {
+function block(
+  blocker: TechnicalBlocker,
+  reason: string,
+  provenance: string,
+  considered: CandidateConsideration[] = [],
+): RoutingBlocked {
   return {
-    outcome: 'HUMAN_REQUIRED',
+    outcome: 'BLOCKED',
+    blocker,
     reason,
     candidates_considered: considered,
-    allowed_next_steps: ['REPLAN', 'HUMAN_REQUIRED'],
+    allowed_next_steps: ['RECONFIGURE_RUNTIME', 'REPLAN'],
     provenance: [provenance],
   };
 }
@@ -669,11 +693,18 @@ function block(reason: string, provenance: string, considered: CandidateConsider
  */
 export function routeInitialProfile(input: InitialRoutingInput): InitialRoutingResult {
   const roleParsed = WorkerRole.safeParse(input.role);
-  if (!roleParsed.success) return block('worker role inválido impede routing', 'WorkerRole.safeParse');
+  if (!roleParsed.success) {
+    return block(
+      'RUNTIME_CONFIGURATION_INVALID',
+      'worker role inválido impede routing',
+      'WorkerRole.safeParse',
+    );
+  }
   const role = roleParsed.data;
   const unitParsed = StructuredWorkUnit.safeParse(input.work_unit);
   if (!unitParsed.success) {
     return block(
+      'RUNTIME_CONFIGURATION_INVALID',
       `work unit inválida: ${unitParsed.error.issues.map((issue) => `${issue.path.join('.')} ${issue.message}`).join('; ')}`,
       'StructuredWorkUnit.safeParse',
     );
@@ -681,6 +712,7 @@ export function routeInitialProfile(input: InitialRoutingInput): InitialRoutingR
   const unit = unitParsed.data;
   if (unit.assessment.environment_readiness.status !== 'READY') {
     return block(
+      'INSUFFICIENT_EVIDENCE',
       `environment_readiness=${unit.assessment.environment_readiness.status}: fato ausente ou inválido impede routing`,
       'assessment.environment_readiness',
     );
@@ -690,6 +722,7 @@ export function routeInitialProfile(input: InitialRoutingInput): InitialRoutingR
   const invalidCandidate = parsedCandidates.find((candidate) => !candidate.success);
   if (invalidCandidate !== undefined && !invalidCandidate.success) {
     return block(
+      'RUNTIME_CONFIGURATION_INVALID',
       `candidate inválido: ${invalidCandidate.error.issues.map((issue) => `${issue.path.join('.')} ${issue.message}`).join('; ')}`,
       'RoutingCandidate.safeParse',
     );
@@ -700,7 +733,13 @@ export function routeInitialProfile(input: InitialRoutingInput): InitialRoutingR
       return candidate.data;
     })
     .sort((left, right) => left.profile_id.localeCompare(right.profile_id));
-  if (candidates.length === 0) return block('nenhum profile candidato foi fornecido', 'input.candidates');
+  if (candidates.length === 0) {
+    return block(
+      'NO_ELIGIBLE_EXECUTOR',
+      'nenhum profile candidato foi fornecido',
+      'input.candidates',
+    );
+  }
 
   const requirement = requiredTierOf(unit);
   const considered: CandidateConsideration[] = [];
@@ -809,6 +848,7 @@ export function routeInitialProfile(input: InitialRoutingInput): InitialRoutingR
       // Não é recusa por tempo: é aritmética que estourou a representação, e
       // um número ilegível não pode entrar num record de evidência.
       return block(
+        'RUNTIME_CONFIGURATION_INVALID',
         'previsão de runtime não é representável como inteiro seguro; requer replan',
         'execution_runtime_forecast.arithmetic',
         considered,
@@ -863,6 +903,7 @@ export function routeInitialProfile(input: InitialRoutingInput): InitialRoutingR
   }
 
   return block(
+    'NO_ELIGIBLE_EXECUTOR',
     `nenhum profile disponível, compatível e com tier >= ${requirement.tier}; mais tempo não substitui decomposição ou capacidade`,
     'CapabilityRegistry,input.candidates,work_unit.assessment',
     considered,

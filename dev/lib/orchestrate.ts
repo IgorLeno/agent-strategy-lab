@@ -12,6 +12,7 @@ import { closeTaskByLaunchPolicy } from './close-dispatch.js';
 import { experimentFactsOf } from './doctor.js';
 import { resumePendingAcceptance } from './finalize-orchestrated.js';
 import { headSha } from './git.js';
+import { type ControlPlaneHalt, createTechnicalBlocked } from './control-plane-halt.js';
 import { InfraRecoveryError, recoverInfraAttempt } from './infra-recover.js';
 import { withHarnessLock } from './lock.js';
 import { runOrchestrationPreflight, type PreflightResult } from './orchestrate-preflight.js';
@@ -38,7 +39,6 @@ import {
   ROUTINE_RECIPES,
   resolveRoutinePostLaunch,
   resolveRoutinePreflight,
-  type HumanRequiredOutput,
   type RoutinePostLaunchIncident,
 } from './routine-autonomy.js';
 import {
@@ -210,11 +210,14 @@ async function executeReadyTask(
   if (!packet || !selection.task) {
     return { empty: true, stop: { status: selection.status, reason: selection.reason } };
   }
+  // A seleção divergiu do retry operacional pedido: o runtime e a expectativa
+  // discordam sobre QUAL task está em curso. É incoerência de evidência, não
+  // uma decisão de operador — e continua fail-closed, sem lançar nada.
   if (expectedTaskId !== undefined && packet.task_id !== expectedTaskId) {
     return {
       empty: true,
       stop: {
-        status: 'HUMAN_REQUIRED',
+        status: 'INCONSISTENT_EVIDENCE',
         reason: `retry operacional esperava ${expectedTaskId}, mas selecionou ${packet.task_id}`,
       },
     };
@@ -383,20 +386,20 @@ type RoutinePostLaunchHandling =
   | {
       readonly status: 'RETRIED';
       readonly execution: ExecutionResult;
-      readonly human_required: null;
+      readonly halt: null;
     }
   | {
       readonly status: 'RECOVERED';
       readonly execution: null;
-      readonly human_required: null;
+      readonly halt: null;
       readonly incident: RoutinePostLaunchIncident;
       readonly incident_id: string;
       readonly operational_retry_budget: number;
     }
   | {
-      readonly status: 'HUMAN_REQUIRED';
+      readonly status: 'BLOCKED';
       readonly execution: null;
-      readonly human_required: HumanRequiredOutput;
+      readonly halt: ControlPlaneHalt;
     };
 
 type RoutinePostLaunchSettlement =
@@ -404,13 +407,13 @@ type RoutinePostLaunchSettlement =
       readonly status: 'EXECUTED';
       readonly execution: ExecutionResult;
       readonly executions: readonly ExecutionResult[];
-      readonly human_required: null;
+      readonly halt: null;
     }
   | {
-      readonly status: 'HUMAN_REQUIRED';
+      readonly status: 'BLOCKED';
       readonly execution: null;
       readonly executions: readonly ExecutionResult[];
-      readonly human_required: HumanRequiredOutput;
+      readonly halt: ControlPlaneHalt;
     };
 
 function assertNever(value: never): never {
@@ -425,13 +428,17 @@ function needsRoutinePostLaunch(execution: ExecutionResult): boolean {
   );
 }
 
-function operationalRetryHumanRequired(
+/**
+ * Budget operacional esgotado é PROTOCOLO/TOOLING que não converge, não uma
+ * decisão de operador: nada aqui pede autorização, e nada aqui continua.
+ */
+function operationalRetryBlocked(
   incidentId: string,
   reason: string,
   evidencePaths: readonly string[],
-): HumanRequiredOutput {
-  return {
-    status: 'HUMAN_REQUIRED',
+): ControlPlaneHalt {
+  return createTechnicalBlocked({
+    blocker: 'AUTOMATED_REMEDIATION_FAILED',
     incident_id: incidentId,
     decision_needed: 'Revisar o incidente operacional persistente antes de um novo provider launch.',
     why_automation_stopped: reason,
@@ -440,7 +447,7 @@ function operationalRetryHumanRequired(
       'inspecionar manualmente a evidência preservada',
     ],
     evidence_paths: [...evidencePaths],
-  };
+  });
 }
 
 async function handleRoutinePostLaunch(
@@ -482,7 +489,7 @@ async function handleRoutinePostLaunch(
   });
   switch (resolution.status) {
     case 'RETRIED':
-      return { status: 'RETRIED', execution: resolution.retry, human_required: null };
+      return { status: 'RETRIED', execution: resolution.retry, halt: null };
     case 'RECOVERED': {
       const recipe = ROUTINE_RECIPES.find(
         (candidate) =>
@@ -492,17 +499,17 @@ async function handleRoutinePostLaunch(
       return {
         status: 'RECOVERED',
         execution: null,
-        human_required: null,
+        halt: null,
         incident,
         incident_id: resolution.record.incident_id,
         operational_retry_budget: recipe?.retry_budget ?? 0,
       };
     }
-    case 'HUMAN_REQUIRED':
+    case 'BLOCKED':
       return {
-        status: 'HUMAN_REQUIRED',
+        status: 'BLOCKED',
         execution: null,
-        human_required: resolution.human_required,
+        halt: resolution.halt,
       };
     default:
       return assertNever(resolution);
@@ -542,14 +549,14 @@ async function settleRoutinePostLaunch(
           status: 'EXECUTED',
           execution: handled.execution,
           executions,
-          human_required: null,
+          halt: null,
         };
-      case 'HUMAN_REQUIRED':
+      case 'BLOCKED':
         return {
-          status: 'HUMAN_REQUIRED',
+          status: 'BLOCKED',
           execution: null,
           executions,
-          human_required: handled.human_required,
+          halt: handled.halt,
         };
       case 'RECOVERED': {
         operationalRetriesRemaining ??= handled.operational_retry_budget;
@@ -557,10 +564,10 @@ async function settleRoutinePostLaunch(
         recoveredEvidencePaths = handled.incident.evidence_paths;
         if (operationalRetriesRemaining < 1) {
           return {
-            status: 'HUMAN_REQUIRED',
+            status: 'BLOCKED',
             execution: null,
             executions,
-            human_required: operationalRetryHumanRequired(
+            halt: operationalRetryBlocked(
               recoveredIncidentId,
               'budget operacional da recipe esgotado; incidente persistente de protocol/tooling ' +
                 'foi recuperado sem novo retry',
@@ -580,10 +587,10 @@ async function settleRoutinePostLaunch(
         );
         if ('empty' in retry) {
           return {
-            status: 'HUMAN_REQUIRED',
+            status: 'BLOCKED',
             execution: null,
             executions,
-            human_required: operationalRetryHumanRequired(
+            halt: operationalRetryBlocked(
               recoveredIncidentId,
               `retry operacional da mesma task não pôde executar: ${retry.stop.status}: ${retry.stop.reason}`,
               recoveredEvidencePaths,
@@ -599,7 +606,7 @@ async function settleRoutinePostLaunch(
     }
   }
 
-  return { status: 'EXECUTED', execution, executions, human_required: null };
+  return { status: 'EXECUTED', execution, executions, halt: null };
 }
 
 export interface OrchestrateOptions {
@@ -835,7 +842,7 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
   // e nada muda entre o que o pre-flight conferiu e o que o loop lança.
   let exhausted = false;
   let preflight: PreflightResult | null = null;
-  let humanRequired: HumanRequiredOutput | null = null;
+  let controlPlaneHalt: ControlPlaneHalt | null = null;
 
   const acceptance = controlPlane?.acceptance;
 
@@ -851,20 +858,20 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
     // implementer nem reviewer.
     if (acceptance !== undefined) {
       const reviewReconciliation = await controlPlane!.reconcilePendingReviewRejection();
-      if (reviewReconciliation.status === 'HUMAN_REQUIRED') {
-        humanRequired = reviewReconciliation.human_required;
+      if (reviewReconciliation.status === 'HALT') {
+        controlPlaneHalt = reviewReconciliation.halt;
         stop = {
-          status: 'HUMAN_REQUIRED',
-          reason: reviewReconciliation.human_required.why_automation_stopped,
+          status: controlPlaneHalt.status,
+          reason: controlPlaneHalt.why_automation_stopped,
         };
         return;
       }
       const resumed = await resumePendingAcceptance({ paths, loaded, acceptance });
       if (resumed.status === 'BLOCKED') {
-        humanRequired = controlPlane?.snapshot().human_gate ?? null;
+        controlPlaneHalt = controlPlane?.snapshot().halt ?? null;
         stop = {
-          status: 'HUMAN_REQUIRED',
-          reason: humanRequired?.why_automation_stopped ?? resumed.reason,
+          status: controlPlaneHalt?.status ?? 'BLOCKED',
+          reason: controlPlaneHalt?.why_automation_stopped ?? resumed.reason,
         };
         return;
       }
@@ -916,12 +923,13 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
           }),
         });
         currentPreflight = resolution.preflight;
-        humanRequired = resolution.human_required;
-        if (resolution.status === 'HUMAN_REQUIRED') {
-          stop = {
-            status: 'HUMAN_REQUIRED',
-            reason: resolution.human_required?.why_automation_stopped ?? 'decisão humana necessária',
-          };
+        if (resolution.status === 'BLOCKED') {
+          const resolved = resolution.halt;
+          controlPlaneHalt = resolved;
+          // O status da parada vem da PRÓPRIA parada: um incidente de routine
+          // autonomy é bloqueio técnico e não pode se apresentar como decisão
+          // humana só porque o loop parou aqui.
+          stop = { status: resolved.status, reason: resolved.why_automation_stopped };
           preflight = currentPreflight;
           return;
         }
@@ -971,11 +979,11 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
       if (controlPlane === undefined) return 'HALT';
       const followUp = await controlPlane.onRepairExhausted({ taskId, reason: halt.reason });
       if (followUp.status === 'ESCALATED') return 'CONTINUE';
-      if (followUp.status === 'HUMAN_REQUIRED') {
-        humanRequired = followUp.human_required;
+      if (followUp.status === 'HALT') {
+        controlPlaneHalt = followUp.halt;
         stop = {
-          status: 'HUMAN_REQUIRED',
-          reason: followUp.human_required.why_automation_stopped,
+          status: controlPlaneHalt.status,
+          reason: controlPlaneHalt.why_automation_stopped,
         };
         return 'HALT';
       }
@@ -1019,7 +1027,7 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
             escalationContinuation = true;
             continue;
           }
-          stop = stop.status === 'HUMAN_REQUIRED' ? stop : halt;
+          stop = controlPlaneHalt !== null ? stop : halt;
           break;
         }
         if (rec.decision.action !== 'REPAIR_ALLOWED') {
@@ -1072,11 +1080,11 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
           attemptKind: repairMeta === null ? 'FIRST_PASS' : 'REPAIR',
           pinnedProfileId: repairMeta === null ? null : launchProfile,
         });
-        if (decision.outcome === 'HUMAN_REQUIRED') {
-          humanRequired = decision.human_required;
+        if (decision.outcome === 'HALT') {
+          controlPlaneHalt = decision.halt;
           stop = {
-            status: 'HUMAN_REQUIRED',
-            reason: decision.human_required.why_automation_stopped,
+            status: controlPlaneHalt.status,
+            reason: controlPlaneHalt.why_automation_stopped,
           };
           break;
         }
@@ -1110,11 +1118,11 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
           acceptance,
         );
         iterations.push(...settled.executions.map((item) => item.iteration));
-        if (settled.status === 'HUMAN_REQUIRED') {
-          humanRequired = settled.human_required;
+        if (settled.status === 'BLOCKED') {
+          controlPlaneHalt = settled.halt;
           stop = {
-            status: 'HUMAN_REQUIRED',
-            reason: settled.human_required.why_automation_stopped,
+            status: controlPlaneHalt.status,
+            reason: controlPlaneHalt.why_automation_stopped,
           };
           break;
         }
@@ -1132,11 +1140,11 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
           launch: executed.iteration.launch,
           reason: executed.iteration.reason,
         });
-        if (followUp.status === 'HUMAN_REQUIRED') {
-          humanRequired = followUp.human_required;
+        if (followUp.status === 'HALT') {
+          controlPlaneHalt = followUp.halt;
           stop = {
-            status: 'HUMAN_REQUIRED',
-            reason: followUp.human_required.why_automation_stopped,
+            status: controlPlaneHalt.status,
+            reason: controlPlaneHalt.why_automation_stopped,
           };
           break;
         }
@@ -1187,11 +1195,11 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
           attemptKind: 'REPAIR',
           pinnedProfileId: rec.decision.profile_id,
         });
-        if (decision.outcome === 'HUMAN_REQUIRED') {
-          humanRequired = decision.human_required;
+        if (decision.outcome === 'HALT') {
+          controlPlaneHalt = decision.halt;
           stop = {
-            status: 'HUMAN_REQUIRED',
-            reason: decision.human_required.why_automation_stopped,
+            status: controlPlaneHalt.status,
+            reason: controlPlaneHalt.why_automation_stopped,
           };
           break;
         }
@@ -1223,11 +1231,11 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
           acceptance,
         );
         iterations.push(...settled.executions.map((item) => item.iteration));
-        if (settled.status === 'HUMAN_REQUIRED') {
-          humanRequired = settled.human_required;
+        if (settled.status === 'BLOCKED') {
+          controlPlaneHalt = settled.halt;
           stop = {
-            status: 'HUMAN_REQUIRED',
-            reason: settled.human_required.why_automation_stopped,
+            status: controlPlaneHalt.status,
+            reason: controlPlaneHalt.why_automation_stopped,
           };
           break;
         }
@@ -1245,11 +1253,11 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
           launch: repair.iteration.launch,
           reason: repair.iteration.reason,
         });
-        if (followUp.status === 'HUMAN_REQUIRED') {
-          humanRequired = followUp.human_required;
+        if (followUp.status === 'HALT') {
+          controlPlaneHalt = followUp.halt;
           stop = {
-            status: 'HUMAN_REQUIRED',
-            reason: followUp.human_required.why_automation_stopped,
+            status: controlPlaneHalt.status,
+            reason: controlPlaneHalt.why_automation_stopped,
           };
           break;
         }
@@ -1275,7 +1283,7 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
           escalationContinuation = true;
           continue;
         }
-        stop = stop.status === 'HUMAN_REQUIRED' ? stop : repairHalt;
+        stop = controlPlaneHalt !== null ? stop : repairHalt;
         break;
       }
       stop = repair.stop ?? { status: repair.closeKind ?? 'FAIL', reason: repair.iteration.reason };
@@ -1313,7 +1321,7 @@ export async function runOrchestrate(options: OrchestrateOptions): Promise<Orche
       ? null
       : await summarizeProfilesUsed(paths, controlPlane, iterations);
   const payload = {
-    ...(humanRequired ?? {}),
+    ...(controlPlaneHalt ?? {}),
     ...(preflightReport === null
       ? {}
       : {

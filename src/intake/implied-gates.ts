@@ -1,4 +1,4 @@
-import type { HumanGatedCapability } from './index.js';
+import type { HumanAuthority } from './index.js';
 
 /**
  * Classifica INTENÇÃO a partir do texto humano. Isto NÃO autoriza nada:
@@ -25,7 +25,7 @@ const NEGATION_CLAUSE =
   /(?:\b(?:no|not|never|don'?t|do not|does not|doesn'?t|avoid|without|forbidden|prohibited|must not|mustn'?t|cannot|can'?t|shall not|shouldn'?t|should not|ban(?:ned)?|não|nao|nunca|jamais|sem|proibid[oa]s?|evit(?:e|ar|ando)|ved(?:a|ado|ada))\b|\bnem\b)/i;
 
 interface LexicalCategory {
-  readonly capability: HumanGatedCapability;
+  readonly capability: HumanAuthority;
   readonly patterns: readonly RegExp[];
   /**
    * `publish`: a intenção correspondente é publicar no remoto/ref concedido
@@ -118,7 +118,7 @@ function splitClauses(text: string): string[] {
 }
 
 export interface ImpliedGateMatch {
-  readonly capability: HumanGatedCapability;
+  readonly capability: HumanAuthority;
   /** Cláusula que evidencia a intenção afirmativa (nunca uma cláusula negada). */
   readonly evidence: string;
   readonly satisfiable_by: 'publish' | null;
@@ -143,6 +143,6 @@ export function classifyImpliedHumanGatedMatches(rawInstruction: string): readon
   return matches;
 }
 
-export function classifyImpliedHumanGated(rawInstruction: string): readonly HumanGatedCapability[] {
+export function classifyImpliedHumanGated(rawInstruction: string): readonly HumanAuthority[] {
   return [...new Set(classifyImpliedHumanGatedMatches(rawInstruction).map((match) => match.capability))];
 }

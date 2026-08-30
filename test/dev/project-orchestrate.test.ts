@@ -866,8 +866,13 @@ describe('gate humano proporcional e autorização de escopo', () => {
       capability: 'CONFIGURED_SUBSCRIPTION_WORKER',
       quota: { availability: false, provenance: 'provider recusou por limite; janela não resetou' },
     });
-    expect(insufficient.outcome).toBe('HUMAN_REQUIRED');
+    // Continua bloqueando — mas como BLOQUEIO TÉCNICO. Nenhuma autorização
+    // humana faz uma janela de quota resetar antes da hora.
+    expect(insufficient.outcome).toBe('BLOCKED');
+    if (insufficient.outcome !== 'BLOCKED') throw new Error('esperava BLOCKED');
+    expect(insufficient.blocker).toBe('NO_ELIGIBLE_EXECUTOR');
     expect(insufficient.checks.at(-1)?.name).toBe('quota');
+    expect(insufficient.checks.at(-1)?.decision).toBe('BLOCKED');
 
     const unknown = authorizeProjectLaunch({
       ...base,
@@ -955,23 +960,25 @@ describe('failure diagnosis depois do repair esgotado', () => {
     expect(followUp.escalates).toBe(false);
   });
 
-  it('adapta a decisão pura de M79 para o HumanRequiredOutput do harness', () => {
+  it('evidência insuficiente vira BLOQUEIO TÉCNICO, não gate humano fabricado', () => {
     const followUp = resolveFailureFollowUp({
       diagnosis: diagnosis({ classification: 'UNKNOWN_INSUFFICIENT_EVIDENCE' }),
       incidentId: 'INC-9',
     });
     expect(followUp.escalates).toBe(false);
-    expect(followUp.human_required).not.toBeNull();
-    expect(followUp.human_required?.status).toBe('HUMAN_REQUIRED');
-    expect(followUp.human_required?.incident_id).toBe('INC-9');
-    expect(followUp.human_required?.evidence_paths).toEqual([
-      '.dev/attempts/T1/1-abandoned.json',
-    ]);
-    expect(followUp.human_required?.why_automation_stopped).toContain('provenance');
+    expect(followUp.halt).not.toBeNull();
+    // "a automação não sabe o que fazer" nunca foi uma decisão humana.
+    expect(followUp.halt?.status).toBe('BLOCKED');
+    expect(followUp.halt?.incident_id).toBe('INC-9');
+    expect(followUp.halt?.evidence_paths).toEqual(['.dev/attempts/T1/1-abandoned.json']);
+    expect(followUp.halt?.why_automation_stopped).toContain('classification');
+  });
 
+  it('o adapter de M79 preserva a autoridade humana nomeada, sem traduzi-la', () => {
     const direct = toHumanRequiredOutput(
       {
         status: 'HUMAN_REQUIRED',
+        human_authority: 'SCOPE_EXPANSION',
         classification: 'CAPABILITY',
         decision_needed: 'decidir',
         why_automation_stopped: 'parou',
@@ -982,6 +989,8 @@ describe('failure diagnosis depois do repair esgotado', () => {
       'INC-2',
     );
     expect(direct.options).toEqual(['a']);
+    expect(direct.human_authority).toBe('SCOPE_EXPANSION');
+    expect(direct.why_automation_stopped).toContain('provenance');
   });
 });
 

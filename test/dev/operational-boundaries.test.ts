@@ -358,7 +358,9 @@ describe('fronteiras operacionais — Onda 1', () => {
       else process.env['AGENTLAB_FAKE_MODE'] = previousMode;
     }
 
-    expect(result.stop.status, JSON.stringify(result.payload, null, 2)).toBe('HUMAN_REQUIRED');
+    // Saída ilegível do reviewer: nenhum veredito foi emitido. Defeito de
+    // protocolo, não decisão humana — e nada é promovido mesmo assim.
+    expect(result.stop.status, JSON.stringify(result.payload, null, 2)).toBe('BLOCKED');
     expect(result.stop.reason).toContain('review independente não pôde ser concluída');
     expect(result.payload['incident_id']).toEqual(expect.stringContaining('review'));
 
@@ -453,7 +455,11 @@ describe('fronteiras operacionais — Onda 1', () => {
       else process.env['AGENTLAB_FAKE_MODE'] = previousMode;
     }
 
-    expect(result.stop.status, JSON.stringify(result.payload, null, 2)).toBe('HUMAN_REQUIRED');
+    // Reviewer que terminou em exit 1 não emitiu veredito: nada foi decidido,
+    // nem a favor nem contra. É defeito de invocação — nenhuma autorização
+    // humana o conserta — e continuar sem review permanece proibido.
+    expect(result.stop.status, JSON.stringify(result.payload, null, 2)).toBe('BLOCKED');
+    expect(result.payload['blocker']).toBe('PROVIDER_OR_INFRA_FAILURE');
     expect(result.stop.reason).toContain('review independente não pôde ser concluída');
     expect(result.stop.reason).toContain('exit 1');
 
