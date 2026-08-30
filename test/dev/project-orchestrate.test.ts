@@ -1867,6 +1867,165 @@ describe('G — reviewer não ganha autorização mais fraca que o implementer',
     });
   }
 
+  /**
+   * ACCEPT declarado sobre finding que o control plane já classificou como
+   * blocking é contradição estrutural. Ela não vira REJECT por inferência — a
+   * disposição correta não é dedutível da base — e nunca autoriza PASS.
+   */
+  for (const basis of [
+    'ACCEPTANCE_VIOLATION',
+    'CORRECTNESS_DEFECT',
+    'INTEGRITY_VIOLATION',
+    'SECURITY_OR_SAFETY_DEFECT',
+    'REQUIRED_SURFACE_UNVERIFIED',
+    'SCOPE_OR_REQUIREMENT_VIOLATION',
+  ]) {
+    it(`ACCEPT com finding de base ${basis} não é aceito e termina fail-closed`, async () => {
+      const profile = await loadProfile(REPO_ROOT, CODEX_PROFILE_ID);
+      const prompts: string[] = [];
+      const result = await launchProjectReviewer({
+        paths,
+        profile,
+        scope: authorizationScope(),
+        implementerProfileId: CLAUDE_PROFILE_ID,
+        diversityRequirement: 'required',
+        risk: 'critical',
+        credential: { availability: true, provenance: 'probe local provou a assinatura' },
+        quota: { availability: null, provenance: 'quota desconhecida' },
+        packet: reviewerPacketV2(),
+        port: {
+          run: async ({ prompt }) => {
+            prompts.push(prompt);
+            return codexStream({
+              decision: 'ACCEPT',
+              reason: 'candidate aprovado',
+              findings: [finding(basis, 'ADVISORY')],
+              coverage: validCoverage,
+            });
+          },
+        },
+      });
+
+      expect(prompts).toHaveLength(2);
+      expect(prompts[1]).toMatch(/declarou ACCEPT e ao mesmo tempo listou/);
+      expect(prompts[1]).toMatch(new RegExp(basis));
+      expect(result).toMatchObject({
+        outcome: 'REVIEW_UNAVAILABLE',
+        code: 'REVIEW_VERDICT_NOT_PARSEABLE',
+      });
+    });
+  }
+
+  for (const basis of [
+    'OPTIONAL_REFACTOR',
+    'STYLE_PREFERENCE',
+    'PERFORMANCE_NOT_REQUIRED',
+    'UNRELATED_TECHNICAL_DEBT',
+    'OPTIONAL_SCOPE_EXPANSION',
+  ]) {
+    it(`ACCEPT com finding de base ${basis} continua um ACCEPT válido`, async () => {
+      const result = await verdictOf({
+        decision: 'ACCEPT',
+        reason: 'candidate aprovado; a observação é opcional',
+        findings: [finding(basis, 'BLOCKING')],
+        coverage: validCoverage,
+      });
+      expect(result).toMatchObject({
+        outcome: 'ACCEPT',
+        findings: [{ basis, severity: 'ADVISORY' }],
+      });
+    });
+  }
+
+  it('contradição ACCEPT+blocking usa a correção protocolar bounded e aceita o REJECT corrigido', async () => {
+    const profile = await loadProfile(REPO_ROOT, CODEX_PROFILE_ID);
+    const prompts: string[] = [];
+    const outputs = [
+      {
+        decision: 'ACCEPT',
+        reason: 'candidate aprovado',
+        findings: [finding('ACCEPTANCE_VIOLATION', 'ADVISORY')],
+        coverage: validCoverage,
+      },
+      {
+        decision: 'REJECT',
+        rejection_disposition: 'IMPLEMENTATION_DEFECT',
+        reason: 'uma acceptance obrigatória não foi atendida',
+        findings: [finding('ACCEPTANCE_VIOLATION', 'BLOCKING')],
+      },
+    ];
+
+    const result = await launchProjectReviewer({
+      paths,
+      profile,
+      scope: authorizationScope(),
+      implementerProfileId: CLAUDE_PROFILE_ID,
+      diversityRequirement: 'required',
+      risk: 'critical',
+      credential: { availability: true, provenance: 'probe local provou a assinatura' },
+      quota: { availability: null, provenance: 'quota desconhecida' },
+      packet: reviewerPacketV2(),
+      port: {
+        run: async ({ prompt }) => {
+          prompts.push(prompt);
+          return codexStream(outputs[prompts.length - 1]);
+        },
+      },
+    });
+
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toMatch(/CORREÇÃO PROTOCOLAR/);
+    expect(prompts[1]).toMatch(/sem revisar nada de novo/);
+    expect(result).toMatchObject({
+      outcome: 'REJECT',
+      rejection_disposition: 'IMPLEMENTATION_DEFECT',
+      findings: [{ basis: 'ACCEPTANCE_VIOLATION', severity: 'BLOCKING' }],
+    });
+  });
+
+  it('contradição ACCEPT+blocking também é resolvida por um ACCEPT coerente só com advisory', async () => {
+    const profile = await loadProfile(REPO_ROOT, CODEX_PROFILE_ID);
+    const prompts: string[] = [];
+    const outputs = [
+      {
+        decision: 'ACCEPT',
+        reason: 'candidate aprovado',
+        findings: [finding('CORRECTNESS_DEFECT', 'ADVISORY')],
+        coverage: validCoverage,
+      },
+      {
+        decision: 'ACCEPT',
+        reason: 'o ponto anterior era preferência, não defeito',
+        findings: [finding('OPTIONAL_REFACTOR', 'ADVISORY')],
+        coverage: validCoverage,
+      },
+    ];
+
+    const result = await launchProjectReviewer({
+      paths,
+      profile,
+      scope: authorizationScope(),
+      implementerProfileId: CLAUDE_PROFILE_ID,
+      diversityRequirement: 'required',
+      risk: 'critical',
+      credential: { availability: true, provenance: 'probe local provou a assinatura' },
+      quota: { availability: null, provenance: 'quota desconhecida' },
+      packet: reviewerPacketV2(),
+      port: {
+        run: async ({ prompt }) => {
+          prompts.push(prompt);
+          return codexStream(outputs[prompts.length - 1]);
+        },
+      },
+    });
+
+    expect(prompts).toHaveLength(2);
+    expect(result).toMatchObject({
+      outcome: 'ACCEPT',
+      findings: [{ basis: 'OPTIONAL_REFACTOR', severity: 'ADVISORY' }],
+    });
+  });
+
   it('focused re-review aceita finding original corrigido e mantém sugestão não relacionada advisory', async () => {
     const profile = await loadProfile(REPO_ROOT, CODEX_PROFILE_ID);
     let prompt = '';

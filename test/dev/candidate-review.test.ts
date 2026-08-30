@@ -174,6 +174,56 @@ describe('cobertura estrutural da review', () => {
     expect(result.success).toBe(false);
     expect(JSON.stringify(result)).toMatch(/ACCEPT não pode declarar rejection_disposition/);
   });
+
+  function finding(basis: string) {
+    return {
+      basis,
+      relationship: 'CURRENT_CANDIDATE',
+      summary: `finding de base ${basis}`,
+    };
+  }
+
+  // Defesa em profundidade: mesmo que algum caminho futuro escape do adapter,
+  // o registro persistido não pode afirmar aceite e defeito bloqueante juntos.
+  for (const basis of [
+    'ACCEPTANCE_VIOLATION',
+    'CORRECTNESS_DEFECT',
+    'INTEGRITY_VIOLATION',
+    'SECURITY_OR_SAFETY_DEFECT',
+    'REQUIRED_SURFACE_UNVERIFIED',
+    'SCOPE_OR_REQUIREMENT_VIOLATION',
+  ]) {
+    it(`ACCEPT com finding de base ${basis} é recusado pelo schema`, () => {
+      const result = CandidateReviewRecord.safeParse(review({ findings: [finding(basis)] }));
+      expect(result.success).toBe(false);
+      expect(JSON.stringify(result)).toMatch(/ACCEPT não pode conter finding blocking/);
+    });
+  }
+
+  it('ACCEPT com findings advisory e coverage válida continua aceito', () => {
+    const parsed = CandidateReviewRecord.parse(
+      review({ findings: [finding('OPTIONAL_REFACTOR'), finding('STYLE_PREFERENCE')] }),
+    );
+    expect(parsed.decision).toBe('ACCEPT');
+    expect(parsed.findings?.map((entry) => entry.severity)).toEqual(['ADVISORY', 'ADVISORY']);
+  });
+
+  it('REJECT com finding blocking permanece válido', () => {
+    const { coverage: _omitted, ...withoutCoverage } = review();
+    const parsed = CandidateReviewRecord.parse({
+      ...withoutCoverage,
+      decision: 'REJECT',
+      rejection_disposition: 'IMPLEMENTATION_DEFECT',
+      reason: 'o candidate viola o acceptance já declarado',
+      findings: [finding('ACCEPTANCE_VIOLATION')],
+    });
+    expect(parsed.findings?.[0]?.severity).toBe('BLOCKING');
+  });
+
+  it('record histórico sem findings continua legível', () => {
+    const parsed = CandidateReviewRecord.parse(review());
+    expect(parsed.findings).toBeUndefined();
+  });
 });
 
 describe('endereçamento de what_i_did_not_check', () => {

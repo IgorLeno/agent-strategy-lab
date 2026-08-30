@@ -2515,6 +2515,22 @@ export const CandidateReviewRecord = z
         message: 'ACCEPT não pode declarar rejection_disposition',
       });
     }
+    // Defesa em profundidade contra o mesmo contra-senso que o adapter recusa
+    // na leitura do veredito: um ACCEPT persistido não pode carregar finding
+    // cuja base a matriz canônica classifica como BLOCKING. A autoridade é
+    // `isBlockingFinding` — nenhuma segunda tabela aqui. Records históricos
+    // sem `findings` continuam legíveis: lista ausente não afirma nada.
+    if (record.decision === 'ACCEPT') {
+      const blocking = (record.findings ?? []).filter((finding) => isBlockingFinding(finding));
+      if (blocking.length > 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            'ACCEPT não pode conter finding blocking: ' +
+            blocking.map((finding) => finding.basis).join(', '),
+        });
+      }
+    }
     const declared = record.implementer_gaps ?? [];
     const addressed = record.coverage?.handoff_gaps ?? [];
     const addressedGaps = addressed.map((entry) => entry.gap);

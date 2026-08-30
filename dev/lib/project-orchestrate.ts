@@ -1973,6 +1973,33 @@ function assessExtractedReviewerVerdict(parsed: unknown): ReviewerVerdictAssessm
         .join('; ')}`,
     );
   }
+  // ACCEPT declarado junto de um finding cuja BASE o control plane já
+  // classificou como blocking é CONTRADIÇÃO ESTRUTURAL, não metadado
+  // supérfluo: o veredito afirma "nada impede promover" enquanto a própria
+  // lista nomeia o que impede. Ignorar isso porque o modelo também escreveu
+  // ACCEPT devolveria ao texto do reviewer a autoridade que a derivação por
+  // `basis` acabou de tirar dele.
+  //
+  // A contradição NÃO é convertida em REJECT aqui: a disposição correta não é
+  // inferível — SCOPE_OR_REQUIREMENT_VIOLATION e SECURITY_OR_SAFETY_DEFECT
+  // apontam para fronteira humana, não para bounded repair, e inventar essa
+  // classificação seria o control plane decidindo o que só o reviewer (ou uma
+  // pessoa) decide. Pede-se a resolução da contradição — não uma review nova.
+  const blockingFindings =
+    decision === 'ACCEPT' && findings !== null
+      ? findings.filter((finding) => isBlockingFinding(finding))
+      : [];
+  if (blockingFindings.length > 0) {
+    corrections.push(
+      'Seu veredito anterior era contraditório: declarou ACCEPT e ao mesmo tempo listou ' +
+        `finding(s) de base blocking (${blockingFindings
+          .map((finding) => finding.basis)
+          .join(', ')}). ` +
+        'Resolva EXATAMENTE esta contradição, sem revisar nada de novo: ou ACCEPT com ' +
+        'findings apenas advisory e coverage válida, ou REJECT com a rejection_disposition ' +
+        'adequada e reason/findings coerentes com ela.',
+    );
+  }
 
   if (decision !== 'ACCEPT' && decision !== 'REJECT') {
     return { verdict: null, corrections };
@@ -1980,7 +2007,8 @@ function assessExtractedReviewerVerdict(parsed: unknown): ReviewerVerdictAssessm
   const blocking =
     reason === '' ||
     (decision === 'REJECT' && !rejectionDisposition.success) ||
-    (declared === 'ACCEPT' && value?.rejection_disposition !== undefined);
+    (declared === 'ACCEPT' && value?.rejection_disposition !== undefined) ||
+    blockingFindings.length > 0;
   if (blocking) {
     return { verdict: null, corrections };
   }
