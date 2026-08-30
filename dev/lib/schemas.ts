@@ -50,6 +50,7 @@ const identifier = z
   .string()
   .regex(/^[A-Za-z0-9][A-Za-z0-9_-]*$/, 'id deve ser alfanumérico com - ou _');
 const shaHex = z.string().regex(/^[0-9a-f]{40}$/, 'esperado SHA-1 de commit em hex minúsculo');
+const sha256Hex = z.string().regex(/^[0-9a-f]{64}$/);
 
 // ---------------------------------------------------------------------------
 // Validação estruturada: argv, nunca shell — precisa ser re-executável pelo
@@ -610,6 +611,37 @@ export const PreviousAttemptDiagnostics = z
   });
 export type PreviousAttemptDiagnostics = z.infer<typeof PreviousAttemptDiagnostics>;
 
+/**
+ * AVISO DE CONTINUAÇÃO: a working tree do alvo JÁ contém trabalho de um attempt
+ * anterior desta mesma tarefa, reidratado pelo orquestrador a partir do
+ * `RECOVERABLE_UNFINALIZED_PATCH` que sobreviveu à morte do provider.
+ *
+ * É o oposto do `previous_attempt_diagnostics`, e por isso é um campo separado:
+ * lá o patch anterior NÃO está em disco e a solução foi reprovada; aqui o patch
+ * ESTÁ em disco e ninguém o julgou. Colapsar os dois faria o worker tratar
+ * trabalho não avaliado como trabalho reprovado.
+ *
+ * Reaproveitar não é confiar: o conteúdo continua não validado, não é candidate
+ * e não é PASS.
+ */
+export const RecoveredWorkNotice = z
+  .object({
+    source_attempt: z.number().int().positive(),
+    /** Arquivos reidratados, únicos e ordenados. */
+    changed_files: z.array(nonEmpty).min(1),
+    /** Caminhos relativos ao devDir — evidência auditável do que foi aplicado. */
+    patch_path: nonEmpty,
+    patch_sha256: sha256Hex,
+  })
+  .strict()
+  .superRefine((notice, ctx) => {
+    const sorted = [...new Set(notice.changed_files)].sort();
+    if (JSON.stringify(sorted) !== JSON.stringify(notice.changed_files)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'changed_files deve ser único e ordenado' });
+    }
+  });
+export type RecoveredWorkNotice = z.infer<typeof RecoveredWorkNotice>;
+
 export const TaskPacket = z
   .object({
     schema_version: z.literal(DEV_SCHEMA_VERSION),
@@ -624,6 +656,11 @@ export const TaskPacket = z
     previous_handoff: HandoffRecord.nullable(),
     /** Só existe em attempt de reparo; ausente em packet legado e no attempt 1. */
     previous_attempt_diagnostics: PreviousAttemptDiagnostics.optional(),
+    /**
+     * Só existe quando o orquestrador reidratou trabalho de um attempt morto
+     * por falha terminal do provider. Ausente é o caso normal.
+     */
+    recovered_work: RecoveredWorkNotice.optional(),
     generated_at: z.string().datetime(),
   })
   .strict();
@@ -1132,6 +1169,36 @@ export const PreLaunchWorkingTree = z
   });
 export type PreLaunchWorkingTree = z.infer<typeof PreLaunchWorkingTree>;
 
+/**
+ * O que o ORQUESTRADOR colocou no alvo antes deste launch, e de onde veio.
+ *
+ * Sem este registro a reidratação seria indistinguível de trabalho do worker —
+ * e a atribuição do attempt seguinte, que subtrai o que já estava sujo, jogaria
+ * fora justamente o trabalho recuperado. Aqui a proveniência fica explícita:
+ * estes arquivos são desta tarefa, vieram do attempt `source_attempt`, e nunca
+ * foram validados.
+ */
+export const LaunchContinuation = z
+  .object({
+    source_attempt: z.number().int().positive(),
+    /** Arquivos reaplicados no alvo, únicos e ordenados. */
+    rehydrated_files: z.array(nonEmpty).min(1),
+    patch_path: nonEmpty,
+    patch_sha256: sha256Hex,
+    rehydrated_at: z.string().datetime(),
+  })
+  .strict()
+  .superRefine((continuation, ctx) => {
+    const sorted = [...new Set(continuation.rehydrated_files)].sort();
+    if (JSON.stringify(sorted) !== JSON.stringify(continuation.rehydrated_files)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'rehydrated_files deve ser único e ordenado',
+      });
+    }
+  });
+export type LaunchContinuation = z.infer<typeof LaunchContinuation>;
+
 export const LaunchRecord = z
   .object({
     schema_version: z.literal(DEV_SCHEMA_VERSION),
@@ -1224,8 +1291,27 @@ export const LaunchRecord = z
      * inferida.
      */
     pre_launch_working_tree: PreLaunchWorkingTree.nullable().default(null),
+    /**
+     * Trabalho de um attempt anterior reidratado no alvo POR ESTE launch.
+     * `null` no caso normal e em todo record anterior ao campo. Os arquivos
+     * listados aqui aparecem em `pre_launch_working_tree` — eles estavam mesmo
+     * lá antes do spawn —, e é este campo que diz que a origem é a tarefa.
+     */
+    continuation: LaunchContinuation.nullable().default(null),
   })
-  .strict();
+  .strict()
+  .superRefine((record, ctx) => {
+    if (record.continuation === null) return;
+    const present = new Set(record.pre_launch_working_tree?.files ?? []);
+    const missing = record.continuation.rehydrated_files.filter((file) => !present.has(file));
+    if (missing.length > 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `continuação declara arquivo ausente da árvore observada: ${missing.join(', ')}`,
+        path: ['continuation'],
+      });
+    }
+  });
 export type LaunchRecord = z.infer<typeof LaunchRecord>;
 export type LaunchRecordInput = z.input<typeof LaunchRecord>;
 
@@ -2607,7 +2693,6 @@ export type RecoveredFinalizationRecord = z.infer<typeof RecoveredFinalizationRe
 // (.dev/failed-attempts/<task>/attempt-<n>/…)
 // ---------------------------------------------------------------------------
 
-const sha256Hex = z.string().regex(/^[0-9a-f]{64}$/);
 
 /**
  * Como o arquivo chegou à working tree do worker, relativo ao base autorizado.

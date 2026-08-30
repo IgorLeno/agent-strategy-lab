@@ -62,5 +62,7 @@ if (!scenario) {
 // O stream em si é o mesmo fixture usado pelos testes de transporte: um único
 // lugar descreve o que a CLI emite.
 const stream = path.join(process.env.AGENTLAB_REPO_ROOT ?? process.cwd(), 'fixtures', 'fake-claude-stream.mjs');
-const run = spawnSync(process.execPath, [stream], { stdio: 'inherit', env: process.env });
+// O argv do run é repassado: o cenário de continuação precisa enxergar o
+// prompt que o launcher realmente entregou, e não uma reconstrução do teste.
+const run = spawnSync(process.execPath, [stream, ...args], { stdio: 'inherit', env: process.env });
 process.exit(run.status ?? 70);

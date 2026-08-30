@@ -81,6 +81,7 @@ import {
   DEV_SCHEMA_VERSION,
   OpenCodeLaunchTelemetry,
   PoolCapacityRecord,
+  type LaunchContinuation,
   type LaunchRecord,
   type ProcessIdentity,
   type TaskPacket,
@@ -127,6 +128,12 @@ export interface LaunchInput {
   ) => Promise<PoolCapacityObservation | null>;
   /** Snapshot fresco já obtido pelo routing; evita repetir o mesmo read. */
   readonly poolCapacityBefore?: PoolCapacityObservation | null;
+  /**
+   * Trabalho de um attempt anterior que o ORQUESTRADOR já reidratou no alvo.
+   * Chega pronto de `launchTask` em vez de ser resolvido aqui: quem decide
+   * continuar é o passo do lifecycle, e o launcher só registra o que recebeu.
+   */
+  readonly continuation?: LaunchContinuation | null;
 }
 
 export interface LaunchOutcome {
@@ -431,6 +438,7 @@ export async function launchWorker(input: LaunchInput): Promise<LaunchOutcome> {
       ...accessContractFacts(accessProof),
     },
     pre_launch_working_tree: preLaunchWorkingTree,
+    continuation: input.continuation ?? null,
   };
 
   // Registra o lançamento antes de esperar: um crash do orquestrador aqui

@@ -3,6 +3,7 @@ import {
   type HandoffRecord,
   type PlanTask,
   type PreviousAttemptDiagnostics,
+  type RecoveredWorkNotice,
   type TaskPacket,
   parseTaskPacket,
 } from './schemas.js';
@@ -13,6 +14,11 @@ export interface BuildPacketInput {
   readonly previousHandoff: HandoffRecord | null;
   /** Só existe em attempt de reparo; derivado de record, nunca de transcript. */
   readonly previousAttemptDiagnostics?: PreviousAttemptDiagnostics | null;
+  /**
+   * Só existe quando o orquestrador vai reidratar trabalho de um attempt morto
+   * por falha terminal do provider. Derivado de record e do manifesto do bundle.
+   */
+  readonly recoveredWork?: RecoveredWorkNotice | null;
   readonly now?: string;
 }
 
@@ -22,6 +28,10 @@ export interface BuildPacketInput {
  * de transcript, conversa, raciocínio, logs ou reviews históricos: a limpeza de
  * contexto é garantida pelo processo novo, e o packet é o único canal de
  * entrada permitido.
+ *
+ * `recovered_work` segue a mesma regra: é derivado de record, e o que ele
+ * descreve não é opinião do attempt anterior — são os arquivos que o
+ * orquestrador reaplicou no alvo antes do spawn.
  */
 export function buildTaskPacket(input: BuildPacketInput): TaskPacket {
   const { task, baseSha, previousHandoff } = input;
@@ -39,6 +49,7 @@ export function buildTaskPacket(input: BuildPacketInput): TaskPacket {
     ...(input.previousAttemptDiagnostics
       ? { previous_attempt_diagnostics: input.previousAttemptDiagnostics }
       : {}),
+    ...(input.recoveredWork ? { recovered_work: input.recoveredWork } : {}),
     generated_at: input.now ?? new Date().toISOString(),
   });
 }

@@ -24,6 +24,8 @@ import {
   launchRecordPath,
   preservedBundleManifestPath,
   preservedBundlePatchPath,
+  readLaunchRecord,
+  readPacket,
   readInfraFailedAttempt,
   readPreservedBundleManifest,
   readValidationFailedAttempt,
@@ -1057,17 +1059,31 @@ describe('falha terminal do provider com trabalho não finalizado na árvore', (
     expect(recoverable?.attempt).toBe(1);
     expect(recoverable?.changed_files).toEqual(['README.md', 'docs/SEMI_IMPERIUM.md']);
 
+    // dev-next imprime o MESMO aviso que iria no packet do próximo launch —
+    // não uma segunda opinião sobre a evidência.
     const next = await runDevCli('dev-next.ts', ['--repo', sandbox.root], devEnv());
     expect(next.exitCode, next.stderr).toBe(0);
     expect(JSON.parse(next.stdout)).toMatchObject({
       task_id: 'T1',
       attempt: 2,
-      recoverable_unfinalized_patch: {
-        attempt: 1,
+      recovered_work: {
+        source_attempt: 1,
         changed_files: ['README.md', 'docs/SEMI_IMPERIUM.md'],
         patch_path: 'failed-attempts/T1/attempt-1/changes.patch',
       },
     });
+  });
+
+  it('não atravessa um attempt mais recente para pescar patch antigo', async () => {
+    await runFailedAttempt();
+    await workerTouchedTarget();
+    await recover();
+    expect(await readRecoverableUnfinalizedPatch(paths, 'T1', 1)).not.toBeNull();
+
+    // Do ponto de vista de um attempt 3, o attempt 2 é quem responde por si.
+    // Ele não deixou patch recuperável, então não há o que continuar — o patch
+    // do attempt 1 já foi superado por uma tentativa posterior.
+    expect(await readRecoverableUnfinalizedPatch(paths, 'T1', 2)).toBeNull();
   });
 
   it('sujeira PRÉ-EXISTENTE nunca é absorvida no patch recuperável da task', async () => {
@@ -1128,5 +1144,175 @@ describe('falha terminal do provider com trabalho não finalizado na árvore', (
     expect(second.record).toEqual(first.record);
     const manifest = await readPreservedBundleManifest(paths, 'T1', 1);
     expect(manifest?.patch_sha256).toBe(first.record.recoverable_patch?.patch_sha256);
+  });
+});
+
+/**
+ * FLUXO CANÔNICO DE RESUME, ponta a ponta.
+ *
+ * `pnpm lab resume RUNTIME` chega ao próximo launch por
+ * resumeHumanInstruction → runProject/runPlan → runOrchestrate → recuperação
+ * de infra → preflight → executeReadyTask → launchTask. É esse caminho — e não
+ * `dev-next`, que só imprime — que precisa entregar o trabalho recuperado ao
+ * attempt seguinte.
+ *
+ * A prova é de CONTEÚDO: o worker do attempt 2 é uma sonda que não escreve
+ * nada e não recria nada. Ele apenas relata o que encontra no alvo e no
+ * próprio prompt. Se a marca do attempt 1 aparecer no stdout dele, ela chegou
+ * pelo caminho de produção.
+ */
+describe('continuação canônica depois de falha terminal do provider', () => {
+  const PROBE_PROFILE = 'claude-continuation-probe-v1';
+  const MARK = 'WORK_FROM_ATTEMPT_1';
+
+  beforeEach(async () => {
+    await writeFile(
+      path.join(sandbox.root, 'dev', 'profiles', `${PROBE_PROFILE}.yaml`),
+      PROFILE_YAML.replace(`id: ${PROFILE_ID}`, `id: ${PROBE_PROFILE}`).replace(
+        'AGENTLAB_FAKE_STREAM: api-error',
+        'AGENTLAB_FAKE_STREAM: continuation-probe',
+      ),
+      'utf8',
+    );
+    await runGit(sandbox.root, ['add', '-A']);
+    await runGit(sandbox.root, ['commit', '-q', '-m', 'perfil sonda de continuação']);
+    // O plano é relido do disco: o commit acima moveu o HEAD e o baseline.
+    loaded = await loadPlan(paths.planFile);
+    await writeState(
+      paths,
+      buildInitialState(loaded.plan, loaded.planSha256, {
+        baselineSha: await headSha(paths.repoRoot),
+      }),
+    );
+  });
+
+  /** O que o worker do attempt 1 tinha escrito quando o provider morreu. */
+  async function attemptOneWorkOnTarget(): Promise<void> {
+    await writeFile(
+      path.join(sandbox.root, 'README.md'),
+      `# sandbox\n\n${MARK} tracked\n`,
+      'utf8',
+    );
+    await mkdir(path.join(sandbox.root, 'docs'), { recursive: true });
+    await writeFile(
+      path.join(sandbox.root, 'docs', 'CONTINUATION.md'),
+      `${MARK} untracked\n`,
+      'utf8',
+    );
+  }
+
+  async function attemptOneDiedWithWorkOnTarget(): Promise<void> {
+    const { packet } = await prepareNextTask(paths, loaded);
+    if (!packet) throw new Error('nenhuma tarefa selecionada');
+    const result = await launchTask(paths, packet, PROBE_PROFILE);
+    if (result.classification !== 'INFRA_ERROR') {
+      throw new Error(`esperado INFRA_ERROR, veio ${result.classification}: ${result.reason}`);
+    }
+    await attemptOneWorkOnTarget();
+  }
+
+  /** O resume canônico: mesma função que `pnpm lab resume` alcança. */
+  async function canonicalResume(): Promise<{ stdout: string }> {
+    return runDevCli(
+      'dev-orchestrate.ts',
+      ['--repo', sandbox.root, '--profile', PROBE_PROFILE, '--max-iterations', '2'],
+      devEnv(),
+    );
+  }
+
+  it('o attempt 2 do resume canônico recebe o conteúdo produzido no attempt 1', async () => {
+    await attemptOneDiedWithWorkOnTarget();
+
+    await canonicalResume();
+
+    // O que o worker do attempt 2 EFETIVAMENTE viu no alvo.
+    const stdout = await readFile(path.join(paths.logsDir, 'T1.stdout.log'), 'utf8');
+    expect(stdout).toContain(`README.md::# sandbox\\n\\n${MARK} tracked`);
+    expect(stdout).toContain(`docs/CONTINUATION.md::${MARK} untracked`);
+    // E soube que estava continuando, pelo packet e pelo prompt de produção.
+    expect(stdout).toContain('PACKET_RECOVERED_WORK true');
+    expect(stdout).toContain('PROMPT_CONTINUATION_NOTICE true');
+
+    const packet = await readPacket(paths, 'T1');
+    expect(packet?.recovered_work).toMatchObject({
+      source_attempt: 1,
+      changed_files: ['README.md', 'docs/CONTINUATION.md'],
+    });
+    expect(getTaskState(await readState(paths), 'T1').attempts).toBe(2);
+  });
+
+  it('a continuação é rastreável no LaunchRecord do attempt 2', async () => {
+    await attemptOneDiedWithWorkOnTarget();
+    await canonicalResume();
+
+    const launch = await readLaunchRecord(paths, 'T1');
+    expect(launch?.continuation).toMatchObject({
+      source_attempt: 1,
+      rehydrated_files: ['README.md', 'docs/CONTINUATION.md'],
+    });
+    expect(launch?.continuation?.patch_sha256).toBe(
+      (await readInfraFailedAttempt(paths, 'T1', 1))?.recoverable_patch?.patch_sha256,
+    );
+  });
+
+  it('attempt 1 continua INFRA_ERROR arquivado e seu bundle continua append-only', async () => {
+    await attemptOneDiedWithWorkOnTarget();
+    const patchBefore = await readFile(preservedBundlePatchPath(paths, 'T1', 1), 'utf8').catch(
+      () => null,
+    );
+    expect(patchBefore).toBeNull();
+
+    await canonicalResume();
+
+    const archived = await readInfraFailedAttempt(paths, 'T1', 1);
+    expect(archived?.launch_classification).toBe('INFRA_ERROR');
+    expect(archived?.reason_code).toBe('PROVIDER_TERMINAL_FAILURE_WITH_RECOVERABLE_PATCH');
+    const patch = await readFile(preservedBundlePatchPath(paths, 'T1', 1), 'utf8');
+    expect(patch).toContain(MARK);
+    expect(archived?.recoverable_patch?.patch_sha256).toBe(
+      createHash('sha256').update(Buffer.from(patch, 'utf8')).digest('hex'),
+    );
+  });
+
+  it('o attempt 2 não nasce PASS, sem candidate e sem accepted', async () => {
+    await attemptOneDiedWithWorkOnTarget();
+    await canonicalResume();
+
+    const task = getTaskState(await readState(paths), 'T1');
+    expect(task.status).not.toBe('PASS');
+    expect(task.candidate_commit).toBeNull();
+    expect(task.accepted_commit).toBeNull();
+    // Sem completion e sem finalização: validation e review continuam devidos.
+    expect(await exists(completionPath(paths, 'T1'))).toBe(false);
+    expect(await exists(path.join(paths.finalizationsDir, 'T1'))).toBe(false);
+  });
+
+  it('morrer DE NOVO durante a continuação continua recuperável, acumulando o trabalho', async () => {
+    await attemptOneDiedWithWorkOnTarget();
+    await canonicalResume();
+    // O attempt 2 morreu do mesmo jeito e o alvo continua com o trabalho.
+    await writeFile(
+      path.join(sandbox.root, 'docs', 'MORE.md'),
+      'WORK_FROM_ATTEMPT_2\n',
+      'utf8',
+    );
+
+    await canonicalResume();
+
+    // O bundle do attempt 2 carrega o trabalho ACUMULADO: continuar não
+    // fragmenta a evidência em pedaços que ninguém consegue recompor.
+    const second = await readInfraFailedAttempt(paths, 'T1', 2);
+    expect(second?.recoverable_changed_files).toEqual([
+      'README.md',
+      'docs/CONTINUATION.md',
+      'docs/MORE.md',
+    ]);
+    const patch = await readFile(preservedBundlePatchPath(paths, 'T1', 2), 'utf8');
+    expect(patch).toContain(MARK);
+    expect(patch).toContain('WORK_FROM_ATTEMPT_2');
+    // E o bundle do attempt 1 não foi tocado.
+    expect(await readFile(preservedBundlePatchPath(paths, 'T1', 1), 'utf8')).not.toContain(
+      'WORK_FROM_ATTEMPT_2',
+    );
   });
 });

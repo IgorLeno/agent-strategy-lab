@@ -144,12 +144,40 @@ ${HANDOFF_DRAFT_CONTRACT}
 Packet (também em ${io.packetPath}):
 `;
 
-  const full = `${preamble}${repairNotice(packet)}`;
+  const full = `${preamble}${repairNotice(packet)}${continuationNotice(packet)}`;
   const size = Buffer.byteLength(full, 'utf8');
   if (size > MAXIMUM_PREAMBLE_BYTES) {
     throw new Error(`preâmbulo do prompt excede ${MAXIMUM_PREAMBLE_BYTES} bytes: ${size}`);
   }
   return `${full}${canonicalJson(packet)}\n`;
+}
+
+/**
+ * O oposto exato do `repairNotice`: ali o patch anterior NÃO está em disco e a
+ * solução foi reprovada; aqui o patch ESTÁ em disco e ninguém o julgou.
+ *
+ * Sem esta nota o worker encontraria a working tree suja num attempt que ele
+ * acredita começar do base, e a leitura razoável seria "alguém sujou o
+ * repositório" — ou pior, desfazer o trabalho para "partir limpo".
+ */
+function continuationNotice(packet: TaskPacket): string {
+  const recovered = packet.recovered_work;
+  if (recovered === undefined) return '';
+  return `
+CONTINUAÇÃO DE TRABALHO RECUPERADO — leia recovered_work no packet.
+A working tree JÁ contém as mudanças do attempt ${recovered.source_attempt} DESTA MESMA tarefa.
+Aquele attempt foi interrompido por falha terminal do provider antes de
+completar o protocolo: o trabalho existe, mas NÃO foi validado, NÃO foi
+revisado e não é candidate. O orquestrador o reaplicou no alvo para que você
+CONTINUE dele em vez de reimplementar do zero.
+
+Continue a partir do que está lá. Confira, corrija e complete o que faltar —
+nada disso passou por gate nenhum. Ao final, changed_files deve declarar TODOS
+os arquivos do patch entregue, inclusive os que já vieram recuperados.
+Não desfaça o trabalho recuperado para "começar limpo": ele é o ponto de
+partida desta tentativa.
+
+`;
 }
 
 /**
@@ -159,13 +187,21 @@ Packet (também em ${io.packetPath}):
  */
 function repairNotice(packet: TaskPacket): string {
   if (packet.previous_attempt_diagnostics === undefined) return '';
+  // Um attempt de reparo PODE ter trabalho recuperado por cima: o reparo
+  // começou, o provider morreu no meio e o que ele já tinha feito foi
+  // reidratado. Dizer "o patch não está em disco" ali seria falso, e a nota de
+  // continuação é que descreve o que existe na árvore.
+  const patchLocation =
+    packet.recovered_work === undefined
+      ? `O patch anterior NÃO está em disco: a working tree já voltou ao
+base. `
+      : '';
   return `
 ATTEMPT DE REPARO — leia previous_attempt_diagnostics no packet.
 O attempt anterior DESTA MESMA tarefa declarou SUCCESS e foi REPROVADO pela
 validação oficial do orquestrador. failed_validations lista os comandos que
 falharam; validation_logs_dir aponta os logs oficiais no runtime do
-orquestrador. O patch anterior NÃO está em disco: a working tree já voltou ao
-base. Corrija a causa da falha; repetir a mesma solução reprova de novo.
+orquestrador. ${patchLocation}Corrija a causa da falha; repetir a mesma solução reprova de novo.
 
 `;
 }

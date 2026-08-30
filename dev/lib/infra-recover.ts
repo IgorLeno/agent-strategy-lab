@@ -523,8 +523,15 @@ async function preserveUnfinalizedWork(
   const attempt = task.attempts;
   const baseSha = task.base_sha as string;
   const dirty = await workingTreeFiles(paths.repoRoot);
-  const preexisting = new Set(launch.pre_launch_working_tree?.files ?? []);
-  const attributable = dirty.filter((file) => !preexisting.has(file)).sort();
+  // Sujeira ALHEIA = o que já estava lá antes do spawn MENOS o que o próprio
+  // orquestrador reidratou para este attempt. Sem essa subtração, continuar um
+  // trabalho recuperado o transformaria em "sujeira pré-existente" e o attempt
+  // seguinte descartaria justamente o que veio do anterior.
+  const rehydrated = new Set(launch.continuation?.rehydrated_files ?? []);
+  const foreign = new Set(
+    (launch.pre_launch_working_tree?.files ?? []).filter((file) => !rehydrated.has(file)),
+  );
+  const attributable = dirty.filter((file) => !foreign.has(file)).sort();
 
   const existing = await readPreservedBundleManifest(paths, taskId, attempt);
   if (attributable.length === 0) {
@@ -545,7 +552,7 @@ async function preserveUnfinalizedWork(
     return work;
   }
 
-  if (launch.pre_launch_working_tree === null) {
+  if (launch.pre_launch_working_tree === null && launch.continuation === null) {
     throw new InfraRecoveryError(
       `working tree suja (${attributable.join(', ')}) e o LaunchRecord não registra o estado ` +
         'anterior ao spawn: a atribuição do patch não é demonstrável. Preserve as mudanças ' +
@@ -716,19 +723,21 @@ export async function readRecoverableUnfinalizedPatch(
   attempts?: number,
 ): Promise<RecoverableUnfinalizedWork | null> {
   const state = await readState(paths).catch(() => null);
-  const highest = attempts ?? (state === null ? 0 : getTaskState(state, taskId).attempts);
-  for (let attempt = highest; attempt >= 1; attempt -= 1) {
-    const record = await readInfraFailedAttempt(paths, taskId, attempt);
-    if (record === null || record.recoverable_patch === null) continue;
-    return {
-      attempt: record.attempt,
-      ref: record.recoverable_patch,
-      changed_files: record.recoverable_changed_files,
-      patch_fingerprint: record.recoverable_patch_fingerprint as string,
-      alreadyPreserved: true,
-    };
-  }
-  return null;
+  const last = attempts ?? (state === null ? 0 : getTaskState(state, taskId).attempts);
+  if (last < 1) return null;
+  // SOMENTE o attempt imediatamente anterior. Não se atravessa um attempt mais
+  // recente para pescar um patch antigo: aquele attempt já respondeu por si —
+  // com veredito de validation, com review ou com abandono —, e reidratar um
+  // estado que ele próprio superou reintroduziria trabalho descartado.
+  const record = await readInfraFailedAttempt(paths, taskId, last);
+  if (record === null || record.recoverable_patch === null) return null;
+  return {
+    attempt: record.attempt,
+    ref: record.recoverable_patch,
+    changed_files: record.recoverable_changed_files,
+    patch_fingerprint: record.recoverable_patch_fingerprint as string,
+    alreadyPreserved: true,
+  };
 }
 
 /** Reabre a tarefa para um NOVO attempt. `attempts` nunca diminui. */

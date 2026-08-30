@@ -4,6 +4,7 @@ import path from 'node:path';
 import { writeFileOnce } from './atomic.js';
 import { canonicalJson, sha256Hex } from './canonical.js';
 import {
+  applyPreservedPatch,
   currentFileContent,
   pathsPresentIn,
   removeFilesFromIndex,
@@ -11,6 +12,7 @@ import {
   scopedPatch,
   treeEntries,
   treeNameStatus,
+  workingTreeFiles,
   writeScopedTree,
 } from './git.js';
 import type { HarnessPaths } from './paths.js';
@@ -278,6 +280,85 @@ export async function readPreservedBundleRef(
   if (manifest === null) return null;
   const bytes = await readFile(preservedBundleManifestPath(paths, taskId, attempt));
   return refFrom(paths, manifest, bytes);
+}
+
+export interface RehydratePreservedBundleInput {
+  readonly paths: HarnessPaths;
+  readonly taskId: string;
+  readonly attempt: number;
+  /** Base sobre a qual o patch foi tirado E sobre a qual ele será reaplicado. */
+  readonly baseSha: string;
+}
+
+export interface RehydratedBundle {
+  readonly manifest: PreservedChangeBundleManifest;
+  readonly ref: PreservedChangeBundleRef;
+  readonly files: readonly string[];
+}
+
+/**
+ * Devolve ao alvo o patch preservado de um attempt anterior — o inverso exato
+ * de `resetFilesToBase`, com as mesmas garantias e a mesma paranoia.
+ *
+ * Determinismo é VERIFICADO, não presumido: depois de aplicar, a working tree
+ * precisa conter exatamente os arquivos que o manifesto declara, com os hashes
+ * que o manifesto declara. Reidratação parcial ou contaminada é recusada antes
+ * de qualquer worker nascer — um alvo que ninguém consegue descrever é pior do
+ * que um alvo vazio.
+ *
+ * Pré-condição: árvore limpa em `baseSha`. Quem chama já provou isso pela
+ * guarda de base; aqui ela é reconferida porque aplicar patch sobre sujeira
+ * alheia misturaria trabalho de origens diferentes sem deixar rastro.
+ */
+export async function rehydratePreservedBundle(
+  input: RehydratePreservedBundleInput,
+): Promise<RehydratedBundle> {
+  const { paths, taskId, attempt, baseSha } = input;
+  const manifest = await readPreservedBundleManifest(paths, taskId, attempt);
+  if (manifest === null) {
+    throw new FailedAttemptBundleError(`attempt ${attempt} de ${taskId} não tem bundle preservado`);
+  }
+  if (manifest.base_sha !== baseSha) {
+    throw new FailedAttemptBundleError(
+      `bundle do attempt ${attempt} foi tirado de ${manifest.base_sha}, e a base atual é ${baseSha}`,
+    );
+  }
+  for (const file of manifest.changed_files) assertRepoRelativePath(file);
+
+  const patchFile = preservedBundlePatchPath(paths, taskId, attempt);
+  const patchBytes = await readFile(patchFile);
+  if (sha256Hex(patchBytes) !== manifest.patch_sha256) {
+    throw new FailedAttemptBundleError(`patch preservado do attempt ${attempt} foi alterado`);
+  }
+  if ((await workingTreeFiles(paths.repoRoot)).length > 0) {
+    throw new FailedAttemptBundleError('reidratação exige working tree limpa na base do attempt');
+  }
+
+  await applyPreservedPatch(paths.repoRoot, patchFile);
+
+  // O que ficou no alvo tem que ser EXATAMENTE o que o manifesto descreve.
+  const applied = await workingTreeFiles(paths.repoRoot);
+  if (canonicalJson(applied) !== canonicalJson([...manifest.changed_files])) {
+    throw new FailedAttemptBundleError(
+      `reidratação produziu [${applied.join(', ')}], manifesto declara [${manifest.changed_files.join(', ')}]`,
+    );
+  }
+  for (const file of manifest.files) {
+    if (file.status === 'deleted') continue;
+    const content = await currentFileContent(paths.repoRoot, file.path);
+    if (content === null || content.sha256 !== file.sha256) {
+      throw new FailedAttemptBundleError(
+        `reidratação divergiu do manifesto em ${file.path}`,
+      );
+    }
+  }
+
+  const manifestFile = preservedBundleManifestPath(paths, taskId, attempt);
+  return {
+    manifest,
+    ref: refFrom(paths, manifest, await readFile(manifestFile)),
+    files: manifest.changed_files,
+  };
 }
 
 export interface ResetFilesToBaseInput {

@@ -18,11 +18,23 @@ import {
   type PoolCapacityLaunchContext,
 } from './pool-capacity-observer.js';
 import { loadProfile } from './profile.js';
-import { readHandoff, writePacket } from './records.js';
+import {
+  readHandoff,
+  readInfraFailedAttempt,
+  readPreservedBundleManifest,
+  writePacket,
+} from './records.js';
+import { readRecoverableUnfinalizedPatch } from './infra-recover.js';
+import { rehydratePreservedBundle } from './failed-attempt-bundle.js';
 import { readPreviousAttemptDiagnostics } from './retry-failed.js';
 import { selectNextTask, type Selection } from './select.js';
 import { getTaskState, readState, withTaskState, writeState } from './state.js';
-import type { TaskPacket } from './schemas.js';
+import type {
+  DevelopmentState,
+  LaunchContinuation,
+  RecoveredWorkNotice,
+  TaskPacket,
+} from './schemas.js';
 
 /**
  * Passos que orquestrador e CLIs individuais compartilham. Cada passo faz uma
@@ -63,14 +75,102 @@ export async function prepareNextTask(
     selection.task.id,
     getTaskState(state, selection.task.id).attempts,
   );
+  const baseSha = await headSha(paths.repoRoot);
+  // Trabalho que sobreviveu à morte do provider num attempt anterior. Só entra
+  // quando ele foi tirado EXATAMENTE desta base: um bundle de outra base não
+  // reaplica, e oferecer o que não se sabe aplicar seria promessa vazia.
+  const recoveredWork = await resolveRecoveredWork(paths, selection.task.id, state, baseSha);
   const packet = buildTaskPacket({
     task: selection.task,
-    baseSha: await headSha(paths.repoRoot),
+    baseSha,
     previousHandoff,
     previousAttemptDiagnostics,
+    recoveredWork,
   });
   await writePacket(paths, packet);
   return { selection, packet, baseViolation: null };
+}
+
+/**
+ * O aviso de continuação que vai no packet, derivado do
+ * `InfraFailedAttemptRecord` e do manifesto — nunca de estado em memória.
+ *
+ * `null` quando não há patch recuperável, quando ele foi tirado de outra base,
+ * ou quando o bundle sumiu. Nos três casos o attempt seguinte simplesmente
+ * começa do base, como sempre começou: continuar é uma oportunidade provada,
+ * não uma obrigação que possa travar a tarefa.
+ */
+export async function resolveRecoveredWork(
+  paths: HarnessPaths,
+  taskId: string,
+  state: DevelopmentState,
+  baseSha: string,
+): Promise<RecoveredWorkNotice | null> {
+  const recoverable = await readRecoverableUnfinalizedPatch(
+    paths,
+    taskId,
+    getTaskState(state, taskId).attempts,
+  );
+  if (recoverable === null) return null;
+  const manifest = await readPreservedBundleManifest(paths, taskId, recoverable.attempt);
+  if (manifest === null || manifest.base_sha !== baseSha) return null;
+  return {
+    source_attempt: recoverable.attempt,
+    changed_files: [...recoverable.changed_files],
+    patch_path: recoverable.ref.patch_path,
+    patch_sha256: recoverable.ref.patch_sha256,
+  };
+}
+
+/**
+ * Reaplica no alvo o trabalho que o packet declara, e devolve a proveniência
+ * para o LaunchRecord.
+ *
+ * O packet é o canal de entrada, mas não é a autoridade sobre os bytes: o
+ * `InfraFailedAttemptRecord` do attempt de origem é. Um packet persistido antes
+ * e relançado depois não pode fazer o orquestrador aplicar um patch que a
+ * evidência não confirma.
+ */
+async function rehydrateRecoveredWork(
+  paths: HarnessPaths,
+  packet: TaskPacket,
+): Promise<LaunchContinuation | null> {
+  const notice = packet.recovered_work;
+  if (notice === undefined) return null;
+  const archived = await readInfraFailedAttempt(paths, packet.task_id, notice.source_attempt);
+  if (archived?.recoverable_patch == null) {
+    throw new ContinuationRehydrationError(
+      `packet de ${packet.task_id} declara trabalho recuperado do attempt ${notice.source_attempt}, ` +
+        'mas não existe InfraFailedAttemptRecord com patch recuperável',
+    );
+  }
+  if (archived.recoverable_patch.patch_sha256 !== notice.patch_sha256) {
+    throw new ContinuationRehydrationError(
+      `packet de ${packet.task_id} aponta para um patch que não é o do attempt ${notice.source_attempt}`,
+    );
+  }
+  let rehydrated;
+  try {
+    rehydrated = await rehydratePreservedBundle({
+      paths,
+      taskId: packet.task_id,
+      attempt: notice.source_attempt,
+      baseSha: packet.base_sha,
+    });
+  } catch (error) {
+    throw new ContinuationRehydrationError(
+      `reidratação do attempt ${notice.source_attempt} de ${packet.task_id} falhou: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+  return {
+    source_attempt: notice.source_attempt,
+    rehydrated_files: [...rehydrated.files],
+    patch_path: rehydrated.ref.patch_path,
+    patch_sha256: rehydrated.ref.patch_sha256,
+    rehydrated_at: new Date().toISOString(),
+  };
 }
 
 export interface LaunchStepResult {
@@ -83,8 +183,21 @@ export interface LaunchStepResult {
  * Recusa ANTES do spawn: nenhum provider nasceu, nenhum attempt foi consumido,
  * nenhum LaunchRecord existe. Não é INFRA_ERROR — a tarefa permanece READY.
  */
+/**
+ * A reidratação do trabalho recuperado falhou. Nenhum provider nasceu e nenhum
+ * attempt foi consumido: é blocker operacional, não veredito de infraestrutura.
+ * O alvo continua no base e o bundle preservado continua intacto.
+ */
+export class ContinuationRehydrationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ContinuationRehydrationError';
+  }
+}
+
 function isPreSpawnRefusal(error: unknown): boolean {
   return (
+    error instanceof ContinuationRehydrationError ||
     error instanceof InboxProvenanceError ||
     error instanceof BillingPreflightError ||
     error instanceof UsageMeasurementSafetyError ||
@@ -139,6 +252,12 @@ export async function launchTask(
       `packet de ${taskId} tem base_sha ${packet.base_sha}, diferente do HEAD atual — gere o packet de novo`,
     );
   }
+  // REIDRATAÇÃO, depois das guardas de base e antes de qualquer efeito de
+  // provider: a guarda exige árvore limpa no base, e é exatamente sobre essa
+  // árvore que o patch do attempt anterior reaplica. Falhar aqui deixa a tarefa
+  // READY, sem consumir attempt e sem tocar o bundle preservado.
+  const continuation = await rehydrateRecoveredWork(paths, packet);
+
   const startedAt = new Date().toISOString();
   const capacity =
     poolCapacity ?? {
@@ -157,6 +276,7 @@ export async function launchTask(
         ? { poolCapacityBefore: capacity.before }
         : {}),
       poolCapacityProbe: capacity.probe,
+      continuation,
       ...(machineSafetyCeilingSecondsOverride === undefined
         ? {}
         : { machineSafetyCeilingSecondsOverride }),

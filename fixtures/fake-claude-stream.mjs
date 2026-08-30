@@ -4,6 +4,8 @@
 // real de spawn, leitura de stdout e classificação do launcher.
 //
 // O cenário vem de AGENTLAB_FAKE_STREAM.
+import { readFileSync } from 'node:fs';
+
 const scenario = process.env.AGENTLAB_FAKE_STREAM ?? 'success';
 
 const SESSION = '11111111-2222-3333-4444-555555555555';
@@ -126,6 +128,47 @@ if (scenario === 'json-api-error') {
     );
     process.exitCode = 1;
     break;
+
+  // SONDA DE CONTINUAÇÃO. Não escreve nada e não recria nada: apenas reporta o
+  // que encontra no alvo e no próprio prompt, para que o teste possa provar
+  // que o trabalho do attempt anterior chegou até aqui pelo caminho de
+  // produção. Termina em falha de provider, então uma segunda morte durante a
+  // continuação continua sendo exercitada.
+  case 'continuation-probe': {
+    const seen = ['README.md', 'docs/CONTINUATION.md'].map((file) => {
+      try {
+        return `${file}::${readFileSync(file, 'utf8').trim()}`;
+      } catch {
+        return `${file}::ABSENT`;
+      }
+    });
+    const prompt = process.argv.slice(2).join('\n');
+    write({
+      type: 'assistant',
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: `WORKTREE_SEEN ${seen.join(' | ')}` },
+          { type: 'text', text: `PACKET_RECOVERED_WORK ${prompt.includes('"recovered_work"')}` },
+          { type: 'text', text: `PROMPT_CONTINUATION_NOTICE ${prompt.includes('CONTINUAÇÃO DE TRABALHO RECUPERADO')}` },
+        ],
+      },
+    });
+    write(
+      result({
+        is_error: true,
+        terminal_reason: 'api_error',
+        api_error_status: null,
+        result: 'API Error: Unable to connect to API (ENOTFOUND)',
+        num_turns: 1,
+        total_cost_usd: 0,
+        usage: { input_tokens: 0, output_tokens: 0 },
+        modelUsage: {},
+      }),
+    );
+    process.exitCode = 1;
+    break;
+  }
 
   // Falha terminal SEM `is_error`: motivo terminal desconhecido cai do lado
   // seguro sem que ninguém precise acrescentá-lo a uma lista.
