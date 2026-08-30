@@ -2099,6 +2099,307 @@ describe('G — reviewer não ganha autorização mais fraca que o implementer',
     expect(result).toMatchObject({ outcome: 'REJECT' });
   });
 
+  /**
+   * Autoridade efetiva é `basis` E `relationship` E modo — conjunção, nunca
+   * disjunção. Um relationship grave não promove base advisory, e uma base
+   * capaz de bloquear não reprova trabalho que ela não toca.
+   */
+  async function verdictInMode(
+    mode: 'GENERAL' | 'FOCUSED_REREVIEW',
+    payload: Record<string, unknown>,
+  ) {
+    const profile = await loadProfile(REPO_ROOT, CODEX_PROFILE_ID);
+    return launchProjectReviewer({
+      paths,
+      profile,
+      scope: authorizationScope(),
+      implementerProfileId: CLAUDE_PROFILE_ID,
+      diversityRequirement: 'required',
+      risk: 'critical',
+      credential: { availability: true, provenance: 'probe local provou a assinatura' },
+      quota: { availability: null, provenance: 'quota desconhecida' },
+      packet: reviewerPacketV2(mode),
+      port: { run: async () => codexStream(payload) },
+    });
+  }
+
+  function scopedFinding(basis: string, relationship: string) {
+    return {
+      basis,
+      relationship,
+      summary: `finding ${basis} (${relationship})`,
+    };
+  }
+
+  function rejectOf(basis: string, relationship: string) {
+    return {
+      decision: 'REJECT',
+      rejection_disposition: 'IMPLEMENTATION_DEFECT',
+      reason: 'defeito descrito pelo reviewer',
+      findings: [scopedFinding(basis, relationship)],
+      coverage: validCoverage,
+    };
+  }
+
+  const BLOCKING_IN_SCOPE: readonly (readonly [
+    'GENERAL' | 'FOCUSED_REREVIEW',
+    string,
+    string,
+  ])[] = [
+    ['GENERAL', 'ACCEPTANCE_VIOLATION', 'CURRENT_CANDIDATE'],
+    ['GENERAL', 'CORRECTNESS_DEFECT', 'NEW_CRITICAL_DEFECT'],
+    ['FOCUSED_REREVIEW', 'ACCEPTANCE_VIOLATION', 'ORIGINAL_FINDING'],
+    ['FOCUSED_REREVIEW', 'ACCEPTANCE_VIOLATION', 'AFFECTED_ACCEPTANCE'],
+    ['FOCUSED_REREVIEW', 'CORRECTNESS_DEFECT', 'REPAIR_REGRESSION'],
+    ['FOCUSED_REREVIEW', 'SECURITY_OR_SAFETY_DEFECT', 'NEW_CRITICAL_DEFECT'],
+  ];
+
+  for (const [mode, basis, relationship] of BLOCKING_IN_SCOPE) {
+    it(`${mode} + ${basis} + ${relationship} reprova`, async () => {
+      const result = await verdictInMode(mode, rejectOf(basis, relationship));
+      expect(result).toMatchObject({
+        outcome: 'REJECT',
+        rejection_disposition: 'IMPLEMENTATION_DEFECT',
+        findings: [{ basis, relationship }],
+      });
+    });
+  }
+
+  const ADVISORY_OUT_OF_SCOPE: readonly (readonly [
+    'GENERAL' | 'FOCUSED_REREVIEW',
+    string,
+    string,
+  ])[] = [
+    // Defeito real de OUTRO subsistema não reinicia esta work unit.
+    ['GENERAL', 'CORRECTNESS_DEFECT', 'UNRELATED'],
+    ['FOCUSED_REREVIEW', 'CORRECTNESS_DEFECT', 'UNRELATED'],
+    // Rótulo genérico da review geral não reabre o candidate inteiro na focada.
+    ['FOCUSED_REREVIEW', 'CORRECTNESS_DEFECT', 'CURRENT_CANDIDATE'],
+    ['FOCUSED_REREVIEW', 'ACCEPTANCE_VIOLATION', 'CURRENT_CANDIDATE'],
+    // Relationship grave não promove base advisory.
+    ['GENERAL', 'OPTIONAL_REFACTOR', 'NEW_CRITICAL_DEFECT'],
+    ['FOCUSED_REREVIEW', 'OPTIONAL_REFACTOR', 'NEW_CRITICAL_DEFECT'],
+  ];
+
+  for (const [mode, basis, relationship] of ADVISORY_OUT_OF_SCOPE) {
+    it(`${mode} + ${basis} + ${relationship} não cria reparo do trabalho atual`, async () => {
+      const result = await verdictInMode(mode, rejectOf(basis, relationship));
+      // O finding é PRESERVADO como evidência; o que ele não faz é reprovar.
+      expect(result).toMatchObject({
+        outcome: 'ACCEPT',
+        rejection_disposition: null,
+        findings: [{ basis, relationship }],
+      });
+    });
+  }
+
+  it('ACCEPT com defeito de correctness UNRELATED não é contradição e não pede correção', async () => {
+    const profile = await loadProfile(REPO_ROOT, CODEX_PROFILE_ID);
+    const prompts: string[] = [];
+    const result = await launchProjectReviewer({
+      paths,
+      profile,
+      scope: authorizationScope(),
+      implementerProfileId: CLAUDE_PROFILE_ID,
+      diversityRequirement: 'required',
+      risk: 'critical',
+      credential: { availability: true, provenance: 'probe local provou a assinatura' },
+      quota: { availability: null, provenance: 'quota desconhecida' },
+      packet: reviewerPacketV2(),
+      port: {
+        run: async ({ prompt }) => {
+          prompts.push(prompt);
+          return codexStream({
+            decision: 'ACCEPT',
+            reason: 'o candidate está correto; o defeito citado é de outro subsistema',
+            findings: [scopedFinding('CORRECTNESS_DEFECT', 'UNRELATED')],
+            coverage: validCoverage,
+          });
+        },
+      },
+    });
+
+    expect(prompts).toHaveLength(1);
+    expect(result).toMatchObject({ outcome: 'ACCEPT' });
+  });
+
+  it('ACCEPT com finding blocking EM ESCOPO continua fail-closed', async () => {
+    const profile = await loadProfile(REPO_ROOT, CODEX_PROFILE_ID);
+    const prompts: string[] = [];
+    const result = await launchProjectReviewer({
+      paths,
+      profile,
+      scope: authorizationScope(),
+      implementerProfileId: CLAUDE_PROFILE_ID,
+      diversityRequirement: 'required',
+      risk: 'critical',
+      credential: { availability: true, provenance: 'probe local provou a assinatura' },
+      quota: { availability: null, provenance: 'quota desconhecida' },
+      packet: reviewerPacketV2(),
+      port: {
+        run: async ({ prompt }) => {
+          prompts.push(prompt);
+          return codexStream({
+            decision: 'ACCEPT',
+            reason: 'candidate aprovado',
+            findings: [scopedFinding('ACCEPTANCE_VIOLATION', 'CURRENT_CANDIDATE')],
+            coverage: validCoverage,
+          });
+        },
+      },
+    });
+
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toMatch(/declarou ACCEPT e ao mesmo tempo listou/);
+    expect(result).toMatchObject({
+      outcome: 'REVIEW_UNAVAILABLE',
+      code: 'REVIEW_VERDICT_NOT_PARSEABLE',
+    });
+  });
+
+  it('o prompt focado nomeia os relationships que reprovam e exclui CURRENT_CANDIDATE', async () => {
+    const profile = await loadProfile(REPO_ROOT, CODEX_PROFILE_ID);
+    let prompt = '';
+    await launchProjectReviewer({
+      paths,
+      profile,
+      scope: authorizationScope(),
+      implementerProfileId: CLAUDE_PROFILE_ID,
+      diversityRequirement: 'required',
+      risk: 'critical',
+      credential: { availability: true, provenance: 'probe local provou a assinatura' },
+      quota: { availability: null, provenance: 'quota desconhecida' },
+      packet: reviewerPacketV2('FOCUSED_REREVIEW'),
+      port: {
+        run: async (input) => {
+          prompt = input.prompt;
+          return codexStream({
+            decision: 'ACCEPT',
+            reason: 'finding original corrigido',
+            coverage: validCoverage,
+          });
+        },
+      },
+    });
+
+    expect(prompt).toMatch(/ORIGINAL_FINDING,/);
+    expect(prompt).toMatch(/CURRENT_CANDIDATE é o/);
+  });
+
+  /**
+   * `"findings":[]` é declaração estruturada VÁLIDA de ZERO defeito
+   * bloqueante. Ela não pode autorizar reparo pelo texto livre do `reason`.
+   */
+  it('REJECT IMPLEMENTATION_DEFECT com findings=[] não autoriza reparo e pede correção bounded', async () => {
+    const profile = await loadProfile(REPO_ROOT, CODEX_PROFILE_ID);
+    const prompts: string[] = [];
+    const result = await launchProjectReviewer({
+      paths,
+      profile,
+      scope: authorizationScope(),
+      implementerProfileId: CLAUDE_PROFILE_ID,
+      diversityRequirement: 'required',
+      risk: 'critical',
+      credential: { availability: true, provenance: 'probe local provou a assinatura' },
+      quota: { availability: null, provenance: 'quota desconhecida' },
+      packet: reviewerPacketV2(),
+      port: {
+        run: async ({ prompt }) => {
+          prompts.push(prompt);
+          return codexStream({
+            decision: 'REJECT',
+            rejection_disposition: 'IMPLEMENTATION_DEFECT',
+            reason: 'tem alguma coisa errada aí',
+            findings: [],
+          });
+        },
+      },
+    });
+
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toMatch(/"findings":\[\]/);
+    expect(result).toMatchObject({
+      outcome: 'REVIEW_UNAVAILABLE',
+      code: 'REVIEW_VERDICT_NOT_PARSEABLE',
+    });
+  });
+
+  it('findings=[] corrigido para um finding em escopo volta ao caminho normal de REJECT', async () => {
+    const profile = await loadProfile(REPO_ROOT, CODEX_PROFILE_ID);
+    const prompts: string[] = [];
+    const outputs = [
+      {
+        decision: 'REJECT',
+        rejection_disposition: 'IMPLEMENTATION_DEFECT',
+        reason: 'tem alguma coisa errada aí',
+        findings: [],
+      },
+      {
+        decision: 'REJECT',
+        rejection_disposition: 'IMPLEMENTATION_DEFECT',
+        reason: 'aceitação declarada não foi atendida',
+        findings: [scopedFinding('ACCEPTANCE_VIOLATION', 'CURRENT_CANDIDATE')],
+      },
+    ];
+    const result = await launchProjectReviewer({
+      paths,
+      profile,
+      scope: authorizationScope(),
+      implementerProfileId: CLAUDE_PROFILE_ID,
+      diversityRequirement: 'required',
+      risk: 'critical',
+      credential: { availability: true, provenance: 'probe local provou a assinatura' },
+      quota: { availability: null, provenance: 'quota desconhecida' },
+      packet: reviewerPacketV2(),
+      port: {
+        run: async ({ prompt }) => {
+          prompts.push(prompt);
+          return codexStream(outputs[prompts.length - 1]);
+        },
+      },
+    });
+
+    expect(prompts).toHaveLength(2);
+    expect(result).toMatchObject({
+      outcome: 'REJECT',
+      rejection_disposition: 'IMPLEMENTATION_DEFECT',
+      findings: [{ basis: 'ACCEPTANCE_VIOLATION', severity: 'BLOCKING' }],
+    });
+  });
+
+  it('REJECT IMPLEMENTATION_DEFECT sem campo findings continua conservador e não pede correção', async () => {
+    const profile = await loadProfile(REPO_ROOT, CODEX_PROFILE_ID);
+    const prompts: string[] = [];
+    const result = await launchProjectReviewer({
+      paths,
+      profile,
+      scope: authorizationScope(),
+      implementerProfileId: CLAUDE_PROFILE_ID,
+      diversityRequirement: 'required',
+      risk: 'critical',
+      credential: { availability: true, provenance: 'probe local provou a assinatura' },
+      quota: { availability: null, provenance: 'quota desconhecida' },
+      packet: reviewerPacketV2(),
+      port: {
+        run: async ({ prompt }) => {
+          prompts.push(prompt);
+          return codexStream({
+            decision: 'REJECT',
+            rejection_disposition: 'IMPLEMENTATION_DEFECT',
+            reason: 'veredito sem contrato de findings',
+          });
+        },
+      },
+    });
+
+    expect(prompts).toHaveLength(1);
+    expect(result).toMatchObject({
+      outcome: 'REJECT',
+      rejection_disposition: 'IMPLEMENTATION_DEFECT',
+      findings: null,
+    });
+  });
+
   it('Claude reviewer em target externo prova o argv resolvido e alcança a porta do provider', async () => {
     const target = await makeTemporaryDir();
     const externalPaths = resolveHarnessPaths(target, { profileCatalogRoot: REPO_ROOT });

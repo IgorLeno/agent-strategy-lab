@@ -79,6 +79,7 @@ import {
   ReviewFinding,
   isBlockingFinding,
   ReviewRejectionDisposition,
+  type ReviewMode,
   type HandoffConfidenceLevel,
   type ReviewFinding as ReviewFindingType,
   type ReviewParseFailureOutcome,
@@ -1748,7 +1749,7 @@ export interface ProjectReviewPacket {
   readonly focused_review?: ProjectFocusedReviewScope;
 }
 
-export type ProjectReviewMode = 'GENERAL' | 'FOCUSED_REREVIEW';
+export type ProjectReviewMode = ReviewMode;
 
 /**
  * Fatos DURÁVEIS do REJECT que autorizou o bounded repair. Nunca transcript e
@@ -1842,6 +1843,11 @@ function reviewFindingsContract(): readonly string[] {
     'se exige decisão humana.',
     'Um REJECT cujos findings são todos advisory não reprova nada: se você só tem',
     'findings advisory, responda ACCEPT com a coverage exigida e registre as observações.',
+    'relationship também é autoridade, e as duas dimensões precisam concordar: uma base',
+    'advisory NÃO vira gate porque o relationship soa grave, e um defeito real de OUTRO',
+    'subsistema (relationship UNRELATED) NÃO reprova este trabalho — ele fica gravado',
+    'como evidência advisory para trabalho futuro. Um REJECT IMPLEMENTATION_DEFECT com',
+    '"findings":[] não autoriza reparo nenhum: nomeie o finding ou responda ACCEPT.',
   ];
 }
 
@@ -1864,6 +1870,10 @@ function focusedReviewContract(packet: ProjectReviewPacket): readonly string[] {
     'Você NÃO deve revisar o repositório inteiro nem reavaliar a arquitetura do zero.',
     'Sugestão nova e não relacionada, não crítica, é ADVISORY e não reprova.',
     'Defeito genuinamente INTRODUZIDO pelo reparo continua BLOCKING.',
+    'Aqui só reprovam os relationships destas quatro perguntas: ORIGINAL_FINDING,',
+    'AFFECTED_ACCEPTANCE, REPAIR_REGRESSION e NEW_CRITICAL_DEFECT. CURRENT_CANDIDATE é o',
+    'rótulo da review geral e não reabre o candidate inteiro aqui: se o problema veio do',
+    'reparo, ele é REPAIR_REGRESSION ou NEW_CRITICAL_DEFECT.',
   ];
 }
 
@@ -1903,7 +1913,10 @@ interface ReviewerVerdictAssessment {
   readonly corrections: readonly string[];
 }
 
-function assessExtractedReviewerVerdict(parsed: unknown): ReviewerVerdictAssessment {
+function assessExtractedReviewerVerdict(
+  parsed: unknown,
+  mode: ReviewMode,
+): ReviewerVerdictAssessment {
   const value = parsed as {
     decision?: unknown;
     rejection_disposition?: unknown;
@@ -1942,7 +1955,33 @@ function assessExtractedReviewerVerdict(parsed: unknown): ReviewerVerdictAssessm
     declaredDisposition.data === 'IMPLEMENTATION_DEFECT' &&
     findings !== null &&
     findings.length > 0 &&
-    !findings.some((finding) => isBlockingFinding(finding));
+    !findings.some((finding) => isBlockingFinding(finding, mode));
+  // Lista de findings EXPLICITAMENTE vazia é uma declaração estruturada
+  // válida — e o que ela declara é ZERO defeito bloqueante. Um REJECT de
+  // defeito de implementação assim não pode autorizar bounded repair: o escopo
+  // do reparo e o da re-review focada saem dos findings blocking, e derivá-lo
+  // da prosa do `reason` devolveria ao texto do modelo a autoridade que a
+  // derivação estruturada acabou de tirar dele.
+  //
+  // Não é convertido em ACCEPT nem em REJECT por inferência: pede-se a UMA
+  // correção protocolar bounded já existente. Findings AUSENTES ou malformados
+  // (`findings === null`) seguem conservadores como antes — record histórico
+  // não afirma "nenhum finding".
+  const emptyFindingsImplementationReject =
+    declared === 'REJECT' &&
+    declaredDisposition.success &&
+    declaredDisposition.data === 'IMPLEMENTATION_DEFECT' &&
+    findings !== null &&
+    findings.length === 0;
+  if (emptyFindingsImplementationReject) {
+    corrections.push(
+      'Seu REJECT anterior era IMPLEMENTATION_DEFECT com "findings":[] — uma lista vazia ' +
+        'declara ZERO defeito bloqueante, e o reason em texto livre não autoriza reparo. ' +
+        'Responda de novo: ou REJECT com ao menos um finding de base capaz de bloquear e ' +
+        'relationship em escopo, com a rejection_disposition adequada, ou ACCEPT com ' +
+        'coverage válida e os achados opcionais como findings advisory.',
+    );
+  }
   const decision = advisoryOnlyReject ? 'ACCEPT' : declared;
   if (decision !== 'ACCEPT' && decision !== 'REJECT') {
     corrections.push(
@@ -1987,7 +2026,7 @@ function assessExtractedReviewerVerdict(parsed: unknown): ReviewerVerdictAssessm
   // pessoa) decide. Pede-se a resolução da contradição — não uma review nova.
   const blockingFindings =
     decision === 'ACCEPT' && findings !== null
-      ? findings.filter((finding) => isBlockingFinding(finding))
+      ? findings.filter((finding) => isBlockingFinding(finding, mode))
       : [];
   if (blockingFindings.length > 0) {
     corrections.push(
@@ -2008,6 +2047,7 @@ function assessExtractedReviewerVerdict(parsed: unknown): ReviewerVerdictAssessm
     reason === '' ||
     (decision === 'REJECT' && !rejectionDisposition.success) ||
     (declared === 'ACCEPT' && value?.rejection_disposition !== undefined) ||
+    emptyFindingsImplementationReject ||
     blockingFindings.length > 0;
   if (blocking) {
     return { verdict: null, corrections };
@@ -2253,7 +2293,10 @@ export async function launchProjectReviewer(
         return _exhaustive;
       }
     }
-    const assessment = assessExtractedReviewerVerdict(extracted.value);
+    const assessment = assessExtractedReviewerVerdict(
+      extracted.value,
+      options.packet.review_mode ?? 'GENERAL',
+    );
     if (assessment.corrections.length > 0 && invocation === 1) {
       prompt = buildReviewerCorrectionPrompt(options.packet, assessment.corrections);
       continue;

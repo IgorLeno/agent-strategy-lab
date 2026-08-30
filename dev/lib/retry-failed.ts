@@ -1011,7 +1011,9 @@ export async function retryReviewRejectedAttempt(
       ...(review.findings === undefined
         ? {}
         : (() => {
-            const blocking = review.findings.filter((finding) => isBlockingFinding(finding));
+            const blocking = review.findings.filter((finding) =>
+              isBlockingFinding(finding, review.review_mode ?? 'GENERAL'),
+            );
             return blocking.length === 0 ? {} : { blocking_findings: blocking };
           })()),
       changed_files: files,

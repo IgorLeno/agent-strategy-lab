@@ -2594,6 +2594,11 @@ export async function createProjectControlPlane(
         ...(implementerGaps === null ? {} : { implementer_gaps: implementerGaps }),
         ...(verdict.coverage === null ? {} : { coverage: verdict.coverage }),
         ...(verdict.findings === null ? {} : { findings: [...verdict.findings] }),
+        // Modo em que o veredito nasceu, copiado do requirement que o exigiu.
+        // Sem ele, o record perderia a dimensão que decide quais relationships
+        // têm autoridade sobre estes findings. Requirement v1 não declara modo
+        // e continua sendo GENERAL por ausência.
+        ...('mode' in requirement ? { review_mode: requirement.mode } : {}),
         decision: verdict.outcome,
         ...(verdict.outcome === 'REJECT'
           ? { rejection_disposition: verdict.rejection_disposition }

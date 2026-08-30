@@ -2209,10 +2209,6 @@ export function effectiveFindingSeverity(basis: ReviewFindingBasis): ReviewFindi
   return REVIEW_FINDING_BASIS_AUTHORITY[basis];
 }
 
-export function isBlockingFinding(finding: { readonly basis: ReviewFindingBasis }): boolean {
-  return effectiveFindingSeverity(finding.basis) === 'BLOCKING';
-}
-
 export const ReviewFindingRelationship = z.enum([
   'CURRENT_CANDIDATE',
   'ORIGINAL_FINDING',
@@ -2223,12 +2219,91 @@ export const ReviewFindingRelationship = z.enum([
 ]);
 export type ReviewFindingRelationship = z.infer<typeof ReviewFindingRelationship>;
 
+/** Modo da review exigida. GENERAL revisa o candidate; FOCUSED_REREVIEW, o reparo. */
+export const ReviewMode = z.enum(['GENERAL', 'FOCUSED_REREVIEW']);
+export type ReviewMode = z.infer<typeof ReviewMode>;
+
+/**
+ * Quais RELACIONAMENTOS participam de autoridade de bloqueio em cada modo.
+ *
+ * `basis` diz O QUE foi achado; `relationship` diz o que aquilo tem a ver com
+ * o trabalho corrente. Sem esta segunda dimensão, um defeito real de OUTRO
+ * subsistema reinicia a work unit atual — exatamente o loop que a review
+ * focada existe para eliminar: review, defeito A, reparo, re-review, defeito B
+ * não relacionado, reparo, ...
+ *
+ * GENERAL revisa o candidate inteiro, então todo relacionamento COM o
+ * candidate está em escopo; só `UNRELATED` fica fora — ele é evidência
+ * advisory para trabalho futuro, nunca gate do trabalho atual.
+ *
+ * FOCUSED_REREVIEW é o codificado das quatro perguntas do prompt: o finding
+ * original foi corrigido, a acceptance afetada continua válida, o reparo
+ * regrediu algo, o reparo introduziu defeito novo CRÍTICO. `CURRENT_CANDIDATE`
+ * fica DE FORA de propósito: ele é o rótulo genérico da review geral, e
+ * aceitá-lo aqui devolveria ao reviewer o poder de reabrir o candidate inteiro
+ * durante uma re-review focada. Problema causado pelo reparo tem rótulo
+ * próprio — REPAIR_REGRESSION ou NEW_CRITICAL_DEFECT.
+ */
+export const IN_SCOPE_BLOCKING_RELATIONSHIPS: Readonly<
+  Record<ReviewMode, readonly ReviewFindingRelationship[]>
+> = {
+  GENERAL: ReviewFindingRelationship.options.filter(
+    (relationship) => relationship !== 'UNRELATED',
+  ),
+  FOCUSED_REREVIEW: [
+    'ORIGINAL_FINDING',
+    'AFFECTED_ACCEPTANCE',
+    'REPAIR_REGRESSION',
+    'NEW_CRITICAL_DEFECT',
+  ],
+};
+
+/**
+ * ÚNICA autoridade de bloqueio da lifecycle, determinística em `basis` +
+ * `relationship` + modo. É uma conjunção, nunca uma disjunção: a CLASSE do
+ * achado precisa ser capaz de bloquear E o achado precisa estar em escopo.
+ *
+ * Isso fecha os dois abusos simétricos. `OPTIONAL_REFACTOR` +
+ * `NEW_CRITICAL_DEFECT` não vira gate porque o relacionamento soa grave — o
+ * relacionamento não cria autoridade que a base não tem. E `CORRECTNESS_DEFECT`
+ * + `UNRELATED` não reinicia esta work unit — a base é capaz de bloquear, mas
+ * não este trabalho.
+ */
+export function effectiveFindingAuthority(
+  finding: {
+    readonly basis: ReviewFindingBasis;
+    readonly relationship: ReviewFindingRelationship;
+  },
+  mode: ReviewMode,
+): ReviewFindingSeverity {
+  if (effectiveFindingSeverity(finding.basis) !== 'BLOCKING') return 'ADVISORY';
+  return IN_SCOPE_BLOCKING_RELATIONSHIPS[mode].includes(finding.relationship)
+    ? 'BLOCKING'
+    : 'ADVISORY';
+}
+
+export function isBlockingFinding(
+  finding: {
+    readonly basis: ReviewFindingBasis;
+    readonly relationship: ReviewFindingRelationship;
+  },
+  mode: ReviewMode,
+): boolean {
+  return effectiveFindingAuthority(finding, mode) === 'BLOCKING';
+}
+
 /**
  * `severity` declarada pelo reviewer é ACEITA e IGNORADA: aceita para não
  * transformar metadado supérfluo em ciclo de correção protocolar caro,
- * ignorada porque a severidade persistida e obedecida é sempre a derivada de
- * `basis`. Nenhuma string escolhida pelo modelo promove uma base advisory a
- * gate blocking nem rebaixa uma base blocking-capable a advisory.
+ * ignorada porque a severidade persistida é sempre a derivada de `basis`.
+ * Nenhuma string escolhida pelo modelo promove uma base advisory a gate
+ * blocking nem rebaixa uma base blocking-capable a advisory.
+ *
+ * `severity` persistida é a capacidade da CLASSE do achado, não o veredito de
+ * escopo: ela não conhece o modo da review. Quem a lifecycle obedece é
+ * `effectiveFindingAuthority(finding, mode)`, que exige também um
+ * `relationship` em escopo — por isso um finding pode ficar gravado como
+ * `BLOCKING` dentro de um ACCEPT legítimo quando ele é `UNRELATED`.
  */
 export const ReviewFinding = z
   .object({
@@ -2280,7 +2355,7 @@ const CandidateReviewRequirementV2 = z
     diversity_requirement: nonEmpty,
     policy_provenance: nonEmpty,
     reasons: z.array(nonEmpty).min(1),
-    mode: z.enum(['GENERAL', 'FOCUSED_REREVIEW']),
+    mode: ReviewMode,
     task_acceptance_sha256: z.string().regex(/^[0-9a-f]{64}$/),
     focused_review: FocusedReviewContext.optional(),
   })
@@ -2501,6 +2576,12 @@ export const CandidateReviewRecord = z
     coverage: CandidateReviewCoverage.optional(),
     /** Findings estruturados; ausente apenas em records históricos V1. */
     findings: z.array(ReviewFinding).optional(),
+    /**
+     * Modo em que a review nasceu, copiado do requirement v2. Decide o escopo
+     * de `relationship` que tem autoridade sobre ESTE record. Ausente = record
+     * histórico ou requirement v1: ambos são review GENERAL.
+     */
+    review_mode: ReviewMode.optional(),
     decision: z.enum(['ACCEPT', 'REJECT']),
     /** Ausente somente em records legados anteriores a esta classificação. */
     rejection_disposition: ReviewRejectionDisposition.optional(),
@@ -2517,11 +2598,15 @@ export const CandidateReviewRecord = z
     }
     // Defesa em profundidade contra o mesmo contra-senso que o adapter recusa
     // na leitura do veredito: um ACCEPT persistido não pode carregar finding
-    // cuja base a matriz canônica classifica como BLOCKING. A autoridade é
-    // `isBlockingFinding` — nenhuma segunda tabela aqui. Records históricos
-    // sem `findings` continuam legíveis: lista ausente não afirma nada.
+    // que a autoridade canônica classifica como BLOCKING NESTE modo. A
+    // autoridade é `isBlockingFinding` — nenhuma segunda tabela aqui. Records
+    // históricos sem `findings` continuam legíveis: lista ausente não afirma
+    // nada; sem `review_mode`, o modo é GENERAL, como todo record anterior.
+    const mode = record.review_mode ?? 'GENERAL';
     if (record.decision === 'ACCEPT') {
-      const blocking = (record.findings ?? []).filter((finding) => isBlockingFinding(finding));
+      const blocking = (record.findings ?? []).filter((finding) =>
+        isBlockingFinding(finding, mode),
+      );
       if (blocking.length > 0) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
@@ -2530,6 +2615,24 @@ export const CandidateReviewRecord = z
             blocking.map((finding) => finding.basis).join(', '),
         });
       }
+    }
+    // O simétrico: um REJECT de DEFEITO DE IMPLEMENTAÇÃO que declara
+    // EXPLICITAMENTE zero findings nomeou zero motivos para reprovar. Ele não
+    // pode autorizar bounded repair a partir de prosa livre — o escopo do
+    // reparo e da re-review focada sai dos findings blocking, não do `reason`.
+    // Lista AUSENTE continua legível: record histórico não afirma "nenhum
+    // finding", ele apenas antecede o contrato.
+    if (
+      record.decision === 'REJECT' &&
+      record.rejection_disposition === 'IMPLEMENTATION_DEFECT' &&
+      record.findings !== undefined &&
+      record.findings.length === 0
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          'REJECT IMPLEMENTATION_DEFECT com findings=[] não nomeia nenhum defeito bloqueante',
+      });
     }
     const declared = record.implementer_gaps ?? [];
     const addressed = record.coverage?.handoff_gaps ?? [];
