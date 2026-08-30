@@ -30,6 +30,7 @@ import {
   RevalidationSourceBinding,
   RecoveredFinalizationRecord,
   ValidationFailedAttemptRecord,
+  HANDOFF_NORMALIZATION_SCHEMAS,
   type HandoffDraft,
   type HandoffRecord,
   type InfraFailedAttemptRecordInput,
@@ -485,7 +486,9 @@ export const readReport = (
   taskId: string,
 ): Promise<AgentCompletionReport | null> =>
   readOptional(reportPath(paths, taskId), (input) =>
-    AgentCompletionReport.parse(normalizeHandoffOpinion(input)),
+    AgentCompletionReport.parse(
+      normalizeHandoffOpinion(input, HANDOFF_NORMALIZATION_SCHEMAS),
+    ),
   );
 
 export const writeCompletion = (

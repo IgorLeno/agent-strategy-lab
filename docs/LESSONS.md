@@ -1240,3 +1240,11 @@ factual (profile_id + upstream de providerFactsOf) persistido em
 generated_from; REUSED lê isso e não re-seleciona. Diversidade compara
 upstream, não scaffold: Codex/OpenAI e OpenCode/OpenAI não são dois
 providers.
+
+[2026-08-30] Context: o normalizador de handoff aplicava limites de
+representação de prosa também a paths, argv e coleções de ponteiros.
+Mistake: truncar ou condensar identidade fabricava uma terceira referência;
+validação aproximada ainda deixava evidência inválida derrubar o draft inteiro.
+Rule: todo campo normalizado escolhe uma classe semântica. Prosa
+não-autoritativa pode ter omissão visível; ponteiro é validado pelo schema
+canônico e permanece byte-idêntico ou a referência inteira é descartada.

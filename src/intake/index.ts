@@ -158,8 +158,22 @@ export type NonAuthoritativeHumanGatedCapability = Exclude<
   HumanAuthority
 >;
 const _AUTHORITY_IS_SUBSET_OF_GATED: readonly HumanGatedCapability[] = HumanAuthority.options;
-const _NON_AUTHORITATIVE_IS_EXACTLY_INSUFFICIENT_EVIDENCE: NonAuthoritativeHumanGatedCapability =
-  'INSUFFICIENT_EVIDENCE';
+
+type ExactType<Actual, Expected> = [Actual] extends [Expected]
+  ? [Expected] extends [Actual]
+    ? true
+    : false
+  : false;
+
+/**
+ * Prova BIDIRECIONAL: tanto a diferença cabe no literal quanto o literal cabe
+ * na diferença. Se uma capability nova ficar fora de HumanAuthority, este
+ * valor deixa de ter tipo `true` e `pnpm typecheck` falha.
+ */
+const _NON_AUTHORITATIVE_IS_EXACTLY_INSUFFICIENT_EVIDENCE: ExactType<
+  NonAuthoritativeHumanGatedCapability,
+  'INSUFFICIENT_EVIDENCE'
+> = true;
 void _AUTHORITY_IS_SUBSET_OF_GATED;
 void _NON_AUTHORITATIVE_IS_EXACTLY_INSUFFICIENT_EVIDENCE;
 

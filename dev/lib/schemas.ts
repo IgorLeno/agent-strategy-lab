@@ -6,7 +6,10 @@ import {
   byteSize,
 } from './budget.js';
 import { ExecutionPolicy, LEGACY_EXECUTION_POLICY } from './execution-policy.js';
-import { normalizeHandoffOpinion } from './handoff-normalize.js';
+import {
+  normalizeHandoffOpinion,
+  type HandoffNormalizationSchemas,
+} from './handoff-normalize.js';
 import { PlannerTaskMetadata } from '../../src/planner/task.js';
 
 /**
@@ -47,6 +50,8 @@ export const BLOCKING_STATUSES: readonly TaskStatus[] = [
 ];
 
 const nonEmpty = z.string().min(1);
+/** Identidade textual canônica dos ponteiros livres do protocolo. Sem transform. */
+export const HandoffPointerIdentity = nonEmpty;
 const identifier = z
   .string()
   .regex(/^[A-Za-z0-9][A-Za-z0-9_-]*$/, 'id deve ser alfanumérico com - ou _');
@@ -262,7 +267,7 @@ const handoffEvidenceVariants = z.discriminatedUnion('kind', [
   z
     .object({
       kind: z.literal('file'),
-      path: z.string().min(1).max(200),
+      path: HandoffPointerIdentity,
       lines: evidenceLineRange.optional(),
       claim: evidenceClaim,
     })
@@ -270,7 +275,7 @@ const handoffEvidenceVariants = z.discriminatedUnion('kind', [
   z
     .object({
       kind: z.literal('command'),
-      argv: z.array(nonEmpty).min(1).max(8),
+      argv: z.array(HandoffPointerIdentity).min(1),
       claim: evidenceClaim,
     })
     .strict(),
@@ -296,6 +301,15 @@ export const HandoffEvidenceReference = handoffEvidenceVariants.superRefine((ref
   }
 });
 export type HandoffEvidenceReference = z.infer<typeof HandoffEvidenceReference>;
+
+/**
+ * Os dois parsers canônicos entregues ao normalizador. A dependência é
+ * injetada daqui para evitar ciclo e impedir um validador aproximado paralelo.
+ */
+export const HANDOFF_NORMALIZATION_SCHEMAS = {
+  pointerIdentity: HandoffPointerIdentity,
+  evidenceReference: HandoffEvidenceReference,
+} satisfies HandoffNormalizationSchemas;
 
 // ---------------------------------------------------------------------------
 // Confidence — opinião do worker, lida pessimistamente pelo harness.
@@ -402,13 +416,13 @@ const handoffCommonBody = {
   validations: z.array(ValidationResult),
   decisions: z.array(nonEmpty).max(5),
   lessons: z.array(nonEmpty).max(3),
-  next_relevant_files: z.array(nonEmpty).max(5),
+  next_relevant_files: z.array(HandoffPointerIdentity),
 };
 
 const handoffV2Body = {
   ...handoffCommonBody,
   /** Referências à evidência; nunca a evidência. Opcional = não declarada. */
-  evidence: z.array(HandoffEvidenceReference).max(8).optional(),
+  evidence: z.array(HandoffEvidenceReference).optional(),
   /**
    * Opcional: ausente significa "não registrado", nunca "não existe".
    *
@@ -705,7 +719,7 @@ export const AgentCompletionReport = z
     validations: z.array(ValidationResult),
     decisions: z.array(nonEmpty).max(5),
     lessons: z.array(nonEmpty).max(3),
-    relevant_files: z.array(nonEmpty).max(5),
+    relevant_files: z.array(HandoffPointerIdentity),
   })
   .strict();
 export type AgentCompletionReport = z.infer<typeof AgentCompletionReport>;
@@ -2099,7 +2113,9 @@ export const PlannedWorkAdoptionRecord = z
 export type PlannedWorkAdoptionRecord = z.infer<typeof PlannedWorkAdoptionRecord>;
 
 /**
- * Budget OPERACIONAL do subject de commit, em bytes UTF-8. Fonte ÚNICA: quem
+ * INTENTIONAL_POLICY_BOUNDARY do subject de commit, em bytes UTF-8. É uma
+ * convenção interna de legibilidade do Lab, NÃO um máximo externo imposto
+ * pelo Git. Fonte ÚNICA: quem
  * VALIDA (`CommitMessage`) e quem DERIVA uma mensagem a partir de um
  * `PlanTask` (`dev/lib/commit-message.ts`) leem o mesmo número. Duplicar o
  * literal em dois módulos é exatamente como um gerador passa a produzir
@@ -3327,7 +3343,7 @@ export function parseTaskPacket(input: unknown): TaskPacket {
  * inteiro e levava junto todo o contexto do worker.
  */
 export function parseHandoffDraft(input: unknown): HandoffDraft {
-  return HandoffDraft.parse(normalizeHandoffOpinion(input));
+  return HandoffDraft.parse(normalizeHandoffOpinion(input, HANDOFF_NORMALIZATION_SCHEMAS));
 }
 
 /**
