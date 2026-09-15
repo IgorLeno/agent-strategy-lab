@@ -48,22 +48,34 @@ export function createLabUi(options: LabUiOptions): LabUi {
     ...(options.columns === undefined ? {} : { columns: options.columns }),
   });
   const intervalMs = options.repaintIntervalMs ?? 1_000;
+  let waitingForInput = false;
   const timer =
-    intervalMs > 0 ? setInterval(() => writer.paint(projection.snapshot()), intervalMs) : null;
+    intervalMs > 0 ? setInterval(() => {
+      if (!waitingForInput) writer.paint(projection.snapshot());
+    }, intervalMs) : null;
   timer?.unref();
   let finished = false;
 
   return {
     resolved,
     listener: (event) => {
+      if (finished) return;
       projection.listener(event);
+      if (event.stage === 'WAITING_FOR_INPUT') {
+        // The prompt and terminal echo take ownership of the cursor. Seal the
+        // frame so the first post-input repaint cannot erase the directive.
+        if (!waitingForInput) writer.finish(projection.snapshot());
+        waitingForInput = true;
+        return;
+      }
+      waitingForInput = false;
       writer.paint(projection.snapshot());
     },
     finish: () => {
       if (finished) return;
       finished = true;
       if (timer !== null) clearInterval(timer);
-      writer.finish(projection.snapshot());
+      if (!waitingForInput) writer.finish(projection.snapshot());
     },
     snapshot: () => projection.snapshot(),
   };

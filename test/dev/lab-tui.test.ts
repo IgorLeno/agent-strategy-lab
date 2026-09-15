@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import type { LabProgressEvent } from '../../dev/lib/lab-progress.js';
 import { createLabProjection } from '../../dev/lib/lab-projection.js';
@@ -331,6 +331,52 @@ describe('a TUI projeta a deliberação de plano', () => {
 });
 
 describe('modo de interface', () => {
+  it('cede o cursor durante a captura e retoma em um frame novo', () => {
+    vi.useFakeTimers();
+    const chunks: string[] = [];
+    const ui = createLabUi({ mode: 'tui', isTTY: true, title: 'input',
+      write: (chunk) => chunks.push(chunk) });
+    try {
+      ui.listener({ stage: 'WAITING_FOR_INPUT' });
+      const count = chunks.length;
+      ui.listener({ stage: 'WAITING_FOR_INPUT' });
+      vi.advanceTimersByTime(5_000);
+      expect(chunks).toHaveLength(count);
+      ui.listener({ stage: 'PREFLIGHT' });
+      expect(chunks[count]).not.toContain('\u001b[');
+      vi.advanceTimersByTime(1_000);
+      expect(chunks.at(-1)).toContain('\u001b[');
+      ui.finish();
+      const finishedCount = chunks.length;
+      vi.advanceTimersByTime(5_000);
+      ui.listener({ stage: 'PREFLIGHT' });
+      ui.finish();
+      expect(chunks).toHaveLength(finishedCount);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      ui.finish();
+      vi.useRealTimers();
+    }
+  });
+
+  it('encerrar durante a captura libera o timer sem repintar a entrada', () => {
+    vi.useFakeTimers();
+    const chunks: string[] = [];
+    const ui = createLabUi({ mode: 'tui', isTTY: true, title: 'input',
+      write: (chunk) => chunks.push(chunk) });
+    try {
+      ui.listener({ stage: 'WAITING_FOR_INPUT' });
+      const count = chunks.length;
+      ui.finish();
+      vi.advanceTimersByTime(5_000);
+      expect(chunks).toHaveLength(count);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      ui.finish();
+      vi.useRealTimers();
+    }
+  });
+
   it('auto usa TUI só em terminal interativo; não-TTY continua log plain', () => {
     expect(parseLabUiMode(undefined)).toBe('auto');
     expect(parseLabUiMode('tui')).toBe('tui');

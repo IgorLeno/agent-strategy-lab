@@ -51,6 +51,8 @@ async function readStdin(interactive: boolean, onWaiting?: () => void): Promise<
   for await (const chunk of stdinStream) {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   }
+  // EOF need not follow a newline. Start subsequent output below the input.
+  if (interactive && stdinStream.isTTY === true) process.stderr.write('\n');
   return Buffer.concat(chunks).toString('utf8');
 }
 
