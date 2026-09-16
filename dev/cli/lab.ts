@@ -28,7 +28,7 @@ import { ProviderExpansionAuthorizationError } from '../lib/provider-expansion.j
 import { PlanSetupError } from '../lib/run-plan.js';
 import { ProjectAuthorizationError } from '../lib/project-authorization.js';
 import { SelfMaintenanceError } from '../lib/lab-self.js';
-import { shouldOpenWizard } from '../lib/lab-wizard-dispatch.js';
+import { dispatchWizardResult, shouldOpenWizard } from '../lib/lab-wizard-dispatch.js';
 import { createWizardPrompts, runLabWizard, WizardCancelled } from '../lib/lab-wizard.js';
 import { RunDirectiveError } from '../../src/intake/index.js';
 
@@ -91,7 +91,7 @@ async function main(): Promise<void> {
         submit: submitRunDirective,
         resume: resumeHumanInstruction,
       });
-      if (result === 'completed') return;
+      if (dispatchWizardResult(result, emit, process.exit) === 'return') return;
     } catch (error) {
       if (error instanceof WizardCancelled) return;
       throw error;
