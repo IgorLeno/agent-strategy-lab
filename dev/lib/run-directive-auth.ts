@@ -1,4 +1,4 @@
-import type { AutonomousExecutionCapability } from '../../src/intake/index.js';
+import { hasAutonomousCapability, LOCAL_WORKSPACE_CAPABILITIES, type AutonomousExecutionCapability } from '../../src/intake/index.js';
 import {
   DirectiveNeverGrantablePermission,
   RunDirectiveError,
@@ -21,9 +21,9 @@ const GRANTABLE_TO_BOUNDARY: Readonly<
     AutonomousExecutionCapability
   >
 > = {
-  local_repository_write: 'DISPOSABLE_LOCAL_WORKSPACE',
-  dependency_network: 'DISPOSABLE_LOCAL_WORKSPACE',
-  local_git_commits: 'DISPOSABLE_LOCAL_WORKSPACE',
+  local_repository_write: 'LOCAL_REPOSITORY_WRITE',
+  dependency_network: 'DEPENDENCY_NETWORK',
+  local_git_commits: 'LOCAL_GIT_COMMITS',
   subscription_workers: 'CONFIGURED_SUBSCRIPTION_WORKER',
   deterministic_validation: 'DETERMINISTIC_VALIDATION',
   bounded_repair: 'BOUNDED_REPAIR',
@@ -58,6 +58,16 @@ export function overlayAuthorization(input: {
   const allow = input.header?.authorization?.allow;
   const deny = input.header?.authorization?.deny;
   let boundary = [...input.preset.autonomous_execution_boundary];
+  // Expand the legacy umbrella before a granular override so a deny cannot
+  // revoke unrelated grants or be silently overridden by the umbrella.
+  const localOverride = ['local_repository_write', 'dependency_network', 'local_git_commits']
+    .some((name) => allow?.[name as DirectivePermission] === true || deny?.[name as DirectivePermission] === true);
+  if (localOverride && boundary.includes('DISPOSABLE_LOCAL_WORKSPACE')) {
+    boundary = uniqueBoundary([
+      ...boundary.filter((entry) => entry !== 'DISPOSABLE_LOCAL_WORKSPACE'),
+      ...LOCAL_WORKSPACE_CAPABILITIES,
+    ]);
+  }
 
   for (const [name, granted] of permissionEntries(allow)) {
     const denied = deny?.[name];
@@ -155,7 +165,20 @@ export function snapshotHasCapability(
   file: AuthorizationFile,
   capability: AutonomousExecutionCapability,
 ): boolean {
-  return file.autonomous_execution_boundary.includes(capability);
+  return hasAutonomousCapability(file.autonomous_execution_boundary, capability);
+}
+
+/**
+ * Current worker and official-validation execution has no proved dependency
+ * network sandbox. A prompt restriction is not enforcement. Keep this a
+ * technical incompatibility, not a request to re-authorize an explicit denial.
+ */
+export function dependencyNetworkRestrictionDiagnostic(
+  boundary: readonly AutonomousExecutionCapability[],
+): string | null {
+  return hasAutonomousCapability(boundary, 'DEPENDENCY_NETWORK')
+    ? null
+    : 'DEPENDENCY_NETWORK_DENIAL_UNSUPPORTED: the current worker and validation sandbox cannot enforce denied dependency network access';
 }
 
 export function resolvedPublishLabel(grant: ResolvedPublishGrant): string {

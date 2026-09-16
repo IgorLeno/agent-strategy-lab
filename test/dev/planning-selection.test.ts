@@ -323,6 +323,8 @@ describe('failover de invocação do planner', () => {
     expect(result.outcome).toBe('DRAFT_RETURNED');
     if (result.outcome !== 'DRAFT_RETURNED') return;
     expect(result.model).toBe(SOL);
+    await port.invoke(invocation);
+    expect(seen).toEqual([OPUS, SOL, SOL]);
   });
 
   it('draft ilegível não dispara failover', async () => {

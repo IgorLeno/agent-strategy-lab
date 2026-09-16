@@ -241,6 +241,7 @@ export const PlanningWorkerInvocation = z
       .object({
         attempt: z.literal(2),
         previous_stage: z.enum([
+          'PLANNING_WORKER',
           'SCHEMA_NORMALIZATION',
           'AVC_DECOMPOSITION',
           'DEPENDENCY_VALIDATION',

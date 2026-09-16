@@ -32,10 +32,12 @@ import { ZodError } from 'zod';
 import { access, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { canonicalSha256 } from './canonical.js';
+import { dependencyNetworkRestrictionDiagnostic } from './run-directive-auth.js';
 
 import {
   ProjectIntakeRequest,
   ExecutionAuthorizationScope,
+  authorizeExecutionAction,
 } from '../../src/intake/index.js';
 import { inspectRepository, type ProjectInspection } from '../../src/inspection/index.js';
 import { assessExecution } from '../../src/planner/assess.js';
@@ -948,15 +950,15 @@ export async function createProjectControlPlane(
 
   const profiles = new Map<string, LauncherProfile>();
   const provenances = new Map<string, ProfileProvenance>();
+  const unavailableProfiles = new Map<string, string>();
   for (const entry of authorization.profile_policy.profiles) {
     try {
       profiles.set(entry.id, await loadProfileFromCatalog(paths.profileCatalogRoot, entry.id));
     } catch (error) {
-      throw new ProjectAuthorizationError(
-        `profile ${entry.id} da policy ${authorization.profile_policy.id} recusado antes de qualquer provider spawn: ` +
-          `${error instanceof Error ? error.message : String(error)}\n` +
-          'Nenhum attempt foi consumido. Nenhum state autoritativo foi alterado.',
-      );
+      // A catalog entry is a candidate, not a requirement to launch it. Keep
+      // evidence of local configuration failures without disabling its peers.
+      unavailableProfiles.set(entry.id, redactString(error instanceof Error ? error.message : String(error)));
+      continue;
     }
     provenances.set(entry.id, profileProvenance(paths.profileCatalogRoot, entry.id));
   }
@@ -1123,14 +1125,17 @@ export async function createProjectControlPlane(
     });
   }
 
-  function candidatesFor(eligible: readonly string[]): RoutingCandidate[] {
+  function candidatesFor(
+    eligible: readonly string[],
+    launchFacts: ReadonlyMap<string, ProjectLaunchFacts>,
+  ): RoutingCandidate[] {
     return eligible.map((id) => {
-      const provenance = provenances.get(id) as ProfileProvenance;
+      const facts = launchFacts.get(id) as ProjectLaunchFacts;
       return {
         profile_id: id,
         availability: {
-          value: true,
-          provenance: `profile carregado do catálogo do harness (${provenance.source_file})`,
+          value: facts.provider.availability !== false && facts.credential.availability !== false,
+          provenance: `${facts.provider.provenance}; ${facts.credential.provenance}`,
         },
       };
     });
@@ -1273,6 +1278,36 @@ export async function createProjectControlPlane(
       });
     }
 
+    const changeBudget = planTask.planner_metadata?.resource_envelope.changed_files;
+    if (!(changeBudget?.expected === 0 && changeBudget.maximum === 0)) {
+      for (const capability of ['LOCAL_REPOSITORY_WRITE', 'LOCAL_GIT_COMMITS'] as const) {
+        if (authorizeExecutionAction(scope, { kind: 'autonomous', capability }) !== 'ALLOWED') {
+          return blocked({
+            authority: 'SCOPE_EXPANSION',
+            incidentId: `project:${request.taskId}:local-permission`,
+            decisionNeeded: `autorizar ${capability} para executar uma alteração versionada`,
+            why: `a work unit exige ${capability}, ausente do escopo autorizado`,
+            options: ['conceder a permissão local necessária na diretiva'],
+            evidencePaths: [input.authorizationFile],
+          });
+        }
+      }
+    }
+    // O worker (verification_only inclusive) não roda em sandbox de rede: uma
+    // negação de DEPENDENCY_NETWORK só vira aplicada bloqueando o launch, não
+    // confiando no prompt para cumpri-la.
+    if (authorizeExecutionAction(scope, { kind: 'autonomous', capability: 'DEPENDENCY_NETWORK' }) !== 'ALLOWED') {
+      return blocked({
+        authority: 'SCOPE_EXPANSION',
+        incidentId: `project:${request.taskId}:local-permission`,
+        decisionNeeded: 'autorizar DEPENDENCY_NETWORK para executar o worker',
+        why: dependencyNetworkRestrictionDiagnostic(scope.autonomous_execution_boundary) ??
+          'a work unit exige DEPENDENCY_NETWORK, ausente do escopo autorizado',
+        options: ['conceder DEPENDENCY_NETWORK explicitamente na diretiva'],
+        evidencePaths: [input.authorizationFile],
+      });
+    }
+
     const inspection = await inspect(paths.repoRoot);
     const head = await headSha(paths.repoRoot);
     const intake = ProjectIntakeRequest.parse({
@@ -1329,6 +1364,17 @@ export async function createProjectControlPlane(
 
     const requestedPin = request.pinnedProfileId ?? escalatedProfileByTask.get(request.taskId) ?? null;
     if (requestedPin !== null && !profiles.has(requestedPin)) {
+      const unavailable = unavailableProfiles.get(requestedPin);
+      if (unavailable !== undefined) {
+        return blocked({
+          blocker: 'RUNTIME_CONFIGURATION_INVALID',
+          incidentId: `project:${request.taskId}:profile-unavailable`,
+          decisionNeeded: 'restabelecer o profile exigido pelo runtime',
+          why: `profile ${requestedPin} autorizado mas indisponível: ${unavailable}`,
+          options: ['corrigir o profile no catálogo autorizado'],
+          evidencePaths: [input.authorizationFile],
+        });
+      }
       // AQUI existe autoridade humana de verdade: o runtime exige um profile
       // que a policy autorizada não contém, e só o operador amplia a policy.
       return blocked({
@@ -1360,6 +1406,12 @@ export async function createProjectControlPlane(
       }
     }
     const eligible = pinned === null ? [...profiles.keys()] : [pinned];
+    // Reuse the same read-only facts for selection and authorization. A known
+    // unavailable credential must not win routing ahead of a usable peer.
+    const launchFacts = new Map<string, ProjectLaunchFacts>();
+    for (const id of eligible) {
+      launchFacts.set(id, await launchFactsFor(profiles.get(id) as LauncherProfile, freshCapacityByPool));
+    }
     const workDefinitionFingerprint = projectWorkDefinitionFingerprint({ planTask, classification });
     const historyQuery = {
       workDefinitionFingerprintSha256: workDefinitionFingerprint,
@@ -1408,7 +1460,7 @@ export async function createProjectControlPlane(
       },
       role: 'implementer',
       capability_registry: registry,
-      candidates: candidatesFor(eligible),
+      candidates: candidatesFor(eligible, launchFacts),
       selection_policy: selectionPolicy,
       evidence_balance: evidenceBalance,
       history,
@@ -1430,7 +1482,10 @@ export async function createProjectControlPlane(
         blocker: 'NO_ELIGIBLE_EXECUTOR',
         incidentId: `project:${request.taskId}:routing`,
         decisionNeeded: 'corrigir a elegibilidade de routing antes de novo launch',
-        why: `routing não encontrou profile elegível dentro da policy: ${reason}`,
+        why: `routing não encontrou profile elegível dentro da policy: ${reason}; ` +
+          [...unavailableProfiles].map(([id, detail]) => `${id}: ${detail}`).join('; ') +
+          [...launchFacts].filter(([, facts]) => facts.provider.availability === false || facts.credential.availability === false)
+            .map(([id, facts]) => `${id}: ${facts.provider.provenance}; ${facts.credential.provenance}`).join('; '),
         options: [
           'declarar um profile compatível na profile_policy',
           'revisar a classificação declarada da work unit',
@@ -1468,7 +1523,7 @@ export async function createProjectControlPlane(
       selectedPool === null ? null : (freshCapacityByPool.get(selectedPool) ?? null);
     // O MESMO snapshot que roteou vira o fato de quota do launch: é a mesma
     // decisão imediata, então reobservar aqui seria uma requisição duplicada.
-    const facts = await launchFactsFor(profile, freshCapacityByPool);
+    const facts = launchFacts.get(selectedProfileId) as ProjectLaunchFacts;
     const launchAuthorization = authorizeProjectLaunch({
       scope,
       capability: request.attemptKind === 'REPAIR' ? 'BOUNDED_REPAIR' : 'CONFIGURED_SUBSCRIPTION_WORKER',
@@ -1548,6 +1603,7 @@ export async function createProjectControlPlane(
           series_considered: routed.evidence.series_considered,
         },
         rationale: [
+          ...[...unavailableProfiles].map(([id, reason]) => `${id}: CATALOG_UNAVAILABLE — ${reason}`),
           ...routed.rationale,
           ...(routed.fallback?.outcome === 'ROUTED' ? routed.fallback.rationale : []),
           ...(routed.fallback?.outcome === 'ROUTED'

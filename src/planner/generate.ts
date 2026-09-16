@@ -167,7 +167,7 @@ export interface PlanningAttemptRecord {
   /** Pedido de revisão entregue ao worker; `null` na tentativa inicial. */
   readonly revision_request: {
     readonly attempt: 2;
-    readonly previous_stage: 'SCHEMA_NORMALIZATION' | 'AVC_DECOMPOSITION' | 'DEPENDENCY_VALIDATION';
+    readonly previous_stage: 'PLANNING_WORKER' | 'SCHEMA_NORMALIZATION' | 'AVC_DECOMPOSITION' | 'DEPENDENCY_VALIDATION';
     readonly issues: readonly string[];
     readonly requires_complete_replacement: true;
   } | null;
@@ -449,10 +449,38 @@ export async function generateImplementationPlan(
     if (!invocationResult.success) {
       const issues = zodIssues(invocationResult.error);
       await observe(attempt, { outcome: 'MALFORMED_RESULT', issues }, null);
+      // Reuse the single revision budget: a malformed response is repairable,
+      // but does not justify another execution loop or broader authority.
+      if (attempt === 1) {
+        invocation = PlanningWorkerInvocation.parse({
+          ...invocation,
+          revision: {
+            attempt: 2,
+            previous_stage: 'PLANNING_WORKER',
+            issues,
+            requires_complete_replacement: true,
+          },
+        });
+        continue;
+      }
       return rejected('PLANNING_WORKER', issues);
     }
     if (invocationResult.data.outcome === 'INVOCATION_FAILED') {
       await observe(attempt, invocationResult.data, null);
+      // Content/JSON errors use the same bounded revision as schema errors.
+      // Transport and authority failures remain owned by launch/failover.
+      if (attempt === 1 && invocationResult.data.failure.code === 'DRAFT_NOT_PARSEABLE') {
+        invocation = PlanningWorkerInvocation.parse({
+          ...invocation,
+          revision: {
+            attempt: 2,
+            previous_stage: 'PLANNING_WORKER',
+            issues: [invocationResult.data.failure.message],
+            requires_complete_replacement: true,
+          },
+        });
+        continue;
+      }
       return rejected('PLANNING_WORKER', [
         `${invocationResult.data.failure.code}: ${invocationResult.data.failure.message}`,
       ]);

@@ -15,7 +15,7 @@ import {
   submitRunDirective,
 } from '../../dev/lib/lab.js';
 import { loadProjectRunAuthorization } from '../../dev/lib/project-authorization.js';
-import { RunDirectiveError } from '../../src/intake/index.js';
+import { hasAutonomousCapability, RunDirectiveError } from '../../src/intake/index.js';
 import { runGit } from './helpers.js';
 
 const created: string[] = [];
@@ -118,7 +118,12 @@ describe('submitRunDirective', () => {
     });
     const snapshot = await loadProjectRunAuthorization(granted.payload['authorization_file'] as string);
     expect(snapshot.file.autonomous_execution_boundary).toContain('BOUNDED_REPAIR');
-    expect(snapshot.file.autonomous_execution_boundary).toContain('DISPOSABLE_LOCAL_WORKSPACE');
+    // O allow granular de local_repository_write expande o legado
+    // DISPOSABLE_LOCAL_WORKSPACE em capabilities independentes; o snapshot
+    // mantém as três, não mais o guarda-chuva.
+    expect(hasAutonomousCapability(snapshot.file.autonomous_execution_boundary, 'LOCAL_REPOSITORY_WRITE')).toBe(true);
+    expect(hasAutonomousCapability(snapshot.file.autonomous_execution_boundary, 'DEPENDENCY_NETWORK')).toBe(true);
+    expect(hasAutonomousCapability(snapshot.file.autonomous_execution_boundary, 'LOCAL_GIT_COMMITS')).toBe(true);
     expect(snapshot.file.billing.allowed_billing_modes).not.toContain('api');
 
     const denied = await submitRunDirective({

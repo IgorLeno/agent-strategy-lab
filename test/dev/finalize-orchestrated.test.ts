@@ -231,6 +231,99 @@ async function commitCount(): Promise<number> {
   return Number((await runGit(root, ['rev-list', '--count', `${baseSha}..HEAD`])).stdout.trim());
 }
 
+async function planVerification(): Promise<void> {
+  const plan = JSON.parse(JSON.stringify(loaded.plan));
+  plan.tasks[0].planner_metadata = {
+    taxonomy: { version: 1, task_class: 'chore', difficulty_declared: 'easy' },
+    risk: 'low', probable_files: [], context_scope: { areas: ['src'] },
+    context_requirements: [], environment_requirements: [],
+    estimated_duration: { expected: 100, maximum: 1000 },
+    validation_budget: { expected: 100, maximum: 1000 },
+    resource_envelope: {
+      duration_ms: { expected: 100, maximum: 1000 },
+      tokens: { expected: 100, maximum: 1000 },
+      changed_files: { expected: 0, maximum: 0 },
+    },
+  };
+  await writeFile(paths.planFile, JSON.stringify(plan));
+  await commitAll(root, 'chore: verification plan');
+  loaded = await loadPlan(paths.planFile);
+  baseSha = await headSha(root);
+}
+
+describe('planned zero-change verification', () => {
+  it('seals official evidence and unchanged checkpoint, without commit or candidate review', async () => {
+    await planVerification();
+    await prepareRun([]);
+    const outcome = await finalize({ acceptance: {
+      requirementFor: () => { throw new Error('no candidate to review'); },
+      review: async () => { throw new Error('no candidate to review'); },
+    } });
+    expect(outcome.kind).toBe('PASS');
+    expect(await commitCount()).toBe(0);
+    expect((await readState(paths)).authorized_head_sha).toBe(baseSha);
+    expect((await readOrchestratedFinalization(paths, 'T1', 1))?.finalization_kind).toBe('verification_only');
+    expect((await verifyCloseBundle(paths, 'T1')).status).toBe('VALID');
+  });
+
+  it.each(['record', 'completion'])('resumes idempotently after %s is durable', async (point) => {
+    await planVerification();
+    await prepareRun([]);
+    const crash = async () => { throw new Error('crash'); };
+    await expect(finalize(point === 'record'
+      ? { afterFinalizationWritten: crash }
+      : { afterCompletionWritten: crash })).rejects.toThrow('crash');
+    expect((await finalize({ validationRunner: async () => { throw new Error('must not rerun validation'); } })).kind).toBe('PASS');
+    expect((await finalize()).kind).toBe('PASS');
+    expect(await commitCount()).toBe(0);
+  });
+
+  it('fica PENDING (não FAIL) quando uma implementação não entrega patch algum', async () => {
+    // Fora do envelope verification_only, diff vazio não é um veredito de
+    // implementação: é a MESMA incerteza que protocol-output-recovery e a
+    // recuperação de INFRA por quota já sabem classificar por cima do
+    // orquestrador. Fechar como FAIL aqui consumiria o attempt e apagaria
+    // essa classificação — por isso o resultado fica PENDING.
+    await prepareRun([]);
+    const outcome = await finalize();
+    expect(outcome.kind).toBe('PENDING');
+    expect(outcome.reason).toMatch(/material derivado do Git está vazio/i);
+    expect(getTaskState(await readState(paths), 'T1').status).toBe('RUNNING');
+  });
+
+  it('rejects a verification worker that writes files', async () => {
+    await planVerification();
+    await prepareRun();
+    expect((await finalize()).kind).toBe('FAIL');
+    expect(await commitCount()).toBe(0);
+  });
+
+  it('rejects a verification worker that moves HEAD', async () => {
+    await planVerification();
+    await prepareRun();
+    await commitAll(root, 'chore: unauthorized worker commit');
+    expect((await finalize()).kind).toBe('FAIL');
+  });
+
+  it('fails official validation without a rejected-patch recovery requirement', async () => {
+    await planVerification();
+    await prepareRun([]);
+    expect((await finalize({ validationRunner: async (command) => ({
+      ...(await passingRunner(command, root)), exit_code: 1,
+    }) })).kind).toBe('FAIL');
+    expect(getTaskState(await readState(paths), 'T1').status).toBe('FAIL');
+  });
+
+  it('detects changes made by validation itself', async () => {
+    await planVerification();
+    await prepareRun([]);
+    expect((await finalize({ validationRunner: async (command) => {
+      await writeFile(path.join(root, 'drift.txt'), 'changed');
+      return passingRunner(command, root);
+    } })).kind).toBe('FAIL');
+  });
+});
+
 afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
@@ -638,13 +731,18 @@ describe('finalizeOrchestratedTask', () => {
     expect((await finalize()).reason).toMatch(/index.*staged/i);
   });
 
-  it('recusa material vazio e LaunchRecord worker-owned; candidate declarado pelo worker é só discrepância', async () => {
+  it('recusa material vazio ficando PENDING, não como falha terminal de implementação', async () => {
     // Report declara um arquivo que não existe: o Git não tem material nenhum
-    // para representar, então não há candidate — e é isso que a mensagem diz.
+    // para representar, então não há candidate. Isso é a mesma incerteza de
+    // protocol-output-recovery, não um veredito de FAIL definitivo.
     await prepareRun(['src/missing.ts']);
     await rm(path.join(root, 'src/missing.ts'));
-    expect((await finalize()).reason).toMatch(/material derivado do Git está vazio/i);
-
+    const outcome = await finalize();
+    expect(outcome.kind).toBe('PENDING');
+    expect(outcome.reason).toMatch(/material derivado do Git está vazio/i);
+    expect(getTaskState(await readState(paths), 'T1').status).toBe('RUNNING');
+  });
+  it('candidate declarado pelo worker é só discrepância', async () => {
     // O worker não é dono do commit neste modo. Declarar um é engano de
     // metadata: registrado, nunca bloqueante.
     await prepareRun(['src/candidate.ts'], { reportCandidate: baseSha });
@@ -686,12 +784,16 @@ describe('finalizeOrchestratedTask', () => {
     async (file) => {
       // Segunda barreira, estrutural: o runtime do harness é ignorado pelo
       // Git, então um arquivo ali não é sequer representável como candidate.
-      // Não há material, não há commit, e nenhum gate humano é acionado.
+      // Não há material e não há commit; o resultado fica PENDING (mesma
+      // incerteza de protocol-output-recovery), e nenhum gate humano é
+      // acionado.
       await prepareRun([file]);
       await mkdir(path.dirname(path.join(root, file)), { recursive: true });
       await writeFile(path.join(root, file), 'runtime\n');
       expect(await workingTreeFiles(root)).not.toContain(file);
-      expect((await finalize()).reason).toMatch(/material derivado do Git está vazio/i);
+      const outcome = await finalize();
+      expect(outcome.kind).toBe('PENDING');
+      expect(outcome.reason).toMatch(/material derivado do Git está vazio/i);
       expect(await commitCount()).toBe(0);
     },
   );

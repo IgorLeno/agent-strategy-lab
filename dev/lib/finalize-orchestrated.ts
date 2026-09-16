@@ -51,6 +51,7 @@ import {
   CompletionRecord,
   DEV_SCHEMA_VERSION,
   OrchestratedFinalizationRecord,
+  isVerificationOnlyTask,
   measureProtocolArtifacts,
   parseHandoffDraft,
   sealHandoff,
@@ -138,13 +139,20 @@ export function isForbiddenOrchestratedPath(file: string): boolean {
   );
 }
 
-function exactFiles(files: readonly string[], label: string): string[] {
+function exactFiles(files: readonly string[], label: string, allowEmpty = true): string[] {
   const sorted = [...files].sort();
-  if (sorted.length === 0) throw new OrchestratedFinalizationError(`${label} está vazio`);
+  if (sorted.length === 0 && !allowEmpty) {
+    throw new OrchestratedFinalizationError(`${label} está vazio`);
+  }
   if (new Set(sorted).size !== sorted.length) {
     throw new OrchestratedFinalizationError(`${label} contém duplicatas`);
   }
   return sorted;
+}
+
+/** The existing structured zero-change envelope is explicit authority, including legacy plans. */
+function verificationOnly(input: FinalizeOrchestratedInput): boolean {
+  return isVerificationOnlyTask(input.loaded.byId.get(input.taskId));
 }
 
 /**
@@ -294,10 +302,15 @@ async function loadSource(input: FinalizeOrchestratedInput): Promise<SourceEvide
     }
   }
 
-  // AUTORIDADE: o material do candidate vem do Git.
+  // AUTORIDADE: o material do candidate vem do Git. Um diff vazio fora do
+  // envelope verification_only não é FAIL direto: fica PENDING (a exceção é
+  // capturada em `finalizeOrchestratedTask`) para que a mesma classificação
+  // de incidente pós-launch (protocol-output-recovery, INFRA de quota etc.)
+  // que já tratava isso continue decidindo, em vez de consumir o attempt.
   const files = exactFiles(
     await deriveCandidateFilesFromGit(input.paths.repoRoot, packet.base_sha),
     'material derivado do Git',
+    isVerificationOnlyTask(planTask),
   );
   // A fronteira de escopo continua fail-closed, agora aplicada ao material
   // REAL: o control plane nunca aceita um candidate que toque seus próprios
@@ -581,7 +594,7 @@ async function finishFail(
   // `writeCompletion` vai gravar —, e não de uma segunda serialização: o hash
   // publicado tem que ser o do arquivo que existe no fim.
   const completionBytes = jsonBytes(CompletionRecord.parse(completion));
-  if (failNeedsSourceBinding(source, validations)) {
+  if (!verificationOnly(input) && failNeedsSourceBinding(source, validations)) {
     await materializeFailedAttemptSource({
       paths: input.paths,
       taskId: input.taskId,
@@ -610,6 +623,56 @@ async function finishFail(
     }),
   );
   return closeOutcome('FAIL', input.taskId, reason, completion, null, differences);
+}
+
+/** Reuse the durable close bundle; candidate_commit is the accepted base checkpoint here. */
+async function finalizeVerification(
+  input: FinalizeOrchestratedInput,
+  state: DevelopmentState,
+  source: SourceEvidence,
+  attempt: number,
+): Promise<CloseOutcome> {
+  const intact = async () =>
+    (await headSha(input.paths.repoRoot)) === source.packet.base_sha &&
+    (await isWorkingTreeClean(input.paths.repoRoot)) &&
+    (await stagedFiles(input.paths.repoRoot)).length === 0;
+  if (source.files.length !== 0 || !(await intact())) {
+    return finishFail(input, state, source, 'verification_only alterou HEAD, index ou working tree', []);
+  }
+  if (source.launch.exit_code !== 0 || source.launch.timed_out ||
+      source.report?.self_reported_result === 'FAILURE') {
+    return finishFail(input, state, source, 'verification_only não concluiu o processo com sucesso', []);
+  }
+  const batch = await runOfficialValidations(input, source.packet, attempt);
+  if (!(await intact())) {
+    return finishFail(input, state, source, 'validação de verification_only alterou o repositório', batch.results, batch.evidence);
+  }
+  if (batch.results.some((result) => result.exit_code !== 0 || result.timed_out)) {
+    return finishFail(input, state, source, 'validação oficial de verification_only falhou', batch.results, batch.evidence);
+  }
+  const record = OrchestratedFinalizationRecord.parse({
+    schema_version: DEV_SCHEMA_VERSION,
+    task_id: input.taskId,
+    attempt,
+    base_sha: source.packet.base_sha,
+    profile_id: source.launch.profile_id,
+    execution_policy: source.launch.execution_policy,
+    ...workerNoteProvenance(source),
+    finalization_kind: 'verification_only',
+    plan_sha256: input.loaded.planSha256,
+    packet_sha256: canonicalSha256(source.packet),
+    commit_message: commitMessageFor(input),
+    changed_files: [],
+    validation_results: batch.results,
+    validation_evidence: batch.evidence,
+    patch_fingerprint: sha256Hex(await commitTree(input.paths.repoRoot, source.packet.base_sha)),
+    candidate_commit: source.packet.base_sha,
+    commit_origin: 'orchestrator',
+    finalized_at: (input.now ?? (() => new Date().toISOString()))(),
+  });
+  await writeOrchestratedFinalization(input.paths, record);
+  await input.afterFinalizationWritten?.(record);
+  return acceptValidatedCandidate(input, state, record, 'verificação aceita sem novo commit');
 }
 
 /**
@@ -770,7 +833,14 @@ export async function verifyOrchestratedFinalizationRecord(
     throw new OrchestratedFinalizationError('OrchestratedFinalizationRecord diverge das fontes');
   }
   assertExactFiles(record.changed_files, source.files);
-  await assertCandidate(
+  if (record.finalization_kind === 'verification_only') {
+    if (!verificationOnly(input) || record.plan_sha256 !== input.loaded.planSha256 ||
+        record.packet_sha256 !== canonicalSha256(source.packet) ||
+        (await headSha(input.paths.repoRoot)) !== record.base_sha ||
+        source.launch.exit_code !== 0 || source.launch.timed_out) {
+      throw new OrchestratedFinalizationError('verification_only diverge do plano, packet, processo ou HEAD');
+    }
+  } else await assertCandidate(
     input.paths,
     record.candidate_commit,
     record.base_sha,
@@ -1112,6 +1182,11 @@ export async function finalizeOrchestratedTask(
   if (source.packet.base_sha !== task.base_sha || source.packet.base_sha !== state.authorized_head_sha) {
     return stayPending(input.paths, state, input.taskId, 'base SHA do packet/state não é autorizada');
   }
+  if (verificationOnly(input)) {
+    return finalizeVerification(input, state, source, task.attempts);
+  }
+  // `source.files` nunca chega vazio aqui fora do envelope verification_only:
+  // `loadSource` já lançou (capturado acima como `stayPending`) antes disto.
   if ((await stagedFiles(input.paths.repoRoot)).length > 0) {
     return stayPending(input.paths, state, input.taskId, 'index contém mudanças staged prévias');
   }

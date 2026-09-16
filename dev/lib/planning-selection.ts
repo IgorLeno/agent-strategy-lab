@@ -266,16 +266,21 @@ export function createPlanningFailoverPort(input: {
     invocation: PlanningWorkerInvocation,
   ) => Promise<PlanningWorkerInvocationResult>;
 }): PlanningWorkerPort {
+  // Keep failed candidates out of subsequent revisions of this same plan.
+  // A new run constructs a new port and observes availability again.
+  const unavailable = new Set<string>();
   return {
     async invoke(invocation: PlanningWorkerInvocation): Promise<PlanningWorkerInvocationResult> {
       let last: PlanningWorkerInvocationResult | null = null;
       for (const profileId of input.ranked_profile_ids) {
+        if (unavailable.has(profileId)) continue;
         const result = await input.invokeWith(profileId, invocation);
         last = result;
         if (result.outcome !== 'INVOCATION_FAILED') return result;
         if (!isRetryablePlanningInvocationFailure(result.failure.code)) {
           return result;
         }
+        unavailable.add(profileId);
       }
       return (
         last ?? {

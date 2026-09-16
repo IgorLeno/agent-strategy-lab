@@ -257,9 +257,12 @@ const PROFILES = {
   go: 'opencode-go-glm-5.3-v1',
 } as const;
 
+const DEFAULT_BOUNDARY = ['DISPOSABLE_LOCAL_WORKSPACE', 'CONFIGURED_SUBSCRIPTION_WORKER', 'DETERMINISTIC_VALIDATION'] as const;
+
 function authorizationYaml(
   profileIds: readonly string[],
   selectionPolicy: 'evidence_balanced' | 'static_cost' = 'evidence_balanced',
+  boundary: readonly string[] = DEFAULT_BOUNDARY,
 ): string {
   return [
     'schema_version: 1',
@@ -268,8 +271,7 @@ function authorizationYaml(
     'constraints: []',
     'exclusions: []',
     'autonomous_execution_boundary:',
-    '  - CONFIGURED_SUBSCRIPTION_WORKER',
-    '  - DETERMINISTIC_VALIDATION',
+    ...boundary.map((entry) => `  - ${entry}`),
     'human_gated_capabilities:',
     '  - UNAUTHORIZED_API_BILLING',
     '  - NEW_CREDENTIAL_BOUNDARY',
@@ -321,6 +323,7 @@ interface RoutingFixture {
 async function routingFixture(
   profileIds: readonly string[],
   selectionPolicy: 'evidence_balanced' | 'static_cost' = 'evidence_balanced',
+  boundary: readonly string[] = DEFAULT_BOUNDARY,
 ): Promise<RoutingFixture> {
   const sandbox = await makeSandboxRepo(PLAN);
   roots.push(sandbox.root);
@@ -336,7 +339,7 @@ async function routingFixture(
   await writeState(paths, buildInitialState(loaded.plan, loaded.planSha256, { baselineSha: baseline }));
   const outside = await temporaryDir('agentlab-capacity-policy-');
   const authorizationFile = path.join(outside, 'agentlab-run.yaml');
-  await writeFile(authorizationFile, authorizationYaml(profileIds, selectionPolicy), 'utf8');
+  await writeFile(authorizationFile, authorizationYaml(profileIds, selectionPolicy, boundary), 'utf8');
   return { paths, loaded, authorizationFile };
 }
 
@@ -396,6 +399,7 @@ function poolForProfile(profile: LauncherProfile): string {
 async function previewWith(
   fixture: RoutingFixture,
   probe: PoolCapacityProbe,
+  runner: CommandRunner = credentialRunner(),
 ) {
   const authorization = await loadProjectRunAuthorization(fixture.authorizationFile);
   const controlPlane = await createProjectControlPlane({
@@ -404,13 +408,85 @@ async function previewWith(
     authorization: authorization.file,
     authorizationFile: authorization.source_file,
     historyLabRoot: await temporaryDir('agentlab-capacity-history-'),
-    credentialRunner: credentialRunner(),
+    credentialRunner: runner,
     poolCapacityProbe: probe,
   });
   return controlPlane.previewNextAction({ taskId: 'T1' });
 }
 
 describe('capacidade fresca no routing de produção', () => {
+  it('exclui profile ausente do catálogo e executa um candidato válido autorizado', async () => {
+    const fixture = await routingFixture(['missing-optional-profile', PROFILES.go]);
+    const preview = await previewWith(fixture, async (profile) =>
+      knownCapacity({ pool: poolForProfile(profile), used: 10 }),
+    );
+    expect(preview.status, JSON.stringify(preview)).toBe('READY');
+    expect(preview.work_unit?.routing.selected_profile_id).toBe(PROFILES.go);
+    expect(preview.work_unit?.routing.rationale.join('\n')).toContain('missing-optional-profile: CATALOG_UNAVAILABLE');
+  });
+
+  it('todos os profiles ausentes produzem bloqueio técnico com diagnóstico', async () => {
+    const fixture = await routingFixture(['missing-optional-profile']);
+    const preview = await previewWith(fixture, async () => { throw new Error('no profile to probe'); });
+    expect(preview).toMatchObject({ status: 'HALT', halt_status: 'BLOCKED' });
+    expect(JSON.stringify(preview)).toContain('missing-optional-profile');
+  });
+
+  it('profile malformado é excluído e mantém o catálogo restante utilizável', async () => {
+    const fixture = await routingFixture(['broken-optional-profile', PROFILES.go]);
+    const catalog = await temporaryDir('agentlab-broken-catalog-');
+    await mkdir(path.join(catalog, 'dev/profiles'), { recursive: true });
+    await writeFile(path.join(catalog, 'dev/profiles/broken-optional-profile.yaml'), 'id: [invalid');
+    await writeFile(path.join(catalog, `dev/profiles/${PROFILES.go}.yaml`),
+      await readFile(path.join(REPO_ROOT, `dev/profiles/${PROFILES.go}.yaml`)));
+    const preview = await previewWith({ ...fixture, paths: { ...fixture.paths, profileCatalogRoot: catalog } },
+      async (profile) => knownCapacity({ pool: poolForProfile(profile), used: 10 }));
+    expect(preview.status, JSON.stringify(preview)).toBe('READY');
+    expect(preview.work_unit?.routing.selected_profile_id).toBe(PROFILES.go);
+    expect(preview.work_unit?.routing.rationale.join('\n')).toContain('broken-optional-profile: CATALOG_UNAVAILABLE');
+  });
+
+  it('pin autorizado mas ausente é bloqueio técnico e não é substituído silenciosamente', async () => {
+    const fixture = await routingFixture(['missing-optional-profile', PROFILES.go]);
+    const authorization = await loadProjectRunAuthorization(fixture.authorizationFile);
+    const plane = await createProjectControlPlane({
+      paths: fixture.paths, loaded: fixture.loaded, authorization: authorization.file,
+      authorizationFile: authorization.source_file,
+      historyLabRoot: await temporaryDir('agentlab-capacity-history-'),
+      credentialRunner: credentialRunner(),
+      poolCapacityProbe: async (profile) => knownCapacity({ pool: poolForProfile(profile), used: 10 }),
+    });
+    const decision = await plane.beforeWorkUnit({ taskId: 'T1', attemptKind: 'FIRST_PASS', pinnedProfileId: 'missing-optional-profile' });
+    expect(decision).toMatchObject({ outcome: 'HALT', halt: { status: 'BLOCKED' } });
+    expect(JSON.stringify(decision)).toContain('autorizado mas indisponível');
+  });
+
+  it('credencial indisponível exclui o favorito antes do routing sem reprobar o selecionado', async () => {
+    const fixture = await routingFixture([PROFILES.codex, PROFILES.go]);
+    const calls: string[] = [];
+    const runner: CommandRunner = async (command, args, ...rest) => {
+      calls.push(command);
+      if (args[0] === 'login') return { code: 1, output: 'Not logged in' };
+      return credentialRunner()(command, args, ...rest);
+    };
+    const preview = await previewWith(fixture, async (profile) =>
+      knownCapacity({ pool: poolForProfile(profile), used: profile.id === PROFILES.codex ? 1 : 80 }), runner,
+    );
+    expect(preview.status, JSON.stringify(preview)).toBe('READY');
+    expect(preview.work_unit?.routing.selected_profile_id).toBe(PROFILES.go);
+    expect(calls).toHaveLength(2);
+  });
+
+  it('nenhuma credencial verificável bloqueia tecnicamente sem invocar workers', async () => {
+    const fixture = await routingFixture([PROFILES.codex, PROFILES.go]);
+    const preview = await previewWith(fixture, async (profile) =>
+      knownCapacity({ pool: poolForProfile(profile), used: 10 }),
+      async () => ({ code: 1, output: 'Not logged in' }),
+    );
+    expect(preview).toMatchObject({ status: 'HALT', halt_status: 'BLOCKED' });
+    expect(preview.reason).toContain('credential source could not be verified');
+  });
+
   it('quota consumida fora do Lab substitui LaunchRecord histórico stale', async () => {
     const fixture = await routingFixture([PROFILES.codex, PROFILES.go]);
     await writeHistoricalCapacity(
@@ -684,6 +760,72 @@ describe('capacidade fresca no routing de produção', () => {
 });
 
 /**
+ * Escrita local, rede e commit são três capabilities independentes do
+ * boundary: cada uma tem que ser checada e bloquear por si só, e nenhuma
+ * delas pode ser satisfeita implicitamente pelas outras. `DEPENDENCY_NETWORK`
+ * em particular não tem sandbox real por trás: negá-la só é honesto se o
+ * control plane recusa o launch, porque escrever a restrição no prompt do
+ * worker não garante cumprimento.
+ */
+describe('escrita local, commit e rede são permissões independentes', () => {
+  it('sem LOCAL_REPOSITORY_WRITE nem DISPOSABLE_LOCAL_WORKSPACE, o launch para por autoridade humana', async () => {
+    const fixture = await routingFixture([PROFILES.go], 'evidence_balanced', [
+      'CONFIGURED_SUBSCRIPTION_WORKER',
+      'DETERMINISTIC_VALIDATION',
+      'DEPENDENCY_NETWORK',
+      'LOCAL_GIT_COMMITS',
+    ]);
+    const preview = await previewWith(fixture, async (profile) =>
+      knownCapacity({ pool: poolForProfile(profile), used: 10 }),
+    );
+    expect(preview).toMatchObject({ status: 'HALT', halt_status: 'HUMAN_REQUIRED' });
+    expect(preview.reason).toContain('LOCAL_REPOSITORY_WRITE');
+  });
+
+  it('sem LOCAL_GIT_COMMITS, o launch para mesmo com escrita e rede concedidas', async () => {
+    const fixture = await routingFixture([PROFILES.go], 'evidence_balanced', [
+      'CONFIGURED_SUBSCRIPTION_WORKER',
+      'DETERMINISTIC_VALIDATION',
+      'LOCAL_REPOSITORY_WRITE',
+      'DEPENDENCY_NETWORK',
+    ]);
+    const preview = await previewWith(fixture, async (profile) =>
+      knownCapacity({ pool: poolForProfile(profile), used: 10 }),
+    );
+    expect(preview).toMatchObject({ status: 'HALT', halt_status: 'HUMAN_REQUIRED' });
+    expect(preview.reason).toContain('LOCAL_GIT_COMMITS');
+  });
+
+  it('DEPENDENCY_NETWORK ausente bloqueia com o diagnóstico de sandbox inexistente, não como grant simples', async () => {
+    const fixture = await routingFixture([PROFILES.go], 'evidence_balanced', [
+      'CONFIGURED_SUBSCRIPTION_WORKER',
+      'DETERMINISTIC_VALIDATION',
+      'LOCAL_REPOSITORY_WRITE',
+      'LOCAL_GIT_COMMITS',
+    ]);
+    const preview = await previewWith(fixture, async (profile) =>
+      knownCapacity({ pool: poolForProfile(profile), used: 10 }),
+    );
+    expect(preview).toMatchObject({ status: 'HALT', halt_status: 'HUMAN_REQUIRED' });
+    expect(preview.reason).toMatch(/^DEPENDENCY_NETWORK_DENIAL_UNSUPPORTED:/);
+  });
+
+  it('as três permissões concedidas granularmente liberam o launch sem o legado DISPOSABLE_LOCAL_WORKSPACE', async () => {
+    const fixture = await routingFixture([PROFILES.go], 'evidence_balanced', [
+      'CONFIGURED_SUBSCRIPTION_WORKER',
+      'DETERMINISTIC_VALIDATION',
+      'LOCAL_REPOSITORY_WRITE',
+      'LOCAL_GIT_COMMITS',
+      'DEPENDENCY_NETWORK',
+    ]);
+    const preview = await previewWith(fixture, async (profile) =>
+      knownCapacity({ pool: poolForProfile(profile), used: 10 }),
+    );
+    expect(preview.status, JSON.stringify(preview)).toBe('READY');
+  });
+});
+
+/**
  * Planner, deliberador, reviewer e degrau de escalation não têm um regime de
  * quota próprio: todos passam por `collectCurrentLaunchFacts`, que observa o
  * pool DA ATIVIDADE. Estes testes exercem esse caminho compartilhado
@@ -867,7 +1009,7 @@ describe('capacidade antes/depois no launch de produção', () => {
       'requested_scope: {summary: executar worker falso sem provider}',
       'constraints: []',
       'exclusions: []',
-      'autonomous_execution_boundary: [CONFIGURED_SUBSCRIPTION_WORKER, DETERMINISTIC_VALIDATION]',
+      'autonomous_execution_boundary: [DISPOSABLE_LOCAL_WORKSPACE, CONFIGURED_SUBSCRIPTION_WORKER, DETERMINISTIC_VALIDATION]',
       'human_gated_capabilities: [UNAUTHORIZED_API_BILLING]',
       'billing: {allowed_billing_modes: [not_applicable]}',
       'profile_policy:',

@@ -74,6 +74,9 @@ export function projectIntakeSha256(intake: ProjectIntakeRequest): string {
  */
 export const AutonomousExecutionCapability = z.enum([
   'DISPOSABLE_LOCAL_WORKSPACE',
+  'LOCAL_REPOSITORY_WRITE',
+  'DEPENDENCY_NETWORK',
+  'LOCAL_GIT_COMMITS',
   'CONFIGURED_SUBSCRIPTION_WORKER',
   'DETERMINISTIC_VALIDATION',
   'BOUNDED_REPAIR',
@@ -81,6 +84,23 @@ export const AutonomousExecutionCapability = z.enum([
   'CROSS_PROVIDER_WITHIN_ALLOWED_SUBSCRIPTION_PROFILES',
 ]);
 export type AutonomousExecutionCapability = z.infer<typeof AutonomousExecutionCapability>;
+
+/** Legacy workspace grants remain readable; overrides expand them before denial. */
+export const LOCAL_WORKSPACE_CAPABILITIES = [
+  'LOCAL_REPOSITORY_WRITE',
+  'DEPENDENCY_NETWORK',
+  'LOCAL_GIT_COMMITS',
+] as const satisfies readonly AutonomousExecutionCapability[];
+
+export function hasAutonomousCapability(
+  boundary: readonly AutonomousExecutionCapability[],
+  capability: AutonomousExecutionCapability,
+): boolean {
+  return boundary.includes(capability) || (
+    boundary.includes('DISPOSABLE_LOCAL_WORKSPACE') &&
+    LOCAL_WORKSPACE_CAPABILITIES.some((entry) => entry === capability)
+  );
+}
 
 /**
  * Categorias que continuam exigindo intervenção humana independentemente do
@@ -294,7 +314,7 @@ export function authorizeExecutionAction(
   action: ExecutionAction,
 ): ExecutionAuthorizationDecision {
   if (action.kind === 'human_gated') return 'HUMAN_REQUIRED';
-  return scope.autonomous_execution_boundary.includes(action.capability)
+  return hasAutonomousCapability(scope.autonomous_execution_boundary, action.capability)
     ? 'ALLOWED'
     : 'HUMAN_REQUIRED';
 }

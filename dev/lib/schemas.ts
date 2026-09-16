@@ -125,6 +125,12 @@ export const PlanTask = z
   .strict();
 export type PlanTask = z.infer<typeof PlanTask>;
 
+/** Explicit zero-change envelope also supports already generated verification plans. */
+export function isVerificationOnlyTask(task: PlanTask | undefined): boolean {
+  const budget = task?.planner_metadata?.resource_envelope.changed_files;
+  return budget?.expected === 0 && budget.maximum === 0;
+}
+
 export const GeneratedPlanSource = z
   .object({
     intake_sha256: z.string().regex(/^[0-9a-f]{64}$/),
@@ -2407,8 +2413,12 @@ export const OrchestratedFinalizationRecord = z
     report_result: z.literal('SUCCESS').optional(),
     /** O candidate não pertence ao conhecimento nem ao report do worker. */
     report_candidate_commit: z.literal(null).optional(),
+    /** Verification accepts the unchanged base checkpoint; no commit is created. */
+    finalization_kind: z.literal('verification_only').optional(),
+    plan_sha256: sha256Hex.optional(),
+    packet_sha256: sha256Hex.optional(),
     commit_message: CommitMessage,
-    changed_files: z.array(nonEmpty).min(1),
+    changed_files: z.array(nonEmpty),
     validation_results: z.array(ValidationResult).min(1),
     validation_evidence: z.array(ValidationEvidence).optional(),
     patch_fingerprint: z.string().regex(/^[0-9a-f]{64}$/),
@@ -2423,6 +2433,15 @@ export const OrchestratedFinalizationRecord = z
   })
   .strict()
   .superRefine((record, ctx) => {
+    if (record.finalization_kind === 'verification_only') {
+      if (record.changed_files.length !== 0 || record.candidate_commit !== record.base_sha ||
+          record.plan_sha256 === undefined || record.packet_sha256 === undefined ||
+          record.review_requirement !== undefined) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'verification_only exige base intacta, zero arquivos e binding de plano/packet' });
+      }
+    } else if (record.changed_files.length === 0) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'implementação exige arquivos alterados' });
+    }
     if (record.execution_policy.commit_owner !== 'orchestrator') {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,

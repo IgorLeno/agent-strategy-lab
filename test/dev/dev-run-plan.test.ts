@@ -644,6 +644,7 @@ function authorizationFor(profiles: readonly string[]): string {
     'requested_scope:',
     '  summary: escopo declarado explicitamente pela run',
     'autonomous_execution_boundary:',
+    '  - DISPOSABLE_LOCAL_WORKSPACE',
     '  - CONFIGURED_SUBSCRIPTION_WORKER',
     '  - DETERMINISTIC_VALIDATION',
     '  - BOUNDED_REPAIR',
