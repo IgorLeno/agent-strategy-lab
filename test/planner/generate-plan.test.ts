@@ -9,6 +9,7 @@ import type { ExecutionAuthorizationScope, ProjectIntakeRequest } from '../../sr
 import {
   generateImplementationPlan,
   projectImplementationPlan,
+  type PlanningAttemptRecord,
 } from '../../src/planner/generate.js';
 import type {
   PlanningWorkerInvocation,
@@ -360,6 +361,53 @@ describe('generateImplementationPlan', () => {
 
     expect(result).toMatchObject({ outcome: 'REJECTED', stage: 'SCHEMA_NORMALIZATION' });
     expect(planner.invocations).toHaveLength(2);
+  });
+
+  it.each([true, false])('repairs malformed output once with unchanged authority (valid replacement: %s)', async (validReplacement) => {
+    const invocations: PlanningWorkerInvocation[] = [];
+    const evidence: PlanningAttemptRecord[] = [];
+    const malformed = { outcome: 'DRAFT_RETURNED' } as PlanningWorkerInvocationResult;
+    const result = await generateImplementationPlan({
+      intake: intake(),
+      inspection: inspection(),
+      authorizationScope: authorizationScope(),
+      planningWorker: {
+        async invoke(invocation) {
+          invocations.push(invocation);
+          return invocations.length === 2 && validReplacement
+            ? draftReturned({ schema_version: 1, tasks: [task()] }, 'replacement')
+            : malformed;
+        },
+      },
+      onAttempt: async (record) => { evidence.push(record); },
+    });
+    expect(result.outcome).toBe(validReplacement ? 'AUTHORIZED' : 'REJECTED');
+    expect(invocations).toHaveLength(2);
+    expect(invocations[1]?.packet).toEqual(invocations[0]?.packet);
+    expect(invocations[1]?.human_instruction).toBe(intake().user_request);
+    expect(invocations[1]?.revision).toMatchObject({
+      attempt: 2, previous_stage: 'PLANNING_WORKER', requires_complete_replacement: true,
+    });
+    expect(evidence).toHaveLength(2);
+    expect(evidence[0]?.invocation.outcome).toBe('MALFORMED_RESULT');
+    expect(evidence[1]?.kind).toBe('REVISION');
+  });
+
+  it('revisa JSON ilegível e preserva a evidência sem ampliar autoridade', async () => {
+    const planner = new SequencedPlanner([
+      {
+        outcome: 'INVOCATION_FAILED', invocation_id: 'bad-json', provider_id: 'fake', model: 'fake',
+        failure: { code: 'DRAFT_NOT_PARSEABLE', message: 'invalid JSON', retryable: false },
+      },
+      draftReturned({ schema_version: 1, tasks: [task()] }, 'replacement'),
+    ]);
+    const result = await generateImplementationPlan({
+      intake: intake(), inspection: inspection(), authorizationScope: authorizationScope(),
+      planningWorker: planner,
+    });
+    expect(result.outcome).toBe('AUTHORIZED');
+    expect(planner.invocations).toHaveLength(2);
+    expect(planner.invocations[1]?.revision?.previous_stage).toBe('PLANNING_WORKER');
   });
 
   it('nao revisa falha de invocacao sem draft retornado', async () => {

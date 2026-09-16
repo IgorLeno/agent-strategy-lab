@@ -7,6 +7,7 @@ import { inspectRepository, type ProjectInspection } from '../../src/inspection/
 import { CapacityStatus } from '../../src/quota/index.js';
 import {
   createHumanInstruction,
+  hasAutonomousCapability,
   HUMAN_GATE_GRANT_PATH,
   type HumanAuthority,
   DETERMINISTIC_INTAKE_COMPILER_PROFILE,
@@ -739,7 +740,7 @@ export async function submitHumanInstruction(
     base: baseSha,
     policy: presetName,
     providers: directive.header?.providers?.policy ?? 'default',
-    local_write: authorization.file.autonomous_execution_boundary.includes('DISPOSABLE_LOCAL_WORKSPACE'),
+    local_write: hasAutonomousCapability(authorization.file.autonomous_execution_boundary, 'LOCAL_REPOSITORY_WRITE'),
     repair: authorization.file.autonomous_execution_boundary.includes('BOUNDED_REPAIR'),
     escalation: authorization.file.autonomous_execution_boundary.includes('CAPABILITY_ESCALATION_WITHIN_LADDER'),
     publish: resolvedPublishLabel(publishGrant),
@@ -887,7 +888,7 @@ export async function resumeHumanInstruction(
     base: instruction.base_sha,
     policy: authorization.file.profile_policy.id,
     providers: 'default',
-    local_write: authorization.file.autonomous_execution_boundary.includes('DISPOSABLE_LOCAL_WORKSPACE'),
+    local_write: hasAutonomousCapability(authorization.file.autonomous_execution_boundary, 'LOCAL_REPOSITORY_WRITE'),
     repair: authorization.file.autonomous_execution_boundary.includes('BOUNDED_REPAIR'),
     escalation: authorization.file.autonomous_execution_boundary.includes('CAPABILITY_ESCALATION_WITHIN_LADDER'),
     publish: resolvedPublishLabel(input.publish === true && persistedGrant === null ? { ...publishGrant, allowed: true } : publishGrant),

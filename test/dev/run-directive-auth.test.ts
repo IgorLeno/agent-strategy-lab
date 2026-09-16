@@ -1,14 +1,66 @@
 import { describe, expect, it } from 'vitest';
 
-import { overlayAuthorization, resolveDirectivePublishGrant } from '../../dev/lib/run-directive-auth.js';
+import { dependencyNetworkRestrictionDiagnostic, overlayAuthorization, resolveDirectivePublishGrant } from '../../dev/lib/run-directive-auth.js';
 import { loadPolicyPreset, DEFAULT_POLICY_PRESET } from '../../dev/lib/policy-preset.js';
-import { parseRunDirective, RunDirectiveError } from '../../src/intake/index.js';
+import { hasAutonomousCapability, LOCAL_WORKSPACE_CAPABILITIES, parseRunDirective, RunDirectiveError } from '../../src/intake/index.js';
 
 function headerOf(yamlBlock: string) {
   return parseRunDirective(`---agentlab\nversion: 1\n${yamlBlock}---\n# body\n`).header;
 }
 
 describe('overlayAuthorization', () => {
+  it.each([
+    ['local_repository_write', 'LOCAL_REPOSITORY_WRITE'],
+    ['dependency_network', 'DEPENDENCY_NETWORK'],
+    ['local_git_commits', 'LOCAL_GIT_COMMITS'],
+  ] as const)('denying %s preserves every independent local permission', async (permission, capability) => {
+    const loaded = await loadPolicyPreset(DEFAULT_POLICY_PRESET);
+    const overlaid = overlayAuthorization({
+      preset: loaded.file,
+      header: headerOf(`authorization:\n  deny:\n    ${permission}: true\n`),
+    });
+    expect(overlaid.autonomous_execution_boundary).not.toContain('DISPOSABLE_LOCAL_WORKSPACE');
+    expect(hasAutonomousCapability(overlaid.autonomous_execution_boundary, capability)).toBe(false);
+    for (const sibling of LOCAL_WORKSPACE_CAPABILITIES.filter((entry) => entry !== capability)) {
+      expect(hasAutonomousCapability(overlaid.autonomous_execution_boundary, sibling)).toBe(true);
+    }
+    // Reapplying or serializing the snapshot cannot recover the denied umbrella.
+    expect(overlayAuthorization({ preset: overlaid, header: null })).toEqual(overlaid);
+  });
+
+  it('a narrow local grant never grants its siblings', async () => {
+    const loaded = await loadPolicyPreset(DEFAULT_POLICY_PRESET);
+    const overlaid = overlayAuthorization({
+      preset: {
+        ...loaded.file,
+        autonomous_execution_boundary: ['CONFIGURED_SUBSCRIPTION_WORKER'],
+      },
+      header: headerOf('authorization:\n  allow:\n    local_repository_write: true\n'),
+    });
+    expect(hasAutonomousCapability(overlaid.autonomous_execution_boundary, 'LOCAL_REPOSITORY_WRITE')).toBe(true);
+    expect(hasAutonomousCapability(overlaid.autonomous_execution_boundary, 'DEPENDENCY_NETWORK')).toBe(false);
+    expect(hasAutonomousCapability(overlaid.autonomous_execution_boundary, 'LOCAL_GIT_COMMITS')).toBe(false);
+  });
+
+  it('legacy workspace grants retain their local capabilities without broadening worker authority', () => {
+    for (const capability of LOCAL_WORKSPACE_CAPABILITIES) {
+      expect(hasAutonomousCapability(['DISPOSABLE_LOCAL_WORKSPACE'], capability)).toBe(true);
+      expect(hasAutonomousCapability([], capability)).toBe(false);
+    }
+    expect(hasAutonomousCapability(['DISPOSABLE_LOCAL_WORKSPACE'], 'CONFIGURED_SUBSCRIPTION_WORKER')).toBe(false);
+  });
+
+  it('requires a real network sandbox when network is denied, while preserving legacy grants', async () => {
+    const loaded = await loadPolicyPreset(DEFAULT_POLICY_PRESET);
+    expect(dependencyNetworkRestrictionDiagnostic(loaded.file.autonomous_execution_boundary)).toBeNull();
+    const denied = overlayAuthorization({
+      preset: loaded.file,
+      header: headerOf('authorization:\n  deny:\n    dependency_network: true\n'),
+    });
+    expect(dependencyNetworkRestrictionDiagnostic(denied.autonomous_execution_boundary)).toMatch(/^DEPENDENCY_NETWORK_DENIAL_UNSUPPORTED:/);
+    expect(dependencyNetworkRestrictionDiagnostic(['DEPENDENCY_NETWORK'])).toBeNull();
+  });
+
   it('allow estruturado acrescenta capability grantable; texto livre não entra', async () => {
     const loaded = await loadPolicyPreset(DEFAULT_POLICY_PRESET);
     const reduced = {
