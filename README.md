@@ -321,7 +321,17 @@ arquiteturalmente elegante. Melhoria do Lab é *evidence-triggered*.
 
 ---
 
-## Quick Start
+## Início rápido
+
+1. Entre no diretório do Agent Strategy Lab.
+2. Execute `pnpm run lab`.
+3. Escolha um projeto, descreva o objetivo, revise o resumo e inicie a execução.
+
+Para scripts e fluxos avançados, use `pnpm lab run --repo <caminho>` com as
+flags de entrada adequadas. Uma Run Directive válida também pode ser enviada
+por pipe ao CLI legado; o wizard guiado exige um terminal interativo.
+
+### Interface avançada: Run Directive
 
 ```text
 pnpm lab run
