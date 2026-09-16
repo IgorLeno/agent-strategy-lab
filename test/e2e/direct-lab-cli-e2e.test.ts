@@ -200,6 +200,22 @@ function runDirective(input: { readonly header: string; readonly body: string })
 }
 
 describe('pnpm lab run — Run Directive', () => {
+  it('preserva Run Directive pipada sem argumentos fora de um terminal interativo', async () => {
+    const fixture = await externalProject();
+    const raw = runDirective({
+      header: `target:\n  type: repository\n  path: ${fixture.target}\n`,
+      body: 'Create a small README note.\n',
+    });
+
+    const result = await runLab([], labEnv(fixture.runs), raw);
+
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout).observability).toMatchObject({
+      target_type: 'external',
+      directive_format: 'agentlab-v1',
+    });
+  }, 60_000);
+
   it('A/B — `lab run` resolve alvo externo só da directive', async () => {
     const fixture = await externalProject();
     const raw = runDirective({

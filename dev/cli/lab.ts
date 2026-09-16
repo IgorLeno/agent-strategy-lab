@@ -28,9 +28,13 @@ import { ProviderExpansionAuthorizationError } from '../lib/provider-expansion.j
 import { PlanSetupError } from '../lib/run-plan.js';
 import { ProjectAuthorizationError } from '../lib/project-authorization.js';
 import { SelfMaintenanceError } from '../lib/lab-self.js';
+import { shouldOpenWizard } from '../lib/lab-wizard-dispatch.js';
+import { createWizardPrompts, runLabWizard, WizardCancelled } from '../lib/lab-wizard.js';
 import { RunDirectiveError } from '../../src/intake/index.js';
 
 const BOOLEAN_FLAGS = [VERBOSE_FLAG, 'self', 'publish'] as const;
+
+export { shouldOpenWizard };
 
 const PRODUCT_PROMPT = [
   'Agent Strategy Lab',
@@ -73,7 +77,28 @@ function sharedFlags(args: ReturnType<typeof parseArgs>) {
 }
 
 async function main(): Promise<void> {
-  const args = parseArgs(process.argv.slice(2), [...BOOLEAN_FLAGS]);
+  const argv = process.argv.slice(2);
+  if (shouldOpenWizard({
+    argv,
+    stdinIsTTY: stdinStream.isTTY === true,
+    stderrIsTTY: process.stderr.isTTY === true,
+  })) {
+    try {
+      const result = await runLabWizard({
+        prompts: createWizardPrompts(),
+        stderr: process.stderr,
+        color: process.env['NO_COLOR'] === undefined,
+        submit: submitRunDirective,
+        resume: resumeHumanInstruction,
+      });
+      if (result === 'completed') return;
+    } catch (error) {
+      if (error instanceof WizardCancelled) return;
+      throw error;
+    }
+  }
+
+  const args = parseArgs(argv, [...BOOLEAN_FLAGS]);
   const subcommand = args.positionals[0];
   if (
     subcommand !== undefined &&
