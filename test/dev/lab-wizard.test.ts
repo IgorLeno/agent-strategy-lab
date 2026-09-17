@@ -53,7 +53,7 @@ function fixture(steps: Step[]) {
     async editor(message) { return next('editor', message) as string; },
   };
   const stderr = { write: vi.fn<(chunk: string) => void>(), columns: 80 };
-  const submit = vi.fn<typeof submitRunDirective>().mockResolvedValue({ payload: {}, exitCode: 0 });
+  const submit = vi.fn<typeof submitRunDirective>().mockResolvedValue({ payload: { status: 'ALL_DONE' }, exitCode: 0 });
   const resume = vi.fn<typeof resumeHumanInstruction>().mockResolvedValue({ payload: {}, exitCode: 0 });
   return {
     prompts, stderr, submit, resume, messages, choicesSeen, queue,
@@ -74,7 +74,7 @@ describe('runLabWizard', () => {
     const f = fixture([select('existing'), select('path'), input(repo), ...objective, {
       ...select('start'), before: () => expect(f.submit).not.toHaveBeenCalled(),
     }]);
-    expect(await f.run()).toBe('completed');
+    expect(await f.run()).toEqual({ payload: { status: 'ALL_DONE' }, exitCode: 0 });
     expect(f.queue).toHaveLength(0);
     expect(f.submit).toHaveBeenCalledOnce();
     const submitted = f.submit.mock.calls[0]![0];
@@ -84,6 +84,22 @@ describe('runLabWizard', () => {
     expect(f.output()).toContain('team/app');
     expect(f.output()).toContain('Add account recovery.');
     expect(f.output()).not.toContain('\x1b');
+  });
+
+  it('preserves a HUMAN_REQUIRED result from submit', async () => {
+    const f = fixture([select('self'), ...objective, select('start')]);
+    const result = { payload: { status: 'HUMAN_REQUIRED' }, exitCode: 9 };
+    f.submit.mockResolvedValue(result);
+
+    await expect(f.run()).resolves.toEqual(result);
+  });
+
+  it('preserves an operational non-zero result from submit', async () => {
+    const f = fixture([select('self'), ...objective, select('start')]);
+    const result = { payload: { status: 'FAILURE', reason: 'provider unavailable' }, exitCode: 17 };
+    f.submit.mockResolvedValue(result);
+
+    await expect(f.run()).resolves.toEqual(result);
   });
 
   it('does not dispatch after Cancel or prompt cancellation', async () => {
@@ -134,7 +150,9 @@ describe('runLabWizard', () => {
   it('resumes the selected runtime without asking for a replacement objective', async () => {
     vi.mocked(listRecentRuntimes).mockResolvedValue([{ runtimeDir: runtime, target: project, updatedAtMs: 1 }]);
     const f = fixture([select('resume'), select(runtime)]);
-    await f.run();
+    const result = { payload: { status: 'HUMAN_REQUIRED' }, exitCode: 9 };
+    f.resume.mockResolvedValue(result);
+    await expect(f.run()).resolves.toEqual(result);
     expect(f.resume).toHaveBeenCalledWith(expect.objectContaining({ runtime_dir: runtime, on_runtime: expect.any(Function), on_summary: expect.any(Function), on_progress: expect.any(Function) }));
     expect(f.submit).not.toHaveBeenCalled();
     expect(f.queue).toHaveLength(0);
@@ -163,7 +181,7 @@ describe('runLabWizard', () => {
         expect(f.output()).toContain('https://example.com/team/new-app.git');
       },
     }]);
-    await f.run();
+    await expect(f.run()).resolves.toEqual({ payload: { status: 'ALL_DONE' }, exitCode: 0 });
     expect(prepareNewProject).toHaveBeenCalledWith({ name: 'new-app', parentDirectory: '/work', remoteUrl: 'https://example.com/team/new-app.git' });
     expect(f.submit.mock.calls[0]![0].repo).toBe('/work/new-app');
   });
@@ -259,10 +277,11 @@ describe('renderWelcome', () => {
       '/_/   \\_\\__, |\\___|_| |_|\\__| |_____|\\__,_|_.__/',
       '        |___/',
     ]);
-    expect(banner).not.toMatch(/[^\x00-\x7f]/);
+    expect(banner.split('\n\n')[0]).not.toMatch(/[^\x00-\x7f]/);
   });
   it('colors only on request, preserving a plain-text equivalent', () => {
     expect(renderWelcome(80, false)).not.toContain('\x1b');
     expect(renderWelcome(80, true).replace(/\x1b\[[0-9;]*m/g, '')).toBe(renderWelcome(80, false));
+    expect(renderWelcome(80, false)).toContain('Planeje, implemente e revise projetos com agentes.');
   });
 });

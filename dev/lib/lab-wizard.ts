@@ -3,7 +3,7 @@ import { homedir } from 'node:os';
 
 import { confirm, editor, input, select } from '@inquirer/prompts';
 
-import { formatRunSummary, type resumeHumanInstruction, type submitRunDirective } from './lab.js';
+import { formatRunSummary, type LabRunResult, type resumeHumanInstruction, type submitRunDirective } from './lab.js';
 import { createProgressRenderer } from './lab-progress.js';
 import {
   inspectWizardProject,
@@ -28,7 +28,7 @@ export class WizardCancelled extends Error {
   }
 }
 
-export type WizardResult = 'completed' | 'advanced';
+export type WizardResult = 'completed' | 'advanced' | LabRunResult;
 type PrimaryChoice = 'existing' | 'new' | 'resume' | 'self' | 'advanced' | 'exit';
 type SummaryChoice = 'start' | 'review' | 'cancel';
 
@@ -70,7 +70,7 @@ export function renderWelcome(columns = 80, color = false): string {
     '/_/   \\_\\__, |\\___|_| |_|\\__| |_____|\\__,_|_.__/',
     '        |___/',
   ].join('\n');
-  return `${paint(logo, color)}\n\nPlan, implement, and review projects with agents.\n`;
+  return `${paint(logo, color)}\n\nPlaneje, implemente e revise projetos com agentes.\n`;
 }
 
 const actions: readonly { readonly name: string; readonly value: WizardAction }[] = [
@@ -183,8 +183,8 @@ export async function runLabWizard(input: {
     ]);
   }
 
-  async function submit(target: WizardTarget, action: WizardAction, objective: string): Promise<void> {
-    await input.submit({
+  async function submit(target: WizardTarget, action: WizardAction, objective: string): Promise<LabRunResult> {
+    return input.submit({
       raw_directive: buildWizardRunDirective({ target, action, objective }),
       instruction_source: 'stdin',
       self: target.type === 'self',
@@ -193,7 +193,7 @@ export async function runLabWizard(input: {
     });
   }
 
-  async function newProject(): Promise<'back' | 'completed'> {
+  async function newProject(): Promise<'back' | 'completed' | LabRunResult> {
     while (true) {
       const name = await prompts.input('Nome do novo projeto:', { validate: projectName });
       const parent = await prompts.input('Diretório pai:', { default: process.cwd(), validate: required });
@@ -223,8 +223,7 @@ export async function runLabWizard(input: {
         describeError(error);
         continue;
       }
-      await submit({ type: 'repository', path: prepared.root }, action, objective);
-      return 'completed';
+      return submit({ type: 'repository', path: prepared.root }, action, objective);
     }
   }
 
@@ -241,7 +240,9 @@ export async function runLabWizard(input: {
     if (choice === 'advanced') return 'advanced';
     if (choice === 'exit') return 'completed';
     if (choice === 'new') {
-      if (await newProject() === 'completed') return 'completed';
+      const newProjectResult = await newProject();
+      if (newProjectResult === 'completed') return 'completed';
+      if (newProjectResult !== 'back') return newProjectResult;
       continue;
     }
     if (choice === 'resume') {
@@ -255,8 +256,7 @@ export async function runLabWizard(input: {
         { name: 'Voltar', value: 'back' },
       ]);
       if (runtime === 'back') continue;
-      await input.resume({ runtime_dir: runtime, ...dispatchOptions() });
-      return 'completed';
+      return input.resume({ runtime_dir: runtime, ...dispatchOptions() });
     }
     while (true) {
       const project = choice === 'existing' ? await chooseExisting() : null;
@@ -267,8 +267,7 @@ export async function runLabWizard(input: {
       const decision = await reviewSummary({ target, ...(project ? { project } : {}), action, objective });
       if (decision === 'cancel') return 'completed';
       if (decision === 'review') continue;
-      await submit(target, action, objective);
-      return 'completed';
+      return submit(target, action, objective);
     }
   }
 }
