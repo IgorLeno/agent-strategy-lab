@@ -9,7 +9,7 @@ import {
   createHumanInstruction,
   hasAutonomousCapability,
   HUMAN_GATE_GRANT_PATH,
-  type HumanAuthority,
+  HumanAuthority,
   DETERMINISTIC_INTAKE_COMPILER_PROFILE,
   deterministicIntakeCompiler,
   humanInstructionBody,
@@ -46,7 +46,10 @@ import {
   loadHumanInstruction,
   loadPersistedIntake,
   loadPersistedRunDirective,
+  loadPersistedRunDirectiveHeader,
   loadPublishGrant,
+  loadRecoveryBudgetUsage,
+  loadRecoveryIncident,
   pathExists,
   persistHumanInstruction,
   persistObservability,
@@ -55,7 +58,29 @@ import {
   persistRunDirective,
   persistRunDirectiveHeader,
   type LabObservability,
+  persistIncidentDiagnosis,
+  persistRecoveryDecision,
+  persistRecoveryIncident,
 } from './lab-runtime.js';
+import {
+  DEFAULT_RECOVERY_BUDGET,
+  diagnosticFromTechnicalHalt,
+  incidentFingerprint,
+  recoveryModeForSession,
+  technicalHaltFromPayload,
+  type IncidentDiagnosis,
+  type RecoveryDecision,
+  type RecoveryIncident,
+} from './incident-recovery.js';
+import {
+  coordinateIncidentRecovery,
+  type IncidentInvestigatorPort,
+  type IncidentRemediationPort,
+  type RemediationOutcome,
+} from './incident-recovery-coordinator.js';
+import { createDefaultIncidentInvestigatorPort } from './incident-investigator.js';
+import { createDefaultIncidentRemediationPort } from './incident-remediation.js';
+import { createHumanRequired } from './control-plane-halt.js';
 import {
   assertControllerUnchanged,
   ensureIsolatedSelfTarget,
@@ -68,7 +93,8 @@ import {
   type SelfTargetIdentity,
 } from './lab-self.js';
 import { withHarnessLock } from './lock.js';
-import { resolveHarnessInstallationRoot } from './paths.js';
+import { resolveHarnessInstallationRoot, type HarnessPaths } from './paths.js';
+import type { LoadedProjectRunAuthorization } from './project-authorization.js';
 import { PlanSetupError, type PlanRunResult } from './run-plan.js';
 import { runProject, type ProjectDeliberationRequest } from './run-project.js';
 import {
@@ -136,6 +162,340 @@ interface SharedLabInput {
   readonly run_project?: typeof runProject;
   readonly on_runtime?: (runtimeDir: string) => void;
   readonly on_summary?: (summary: LabRunSummary) => void;
+  readonly recovery_decide?: (incident: RecoveryIncident) => Promise<RecoveryDecision>;
+  readonly incident_investigator?: IncidentInvestigatorPort;
+  readonly incident_remediation?: IncidentRemediationPort;
+}
+
+/**
+ * Idempotente por construção: `incident_id` deriva só da fingerprint, então a
+ * MESMA falha técnica recorrendo entre resumes tem que apontar para o MESMO
+ * artifact append-only. Reusar o incidente já persistido (em vez de montar um
+ * novo com `created_at` fresco) é o que evita `writeJsonOnce` recusar a
+ * segunda gravação por divergência de um campo que nunca deveria ter mudado.
+ */
+async function persistTechnicalRecoveryCandidate(input: {
+  readonly runtimeDir: string;
+  readonly executed: PlanRunResult;
+  readonly configuredMode: 'ask' | 'auto' | 'stop' | undefined;
+  readonly onProgress?: LabProgressListener;
+}): Promise<{ readonly payload: Record<string, unknown>; readonly incident: RecoveryIncident; readonly mode: 'ask' | 'auto' | 'stop' } | null> {
+  const halt = technicalHaltFromPayload(input.executed.payload);
+  if (halt === null) return null;
+  const taskId = typeof input.executed.payload['task_id'] === 'string'
+    ? input.executed.payload['task_id']
+    : null;
+  const baseSha = typeof input.executed.payload['base_sha'] === 'string'
+    ? input.executed.payload['base_sha']
+    : null;
+  const fingerprint = incidentFingerprint({
+    task_id: taskId,
+    blocker: halt.blocker,
+    reason: halt.why_automation_stopped,
+    evidence_paths: halt.evidence_paths,
+    base_sha: baseSha,
+  });
+  const incidentId = `incident-${fingerprint.slice(0, 16)}`;
+  const mode = recoveryModeForSession({
+    configured: input.configuredMode,
+    isTTY: process.stderr.isTTY === true,
+  });
+  const existing = await loadRecoveryIncident(input.runtimeDir, incidentId);
+  const incident: RecoveryIncident = existing ?? {
+    schema_version: 1,
+    incident_id: incidentId,
+    fingerprint,
+    task_id: taskId,
+    blocker: halt.blocker,
+    reason: halt.why_automation_stopped,
+    evidence_paths: [...halt.evidence_paths],
+    runtime_dir: input.runtimeDir,
+    created_at: new Date().toISOString(),
+    budget: DEFAULT_RECOVERY_BUDGET,
+  };
+  // Conteúdo estável na recorrência (mesma fingerprint => mesmo `incident`
+  // reusado acima) faz destas chamadas um no-op idempotente via
+  // `writeJsonOnce`, não uma segunda gravação divergente.
+  await persistRecoveryIncident({ runtimeDir: input.runtimeDir, mode, incident });
+  if (mode === 'stop') {
+    await persistRecoveryDecision(input.runtimeDir, incidentId, 'stop');
+    await persistIncidentDiagnosis(input.runtimeDir, incidentId, diagnosticFromTechnicalHalt(halt));
+  }
+  input.onProgress?.({ stage: 'RECOVERY_REQUIRED', detail: `${halt.blocker} incident=${incidentId}` });
+  return {
+    incident,
+    mode,
+    payload: {
+      status: mode === 'stop' ? 'BLOCKED' : 'RECOVERY_REQUIRED',
+      incident_id: incidentId,
+      fingerprint,
+      mode,
+      reason: halt.why_automation_stopped,
+      evidence_paths: halt.evidence_paths,
+    },
+  };
+}
+
+/**
+ * HARNESS: compõe self-maintenance ISOLADA sob o mesmo runtime do incidente,
+ * reusando `submitHumanInstruction`/`resumeHumanInstruction` com
+ * `target.type=self` — o MESMO pipeline `--self`, não um segundo executor.
+ * "Pausar o runtime externo" é estrutural, não um mecanismo novo: o runtime
+ * pai já está persistido e o processo só retoma a execução dele DEPOIS que
+ * esta composição retorna. A ligação pai -> runtime de recovery é o próprio
+ * caminho determinístico (`incidents/<id>/harness-recovery`), então rodar de
+ * novo depois de um crash é idempotente: se já existe HumanInstruction ali,
+ * isto RETOMA em vez de tentar submeter uma segunda instrução com hash
+ * diferente (o diagnóstico pode mudar de texto entre tentativas).
+ */
+/**
+ * Interpretação PURA do payload devolvido pela self-maintenance isolada.
+ * Separada de `remediateHarnessIncident` para ser testável sem worktree, git
+ * ou catálogo de profile nenhum — só a lógica de decisão importa aqui.
+ */
+export function interpretHarnessRecoveryPayload(input: {
+  readonly payload: Record<string, unknown>;
+  readonly incidentId: string;
+  readonly nestedRuntimeDir: string;
+}): RemediationOutcome {
+  const { payload } = input;
+  if (payload['status'] === 'HUMAN_REQUIRED') {
+    const parsedAuthority = HumanAuthority.safeParse(payload['human_authority']);
+    if (!parsedAuthority.success) {
+      return {
+        status: 'FAILED',
+        reason: 'self-maintenance isolada sinalizou HUMAN_REQUIRED sem uma human_authority válida',
+      };
+    }
+    const halt = createHumanRequired({
+      human_authority: parsedAuthority.data,
+      incident_id: input.incidentId,
+      decision_needed:
+        typeof payload['decision_needed'] === 'string' ? payload['decision_needed'] : parsedAuthority.data,
+      why_automation_stopped:
+        typeof payload['why_automation_stopped'] === 'string'
+          ? payload['why_automation_stopped']
+          : 'a self-maintenance isolada do harness exige uma decisão humana',
+      options: Array.isArray(payload['options'])
+        ? payload['options'].filter((option): option is string => typeof option === 'string')
+        : [],
+      evidence_paths: [input.nestedRuntimeDir],
+    });
+    return { status: 'HUMAN_REQUIRED', halt };
+  }
+  const stoppedBy = payload['stopped_by'];
+  const status = payload['status'];
+  if (stoppedBy === 'ALL_DONE' || status === 'ALL_DONE') {
+    return { status: 'REMEDIATED' };
+  }
+  return {
+    status: 'FAILED',
+    reason: `self-maintenance isolada não concluiu (status=${String(status ?? stoppedBy ?? 'desconhecido')}); ` +
+      `runtime preservado em ${input.nestedRuntimeDir}`,
+  };
+}
+
+export async function remediateHarnessIncident(input: {
+  readonly parentRuntimeDir: string;
+  readonly controlRoot: string;
+  readonly env: Readonly<Record<string, string | undefined>>;
+  readonly runProjectImpl: typeof runProject;
+  readonly onProgress?: LabProgressListener;
+  readonly incident: RecoveryIncident;
+  readonly diagnosis: IncidentDiagnosis;
+}): Promise<RemediationOutcome> {
+  const nestedRuntimeDir = path.join(
+    input.parentRuntimeDir,
+    'incidents',
+    input.incident.incident_id,
+    'harness-recovery',
+  );
+  input.onProgress?.({
+    stage: 'REMEDIATING',
+    detail: `self-maintenance isolada do harness em ${nestedRuntimeDir}`,
+  });
+  const rawInstruction = [
+    `Recuperação de incidente HARNESS ${input.incident.incident_id} (fingerprint ${input.incident.fingerprint}).`,
+    '',
+    `Causa raiz diagnosticada pelo investigator: ${input.diagnosis.root_cause}`,
+    '',
+    'Passos de remediação sugeridos:',
+    ...input.diagnosis.remediation.map((step) => `- ${step}`),
+    '',
+    `Estratégia de retomada: ${input.diagnosis.resume_strategy}`,
+    '',
+    'Restrição: repair local e limitado ao próprio Agent Lab (self-maintenance isolada). Nenhuma',
+    'publicação, nenhuma credencial nova e nenhuma expansão de escopo além do já autorizado para',
+    'self-maintenance. Se a correção exigir autoridade fora disso, pare com HUMAN_REQUIRED.',
+  ].join('\n');
+
+  const sharedNestedInput = {
+    runtime_dir: nestedRuntimeDir,
+    control_root: input.controlRoot,
+    env: input.env,
+    run_project: input.runProjectImpl,
+    ...(input.onProgress === undefined ? {} : { on_progress: input.onProgress }),
+  };
+
+  let result: LabRunResult;
+  try {
+    result = await (pathExists(labArtifactPaths(nestedRuntimeDir).humanInstruction).then((exists) =>
+      exists
+        ? resumeHumanInstruction(sharedNestedInput)
+        : submitHumanInstruction({
+            ...sharedNestedInput,
+            raw_instruction: rawInstruction,
+            instruction_source: 'file',
+            self: true,
+          }),
+    ));
+  } catch (error) {
+    return {
+      status: 'FAILED',
+      reason: `self-maintenance isolada falhou: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+
+  return interpretHarnessRecoveryPayload({
+    payload: result.payload,
+    incidentId: input.incident.incident_id,
+    nestedRuntimeDir,
+  });
+}
+
+async function resolveRecoveryCandidate(input: {
+  readonly candidate: Awaited<ReturnType<typeof persistTechnicalRecoveryCandidate>>;
+  readonly recoveryDecide?: (incident: RecoveryIncident) => Promise<RecoveryDecision>;
+  readonly investigator?: IncidentInvestigatorPort;
+  readonly remediation?: IncidentRemediationPort;
+  readonly paths: HarnessPaths;
+  readonly authorization: LoadedProjectRunAuthorization;
+  readonly controlRoot: string;
+  readonly env: Readonly<Record<string, string | undefined>>;
+  readonly runProjectImpl: typeof runProject;
+  readonly onProgress?: LabProgressListener;
+}): Promise<{ readonly payload: Record<string, unknown> | null; readonly resume: boolean }> {
+  const candidate = input.candidate;
+  if (candidate === null) return { payload: null, resume: false };
+  if (candidate.mode === 'stop') return { payload: candidate.payload, resume: false };
+  const usage = await loadRecoveryBudgetUsage(candidate.incident.runtime_dir, candidate.incident.fingerprint);
+  const attempt = usage.investigator_launches + 1;
+  const decision = candidate.mode === 'auto'
+    ? 'investigate'
+    : input.recoveryDecide === undefined ? 'stop' : await input.recoveryDecide(candidate.incident);
+  await persistRecoveryDecision(candidate.incident.runtime_dir, candidate.incident.incident_id, decision, attempt);
+  if (decision === 'stop') return { payload: { ...candidate.payload, status: 'BLOCKED' }, resume: false };
+
+  const investigator =
+    input.investigator ??
+    createDefaultIncidentInvestigatorPort({ paths: input.paths, authorization: input.authorization });
+  const remediation =
+    input.remediation ??
+    createDefaultIncidentRemediationPort({
+      paths: input.paths,
+      harness: (harnessInput) =>
+        remediateHarnessIncident({
+          parentRuntimeDir: candidate.incident.runtime_dir,
+          controlRoot: input.controlRoot,
+          env: input.env,
+          runProjectImpl: input.runProjectImpl,
+          incident: harnessInput.incident,
+          diagnosis: harnessInput.diagnosis,
+          ...(input.onProgress === undefined ? {} : { onProgress: input.onProgress }),
+        }),
+    });
+
+  const recovered = await coordinateIncidentRecovery({
+    runtimeDir: candidate.incident.runtime_dir,
+    incident: candidate.incident,
+    usage,
+    investigator,
+    remediation,
+    ...(input.onProgress === undefined ? {} : { onProgress: input.onProgress }),
+  });
+  if (recovered.status === 'HUMAN_REQUIRED') {
+    return { payload: { ...recovered.halt }, resume: false };
+  }
+  if (recovered.status === 'BLOCKED') {
+    return { payload: { ...candidate.payload, status: 'BLOCKED', reason: recovered.reason }, resume: false };
+  }
+  input.onProgress?.({ stage: 'RECOVERY_SUCCEEDED', detail: candidate.incident.incident_id });
+  return { payload: { ...candidate.payload, status: 'RECOVERY_SUCCEEDED' }, resume: true };
+}
+
+/**
+ * Fronteira ÚNICA de recovery, compartilhada por submit e resume: persiste o
+ * candidate, resolve a decisão/porta e, só quando `resolveRecoveryCandidate`
+ * sinaliza `resume: true`, retoma a MESMA primitive oficial (`executeProject`)
+ * sobre o MESMO runtime — nunca um segundo executor. Uma nova parada técnica
+ * na execução retomada vira um incidente NOVO devolvido ao chamador, e não
+ * uma segunda rodada automática dentro desta mesma chamada: "rerodar para
+ * retomar" já é a interface do resto do lifecycle.
+ */
+async function handleTechnicalRecovery(input: {
+  readonly executed: PlanRunResult;
+  readonly repoRoot: string;
+  readonly runtimeDir: string;
+  readonly intake: ProjectIntakeRequest;
+  readonly authorizationFile: string;
+  readonly authorization: LoadedProjectRunAuthorization;
+  readonly maxIterations: number;
+  readonly plannerProfileId?: string;
+  readonly machineSafetyCeilingOverride?: string;
+  readonly verbose?: boolean;
+  readonly autonomy?: 'routine';
+  readonly onProgress?: LabProgressListener;
+  readonly runProjectImpl: typeof runProject;
+  readonly configuredRecoveryMode: 'ask' | 'auto' | 'stop' | undefined;
+  readonly controlRoot: string;
+  readonly env: Readonly<Record<string, string | undefined>>;
+  readonly recoveryDecide?: (incident: RecoveryIncident) => Promise<RecoveryDecision>;
+  readonly incidentInvestigator?: IncidentInvestigatorPort;
+  readonly incidentRemediation?: IncidentRemediationPort;
+}): Promise<{ readonly executed: PlanRunResult; readonly recovery: Record<string, unknown> | null }> {
+  const paths = labHarnessPaths({ repoRoot: input.repoRoot, runtimeDir: input.runtimeDir });
+  const recoveryCandidate = await persistTechnicalRecoveryCandidate({
+    runtimeDir: input.runtimeDir,
+    executed: input.executed,
+    configuredMode: input.configuredRecoveryMode,
+    ...(input.onProgress === undefined ? {} : { onProgress: input.onProgress }),
+  });
+  const resolved = await resolveRecoveryCandidate({
+    candidate: recoveryCandidate,
+    paths,
+    authorization: input.authorization,
+    controlRoot: input.controlRoot,
+    env: input.env,
+    runProjectImpl: input.runProjectImpl,
+    ...(input.recoveryDecide === undefined ? {} : { recoveryDecide: input.recoveryDecide }),
+    ...(input.incidentInvestigator === undefined ? {} : { investigator: input.incidentInvestigator }),
+    ...(input.incidentRemediation === undefined ? {} : { remediation: input.incidentRemediation }),
+    ...(input.onProgress === undefined ? {} : { onProgress: input.onProgress }),
+  });
+  if (!resolved.resume) return { executed: input.executed, recovery: resolved.payload };
+
+  const resumedExecution = await executeProject({
+    repoRoot: input.repoRoot,
+    runtimeDir: input.runtimeDir,
+    intake: input.intake,
+    authorizationFile: input.authorizationFile,
+    maxIterations: input.maxIterations,
+    runProjectImpl: input.runProjectImpl,
+    ...(input.onProgress === undefined ? {} : { onProgress: input.onProgress }),
+    ...(input.plannerProfileId === undefined ? {} : { plannerProfileId: input.plannerProfileId }),
+    ...(input.machineSafetyCeilingOverride === undefined ? {} : { machineSafetyCeilingOverride: input.machineSafetyCeilingOverride }),
+    ...(input.verbose === undefined ? {} : { verbose: input.verbose }),
+    ...(input.autonomy === undefined ? {} : { autonomy: input.autonomy }),
+  });
+  const nextCandidate = await persistTechnicalRecoveryCandidate({
+    runtimeDir: input.runtimeDir,
+    executed: resumedExecution,
+    configuredMode: input.configuredRecoveryMode,
+    ...(input.onProgress === undefined ? {} : { onProgress: input.onProgress }),
+  });
+  const mergedRecovery =
+    nextCandidate === null ? resolved.payload : { ...resolved.payload, next_incident: nextCandidate.payload };
+  return { executed: resumedExecution, recovery: mergedRecovery };
 }
 
 export interface SubmitHumanInstructionInput extends SharedLabInput {
@@ -590,6 +950,9 @@ export async function submitRunDirective(input: SubmitRunDirectiveInput): Promis
     ...(input.on_runtime === undefined ? {} : { on_runtime: input.on_runtime }),
     ...(input.on_summary === undefined ? {} : { on_summary: input.on_summary }),
     ...(input.on_progress === undefined ? {} : { on_progress: input.on_progress }),
+    ...(input.recovery_decide === undefined ? {} : { recovery_decide: input.recovery_decide }),
+    ...(input.incident_investigator === undefined ? {} : { incident_investigator: input.incident_investigator }),
+    ...(input.incident_remediation === undefined ? {} : { incident_remediation: input.incident_remediation }),
     directive: parsed,
   });
 }
@@ -768,7 +1131,7 @@ export async function submitHumanInstruction(
     await assertControllerUnchanged(selfIdentity as SelfTargetIdentity, controlRoot);
   }
 
-  const executed = await executeProject({
+  const firstExecution = await executeProject({
     repoRoot,
     runtimeDir,
     intake,
@@ -781,6 +1144,27 @@ export async function submitHumanInstruction(
     ...(input.machine_safety_ceiling_override === undefined ? {} : { machineSafetyCeilingOverride: input.machine_safety_ceiling_override }),
     ...(input.verbose === undefined ? {} : { verbose: input.verbose }),
     ...(input.autonomy === undefined ? {} : { autonomy: input.autonomy }),
+  });
+  const { executed, recovery } = await handleTechnicalRecovery({
+    executed: firstExecution,
+    repoRoot,
+    runtimeDir,
+    intake,
+    authorizationFile,
+    authorization,
+    maxIterations: input.max_iterations ?? 100,
+    runProjectImpl: input.run_project ?? runProject,
+    configuredRecoveryMode: directive.header?.execution?.recovery_mode,
+    controlRoot,
+    env,
+    ...(onProgress === undefined ? {} : { onProgress }),
+    ...(input.planner_profile_id === undefined ? {} : { plannerProfileId: input.planner_profile_id }),
+    ...(input.machine_safety_ceiling_override === undefined ? {} : { machineSafetyCeilingOverride: input.machine_safety_ceiling_override }),
+    ...(input.verbose === undefined ? {} : { verbose: input.verbose }),
+    ...(input.autonomy === undefined ? {} : { autonomy: input.autonomy }),
+    ...(input.recovery_decide === undefined ? {} : { recoveryDecide: input.recovery_decide }),
+    ...(input.incident_investigator === undefined ? {} : { incidentInvestigator: input.incident_investigator }),
+    ...(input.incident_remediation === undefined ? {} : { incidentRemediation: input.incident_remediation }),
   });
   emitExecutionOutcome(onProgress, executed);
 
@@ -802,6 +1186,7 @@ export async function submitHumanInstruction(
       policy_preset: presetName,
       observability,
       ...executed.payload,
+      ...(recovery === null ? {} : { recovery }),
       ...selfReport,
     },
     exitCode: diverged ? 9 : executed.exitCode,
@@ -861,6 +1246,7 @@ export async function resumeHumanInstruction(
   if (gated !== null) return gated;
 
   const controlRoot = await resolveControlRepo(input.control_root ?? resolveHarnessInstallationRoot());
+  const env = input.env ?? process.env;
 
   let repoRoot = path.resolve(instruction.target.identity);
   let selfIdentity: SelfTargetIdentity | null = null;
@@ -895,7 +1281,7 @@ export async function resumeHumanInstruction(
     runtime: runtimeDir,
   });
 
-  const executed = await executeProject({
+  const firstExecution = await executeProject({
     repoRoot,
     runtimeDir,
     intake,
@@ -907,6 +1293,28 @@ export async function resumeHumanInstruction(
     ...(input.machine_safety_ceiling_override === undefined ? {} : { machineSafetyCeilingOverride: input.machine_safety_ceiling_override }),
     ...(input.verbose === undefined ? {} : { verbose: input.verbose }),
     ...(input.autonomy === undefined ? {} : { autonomy: input.autonomy }),
+  });
+  const { executed, recovery } = await handleTechnicalRecovery({
+    executed: firstExecution,
+    repoRoot,
+    runtimeDir,
+    intake,
+    authorizationFile: artifacts.authorization,
+    authorization,
+    maxIterations: input.max_iterations ?? 100,
+    runProjectImpl: input.run_project ?? runProject,
+    configuredRecoveryMode: (await loadPersistedRunDirectiveHeader(artifacts.runDirectiveHeader))?.execution
+      ?.recovery_mode,
+    controlRoot,
+    env,
+    ...(onProgress === undefined ? {} : { onProgress }),
+    ...(input.planner_profile_id === undefined ? {} : { plannerProfileId: input.planner_profile_id }),
+    ...(input.machine_safety_ceiling_override === undefined ? {} : { machineSafetyCeilingOverride: input.machine_safety_ceiling_override }),
+    ...(input.verbose === undefined ? {} : { verbose: input.verbose }),
+    ...(input.autonomy === undefined ? {} : { autonomy: input.autonomy }),
+    ...(input.recovery_decide === undefined ? {} : { recoveryDecide: input.recovery_decide }),
+    ...(input.incident_investigator === undefined ? {} : { incidentInvestigator: input.incident_investigator }),
+    ...(input.incident_remediation === undefined ? {} : { incidentRemediation: input.incident_remediation }),
   });
   emitExecutionOutcome(onProgress, executed);
   const effectivePublish =
@@ -930,6 +1338,7 @@ export async function resumeHumanInstruction(
       policy_preset: authorization.file.profile_policy.id,
       resumed: true,
       ...executed.payload,
+      ...(recovery === null ? {} : { recovery }),
       ...selfReport,
     },
     exitCode: diverged ? 9 : executed.exitCode,

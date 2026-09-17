@@ -3,6 +3,9 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { stdin as stdinStream } from 'node:process';
 
+import { select } from '@inquirer/prompts';
+
+import type { RecoveryDecision, RecoveryIncident } from '../lib/incident-recovery.js';
 import {
   VERBOSE_FLAG,
   emit,
@@ -60,6 +63,36 @@ async function readStdin(interactive: boolean, onWaiting?: () => void): Promise<
   return Buffer.concat(chunks).toString('utf8');
 }
 
+/**
+ * Prompt de recovery: só é passado adiante quando stderr é TTY (ver
+ * `sharedFlags`), então só é chamado quando `recoveryModeForSession` já
+ * resolveu `ask` — nunca em modo non-interactive. Cancelar (Ctrl+D/Ctrl+C)
+ * vira `stop`, o mesmo desfecho fail-closed de uma decisão explícita de
+ * parar: preserva o runtime, não lança investigator.
+ */
+async function recoveryDecidePrompt(incident: RecoveryIncident): Promise<RecoveryDecision> {
+  process.stderr.write(
+    `\nIncidente técnico ${incident.incident_id} (${incident.blocker}): ${incident.reason}\n`,
+  );
+  try {
+    return await select<RecoveryDecision>({
+      message: 'Investigar e tentar recuperação autorizada, ou parar aqui?',
+      choices: [
+        {
+          name: 'Investigar (lança um investigator read-only; remedia só dentro da autorização já concedida)',
+          value: 'investigate',
+        },
+        { name: 'Parar (preserva o runtime; decisão manual depois)', value: 'stop' },
+      ],
+    });
+  } catch (error) {
+    if (error instanceof Error && (error.name === 'ExitPromptError' || error.name === 'AbortPromptError')) {
+      return 'stop';
+    }
+    throw error;
+  }
+}
+
 function sharedFlags(args: ReturnType<typeof parseArgs>) {
   const plannerProfile = args.options.get('planner-profile');
   // Escape hatch do failsafe de INFRAESTRUTURA — nunca deadline de task.
@@ -73,6 +106,7 @@ function sharedFlags(args: ReturnType<typeof parseArgs>) {
     ...(ceilingSeconds === undefined ? {} : { machine_safety_ceiling_override: ceilingSeconds }),
     ...(parseRoutineAutonomy(args) === undefined ? {} : { autonomy: 'routine' as const }),
     ...(controlRoot === undefined ? {} : { control_root: controlRoot }),
+    ...(process.stderr.isTTY === true ? { recovery_decide: recoveryDecidePrompt } : {}),
   };
 }
 

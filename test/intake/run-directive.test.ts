@@ -149,3 +149,18 @@ describe('planning.deliberation no header', () => {
     }
   });
 });
+
+describe('execution.recovery_mode no header', () => {
+  it('persiste uma política explícita sem conceder nova autoridade', () => {
+    const parsed = parseRunDirective([
+      '---agentlab', 'version: 1', 'execution:', '  recovery_mode: auto', '---', '# Objetivo', '', 'Corrigir o projeto.', '',
+    ].join('\n'));
+    expect(parsed.header?.execution?.recovery_mode).toBe('auto');
+  });
+
+  it('recusa política desconhecida antes de qualquer provider', () => {
+    expect(() => parseRunDirective([
+      '---agentlab', 'version: 1', 'execution:', '  recovery_mode: unlimited', '---', '# Objetivo', '', 'Corrigir o projeto.', '',
+    ].join('\n'))).toThrow(RunDirectiveError);
+  });
+});
