@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { access, readFile } from 'node:fs/promises';
+import { access, readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
@@ -12,7 +12,14 @@ import {
   type HumanInstruction as HumanInstructionRecord,
 } from '../../src/intake/index.js';
 import type { ResolvedPublishGrant } from './run-directive-auth.js';
-import { writeFileAtomic, writeJsonOnce } from './atomic.js';
+import { writeFileAtomic, writeJsonAtomic, writeJsonOnce } from './atomic.js';
+import {
+  IncidentDiagnosis,
+  RecoveryIncident,
+  RecoveryMode,
+  type RecoveryBudgetUsage,
+  type RecoveryMode as RecoveryModeValue,
+} from './incident-recovery.js';
 import { resolveHarnessInstallationRoot, resolveHarnessPaths, type HarnessPaths } from './paths.js';
 import {
   loadProjectRunAuthorization,
@@ -27,6 +34,8 @@ export const SELF_TARGET_FILE = 'lab/self-target.json';
 export const RUN_DIRECTIVE_FILE = 'lab/run-directive.txt';
 export const RUN_DIRECTIVE_HEADER_FILE = 'lab/run-directive-header.yaml';
 export const PUBLISH_GRANT_FILE = 'lab/publish-grant.json';
+export const INCIDENTS_DIR = 'incidents';
+export const RECOVERY_PENDING_FILE = 'incidents/pending.json';
 
 export interface LabObservability {
   readonly schema_version: 1;
@@ -98,6 +107,199 @@ export function labArtifactPaths(runtimeDir: string): {
   };
 }
 
+export function incidentArtifactPaths(runtimeDir: string, incidentId: string): {
+  readonly root: string;
+  readonly incident: string;
+  readonly decision: string;
+  readonly diagnosis: string;
+  readonly outcome: string;
+} {
+  const root = path.join(runtimeDir, INCIDENTS_DIR, incidentId);
+  return {
+    root,
+    incident: path.join(root, 'incident.json'),
+    decision: path.join(root, 'user-decision.json'),
+    diagnosis: path.join(root, 'diagnosis.json'),
+    outcome: path.join(root, 'final-outcome.json'),
+  };
+}
+
+/**
+ * Slot append-only POR CICLO. `incident.json` é o único fato imutável de um
+ * incidente; decisão, diagnóstico e desfecho podem legitimamente DIVERGIR
+ * entre ciclos de remediação do MESMO incidente (orçamento de step 7 permite
+ * até `max_remediation_cycles`), e um arquivo write-once fixo não sobrevive a
+ * um segundo ciclo com desfecho diferente do primeiro. Cada ciclo grava no seu
+ * próprio slot numerado; nenhum arquivo já escrito é sobrescrito.
+ */
+export function incidentAttemptPaths(
+  runtimeDir: string,
+  incidentId: string,
+  attempt: number,
+): { readonly decision: string; readonly diagnosis: string; readonly outcome: string } {
+  const root = path.join(incidentArtifactPaths(runtimeDir, incidentId).root, 'attempts', String(attempt));
+  return {
+    decision: path.join(root, 'user-decision.json'),
+    diagnosis: path.join(root, 'diagnosis.json'),
+    outcome: path.join(root, 'final-outcome.json'),
+  };
+}
+
+/** `null` quando este incidente ainda não foi persistido neste runtime. */
+export async function loadRecoveryIncident(
+  runtimeDir: string,
+  incidentId: string,
+): Promise<RecoveryIncident | null> {
+  const file = incidentArtifactPaths(runtimeDir, incidentId).incident;
+  if (!(await pathExists(file))) return null;
+  return RecoveryIncident.parse(JSON.parse(await readFile(file, 'utf8')));
+}
+
+export async function persistRecoveryIncident(input: {
+  readonly runtimeDir: string;
+  readonly incident: RecoveryIncident;
+  readonly mode: RecoveryModeValue;
+}): Promise<void> {
+  const { runtimeDir, incident, mode } = input;
+  const paths = incidentArtifactPaths(runtimeDir, incident.incident_id);
+  await writeJsonOnce(paths.incident, incident);
+  await writeJsonAtomic(path.join(runtimeDir, RECOVERY_PENDING_FILE), {
+    schema_version: 1,
+    incident_id: incident.incident_id,
+    fingerprint: incident.fingerprint,
+    mode: RecoveryMode.parse(mode),
+  });
+}
+
+export async function persistRecoveryDecision(
+  runtimeDir: string,
+  incidentId: string,
+  decision: 'investigate' | 'stop',
+  attempt?: number,
+): Promise<void> {
+  const file =
+    attempt === undefined
+      ? incidentArtifactPaths(runtimeDir, incidentId).decision
+      : incidentAttemptPaths(runtimeDir, incidentId, attempt).decision;
+  await writeJsonOnce(file, { schema_version: 1, decision });
+}
+
+export async function persistIncidentDiagnosis(
+  runtimeDir: string,
+  incidentId: string,
+  diagnosis: IncidentDiagnosis,
+  attempt?: number,
+): Promise<void> {
+  const file =
+    attempt === undefined
+      ? incidentArtifactPaths(runtimeDir, incidentId).diagnosis
+      : incidentAttemptPaths(runtimeDir, incidentId, attempt).diagnosis;
+  await writeJsonOnce(file, IncidentDiagnosis.parse(diagnosis));
+}
+
+export async function persistRecoveryOutcome(
+  runtimeDir: string,
+  incidentId: string,
+  outcome: Record<string, unknown>,
+  attempt?: number,
+): Promise<void> {
+  const file =
+    attempt === undefined
+      ? incidentArtifactPaths(runtimeDir, incidentId).outcome
+      : incidentAttemptPaths(runtimeDir, incidentId, attempt).outcome;
+  await writeJsonOnce(file, outcome);
+}
+
+export interface RecoveryUsageRecord {
+  readonly schema_version: 1;
+  readonly investigator_launches: number;
+  readonly remediation_cycles: number;
+}
+
+const EMPTY_RECOVERY_USAGE: RecoveryUsageRecord = {
+  schema_version: 1,
+  investigator_launches: 0,
+  remediation_cycles: 0,
+};
+
+function recoveryUsagePath(runtimeDir: string, incidentId: string): string {
+  return path.join(incidentArtifactPaths(runtimeDir, incidentId).root, 'usage.json');
+}
+
+export async function loadRecoveryUsage(runtimeDir: string, incidentId: string): Promise<RecoveryUsageRecord> {
+  const file = recoveryUsagePath(runtimeDir, incidentId);
+  if (!(await pathExists(file))) return EMPTY_RECOVERY_USAGE;
+  return JSON.parse(await readFile(file, 'utf8')) as RecoveryUsageRecord;
+}
+
+/**
+ * Contador MUTÁVEL, ao contrário do resto dos artifacts de incident (que são
+ * append-only). É o único jeito de o orçamento de step 7 sobreviver a
+ * múltiplas invocações de `coordinateIncidentRecovery` para o MESMO
+ * incident_id (mesma fingerprint), atravessando resumes e crashes.
+ */
+export async function incrementRecoveryUsage(
+  runtimeDir: string,
+  incidentId: string,
+  delta: { readonly investigator_launch?: boolean; readonly remediation_cycle?: boolean },
+): Promise<RecoveryUsageRecord> {
+  const current = await loadRecoveryUsage(runtimeDir, incidentId);
+  const next: RecoveryUsageRecord = {
+    schema_version: 1,
+    investigator_launches: current.investigator_launches + (delta.investigator_launch === true ? 1 : 0),
+    remediation_cycles: current.remediation_cycles + (delta.remediation_cycle === true ? 1 : 0),
+  };
+  await writeJsonAtomic(recoveryUsagePath(runtimeDir, incidentId), next);
+  return next;
+}
+
+/**
+ * Orçamento REAL do incidente identificado por `fingerprint`, lido do runtime
+ * persistido — nunca reconstruído em memória.
+ *
+ * `previous_fingerprints` é TODA fingerprint já persistida neste runtime,
+ * INCLUINDO a atual: por construção, `persistRecoveryIncident` já escreveu
+ * `incident.json` antes deste load ser chamado, então uma fingerprint que
+ * RECORRE (o mesmo defeito, mesma task, mesma evidência) sempre aparece aqui
+ * a partir da sua primeira persistência — é esse sinal, combinado com
+ * `remediation_cycles` já no teto, que `recoveryBudgetStatus` usa para provar
+ * "esta fingerprint sobreviveu ao orçamento", não uma comparação com
+ * incidentes IRMÃOS.
+ */
+export async function loadRecoveryBudgetUsage(
+  runtimeDir: string,
+  fingerprint: string,
+): Promise<RecoveryBudgetUsage> {
+  const incidentsRoot = path.join(runtimeDir, INCIDENTS_DIR);
+  let entries: string[] = [];
+  try {
+    // `incidents/pending.json` é um ARQUIVO irmão, não um diretório de
+    // incidente: só entradas que são diretório podem conter `incident.json`.
+    entries = (await readdir(incidentsRoot, { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  const allFingerprints: string[] = [];
+  let usage: RecoveryUsageRecord = EMPTY_RECOVERY_USAGE;
+  for (const entry of entries) {
+    const incidentFile = path.join(incidentsRoot, entry, 'incident.json');
+    if (!(await pathExists(incidentFile))) continue;
+    const parsed = RecoveryIncident.safeParse(JSON.parse(await readFile(incidentFile, 'utf8')));
+    if (!parsed.success) continue;
+    allFingerprints.push(parsed.data.fingerprint);
+    if (parsed.data.fingerprint === fingerprint) {
+      usage = await loadRecoveryUsage(runtimeDir, entry);
+    }
+  }
+  return {
+    investigator_launches: usage.investigator_launches,
+    remediation_cycles: usage.remediation_cycles,
+    previous_fingerprints: allFingerprints,
+  };
+}
+
 export function labHarnessPaths(input: {
   readonly repoRoot: string;
   readonly runtimeDir: string;
@@ -158,6 +360,18 @@ export async function persistRunDirectiveHeader(
   header: AgentLabRunDirectiveHeader,
 ): Promise<void> {
   await writeFileAtomic(file, stringifyYaml(header));
+}
+
+/**
+ * `null` cobre tanto "sem header" (directive legado) quanto "arquivo ausente"
+ * — resume não trata as duas coisas como erro, e o chamador cai no default de
+ * sessão (`recoveryModeForSession`) como já fazia antes deste loader existir.
+ */
+export async function loadPersistedRunDirectiveHeader(
+  file: string,
+): Promise<AgentLabRunDirectiveHeader | null> {
+  if (!(await pathExists(file))) return null;
+  return AgentLabRunDirectiveHeader.parse(parseYaml(await readFile(file, 'utf8')));
 }
 
 export async function persistPublishGrant(file: string, grant: ResolvedPublishGrant): Promise<void> {

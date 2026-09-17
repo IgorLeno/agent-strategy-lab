@@ -30,6 +30,13 @@ export const LAB_PROGRESS_STAGES = [
   'REPAIR',
   'INTEGRATING',
   'PUBLISHED',
+  /** Recovery técnico aguardando ou executando; não é autoridade humana. */
+  'RECOVERY_REQUIRED',
+  'RECOVERY_INVESTIGATING',
+  'ROOT_CAUSE_IDENTIFIED',
+  'REMEDIATING',
+  'REVALIDATING',
+  'RECOVERY_SUCCEEDED',
   'HUMAN_REQUIRED',
   /**
    * PARADA TÉCNICA fail-closed: o loop parou, nada foi promovido e nenhum

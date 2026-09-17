@@ -109,6 +109,8 @@ export const DirectiveExecution = z
   .object({
     mode: z.enum(['new', 'resume']).optional(),
     autonomy: z.literal('routine').optional(),
+    /** Política para blocker técnico terminal; não concede nova autoridade. */
+    recovery_mode: z.enum(['ask', 'auto', 'stop']).optional(),
     runtime: nonEmpty.optional(),
   })
   .strict();

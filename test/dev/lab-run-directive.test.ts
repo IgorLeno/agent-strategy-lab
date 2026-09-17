@@ -76,6 +76,40 @@ describe('resolveLabTarget', () => {
 });
 
 describe('submitRunDirective', () => {
+  it('persiste um candidato de recovery apenas para BLOCKED técnico, sem mascarar a saída', async () => {
+    const target = await gitRepo('agentlab-rd-recovery-');
+    const runs = await mkdtemp(path.join(os.tmpdir(), 'agentlab-rd-recovery-runs-'));
+    created.push(runs);
+    const result = await submitRunDirective({
+      raw_directive: directive({
+        header: `target:\n  type: repository\n  path: ${target}\nexecution:\n  recovery_mode: stop\n`,
+        body: 'Create a note.\n',
+      }),
+      instruction_source: 'stdin',
+      env: { AGENTLAB_FAKE_MODE: '1', AGENTLAB_RUNS_DIR: runs },
+      run_project: async () => ({
+        payload: {
+          stopped_by: 'BLOCKED',
+          project_lifecycle: {
+            halt: {
+              status: 'BLOCKED', blocker: 'AUTOMATED_REMEDIATION_FAILED', incident_id: 'task:T1',
+              decision_needed: 'corrigir', why_automation_stopped: 'repair esgotado', options: [], evidence_paths: ['attempts/T1.json'],
+            },
+          },
+        },
+        exitCode: 9,
+      }),
+    });
+    expect(result.exitCode).toBe(9);
+    expect(result.payload['stopped_by']).toBe('BLOCKED');
+    expect(result.payload['recovery']).toMatchObject({ status: 'BLOCKED', mode: 'stop' });
+    const recovery = result.payload['recovery'] as { incident_id: string };
+    expect(await readFile(path.join(result.payload['runtime_dir'] as string, 'incidents', recovery.incident_id, 'incident.json'), 'utf8'))
+      .toContain('AUTOMATED_REMEDIATION_FAILED');
+    expect(await readFile(path.join(result.payload['runtime_dir'] as string, 'incidents', recovery.incident_id, 'diagnosis.json'), 'utf8'))
+      .toContain('repair esgotado');
+  });
+
   it('A/B — alvo externo vem da directive, sem --repo', async () => {
     const target = await gitRepo('agentlab-rd-ext-');
     const runs = await mkdtemp(path.join(os.tmpdir(), 'agentlab-rd-runs-'));

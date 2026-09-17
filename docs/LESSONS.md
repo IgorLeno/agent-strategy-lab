@@ -1262,3 +1262,31 @@ counterfactual sobre os registros persistidos, e UNKNOWN não persistido
 permanece UNKNOWN. Rótulo escolhido pelo modelo nunca tem autoridade de
 execução: o modelo descreve a CLASSE do achado e o control plane deriva
 determinísticamente se aquela classe pode bloquear.
+
+[2026-09-17] Context: incident recovery (M-incident) persistia decisão,
+diagnóstico e desfecho de um incidente em um path FIXO write-once por
+incident_id, mas o orçamento de step 7 explicitamente permite múltiplos
+ciclos de remediação para a MESMA fingerprint/incident_id.
+Mistake: assumir que "append-only" significa "um arquivo por identidade" —
+um segundo ciclo com um desfecho DIFERENTE do primeiro (ex.: REMEDIATED
+depois BLOCKED por orçamento esgotado) faz `writeJsonOnce` recusar a segunda
+gravação, e só um teste de integração que exercitou 3 ciclos reais revelou
+isso; unit tests de um ciclo só passavam por acaso.
+Rule: quando uma identidade pode legitimamente produzir múltiplos desfechos
+ao longo do tempo (ciclos, tentativas, resumes), append-only significa um
+slot NOVO por ocorrência (`attempts/<n>/...`), nunca um path fixo reescrito.
+Só o fato verdadeiramente imutável da identidade (aqui, `incident.json`) fica
+num path único write-once. Testar só o caminho de UM ciclo não prova nada
+sobre o comportamento em ciclo N+1 — se o design permite N>1, o teste precisa
+exercitar N>1 de verdade.
+
+[2026-09-17] Context: `loadRecoveryBudgetUsage` listava `incidents/` com
+`readdir` puro e tratava toda entrada como diretório de incidente.
+Mistake: `incidents/pending.json` é um arquivo IRMÃO na mesma pasta (o
+marcador mutável de incidente pendente), não um diretório — `readdir` sem
+`withFileTypes` não distingue os dois, e só um teste de integração real
+(não um unit test com fixtures controladas) bateu nesse caso.
+Rule: qualquer código que itera um diretório esperando só subdiretórios de
+uma identidade usa `readdir(dir, { withFileTypes: true })` e filtra
+`isDirectory()` explicitamente — nunca assume que a pasta contém só o que o
+código que a escreveu originalmente pretendia colocar lá.
