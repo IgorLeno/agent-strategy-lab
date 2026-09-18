@@ -144,7 +144,7 @@ if (outcome.status === 'REINVESTIGATE' && reconciliationDepth === 0) {
 - [x] On fresh resume, detect `INTEGRATED_PENDING_RESUME`, mark `RESUME_STARTED`, resume the parent directly, and never repeat completed self-maintenance.
 - [x] Add subprocess E2E assertions: integration PID differs from resume PID; old process never resumes; parent-child incident relation and integrated SHA persist; crash between integration and spawn is recoverable by a later resume.
 - [x] Run `pnpm typecheck` and `pnpm vitest run test/dev/controller-restart.test.ts test/dev/incident-recovery-lab.test.ts test/dev/lab-wizard.test.ts test/dev/lab-wizard-dispatch.test.ts`; 50 tests passed with distinct PIDs (outside sandbox because `tsx` IPC is restricted there).
-- [x] Commit with `git commit -m "fix(recovery): resume harness repair in a fresh controller"`.
+- [x] Commit with `git commit -m "fix(recovery): resume harness repair in a fresh controller"` (`4824d8b`).
 
 ### Task 6: Safe ENVIRONMENT/PROVIDER Audit and Authority Tests
 
@@ -158,19 +158,29 @@ if (outcome.status === 'REINVESTIGATE' && reconciliationDepth === 0) {
 - [x] Assert recovery creates no publish, provider, billing, credential, write-capability, or scope grant.
 - [x] Run `pnpm typecheck` and `pnpm vitest run test/dev/incident-remediation.test.ts test/dev/incident-recovery-authority.test.ts`; 9 tests passed.
 - [x] Omit `fix(recovery): compose existing safe remediation primitives`: the audit correctly leaves both classes blocked and performs no automatic composition.
+- [x] Commit the authority-boundary tests with `git commit -m "test(recovery): lock environment and provider authority boundaries"` (`afab231`).
 
 ### Task 7: Documentation, Full Gates, Push, and PR
 
 **Files:** Modify `docs/autonomous-incident-recovery-plan.md`, `docs/LESSONS.md`, and this plan.
 
-- [ ] Document the exact eligibility table, restart state machine, MISSING_CONTEXT outcomes, real launch accounting, final ENVIRONMENT/PROVIDER behavior, and remaining gaps.
-- [ ] Add the formal lesson: after HARNESS integration, persist a restart contract and resume only in a fresh process; on-disk source changes do not refresh loaded modules.
-- [ ] Run all new focused tests, including the subprocess E2E, and record exact results.
-- [ ] Run `pnpm typecheck`; expect exit 0.
-- [ ] Run `pnpm build`; expect exit 0.
-- [ ] Run `pnpm test`; expect exit 0 for the full suite.
-- [ ] Run `git diff --check`; expect exit 0 and no output.
-- [ ] Review `git status --short`, `git diff --stat origin/main...HEAD`, graph impact, and `git log --oneline origin/main..HEAD`; scope must remain recovery/wizard/tests/docs only.
-- [ ] Mark only actually completed checkboxes and append a concise outcome/evidence note to this plan.
-- [ ] Commit verified docs with `git commit -m "docs: record incident recovery hardening evidence"`.
+- [x] Document the exact eligibility table, restart state machine, MISSING_CONTEXT outcomes, real launch accounting, final ENVIRONMENT/PROVIDER behavior, and remaining gaps.
+- [x] Add formal lessons for typed eligibility, fresh-controller restart, bounded context reconciliation, and actual-launch accounting.
+- [x] Run all new focused tests, including the subprocess E2E: 11 files and 94 tests passed.
+- [x] Run `pnpm typecheck`; exit 0.
+- [x] Run `pnpm build`; exit 0.
+- [x] Run `pnpm test`; 196 files and 2903 tests passed, exit 0.
+- [x] Run `git diff --check`; exit 0 and no output.
+- [x] Review `git status --short`, `git diff --stat origin/main...HEAD`, graph impact, and `git log --oneline origin/main..HEAD`; scope remains recovery/wizard/tests/docs only.
+- [x] Mark only actually completed checkboxes and append a concise outcome/evidence note to this plan.
+- [x] Commit verified docs with `git commit -m "docs: record incident recovery hardening evidence"`.
 - [ ] Push `fix/autonomous-incident-recovery-hardening`, open a PR targeting `main`, and do not merge it.
+
+### Outcome and evidence
+
+The implementation is split into six scoped code/test commits: `74d8036`,
+`369f189`, `c658ce1`, `a5539da`, `4824d8b`, and `afab231`. The final focused
+gate passed 11 files / 94 tests, including the real subprocess fresh-controller
+proof. `pnpm typecheck` and `pnpm build` exited 0. The full suite passed 196
+files / 2903 tests. All recovery tests used fake providers/ports and fixture
+repositories; no real provider or external project run was performed.
