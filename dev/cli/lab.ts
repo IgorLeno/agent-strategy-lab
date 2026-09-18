@@ -34,6 +34,7 @@ import { dispatchWizardResult, shouldOpenWizard } from '../lib/lab-wizard-dispat
 import { createWizardPrompts, runLabWizard, WizardCancelled } from '../lib/lab-wizard.js';
 import { createRecoveryDecisionPrompt } from '../lib/recovery-prompt.js';
 import { RunDirectiveError } from '../../src/intake/index.js';
+import { dispatchControllerRestart } from '../lib/controller-restart.js';
 
 const BOOLEAN_FLAGS = [VERBOSE_FLAG, 'self', 'publish'] as const;
 
@@ -68,6 +69,16 @@ const recoveryDecidePrompt = createRecoveryDecisionPrompt({
   select: (message, choices) => select({ message, choices: [...choices] }),
 });
 
+async function restartInFreshController(result: {
+  readonly payload: Record<string, unknown>;
+  readonly exitCode: number;
+}): Promise<boolean> {
+  const dispatched = await dispatchControllerRestart(result);
+  if (!dispatched.handled) return false;
+  if (dispatched.exitCode !== 0) process.exit(dispatched.exitCode);
+  return true;
+}
+
 function sharedFlags(args: ReturnType<typeof parseArgs>) {
   const plannerProfile = args.options.get('planner-profile');
   // Escape hatch do failsafe de INFRAESTRUTURA — nunca deadline de task.
@@ -101,6 +112,7 @@ async function main(): Promise<void> {
         resume: resumeHumanInstruction,
         recovery_decide: recoveryDecidePrompt,
       });
+      if (typeof result === 'object' && await restartInFreshController(result)) return;
       if (dispatchWizardResult(result, emit, process.exit) === 'return') return;
     } catch (error) {
       if (error instanceof WizardCancelled) return;
@@ -201,6 +213,7 @@ async function main(): Promise<void> {
         ...sharedFlags(args),
       });
       ui.finish();
+      if (await restartInFreshController(result)) return;
       emit(result.payload);
       if (result.exitCode !== 0) process.exit(result.exitCode);
       return;
@@ -236,6 +249,7 @@ async function main(): Promise<void> {
       ...sharedFlags(args),
     });
     ui.finish();
+    if (await restartInFreshController(result)) return;
     emit(result.payload);
     if (result.exitCode !== 0) process.exit(result.exitCode);
   } catch (error) {

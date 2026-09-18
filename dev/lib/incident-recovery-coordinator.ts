@@ -16,6 +16,11 @@ import {
   persistRecoveryOutcome,
 } from './lab-runtime.js';
 import type { LabProgressListener } from './lab-progress.js';
+import {
+  harnessRestartRecordPath,
+  persistHarnessRestartRecord,
+  type HarnessRestartRecord,
+} from './controller-restart.js';
 
 export interface IncidentInvestigatorPort {
   investigate(input: {
@@ -34,6 +39,7 @@ export interface IncidentInvestigatorPort {
 export type RemediationOutcome =
   | { readonly status: 'REMEDIATED' }
   | { readonly status: 'REINVESTIGATE'; readonly evidence_paths: readonly string[] }
+  | { readonly status: 'RESTART_REQUIRED'; readonly record: HarnessRestartRecord }
   | { readonly status: 'HUMAN_REQUIRED'; readonly halt: HumanRequiredOutput }
   | { readonly status: 'FAILED'; readonly reason: string };
 
@@ -47,6 +53,7 @@ export interface IncidentRemediationPort {
 
 export type IncidentRecoveryResult =
   | { readonly status: 'RESUME'; readonly diagnosis: IncidentDiagnosis }
+  | { readonly status: 'RESTART_REQUIRED'; readonly record: HarnessRestartRecord; readonly diagnosis: IncidentDiagnosis }
   | { readonly status: 'HUMAN_REQUIRED'; readonly halt: HumanRequiredOutput; readonly diagnosis: IncidentDiagnosis }
   | { readonly status: 'BLOCKED'; readonly reason: string };
 
@@ -187,6 +194,26 @@ export async function coordinateIncidentRecovery(input: {
       reconciliationDepth += 1;
       currentIncident = { ...currentIncident, evidence_paths: [...outcome.evidence_paths] };
       continue;
+    }
+    if (outcome.status === 'RESTART_REQUIRED') {
+      if (
+        outcome.record.parent_runtime_dir !== input.runtimeDir ||
+        outcome.record.incident_id !== input.incident.incident_id
+      ) {
+        const reason = 'restart record não pertence ao runtime/incidente em recuperação';
+        await persistRecoveryOutcome(input.runtimeDir, input.incident.incident_id, {
+          schema_version: 1, status: 'BLOCKED', reason,
+        }, attempt);
+        return { status: 'BLOCKED', reason };
+      }
+      await persistHarnessRestartRecord(outcome.record);
+      await persistRecoveryOutcome(input.runtimeDir, input.incident.incident_id, {
+        schema_version: 1,
+        status: 'RESTART_REQUIRED',
+        integrated_sha: outcome.record.integrated_sha,
+        restart_record: harnessRestartRecordPath(input.runtimeDir, input.incident.incident_id),
+      }, attempt);
+      return { status: 'RESTART_REQUIRED', record: outcome.record, diagnosis };
     }
 
     input.onProgress?.({ stage: 'REVALIDATING', detail: input.incident.incident_id });

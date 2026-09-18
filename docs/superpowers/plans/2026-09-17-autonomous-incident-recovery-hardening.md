@@ -129,7 +129,7 @@ if (outcome.status === 'REINVESTIGATE' && reconciliationDepth === 0) {
 
 - [x] When nothing is found and no real authority exists, return `NOT_FOUND_TECHNICAL`→BLOCKED and assert no `human_authority` is emitted.
 - [x] Run `pnpm typecheck` plus `pnpm vitest run test/dev/missing-context-reconciliation.test.ts test/dev/incident-remediation.test.ts test/dev/incident-recovery.test.ts test/dev/incident-recovery-lab.test.ts`; 28 tests passed with WP0 continuation and honest absent-artifact BLOCKED.
-- [ ] Commit with `git commit -m "fix(recovery): reconcile missing context from bounded local sources"`.
+- [x] Commit with `git commit -m "fix(recovery): reconcile missing context from bounded local sources"` (`a5539da`).
 
 ### Task 5: HARNESS Fresh-Controller Restart Contract
 
@@ -137,14 +137,14 @@ if (outcome.status === 'REINVESTIGATE' && reconciliationDepth === 0) {
 
 **Interfaces:** Add `RESTART_REQUIRED` to remediation/recovery results. Persist `HarnessRestartRecord` with parent runtime, incident id, nested recovery runtime, integrated SHA, original entry intent, resume target, and `INTEGRATED_PENDING_RESUME | RESUME_STARTED | RESUMED` state.
 
-- [ ] Add a failing coordinator test asserting successful HARNESS integration returns `RESTART_REQUIRED` and old-controller `executeProject` resume count stays zero.
-- [ ] Persist the restart record atomically immediately after successful self-maintenance integration.
-- [ ] Return explicit library exit code `75` for unhandled `RESTART_REQUIRED`; when the CLI performs the restart, mirror the fresh child exit code instead.
-- [ ] Wrap wizard and advanced submit/resume with one restart adapter that spawns the current Node/tsx entrypoint using argv (no shell), inherited stdio, and `resume <parent-runtime>`.
-- [ ] On fresh resume, detect `INTEGRATED_PENDING_RESUME`, mark `RESUME_STARTED`, resume the parent directly, and never repeat completed self-maintenance.
-- [ ] Add subprocess E2E assertions: integration PID differs from resume PID; old process never resumes; parent-child incident relation and integrated SHA persist; crash between integration and spawn is recoverable by a later resume.
-- [ ] Run `pnpm vitest run test/dev/controller-restart.test.ts test/dev/incident-recovery-lab.test.ts`; expect PASS and distinct PIDs.
-- [ ] Commit with `git commit -m "fix(recovery): resume harness repair in a fresh controller"`.
+- [x] Add a failing coordinator test asserting successful HARNESS integration returns `RESTART_REQUIRED` and old-controller `executeProject` resume count stays zero.
+- [x] Persist the restart record atomically immediately after successful self-maintenance integration.
+- [x] Return explicit library exit code `75` for unhandled `RESTART_REQUIRED`; when the CLI performs the restart, mirror the fresh child exit code instead.
+- [x] Wrap wizard and advanced submit/resume with one restart adapter that spawns the current Node/tsx entrypoint using argv (no shell), inherited stdio, and `resume <parent-runtime>`.
+- [x] On fresh resume, detect `INTEGRATED_PENDING_RESUME`, mark `RESUME_STARTED`, resume the parent directly, and never repeat completed self-maintenance.
+- [x] Add subprocess E2E assertions: integration PID differs from resume PID; old process never resumes; parent-child incident relation and integrated SHA persist; crash between integration and spawn is recoverable by a later resume.
+- [x] Run `pnpm typecheck` and `pnpm vitest run test/dev/controller-restart.test.ts test/dev/incident-recovery-lab.test.ts test/dev/lab-wizard.test.ts test/dev/lab-wizard-dispatch.test.ts`; 50 tests passed with distinct PIDs (outside sandbox because `tsx` IPC is restricted there).
+- [x] Commit with `git commit -m "fix(recovery): resume harness repair in a fresh controller"`.
 
 ### Task 6: Safe ENVIRONMENT/PROVIDER Audit and Authority Tests
 

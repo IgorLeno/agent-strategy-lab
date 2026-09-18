@@ -312,6 +312,50 @@ describe('recuperação de incidente através de submitRunDirective/resumeHumanI
     expect(recovery.human_authority).toBe('DESTRUCTIVE_ACTION');
   });
 
+  it('HARNESS integrado exige restart e o controller antigo não retoma executeProject', async () => {
+    const target = await gitRepo('agentlab-recovery-restart-');
+    const runs = await mkdtemp(path.join(os.tmpdir(), 'agentlab-recovery-restart-runs-'));
+    created.push(runs);
+    let calls = 0;
+    const result = await submitRunDirective({
+      raw_directive: directive({
+        header: `target:\n  type: repository\n  path: ${target}\nexecution:\n  recovery_mode: auto\n`,
+        body: 'Corrigir o controller do Agent Lab.\n',
+      }),
+      instruction_source: 'stdin',
+      env: { AGENTLAB_FAKE_MODE: '1', AGENTLAB_RUNS_DIR: runs },
+      run_project: async () => {
+        calls += 1;
+        return { payload: { stopped_by: 'BLOCKED', project_lifecycle: { halt: blockedHalt } }, exitCode: 9 };
+      },
+      incident_investigator: {
+        investigate: async () => diagnosed({ ...targetProjectDiagnosis, classification: 'HARNESS' as const }),
+      },
+      incident_remediation: {
+        remediate: async ({ incident }) => ({
+          status: 'RESTART_REQUIRED' as const,
+          record: {
+            schema_version: 1 as const,
+            parent_runtime_dir: incident.runtime_dir,
+            incident_id: incident.incident_id,
+            harness_recovery_runtime_dir: path.join(incident.runtime_dir, 'incidents', incident.incident_id, 'harness-recovery'),
+            integrated_sha: 'e'.repeat(40),
+            original_entry_intent: 'SUBMIT' as const,
+            resume_target: incident.runtime_dir,
+            state: 'INTEGRATED_PENDING_RESUME' as const,
+          },
+        }),
+      },
+    });
+
+    expect(calls).toBe(1);
+    expect(result.exitCode).toBe(75);
+    expect(result.payload['recovery']).toMatchObject({
+      status: 'RESTART_REQUIRED',
+      restart: { integrated_sha: 'e'.repeat(40), state: 'INTEGRATED_PENDING_RESUME' },
+    });
+  });
+
   it('orçamento real: fingerprint que persiste através de resumes sucessivos esgota e para sem invocar o investigator de novo', async () => {
     const target = await gitRepo('agentlab-recovery-budget-');
     const runs = await mkdtemp(path.join(os.tmpdir(), 'agentlab-recovery-budget-runs-'));
