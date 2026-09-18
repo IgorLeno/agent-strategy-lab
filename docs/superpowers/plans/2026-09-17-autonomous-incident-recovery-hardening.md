@@ -152,12 +152,12 @@ if (outcome.status === 'REINVESTIGATE' && reconciliationDepth === 0) {
 
 **Interfaces:** Reuse only canonical preflight refresh/reinspection and policy-bounded provider retry/failover. Otherwise retain explicit FAILED/BLOCKED with the missing primitive named.
 
-- [ ] Inventory existing ENVIRONMENT/PROVIDER primitives and write a test before each composition.
-- [ ] Compose only primitives whose preconditions are already proven by persisted runtime artifacts; do not install, mutate global state, expand provider policy, request credentials, or change billing.
-- [ ] Keep explicit technical BLOCKED where no safe primitive exists.
-- [ ] Assert recovery creates no publish, provider, billing, credential, write-capability, or scope grant.
-- [ ] Run `pnpm vitest run test/dev/incident-remediation.test.ts test/dev/incident-recovery-authority.test.ts`; expect PASS.
-- [ ] Commit any verified safe composition with `git commit -m "fix(recovery): compose existing safe remediation primitives"`; omit this commit if the audit correctly leaves both classes blocked.
+- [x] Inventory existing ENVIRONMENT/PROVIDER primitives and write a test before each composition.
+- [x] Compose only primitives whose preconditions are already proven by persisted runtime artifacts; audit found none generic enough to compose safely, so no primitive was called.
+- [x] Keep explicit technical BLOCKED where no safe primitive exists, naming the missing precondition/primitive.
+- [x] Assert recovery creates no publish, provider, billing, credential, write-capability, or scope grant.
+- [x] Run `pnpm typecheck` and `pnpm vitest run test/dev/incident-remediation.test.ts test/dev/incident-recovery-authority.test.ts`; 9 tests passed.
+- [x] Omit `fix(recovery): compose existing safe remediation primitives`: the audit correctly leaves both classes blocked and performs no automatic composition.
 
 ### Task 7: Documentation, Full Gates, Push, and PR
 

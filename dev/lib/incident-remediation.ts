@@ -102,6 +102,18 @@ export function createDefaultIncidentRemediationPort(
           return remediateMissingContext({ paths: deps.paths, incident, diagnosis });
         case 'HARNESS':
           return deps.harness({ incident, diagnosis });
+        case 'ENVIRONMENT':
+          return {
+            status: 'FAILED',
+            reason:
+              'ENVIRONMENT permanece técnico: não há primitive canônica de preflight/reinspection que aceite este incidente com pré-condições persistidas suficientes; nenhuma mutação foi tentada',
+          };
+        case 'PROVIDER':
+          return {
+            status: 'FAILED',
+            reason:
+              'PROVIDER permanece técnico: retry/failover é interno ao lifecycle e à profile_policy persistida; não há primitive autônoma segura para este incidente e nenhuma expansão foi concedida',
+          };
         default:
           return {
             status: 'FAILED',
