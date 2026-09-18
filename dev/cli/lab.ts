@@ -5,7 +5,6 @@ import { stdin as stdinStream } from 'node:process';
 
 import { select } from '@inquirer/prompts';
 
-import type { RecoveryDecision, RecoveryIncident } from '../lib/incident-recovery.js';
 import {
   VERBOSE_FLAG,
   emit,
@@ -33,7 +32,9 @@ import { ProjectAuthorizationError } from '../lib/project-authorization.js';
 import { SelfMaintenanceError } from '../lib/lab-self.js';
 import { dispatchWizardResult, shouldOpenWizard } from '../lib/lab-wizard-dispatch.js';
 import { createWizardPrompts, runLabWizard, WizardCancelled } from '../lib/lab-wizard.js';
+import { createRecoveryDecisionPrompt } from '../lib/recovery-prompt.js';
 import { RunDirectiveError } from '../../src/intake/index.js';
+import { dispatchControllerRestart } from '../lib/controller-restart.js';
 
 const BOOLEAN_FLAGS = [VERBOSE_FLAG, 'self', 'publish'] as const;
 
@@ -63,34 +64,19 @@ async function readStdin(interactive: boolean, onWaiting?: () => void): Promise<
   return Buffer.concat(chunks).toString('utf8');
 }
 
-/**
- * Prompt de recovery: só é passado adiante quando stderr é TTY (ver
- * `sharedFlags`), então só é chamado quando `recoveryModeForSession` já
- * resolveu `ask` — nunca em modo non-interactive. Cancelar (Ctrl+D/Ctrl+C)
- * vira `stop`, o mesmo desfecho fail-closed de uma decisão explícita de
- * parar: preserva o runtime, não lança investigator.
- */
-async function recoveryDecidePrompt(incident: RecoveryIncident): Promise<RecoveryDecision> {
-  process.stderr.write(
-    `\nIncidente técnico ${incident.incident_id} (${incident.blocker}): ${incident.reason}\n`,
-  );
-  try {
-    return await select<RecoveryDecision>({
-      message: 'Investigar e tentar recuperação autorizada, ou parar aqui?',
-      choices: [
-        {
-          name: 'Investigar (lança um investigator read-only; remedia só dentro da autorização já concedida)',
-          value: 'investigate',
-        },
-        { name: 'Parar (preserva o runtime; decisão manual depois)', value: 'stop' },
-      ],
-    });
-  } catch (error) {
-    if (error instanceof Error && (error.name === 'ExitPromptError' || error.name === 'AbortPromptError')) {
-      return 'stop';
-    }
-    throw error;
-  }
+const recoveryDecidePrompt = createRecoveryDecisionPrompt({
+  write: (chunk) => process.stderr.write(chunk),
+  select: (message, choices) => select({ message, choices: [...choices] }),
+});
+
+async function restartInFreshController(result: {
+  readonly payload: Record<string, unknown>;
+  readonly exitCode: number;
+}): Promise<boolean> {
+  const dispatched = await dispatchControllerRestart(result);
+  if (!dispatched.handled) return false;
+  if (dispatched.exitCode !== 0) process.exit(dispatched.exitCode);
+  return true;
 }
 
 function sharedFlags(args: ReturnType<typeof parseArgs>) {
@@ -124,7 +110,9 @@ async function main(): Promise<void> {
         color: process.env['NO_COLOR'] === undefined,
         submit: submitRunDirective,
         resume: resumeHumanInstruction,
+        recovery_decide: recoveryDecidePrompt,
       });
+      if (typeof result === 'object' && await restartInFreshController(result)) return;
       if (dispatchWizardResult(result, emit, process.exit) === 'return') return;
     } catch (error) {
       if (error instanceof WizardCancelled) return;
@@ -225,6 +213,7 @@ async function main(): Promise<void> {
         ...sharedFlags(args),
       });
       ui.finish();
+      if (await restartInFreshController(result)) return;
       emit(result.payload);
       if (result.exitCode !== 0) process.exit(result.exitCode);
       return;
@@ -260,6 +249,7 @@ async function main(): Promise<void> {
       ...sharedFlags(args),
     });
     ui.finish();
+    if (await restartInFreshController(result)) return;
     emit(result.payload);
     if (result.exitCode !== 0) process.exit(result.exitCode);
   } catch (error) {

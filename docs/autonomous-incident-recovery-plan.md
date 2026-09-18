@@ -1,48 +1,87 @@
 # Autonomous Incident Recovery
 
-Scope: introduce bounded recovery for a terminal `TechnicalBlockedOutput` without changing the meaning, constructor, or authority requirements of `HumanRequiredOutput`. No provider launch, external-project execution, publish, or self-maintenance integration is part of planning.
+## Scope and authority
 
-## Confirmed architecture
+Agent Lab may investigate and remediate a closed set of terminal technical failures without changing the meaning or authority of `HumanRequiredOutput`. Recovery may inspect persisted evidence, invoke the read-only investigator through profiles already present in `profile_policy`, use existing repair/lifecycle primitives, reconcile bounded local context, and resume the same runtime. It never grants billing, credentials, publication, destruction, provider/profile expansion, product scope, or human authority.
 
-- `dev/lib/control-plane-halt.ts` defines the closed `ControlPlaneHalt` union. `HUMAN_REQUIRED` is structurally tied to a `HumanAuthority`; technical failure is `BLOCKED` with a `TechnicalBlocker`.
-- `dev/lib/project-run.ts` already attempts bounded repair and policy-constrained escalation, and can end the existing lifecycle with `BLOCKED` once those mechanisms are exhausted.
-- `dev/lib/run-plan.ts` owns runtime initialization and `runOrchestrate`; it projects terminal `BLOCKED`, `HUMAN_REQUIRED`, and failure separately.
-- `dev/lib/lab.ts` is the application boundary that persists lab-level artifacts, calls `runProject`, owns `new` versus `resume`, and returns the JSON payload consumed by the CLI.
-- `dev/cli/lab.ts`, `dev/lib/lab-ui.ts`, and `dev/lib/lab-wizard.ts` already provide interactive prompts, TUI frame sealing during input, and machine-readable stdout separated from stderr.
+Interactive runs use one shared Recovery Chat in the advanced CLI and wizard. It presents `Investigar e tentar corrigir automaticamente` (`investigate`) and `Parar e mostrar diagnóstico` (`stop`); Ctrl+C/Ctrl+D map to `stop`. Non-TTY runs default to `stop`, while autonomous recovery requires an explicitly persisted `recovery_mode=auto`.
 
-## Invariants
+## Terminal eligibility
 
-- [ ] Preserve `HumanRequiredOutput` and `TechnicalBlockedOutput` as distinct terminal contracts; recovery is entered only for a persisted technical blocker whose runtime integrity is safe to inspect.
-- [ ] Recovery authorization permits investigation, authorized local repair, validation, and resumption only. It never grants billing, credentials, publishing, destruction, scope expansion, or profiles/providers outside the persisted policy.
-- [ ] Reuse `runProject`/`runPlan` and their official retry, validation, Git, authorization, and lifecycle primitives. Do not add an executor or mutate runtime state directly.
-- [ ] Persist every recovery transition under the current runtime and make restart idempotent and resumable.
-- [ ] Keep non-TTY non-blocking: default `stop`; `auto` only when explicitly persisted/configured.
+`collectTerminalRecoveryFacts` reads authoritative lifecycle, completion, revalidation, state, and preflight records. `classifyTerminalRecovery` is a pure closed allow-list; investigator prose cannot make an ineligible terminal state recoverable.
 
-## Implementation plan
+| Terminal fact | Recoverable | Reason |
+| --- | --- | --- |
+| Typed `TechnicalBlockedOutput` | yes | already carries a structured technical blocker |
+| Official validation `FAIL` | yes | structured revalidation evidence exists, including `verification_only` tasks whose process exited successfully |
+| Typed terminal `INFRA_ERROR` or `TIMED_OUT` | yes | lifecycle-local recovery is exhausted and the technical state is explicit |
+| Preflight block with a recognized `TechnicalBlocker` | yes | blocker is structured before execution |
+| `HUMAN_REQUIRED` | no | preserves its concrete `HumanAuthority`; recovery cannot reinterpret it |
+| `ALL_DONE` or `LIMIT_REACHED` | no | completion and configured limits are not incidents |
+| Worker-reported `FAILURE` | no | a worker judgment is not harness failure evidence |
+| Untyped `FAIL` or untyped preflight block | no | no structured technical cause exists |
+| `MISSCOPED` without a typed technical cause | no | scope judgment is not silently converted to technical recovery |
 
-1. [x] Define recovery-domain schemas and pure helpers in `dev/lib/incident-recovery.ts`: incident classification, validated investigator response, deterministic fingerprint, bounded budget, session-mode resolution, and typed-halt extraction. Model-produced diagnosis is Zod-validated; the contract accepts only evidence references and summaries.
-2. [x] Extend lab runtime paths with an append-only `incidents/<incident-id>/` artifact tree for incident, decision, diagnosis, and a pending marker. Remediation-attempt and final-outcome persistence remain part of coordinator wiring.
-3. [x] Add a pure recovery eligibility/classification adapter at the `PlanRunResult` boundary. It extracts only `project_lifecycle.halt` with typed `BLOCKED`; it passes `HUMAN_REQUIRED`, ordinary failures, unsafe runtime states, and non-recoverable setup errors through unchanged.
-4. [x] Add a recovery coordinator at the `lab.ts` boundary. `handleTechnicalRecovery` persists the candidate, resolves the decision, builds default investigator/remediation ports when the caller doesn't inject one, calls `coordinateIncidentRecovery`, and — on `RESUME` — actually re-invokes `executeProject` on the SAME runtime and uses that fresh result as the final payload (this was a real gap: the coordinator previously only labeled `RECOVERY_SUCCEEDED` without continuing execution). A new technical halt on the resumed run is persisted as `recovery.next_incident` and returned to the caller rather than auto-resolved a second time in the same call — consistent with "rerun the same command to resume" already used by the rest of the lifecycle.
-5. [x] `dev/lib/incident-investigator.ts` routes `INCIDENT_INVESTIGATOR` through the `reviewer` role's existing read-only mechanism (`buildRoleArgv`/`assertReadOnlyArgv`, proven per-provider) rather than a new role — decided explicitly during implementation (see below) to avoid touching the closed `PROJECT_WORKER_ROLES` enum and its exhaustive per-provider switches. Credential/quota facts come from the same canonical `collectCurrentLaunchFacts` every other role uses; failover walks the run's own already-authorized `profile_policy.profiles`, no policy expansion. No cross-provider *preference* ordering was added (out of scope beyond simple in-order failover) — noted as a gap, not implemented.
-6. [x] Deterministic handling of validated diagnoses, in `dev/lib/incident-remediation.ts` and `dev/lib/lab.ts`: (a) `HUMAN_DECISION` → existing typed `HUMAN_REQUIRED` (unchanged, already done). (b) `TARGET_PROJECT` → `remediateTargetProject` grants one additional repair attempt via the existing `grantAdditionalRepairAuthorization` primitive; the coordinator's resume step consumes it through the ordinary `decideAutomaticRepair` path — no new retry primitive was added. (c) `HARNESS` → `remediateHarnessIncident` composes the EXISTING `submitHumanInstruction(self:true)`/`resumeHumanInstruction` pipeline against a nested runtime under `incidents/<id>/harness-recovery/` (idempotent: resumes instead of re-submitting if already started), never a second executor; payload interpretation (HUMAN_REQUIRED propagation, ALL_DONE check) is extracted as pure `interpretHarnessRecoveryPayload` and unit-tested directly. This was an explicit scope decision during implementation (see below): building this now, rather than deferring, was chosen over leaving HARNESS diagnoses permanently un-remediable. (d) `MISSING_CONTEXT` → `remediateMissingContext` is narrower than originally envisioned: it only *verifies* that every `evidence_paths` entry still exists/is readable (catches a false-positive "missing" diagnosis); it does **not** search git history or reconstruct content. When something is genuinely missing, it returns `FAILED` → `BLOCKED`, deliberately **not** a fabricated `HUMAN_REQUIRED` — no `HumanAuthority` enum value actually fits "evidence not found," and inventing one would violate the codebase's own no-fabricated-authority invariant.
-7. [x] Per-fingerprint budgets are enforced with REAL persisted usage (`dev/lib/lab-runtime.ts` `incrementRecoveryUsage`/`loadRecoveryBudgetUsage`, mutable counters distinct from the append-only incident facts), not the previous hardcoded zero. Verified by an integration test that drives two real remediation cycles then confirms a third resume blocks on budget exhaustion *without* invoking the investigator again.
-8. [x] `recovery_mode` end to end: Run Directive field, session default, pending marker, and deterministic `stop` diagnostic (already done) — plus, newly: an interactive TTY `select` prompt (`dev/cli/lab.ts` `recoveryDecidePrompt`, only wired when `stderr.isTTY`), a cancellation adapter (Ctrl+C/Ctrl+D → `stop`, never an uncaught rejection), and `auto` mode actually driving investigation end to end. Also fixed a related gap found while wiring this: `resumeHumanInstruction` previously never re-read the persisted Run Directive header at all, so a resumed run could never honor a configured `recovery_mode` (always fell back to the bare TTY/non-TTY default). Added `loadPersistedRunDirectiveHeader` and wired it into resume.
-9. [x] Progress stages (already declared) are now actually emitted by the coordinator (`RECOVERY_INVESTIGATING`, `ROOT_CAUSE_IDENTIFIED`, `REMEDIATING`, `REVALIDATING`, `RECOVERY_SUCCEEDED`) — this was true before this session too; confirmed unchanged.
-10. [~] Test coverage added: `test/dev/incident-investigator.test.ts` (real reviewer-role mechanism + failover + default-port wiring, fake `port.run`), `test/dev/incident-remediation.test.ts` (TARGET_PROJECT null-task/failure-wrapping, MISSING_CONTEXT presence/absence, HARNESS/PROVIDER dispatch), `test/dev/incident-recovery-lab.test.ts` (`interpretHarnessRecoveryPayload` unit cases; full `submitRunDirective`→BLOCKED→investigate→remediate→**actually resume**→ALL_DONE; HUMAN_REQUIRED-from-remediation propagation; real multi-cycle budget exhaustion across three `resumeHumanInstruction` calls). Two real bugs were caught and fixed by these tests: `loadRecoveryBudgetUsage` crashing on the `incidents/pending.json` sibling file, and `persistTechnicalRecoveryCandidate`/outcome persistence violating append-only on a recurring fingerprint (fixed via idempotent incident reuse + per-attempt `incidentAttemptPaths`). **Not covered**: the TTY prompt/cancellation adapter itself (`recoveryDecidePrompt` in the CLI) has no dedicated test; `remediateHarnessIncident`'s git/worktree orchestration (as opposed to its payload interpretation) has no end-to-end test — reproducing it would need either a fixture control repo with a real `dev/presets/` catalog or a worktree of this actual repository, both judged too risky/heavy for this pass; profile failover was only exercised across 2 fixture profiles, not a full ladder; no test exercises `ENVIRONMENT`/`PROVIDER` classifications reaching remediation (they intentionally return `FAILED` — no strategy implemented, see item 6 note).
-11. [x] `pnpm typecheck` passes clean. Full `pnpm test` run: 191 files, 2870 tests, all passing, exit code 0 — no regressions in the pre-existing suite from this session's changes to `lab.ts`/`lab-runtime.ts`/`incident-recovery-coordinator.ts`. Verification is real-code (fake providers/ports), not a live provider or external project run — none was attempted or claimed.
+The `verification_only` regression is intentional: process exit success does not override a failing official validator. The validation record, rather than worker prose or process status alone, makes the terminal state eligible.
 
-## Design decisions to validate during implementation
+## Durable incidents, evidence, and budgets
 
-- [x] `INCIDENT_INVESTIGATOR` reuses the `reviewer` role's read-only mechanism (decided with the user during this session) — not a new role in `PROJECT_WORKER_ROLES`, not an overload of `planner`.
-- [x] Canonical artifact paths confirmed and extended: `incidents/<id>/incident.json` (immutable), `usage.json` (mutable counters, new), `attempts/<n>/{user-decision,diagnosis,final-outcome}.json` (per-cycle, new — the original single fixed path per artifact could not survive a second remediation cycle with a different outcome; this surfaced as a real test failure and was fixed, not merely designed around).
-- [x] Confirmed the isolated self-maintenance entrypoint does **not** exist separately from the ordinary `--self` pipeline. Decided with the user during this session: build the smallest coordination contract now by composing `submitHumanInstruction(self:true)`/`resumeHumanInstruction` against a nested runtime under the parent incident's directory (`remediateHarnessIncident`), rather than deferring or duplicating the pipeline.
-- [ ] The exact `TechnicalBlocker` → eligible-for-recovery exclusion set was NOT formally established or proven in tests this session. Today, eligibility is implicit: any technical `BLOCKED` payload recognized by `technicalHaltFromPayload` becomes a recovery candidate, and safety is enforced downstream (`safe_within_current_authority`, budget, remediation strategy availability) rather than by an upfront blocker allowlist/denylist. This is a real gap against the plan's original intent and should be revisited.
+Each incident keeps an immutable `incident.json`, mutable persisted usage, and append-only per-attempt decision, diagnosis, launch, and outcome artifacts below `incidents/<incident-id>/`. Stop-mode diagnostics reference a real persisted lifecycle artifact even when the original blocker has no evidence paths.
 
-## Acceptance evidence
+Investigator usage counts actual profile/provider invocations, not coordinator cycles. Every attempted profile yields launch evidence; failover stops at the smaller of the authorized policy and the fingerprint's remaining `max_investigator_launches`. Remediation cycles are accounted independently. A repeated fingerprint cannot obtain more launches by resuming or by failing over.
 
-- [x] A fake external run reaches terminal technical `BLOCKED`, investigates (via an injected fake investigator/remediation port, not a live provider), safely repairs, and continues the original runtime to its next task (ALL_DONE) with no further human input — proven in `test/dev/incident-recovery-lab.test.ts`. Not proven: the same path through a REAL provider-invocation port or through the interactive TTY "Recovery Chat" prompt itself.
-- [x] A validated diagnosis requiring product/architecture authority (`HUMAN_DECISION`, and separately a `HARNESS` remediation that itself hits a human gate) produces only the pre-existing typed `HUMAN_REQUIRED` with the concrete authority and no invented repair — proven for both paths.
-- [x] Choosing stop persists an understandable diagnostic (`diagnosticFromTechnicalHalt`) and preserves the target project (pre-existing, re-verified unchanged). Cancelling the new TTY prompt (Ctrl+C/Ctrl+D) maps to `stop` in code (`recoveryDecidePrompt`) but has no dedicated test.
-- [x] Non-TTY defaults to controlled stop (pre-existing, unchanged). Explicit `auto` performs the bounded recovery path end to end — proven.
-- [x] Repeated unchanged failures terminate within the persisted budget — proven with a real 3-attempt integration test (2 cycles consumed, 3rd blocked without a new investigator launch). Not proven: the `HUMAN_REQUIRED`-by-default-on-repetition failure mode the plan explicitly warns against (no test tries to induce it).
+## Remediation outcomes
+
+- `TARGET_PROJECT` grants one additional repair attempt through the existing authorization primitive; ordinary project execution consumes it.
+- `HARNESS` uses the existing self-maintenance pipeline in a nested incident runtime. Successful integration returns `RESTART_REQUIRED`; the old controller never resumes the parent.
+- `MISSING_CONTEXT` performs bounded, local-only reconciliation and then permits at most one re-investigation with materialized evidence.
+- `HUMAN_DECISION` preserves the existing typed human gate and its concrete authority.
+- `ENVIRONMENT` remains technically blocked because no generic preflight/reinspection primitive accepts an arbitrary incident with sufficient persisted preconditions.
+- `PROVIDER` remains technically blocked because retry/failover belongs to the ordinary lifecycle and persisted `profile_policy`; recovery does not create an out-of-band retry or expand providers.
+
+The final two cases are deliberate fail-closed behavior, not unfinished implicit authority. No profile/model-selection feature was added.
+
+## Bounded MISSING_CONTEXT reconciliation
+
+The reconciler accepts at most 32 requested paths and searches exact relative paths or basenames only in the current checkout and repository docs, up to 16 repository worktrees, 64 local refs and 64 history commits, and 32 sibling runtimes in the same runtime group. A bounded walk examines at most 512 entries, retains at most 16 matches, and rejects artifacts larger than 1 MiB. It never walks HOME or the global filesystem.
+
+Matches are copied into content-addressed incident artifacts. The append-only manifest records source, ref/runtime locator, relative path, byte size, SHA-256, and materialized path. The typed resolution contract is:
+
+- `FOUND_RECOVERABLE`: local evidence was found and can support one re-investigation;
+- `NOT_FOUND_BUT_RECONSTRUCTIBLE`: reserved for deterministic reconstruction when a sound reconstruction primitive exists;
+- `NOT_FOUND_REQUIRES_HUMAN`: reserved for a real, concrete human authority;
+- `NOT_FOUND_TECHNICAL`: bounded sources were exhausted without evidence or real human authority.
+
+The current implementation produces `FOUND_RECOVERABLE` or `NOT_FOUND_TECHNICAL`. The WP0 fixture proves that a document missing from the checkout can be recovered from an authorized sibling worktree/runtime source and execution can continue. If no source contains it, recovery returns technical `BLOCKED`; it does not fabricate `HUMAN_REQUIRED`.
+
+## HARNESS fresh-controller state machine
+
+An integrated self-repair cannot safely resume in the Node.js process that loaded the old modules. Immediately after fast-forward integration, Agent Lab persists `controller-restart.json` with the parent runtime, incident id, nested recovery runtime, integrated SHA, original entry intent, and resume target.
+
+```text
+INTEGRATED_PENDING_RESUME
+          |
+          | fresh process starts parent resume
+          v
+    RESUME_STARTED
+          |
+          | parent resume completes
+          v
+       RESUMED
+```
+
+Library callers receive `RESTART_REQUIRED` and exit code 75. The CLI detects that contract, spawns the current Node/tsx entrypoint without a shell using `resume <parent-runtime>`, inherits stdio, and mirrors the child exit code. A crash after integration but before spawn remains recoverable: a later resume finds the persisted record and continues without repeating self-maintenance. The subprocess test proves the integration PID and resume PID differ and the old process never resumes the parent.
+
+## Verification and remaining gaps
+
+The implementation is exercised with fake providers/ports and fixture repositories; no real provider, billing path, publication, external-project mutation, or destructive action is used. Focused tests cover the shared prompt, exhaustive terminal table, `verification_only`, real launch accounting, WP0 reconciliation, absent-context technical blocking, restart persistence/idempotency, fresh-process PID separation, and authority non-expansion.
+
+Remaining deliberate limitations:
+
+- `ENVIRONMENT` and `PROVIDER` have no generic autonomous remediation strategy; they fail closed with the missing safe primitive named.
+- Reconciliation does not yet implement deterministic reconstruction or a real-authority escalation case.
+- Previous-runtime discovery is bounded to sibling runtime directories but does not yet filter them by a persisted same-target identity.
+- Provider failover is verified with bounded fixture profiles, not a live provider or an exhaustive production ladder.
+- Recovery does not select or add profiles/models; it only traverses the persisted authorized policy.
+
+Current command results and exact counts are recorded in `docs/superpowers/plans/2026-09-17-autonomous-incident-recovery-hardening.md` after the final quality-gate run.

@@ -107,7 +107,10 @@ describe('launchIncidentInvestigator', () => {
       },
     });
     expect(calls).toBe(1);
-    expect(result).toMatchObject({ outcome: 'DIAGNOSED', profile_id: 'fake-worker-economy-v1' });
+    expect(result).toMatchObject({
+      outcome: 'DIAGNOSED',
+      launches: [{ profile_id: 'fake-worker-economy-v1', outcome: 'DIAGNOSED' }],
+    });
     if (result.outcome === 'DIAGNOSED') {
       expect(result.diagnosis.classification).toBe('TARGET_PROJECT');
     }
@@ -131,7 +134,13 @@ describe('launchIncidentInvestigator', () => {
       },
     });
     expect(attempted).toEqual(['fake-worker-economy-v1', 'fake-worker-advanced-v1']);
-    expect(result).toMatchObject({ outcome: 'DIAGNOSED', profile_id: 'fake-worker-advanced-v1' });
+    expect(result).toMatchObject({
+      outcome: 'DIAGNOSED',
+      launches: [
+        { profile_id: 'fake-worker-economy-v1', outcome: 'INVALID_OUTPUT' },
+        { profile_id: 'fake-worker-advanced-v1', outcome: 'DIAGNOSED' },
+      ],
+    });
   });
 
   it('devolve UNAVAILABLE quando nenhum profile produz diagnóstico', async () => {
@@ -147,6 +156,27 @@ describe('launchIncidentInvestigator', () => {
     expect(result.outcome).toBe('UNAVAILABLE');
   });
 
+  it('limits failover to remaining real launches and reports every invocation', async () => {
+    const devDir = await newDevDir();
+    const paths = resolveHarnessPaths(REPO_ROOT, { devDir });
+    const authorization = await authorizationWith([
+      'fake-worker-economy-v1', 'fake-worker-advanced-v1', 'fake-worker-v1',
+    ]);
+    const attempted: string[] = [];
+    const result = await launchIncidentInvestigator({
+      paths,
+      authorization,
+      incident,
+      maximumLaunches: 2,
+      port: { run: async ({ profile }) => { attempted.push(profile.id); return 'invalid'; } },
+    });
+
+    expect(attempted).toEqual(['fake-worker-economy-v1', 'fake-worker-advanced-v1']);
+    expect(result).toMatchObject({ outcome: 'UNAVAILABLE' });
+    expect(result.launches).toHaveLength(2);
+    expect(result.launches.map((launch) => launch.profile_id)).toEqual(attempted);
+  });
+
   it('a porta padrão lança quando indisponível, e devolve o diagnóstico quando disponível', async () => {
     const devDir = await newDevDir();
     const paths = resolveHarnessPaths(REPO_ROOT, { devDir });
@@ -156,14 +186,16 @@ describe('launchIncidentInvestigator', () => {
       authorization,
       port: { run: async () => JSON.stringify(validDiagnosis) },
     });
-    const diagnosis = await port.investigate({ incident });
-    expect(diagnosis).toMatchObject({ classification: 'TARGET_PROJECT' });
+    const diagnosed = await port.investigate({ incident, maximumLaunches: 3 });
+    expect(diagnosed).toMatchObject({ outcome: 'DIAGNOSED', diagnosis: { classification: 'TARGET_PROJECT' } });
 
     const failingPort = createDefaultIncidentInvestigatorPort({
       paths,
       authorization,
       port: { run: async () => 'não é JSON' },
     });
-    await expect(failingPort.investigate({ incident })).rejects.toThrow();
+    await expect(failingPort.investigate({ incident, maximumLaunches: 3 })).resolves.toMatchObject({
+      outcome: 'UNAVAILABLE', launches: [{ profile_id: 'fake-worker-economy-v1' }],
+    });
   });
 });

@@ -59,6 +59,7 @@ import {
   persistRunDirectiveHeader,
   type LabObservability,
   persistIncidentDiagnosis,
+  persistTerminalRecoveryRecord,
   persistRecoveryDecision,
   persistRecoveryIncident,
 } from './lab-runtime.js';
@@ -67,11 +68,11 @@ import {
   diagnosticFromTechnicalHalt,
   incidentFingerprint,
   recoveryModeForSession,
-  technicalHaltFromPayload,
   type IncidentDiagnosis,
   type RecoveryDecision,
   type RecoveryIncident,
 } from './incident-recovery.js';
+import { classifyTerminalRecovery, collectTerminalRecoveryFacts } from './terminal-recovery-policy.js';
 import {
   coordinateIncidentRecovery,
   type IncidentInvestigatorPort,
@@ -112,6 +113,14 @@ import {
 } from './policy-preset.js';
 import { writeFileAtomic } from './atomic.js';
 import type { LabProgressListener } from './lab-progress.js';
+import {
+  CONTROLLER_RESTART_EXIT_CODE,
+  loadHarnessRestartRecord,
+  loadPendingHarnessRestart,
+  persistHarnessRestartRecord,
+  transitionHarnessRestart,
+  type HarnessRestartRecord,
+} from './controller-restart.js';
 
 export class LabRunError extends Error {
   constructor(message: string) {
@@ -176,15 +185,20 @@ interface SharedLabInput {
  */
 async function persistTechnicalRecoveryCandidate(input: {
   readonly runtimeDir: string;
+  readonly paths: HarnessPaths;
   readonly executed: PlanRunResult;
   readonly configuredMode: 'ask' | 'auto' | 'stop' | undefined;
   readonly onProgress?: LabProgressListener;
 }): Promise<{ readonly payload: Record<string, unknown>; readonly incident: RecoveryIncident; readonly mode: 'ask' | 'auto' | 'stop' } | null> {
-  const halt = technicalHaltFromPayload(input.executed.payload);
-  if (halt === null) return null;
-  const taskId = typeof input.executed.payload['task_id'] === 'string'
+  const classification = classifyTerminalRecovery(await collectTerminalRecoveryFacts({
+    payload: input.executed.payload,
+    paths: input.paths,
+  }));
+  if (!classification.eligible) return null;
+  const halt = classification.halt;
+  const taskId = classification.task_id ?? (typeof input.executed.payload['task_id'] === 'string'
     ? input.executed.payload['task_id']
-    : null;
+    : null);
   const baseSha = typeof input.executed.payload['base_sha'] === 'string'
     ? input.executed.payload['base_sha']
     : null;
@@ -217,9 +231,18 @@ async function persistTechnicalRecoveryCandidate(input: {
   // reusado acima) faz destas chamadas um no-op idempotente via
   // `writeJsonOnce`, não uma segunda gravação divergente.
   await persistRecoveryIncident({ runtimeDir: input.runtimeDir, mode, incident });
+  const terminalRecordPath = await persistTerminalRecoveryRecord({
+    runtimeDir: input.runtimeDir,
+    incidentId,
+    halt,
+  });
   if (mode === 'stop') {
     await persistRecoveryDecision(input.runtimeDir, incidentId, 'stop');
-    await persistIncidentDiagnosis(input.runtimeDir, incidentId, diagnosticFromTechnicalHalt(halt));
+    await persistIncidentDiagnosis(
+      input.runtimeDir,
+      incidentId,
+      diagnosticFromTechnicalHalt(halt, terminalRecordPath),
+    );
   }
   input.onProgress?.({ stage: 'RECOVERY_REQUIRED', detail: `${halt.blocker} incident=${incidentId}` });
   return {
@@ -303,6 +326,7 @@ export async function remediateHarnessIncident(input: {
   readonly onProgress?: LabProgressListener;
   readonly incident: RecoveryIncident;
   readonly diagnosis: IncidentDiagnosis;
+  readonly originalEntryIntent: 'SUBMIT' | 'RESUME';
 }): Promise<RemediationOutcome> {
   const nestedRuntimeDir = path.join(
     input.parentRuntimeDir,
@@ -310,6 +334,19 @@ export async function remediateHarnessIncident(input: {
     input.incident.incident_id,
     'harness-recovery',
   );
+  const existingRestart = await loadHarnessRestartRecord(
+    input.parentRuntimeDir,
+    input.incident.incident_id,
+  );
+  if (existingRestart !== null) {
+    if (existingRestart.state === 'RESUMED') {
+      return {
+        status: 'FAILED',
+        reason: 'self-maintenance HARNESS já foi integrada e retomada, mas o mesmo incidente técnico persistiu',
+      };
+    }
+    return { status: 'RESTART_REQUIRED', record: existingRestart };
+  }
   input.onProgress?.({
     stage: 'REMEDIATING',
     detail: `self-maintenance isolada do harness em ${nestedRuntimeDir}`,
@@ -356,11 +393,32 @@ export async function remediateHarnessIncident(input: {
     };
   }
 
-  return interpretHarnessRecoveryPayload({
+  const interpreted = interpretHarnessRecoveryPayload({
     payload: result.payload,
     incidentId: input.incident.incident_id,
     nestedRuntimeDir,
   });
+  if (interpreted.status !== 'REMEDIATED') return interpreted;
+  const selfMaintenance = result.payload['self_maintenance'];
+  if (typeof selfMaintenance !== 'object' || selfMaintenance === null || Array.isArray(selfMaintenance)) {
+    return { status: 'FAILED', reason: 'self-maintenance concluiu sem evidência estrutural da integração' };
+  }
+  const integratedSha = (selfMaintenance as Record<string, unknown>)['integrated_sha'];
+  const integration = (selfMaintenance as Record<string, unknown>)['integration'];
+  if (integration !== 'FAST_FORWARD' || typeof integratedSha !== 'string' || !/^[0-9a-f]{40,64}$/.test(integratedSha)) {
+    return { status: 'FAILED', reason: 'self-maintenance concluiu sem integração FAST_FORWARD e integrated_sha válido' };
+  }
+  const record = await persistHarnessRestartRecord({
+    schema_version: 1,
+    parent_runtime_dir: input.parentRuntimeDir,
+    incident_id: input.incident.incident_id,
+    harness_recovery_runtime_dir: nestedRuntimeDir,
+    integrated_sha: integratedSha,
+    original_entry_intent: input.originalEntryIntent,
+    resume_target: input.parentRuntimeDir,
+    state: 'INTEGRATED_PENDING_RESUME',
+  });
+  return { status: 'RESTART_REQUIRED', record };
 }
 
 async function resolveRecoveryCandidate(input: {
@@ -374,17 +432,24 @@ async function resolveRecoveryCandidate(input: {
   readonly env: Readonly<Record<string, string | undefined>>;
   readonly runProjectImpl: typeof runProject;
   readonly onProgress?: LabProgressListener;
-}): Promise<{ readonly payload: Record<string, unknown> | null; readonly resume: boolean }> {
+  readonly originalEntryIntent: 'SUBMIT' | 'RESUME';
+}): Promise<{
+  readonly payload: Record<string, unknown> | null;
+  readonly resume: boolean;
+  readonly restartRequired: boolean;
+}> {
   const candidate = input.candidate;
-  if (candidate === null) return { payload: null, resume: false };
-  if (candidate.mode === 'stop') return { payload: candidate.payload, resume: false };
+  if (candidate === null) return { payload: null, resume: false, restartRequired: false };
+  if (candidate.mode === 'stop') return { payload: candidate.payload, resume: false, restartRequired: false };
   const usage = await loadRecoveryBudgetUsage(candidate.incident.runtime_dir, candidate.incident.fingerprint);
   const attempt = usage.investigator_launches + 1;
   const decision = candidate.mode === 'auto'
     ? 'investigate'
     : input.recoveryDecide === undefined ? 'stop' : await input.recoveryDecide(candidate.incident);
   await persistRecoveryDecision(candidate.incident.runtime_dir, candidate.incident.incident_id, decision, attempt);
-  if (decision === 'stop') return { payload: { ...candidate.payload, status: 'BLOCKED' }, resume: false };
+  if (decision === 'stop') {
+    return { payload: { ...candidate.payload, status: 'BLOCKED' }, resume: false, restartRequired: false };
+  }
 
   const investigator =
     input.investigator ??
@@ -401,6 +466,7 @@ async function resolveRecoveryCandidate(input: {
           runProjectImpl: input.runProjectImpl,
           incident: harnessInput.incident,
           diagnosis: harnessInput.diagnosis,
+          originalEntryIntent: input.originalEntryIntent,
           ...(input.onProgress === undefined ? {} : { onProgress: input.onProgress }),
         }),
     });
@@ -414,13 +480,28 @@ async function resolveRecoveryCandidate(input: {
     ...(input.onProgress === undefined ? {} : { onProgress: input.onProgress }),
   });
   if (recovered.status === 'HUMAN_REQUIRED') {
-    return { payload: { ...recovered.halt }, resume: false };
+    return { payload: { ...recovered.halt }, resume: false, restartRequired: false };
   }
   if (recovered.status === 'BLOCKED') {
-    return { payload: { ...candidate.payload, status: 'BLOCKED', reason: recovered.reason }, resume: false };
+    return {
+      payload: { ...candidate.payload, status: 'BLOCKED', reason: recovered.reason },
+      resume: false,
+      restartRequired: false,
+    };
+  }
+  if (recovered.status === 'RESTART_REQUIRED') {
+    return {
+      payload: { ...candidate.payload, status: 'RESTART_REQUIRED', restart: recovered.record },
+      resume: false,
+      restartRequired: true,
+    };
   }
   input.onProgress?.({ stage: 'RECOVERY_SUCCEEDED', detail: candidate.incident.incident_id });
-  return { payload: { ...candidate.payload, status: 'RECOVERY_SUCCEEDED' }, resume: true };
+  return {
+    payload: { ...candidate.payload, status: 'RECOVERY_SUCCEEDED' },
+    resume: true,
+    restartRequired: false,
+  };
 }
 
 /**
@@ -452,10 +533,16 @@ async function handleTechnicalRecovery(input: {
   readonly recoveryDecide?: (incident: RecoveryIncident) => Promise<RecoveryDecision>;
   readonly incidentInvestigator?: IncidentInvestigatorPort;
   readonly incidentRemediation?: IncidentRemediationPort;
-}): Promise<{ readonly executed: PlanRunResult; readonly recovery: Record<string, unknown> | null }> {
+  readonly originalEntryIntent: 'SUBMIT' | 'RESUME';
+}): Promise<{
+  readonly executed: PlanRunResult;
+  readonly recovery: Record<string, unknown> | null;
+  readonly restartRequired: boolean;
+}> {
   const paths = labHarnessPaths({ repoRoot: input.repoRoot, runtimeDir: input.runtimeDir });
   const recoveryCandidate = await persistTechnicalRecoveryCandidate({
     runtimeDir: input.runtimeDir,
+    paths,
     executed: input.executed,
     configuredMode: input.configuredRecoveryMode,
     ...(input.onProgress === undefined ? {} : { onProgress: input.onProgress }),
@@ -471,8 +558,15 @@ async function handleTechnicalRecovery(input: {
     ...(input.incidentInvestigator === undefined ? {} : { investigator: input.incidentInvestigator }),
     ...(input.incidentRemediation === undefined ? {} : { remediation: input.incidentRemediation }),
     ...(input.onProgress === undefined ? {} : { onProgress: input.onProgress }),
+    originalEntryIntent: input.originalEntryIntent,
   });
-  if (!resolved.resume) return { executed: input.executed, recovery: resolved.payload };
+  if (!resolved.resume) {
+    return {
+      executed: input.executed,
+      recovery: resolved.payload,
+      restartRequired: resolved.restartRequired,
+    };
+  }
 
   const resumedExecution = await executeProject({
     repoRoot: input.repoRoot,
@@ -489,13 +583,14 @@ async function handleTechnicalRecovery(input: {
   });
   const nextCandidate = await persistTechnicalRecoveryCandidate({
     runtimeDir: input.runtimeDir,
+    paths,
     executed: resumedExecution,
     configuredMode: input.configuredRecoveryMode,
     ...(input.onProgress === undefined ? {} : { onProgress: input.onProgress }),
   });
   const mergedRecovery =
     nextCandidate === null ? resolved.payload : { ...resolved.payload, next_incident: nextCandidate.payload };
-  return { executed: resumedExecution, recovery: mergedRecovery };
+  return { executed: resumedExecution, recovery: mergedRecovery, restartRequired: false };
 }
 
 export interface SubmitHumanInstructionInput extends SharedLabInput {
@@ -1145,7 +1240,7 @@ export async function submitHumanInstruction(
     ...(input.verbose === undefined ? {} : { verbose: input.verbose }),
     ...(input.autonomy === undefined ? {} : { autonomy: input.autonomy }),
   });
-  const { executed, recovery } = await handleTechnicalRecovery({
+  const { executed, recovery, restartRequired } = await handleTechnicalRecovery({
     executed: firstExecution,
     repoRoot,
     runtimeDir,
@@ -1157,6 +1252,7 @@ export async function submitHumanInstruction(
     configuredRecoveryMode: directive.header?.execution?.recovery_mode,
     controlRoot,
     env,
+    originalEntryIntent: 'SUBMIT',
     ...(onProgress === undefined ? {} : { onProgress }),
     ...(input.planner_profile_id === undefined ? {} : { plannerProfileId: input.planner_profile_id }),
     ...(input.machine_safety_ceiling_override === undefined ? {} : { machineSafetyCeilingOverride: input.machine_safety_ceiling_override }),
@@ -1189,7 +1285,7 @@ export async function submitHumanInstruction(
       ...(recovery === null ? {} : { recovery }),
       ...selfReport,
     },
-    exitCode: diverged ? 9 : executed.exitCode,
+    exitCode: restartRequired ? CONTROLLER_RESTART_EXIT_CODE : diverged ? 9 : executed.exitCode,
   };
 }
 
@@ -1200,6 +1296,10 @@ export async function resumeHumanInstruction(
   onProgress?.({ stage: 'PREFLIGHT', detail: 'resume' });
   const runtimeDir = path.resolve(input.runtime_dir);
   input.on_runtime?.(runtimeDir);
+  const pendingHarnessRestart = await loadPendingHarnessRestart(runtimeDir);
+  const activeHarnessRestart: HarnessRestartRecord | null = pendingHarnessRestart === null
+    ? null
+    : await transitionHarnessRestart(pendingHarnessRestart, 'RESUME_STARTED');
   const artifacts = labArtifactPaths(runtimeDir);
   if (!(await pathExists(artifacts.humanInstruction))) {
     throw new LabRunError(`runtime sem HumanInstruction persistida: ${artifacts.humanInstruction}`);
@@ -1294,7 +1394,7 @@ export async function resumeHumanInstruction(
     ...(input.verbose === undefined ? {} : { verbose: input.verbose }),
     ...(input.autonomy === undefined ? {} : { autonomy: input.autonomy }),
   });
-  const { executed, recovery } = await handleTechnicalRecovery({
+  const { executed, recovery, restartRequired } = await handleTechnicalRecovery({
     executed: firstExecution,
     repoRoot,
     runtimeDir,
@@ -1307,6 +1407,7 @@ export async function resumeHumanInstruction(
       ?.recovery_mode,
     controlRoot,
     env,
+    originalEntryIntent: 'RESUME',
     ...(onProgress === undefined ? {} : { onProgress }),
     ...(input.planner_profile_id === undefined ? {} : { plannerProfileId: input.planner_profile_id }),
     ...(input.machine_safety_ceiling_override === undefined ? {} : { machineSafetyCeilingOverride: input.machine_safety_ceiling_override }),
@@ -1329,7 +1430,7 @@ export async function resumeHumanInstruction(
     ...(onProgress === undefined ? {} : { onProgress }),
   });
   const diverged = selfReport['status'] === 'EXTERNAL_STATE_DIVERGENCE';
-  return {
+  const result: LabRunResult = {
     payload: {
       runtime_dir: runtimeDir,
       human_instruction: artifacts.humanInstruction,
@@ -1341,8 +1442,12 @@ export async function resumeHumanInstruction(
       ...(recovery === null ? {} : { recovery }),
       ...selfReport,
     },
-    exitCode: diverged ? 9 : executed.exitCode,
+    exitCode: restartRequired ? CONTROLLER_RESTART_EXIT_CODE : diverged ? 9 : executed.exitCode,
   };
+  if (activeHarnessRestart !== null && !restartRequired) {
+    await transitionHarnessRestart(activeHarnessRestart, 'RESUMED');
+  }
+  return result;
 }
 
 export async function authorizeAdditionalRepairForRuntime(input: {

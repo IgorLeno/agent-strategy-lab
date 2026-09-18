@@ -59,6 +59,28 @@ export const IncidentDiagnosis = z.object({
 });
 export type IncidentDiagnosis = z.infer<typeof IncidentDiagnosis>;
 
+export const InvestigatorLaunchEvidence = z.object({
+  schema_version: z.literal(1),
+  profile_id: nonEmpty,
+  outcome: z.enum(['DIAGNOSED', 'INVOCATION_FAILED', 'INVALID_OUTPUT']),
+  detail: nonEmpty.optional(),
+}).strict();
+export type InvestigatorLaunchEvidence = z.infer<typeof InvestigatorLaunchEvidence>;
+
+export const IncidentInvestigationResult = z.discriminatedUnion('outcome', [
+  z.object({
+    outcome: z.literal('DIAGNOSED'),
+    diagnosis: IncidentDiagnosis,
+    launches: z.array(InvestigatorLaunchEvidence),
+  }).strict(),
+  z.object({
+    outcome: z.literal('UNAVAILABLE'),
+    reason: nonEmpty,
+    launches: z.array(InvestigatorLaunchEvidence),
+  }).strict(),
+]);
+export type IncidentInvestigationResult = z.infer<typeof IncidentInvestigationResult>;
+
 export const RecoveryBudget = z.object({
   max_investigator_launches: z.number().int().positive().max(3).default(3),
   max_remediation_cycles: z.number().int().positive().max(2).default(2),
@@ -136,7 +158,10 @@ export function recoveryModeForSession(input: {
 }
 
 /** Diagnóstico mínimo, factual e explicável para a escolha de parar. */
-export function diagnosticFromTechnicalHalt(halt: TechnicalBlockedOutput): IncidentDiagnosis {
+export function diagnosticFromTechnicalHalt(
+  halt: TechnicalBlockedOutput,
+  terminalLifecycleRecordPath: string,
+): IncidentDiagnosis {
   const classification: IncidentClassification =
     halt.blocker === 'PROVIDER_OR_INFRA_FAILURE' || halt.blocker === 'NO_ELIGIBLE_EXECUTOR'
       ? 'PROVIDER'
@@ -149,7 +174,12 @@ export function diagnosticFromTechnicalHalt(halt: TechnicalBlockedOutput): Incid
     schema_version: 1,
     classification,
     root_cause: halt.why_automation_stopped,
-    evidence: halt.evidence_paths.map((path) => ({ path, summary: 'evidência referenciada pelo lifecycle terminal' })),
+    evidence: halt.evidence_paths.length > 0
+      ? halt.evidence_paths.map((path) => ({ path, summary: 'evidência referenciada pelo lifecycle terminal' }))
+      : [{
+          path: terminalLifecycleRecordPath,
+          summary: 'record estruturado do lifecycle terminal que originou este incidente',
+        }],
     remediation: [...halt.options],
     safe_within_current_authority: false,
     resume_strategy: 'preservar o runtime e retomar a partir dos artifacts persistidos após investigação autorizada',

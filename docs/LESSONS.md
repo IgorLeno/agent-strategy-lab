@@ -1290,3 +1290,36 @@ Rule: qualquer código que itera um diretório esperando só subdiretórios de
 uma identidade usa `readdir(dir, { withFileTypes: true })` e filtra
 `isDirectory()` explicitamente — nunca assume que a pasta contém só o que o
 código que a escreveu originalmente pretendia colocar lá.
+
+[2026-09-18] Context: recovery só reconhecia `project_lifecycle.halt`, então
+uma task `verification_only` com processo bem-sucedido e validação oficial
+FAIL encerrava sem oferecer investigação.
+Mistake: usar uma única forma de payload como proxy para toda falha técnica
+terminal e ignorar os registros autoritativos de completion/revalidation.
+Rule: elegibilidade de recovery é uma allow-list pura sobre fatos terminais
+tipados coletados dos artifacts canônicos; processo zero não supera validação
+oficial FAIL, e prosa do investigator nunca concede elegibilidade.
+
+[2026-09-18] Context: self-maintenance HARNESS integrou código corrigido no
+checkout, mas o controlador corrente já tinha carregado os módulos antigos.
+Mistake: confundir atualização em disco com atualização do module graph vivo
+e tentar retomar o runtime pai no mesmo processo.
+Rule: depois de integrar reparo do harness, persista imediatamente um contrato
+de restart idempotente que vincule runtime pai, incidente, runtime aninhado,
+SHA integrado e alvo; retome o pai apenas em um controlador novo e nunca
+repita a integração já concluída.
+
+[2026-09-18] Context: diagnóstico MISSING_CONTEXT podia apontar para evidência
+ausente embora cópias autorizadas existissem em worktree, Git ou runtime local.
+Mistake: equiparar ausência no checkout atual a necessidade de humano, ou
+procurar sem limites e sem provenance.
+Rule: reconcilie somente fontes locais autorizadas com limites explícitos,
+materialize bytes por conteúdo e permita uma única reinvestigação; se nada for
+encontrado e nenhuma autoridade real existir, permaneça technical BLOCKED.
+
+[2026-09-18] Context: failover do investigator podia executar vários profiles
+em um único ciclo lógico, enquanto o orçamento contava apenas o ciclo.
+Mistake: medir intenção de coordenação em vez do recurso externo consumido.
+Rule: orçamento de investigator conta cada invocação real de profile/provider,
+persiste evidência por launch e limita failover pelo saldo antes do próximo
+launch; resume não reinicia o contador da fingerprint.

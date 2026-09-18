@@ -5,6 +5,7 @@ import { confirm, editor, input, select } from '@inquirer/prompts';
 
 import { formatRunSummary, type LabRunResult, type resumeHumanInstruction, type submitRunDirective } from './lab.js';
 import { createProgressRenderer } from './lab-progress.js';
+import type { RecoveryDecide } from './recovery-prompt.js';
 import {
   inspectWizardProject,
   listRecentRuntimes,
@@ -110,6 +111,7 @@ export async function runLabWizard(input: {
   readonly color: boolean;
   readonly submit: typeof submitRunDirective;
   readonly resume: typeof resumeHumanInstruction;
+  readonly recovery_decide: RecoveryDecide;
   readonly controlRoot?: string;
   readonly env?: Readonly<Record<string, string | undefined>>;
 }): Promise<WizardResult> {
@@ -128,6 +130,7 @@ export async function runLabWizard(input: {
     on_runtime: (dir: string): void => write(`runtime: ${dir}\n`),
     on_summary: (summary: Parameters<typeof formatRunSummary>[0]): void => write(`${formatRunSummary(summary)}\n`),
     on_progress: createProgressRenderer(write),
+    recovery_decide: input.recovery_decide,
   });
 
   async function chooseExisting(): Promise<ProjectChoice | null> {
