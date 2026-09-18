@@ -12,13 +12,11 @@
  * consome o grant sozinho no próximo `runProject`); reconciliação de
  * MISSING_CONTEXT só CONFIRMA presença de evidência, nunca inventa conteúdo.
  */
-import { access } from 'node:fs/promises';
-import path from 'node:path';
-
 import { grantAdditionalRepairAuthorization } from './automatic-repair.js';
 import type { IncidentRemediationPort, RemediationOutcome } from './incident-recovery-coordinator.js';
 import type { IncidentDiagnosis, RecoveryIncident } from './incident-recovery.js';
 import { withHarnessLock } from './lock.js';
+import { reconcileMissingContext } from './missing-context-reconciliation.js';
 import type { HarnessPaths } from './paths.js';
 
 /**
@@ -57,29 +55,30 @@ export async function remediateTargetProject(input: {
 }
 
 /**
- * MISSING_CONTEXT: só CONFIRMA presença de evidência (leitura read-only). Se
+ * MISSING_CONTEXT: procura em fontes locais autorizadas, materializa a
+ * evidência encontrada no runtime atual e pede uma única reinvestigação. Se
  * algo continua ausente, isto é uma falha técnica — não existe HumanAuthority
  * real para "não achamos o arquivo", então isto vira BLOCKED, nunca um
  * HUMAN_REQUIRED fabricado.
  */
 export async function remediateMissingContext(input: {
+  readonly paths: HarnessPaths;
   readonly incident: RecoveryIncident;
+  readonly diagnosis: IncidentDiagnosis;
 }): Promise<RemediationOutcome> {
-  const missing: string[] = [];
-  for (const evidencePath of input.incident.evidence_paths) {
-    try {
-      await access(path.resolve(evidencePath));
-    } catch {
-      missing.push(evidencePath);
-    }
+  const resolution = await reconcileMissingContext({
+    paths: input.paths,
+    runtimeDir: input.incident.runtime_dir,
+    incidentId: input.incident.incident_id,
+    requestedPaths: [...new Set([
+      ...input.incident.evidence_paths,
+      ...input.diagnosis.evidence.map((evidence) => evidence.path),
+    ])],
+  });
+  if (resolution.status === 'FOUND_RECOVERABLE' || resolution.status === 'NOT_FOUND_BUT_RECONSTRUCTIBLE') {
+    return { status: 'REINVESTIGATE', evidence_paths: resolution.evidence_paths };
   }
-  if (missing.length > 0) {
-    return {
-      status: 'FAILED',
-      reason: `evidência ainda ausente e não reconstruível automaticamente: ${missing.join(', ')}`,
-    };
-  }
-  return { status: 'REMEDIATED' };
+  return { status: 'FAILED', reason: resolution.reason };
 }
 
 export interface IncidentRemediationDependencies {
@@ -100,7 +99,7 @@ export function createDefaultIncidentRemediationPort(
         case 'TARGET_PROJECT':
           return remediateTargetProject({ paths: deps.paths, incident, diagnosis });
         case 'MISSING_CONTEXT':
-          return remediateMissingContext({ incident });
+          return remediateMissingContext({ paths: deps.paths, incident, diagnosis });
         case 'HARNESS':
           return deps.harness({ incident, diagnosis });
         default:

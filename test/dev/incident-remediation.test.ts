@@ -84,21 +84,35 @@ describe('remediateTargetProject', () => {
 });
 
 describe('remediateMissingContext', () => {
-  it('REMEDIATED quando toda a evidência listada existe', async () => {
+  it('REINVESTIGATE com evidência materializada quando encontra contexto recuperável', async () => {
     const devDir = await newDevDir();
+    const paths = resolveHarnessPaths(devDir, { devDir });
     const file = path.join(devDir, 'evidence.txt');
     await writeFile(file, 'conteúdo', 'utf8');
-    const result = await remediateMissingContext({ incident: incidentWith({ evidence_paths: [file] }) });
-    expect(result).toEqual({ status: 'REMEDIATED' });
+    const missingContextDiagnosis = { ...diagnosis, classification: 'MISSING_CONTEXT' as const, evidence: [] };
+    const result = await remediateMissingContext({
+      paths,
+      incident: incidentWith({ runtime_dir: devDir, evidence_paths: [file] }),
+      diagnosis: missingContextDiagnosis,
+    });
+    expect(result.status).toBe('REINVESTIGATE');
+    if (result.status === 'REINVESTIGATE') {
+      expect(result.evidence_paths.some((candidate) => candidate.endsWith('-evidence.txt'))).toBe(true);
+    }
   });
 
-  it('FAILED listando os paths ainda ausentes, sem inventar HUMAN_REQUIRED', async () => {
+  it('FAILED técnico quando as fontes locais não contêm o contexto, sem inventar HUMAN_REQUIRED', async () => {
     const devDir = await newDevDir();
+    const paths = resolveHarnessPaths(devDir, { devDir });
     const missing = path.join(devDir, 'nao-existe.txt');
-    const result = await remediateMissingContext({ incident: incidentWith({ evidence_paths: [missing] }) });
+    const result = await remediateMissingContext({
+      paths,
+      incident: incidentWith({ runtime_dir: devDir, evidence_paths: [missing] }),
+      diagnosis: { ...diagnosis, classification: 'MISSING_CONTEXT', evidence: [] },
+    });
     expect(result.status).toBe('FAILED');
     if (result.status === 'FAILED') {
-      expect(result.reason).toContain(missing);
+      expect(result.reason).toContain('fontes locais autorizadas');
     }
   });
 });
@@ -123,7 +137,7 @@ describe('createDefaultIncidentRemediationPort', () => {
     expect(result).toEqual({ status: 'REMEDIATED' });
   });
 
-  it('roteia MISSING_CONTEXT para a checagem read-only de evidência', async () => {
+  it('roteia MISSING_CONTEXT para a reconciliação local limitada', async () => {
     const devDir = await newDevDir();
     const paths = resolveHarnessPaths(devDir, { devDir });
     const port = createDefaultIncidentRemediationPort({
@@ -131,10 +145,10 @@ describe('createDefaultIncidentRemediationPort', () => {
       harness: async () => ({ status: 'FAILED' as const, reason: 'não deveria ser chamado' }),
     });
     const result = await port.remediate({
-      incident: incidentWith({ evidence_paths: [] }),
-      diagnosis: { ...diagnosis, classification: 'MISSING_CONTEXT' },
+      incident: incidentWith({ runtime_dir: devDir, evidence_paths: [] }),
+      diagnosis: { ...diagnosis, classification: 'MISSING_CONTEXT', evidence: [] },
     });
-    expect(result).toEqual({ status: 'REMEDIATED' });
+    expect(result.status).toBe('FAILED');
   });
 
   it('FAILED honesto para classification sem estratégia implementada (ENVIRONMENT/PROVIDER)', async () => {

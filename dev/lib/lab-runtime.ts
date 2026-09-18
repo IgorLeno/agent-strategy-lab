@@ -240,6 +240,21 @@ export async function persistIncidentDiagnosis(
   await writeJsonOnce(file, IncidentDiagnosis.parse(diagnosis));
 }
 
+export async function persistReinvestigationDiagnosis(
+  runtimeDir: string,
+  incidentId: string,
+  attempt: number,
+  diagnosis: IncidentDiagnosis,
+): Promise<void> {
+  const file = path.join(
+    incidentArtifactPaths(runtimeDir, incidentId).root,
+    'attempts',
+    String(attempt),
+    'reinvestigation-diagnosis.json',
+  );
+  await writeJsonOnce(file, IncidentDiagnosis.parse(diagnosis));
+}
+
 export async function persistRecoveryOutcome(
   runtimeDir: string,
   incidentId: string,
