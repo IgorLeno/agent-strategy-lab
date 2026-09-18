@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import { parseRunDirective } from '../../src/intake/index.js';
 import { inspectWizardProject, listRecentRuntimes, prepareNewProject } from '../../dev/lib/lab-project-selection.js';
 import type { resumeHumanInstruction, submitRunDirective } from '../../dev/lib/lab.js';
+import type { RecoveryDecision, RecoveryIncident } from '../../dev/lib/incident-recovery.js';
 import { createWizardPrompts, renderWelcome, runLabWizard, WizardCancelled, type WizardPrompts } from '../../dev/lib/lab-wizard.js';
 import * as inquirer from '@inquirer/prompts';
 
@@ -55,9 +56,13 @@ function fixture(steps: Step[]) {
   const stderr = { write: vi.fn<(chunk: string) => void>(), columns: 80 };
   const submit = vi.fn<typeof submitRunDirective>().mockResolvedValue({ payload: { status: 'ALL_DONE' }, exitCode: 0 });
   const resume = vi.fn<typeof resumeHumanInstruction>().mockResolvedValue({ payload: {}, exitCode: 0 });
+  const recoveryDecide = vi.fn<(incident: RecoveryIncident) => Promise<RecoveryDecision>>().mockResolvedValue('stop');
   return {
-    prompts, stderr, submit, resume, messages, choicesSeen, queue,
-    run: () => runLabWizard({ prompts, stderr, submit, resume, color: false, controlRoot, env: { NO_COLOR: '' } }),
+    prompts, stderr, submit, resume, recoveryDecide, messages, choicesSeen, queue,
+    run: () => runLabWizard({
+      prompts, stderr, submit, resume, recovery_decide: recoveryDecide,
+      color: false, controlRoot, env: { NO_COLOR: '' },
+    }),
     output: () => stderr.write.mock.calls.map(([chunk]) => chunk).join(''),
   };
 }
@@ -78,7 +83,10 @@ describe('runLabWizard', () => {
     expect(f.queue).toHaveLength(0);
     expect(f.submit).toHaveBeenCalledOnce();
     const submitted = f.submit.mock.calls[0]![0];
-    expect(submitted).toMatchObject({ repo, self: false, instruction_source: 'stdin', control_root: controlRoot });
+    expect(submitted).toMatchObject({
+      repo, self: false, instruction_source: 'stdin', control_root: controlRoot,
+      recovery_decide: f.recoveryDecide,
+    });
     expect(parseRunDirective(submitted.raw_directive).header?.target).toEqual({ type: 'repository', path: repo });
     expect(f.output()).toContain('main');
     expect(f.output()).toContain('team/app');
@@ -153,7 +161,13 @@ describe('runLabWizard', () => {
     const result = { payload: { status: 'HUMAN_REQUIRED' }, exitCode: 9 };
     f.resume.mockResolvedValue(result);
     await expect(f.run()).resolves.toEqual(result);
-    expect(f.resume).toHaveBeenCalledWith(expect.objectContaining({ runtime_dir: runtime, on_runtime: expect.any(Function), on_summary: expect.any(Function), on_progress: expect.any(Function) }));
+    expect(f.resume).toHaveBeenCalledWith(expect.objectContaining({
+      runtime_dir: runtime,
+      recovery_decide: f.recoveryDecide,
+      on_runtime: expect.any(Function),
+      on_summary: expect.any(Function),
+      on_progress: expect.any(Function),
+    }));
     expect(f.submit).not.toHaveBeenCalled();
     expect(f.queue).toHaveLength(0);
   });
