@@ -174,7 +174,7 @@ if (outcome.status === 'REINVESTIGATE' && reconciliationDepth === 0) {
 - [x] Review `git status --short`, `git diff --stat origin/main...HEAD`, graph impact, and `git log --oneline origin/main..HEAD`; scope remains recovery/wizard/tests/docs only.
 - [x] Mark only actually completed checkboxes and append a concise outcome/evidence note to this plan.
 - [x] Commit verified docs with `git commit -m "docs: record incident recovery hardening evidence"`.
-- [ ] Push `fix/autonomous-incident-recovery-hardening`, open a PR targeting `main`, and do not merge it.
+- [x] Push `fix/autonomous-incident-recovery-hardening` and open PR #23 targeting `main`; do not merge it.
 
 ### Outcome and evidence
 
