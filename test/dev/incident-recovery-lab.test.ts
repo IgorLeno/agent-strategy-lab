@@ -51,6 +51,12 @@ const targetProjectDiagnosis = {
   resume_strategy: 'retomar T1',
 };
 
+const diagnosed = <T>(diagnosis: T) => ({
+  outcome: 'DIAGNOSED' as const,
+  diagnosis,
+  launches: [{ schema_version: 1 as const, profile_id: 'fixture-investigator', outcome: 'DIAGNOSED' as const }],
+});
+
 describe('interpretHarnessRecoveryPayload', () => {
   const base = { incidentId: 'incident-1', nestedRuntimeDir: '/tmp/nested' };
 
@@ -97,6 +103,36 @@ describe('interpretHarnessRecoveryPayload', () => {
 });
 
 describe('recuperação de incidente através de submitRunDirective/resumeHumanInstruction', () => {
+  it('persists real terminal evidence when stop mode receives zero evidence_paths', async () => {
+    const target = await gitRepo('agentlab-recovery-empty-evidence-');
+    const runs = await mkdtemp(path.join(os.tmpdir(), 'agentlab-recovery-empty-evidence-runs-'));
+    created.push(runs);
+    const result = await submitRunDirective({
+      raw_directive: directive({
+        header: `target:\n  type: repository\n  path: ${target}\nexecution:\n  recovery_mode: stop\n`,
+        body: 'Diagnosticar blocker sem paths.\n',
+      }),
+      instruction_source: 'stdin',
+      env: { AGENTLAB_FAKE_MODE: '1', AGENTLAB_RUNS_DIR: runs },
+      run_project: async () => ({
+        payload: {
+          stopped_by: 'BLOCKED',
+          project_lifecycle: { halt: { ...blockedHalt, evidence_paths: [] } },
+        },
+        exitCode: 9,
+      }),
+    });
+    const runtimeDir = result.payload['runtime_dir'] as string;
+    const pending = JSON.parse(await readFile(path.join(runtimeDir, 'incidents/pending.json'), 'utf8')) as {
+      incident_id: string;
+    };
+    const diagnosis = JSON.parse(await readFile(
+      path.join(runtimeDir, 'incidents', pending.incident_id, 'diagnosis.json'), 'utf8',
+    )) as { evidence: { path: string }[] };
+    expect(diagnosis.evidence).toHaveLength(1);
+    await expect(readFile(diagnosis.evidence[0]!.path, 'utf8')).resolves.toContain('BLOCKED');
+  });
+
   it('offers ask recovery for verification_only official FAIL without project_lifecycle.halt', async () => {
     const target = await gitRepo('agentlab-recovery-verification-only-');
     const runs = await mkdtemp(path.join(os.tmpdir(), 'agentlab-recovery-verification-only-runs-'));
@@ -186,7 +222,7 @@ describe('recuperação de incidente através de submitRunDirective/resumeHumanI
           };
         },
         incident_investigator: {
-          investigate: async () => { investigatorCalls += 1; return targetProjectDiagnosis; },
+          investigate: async () => { investigatorCalls += 1; return diagnosed(targetProjectDiagnosis); },
         },
         incident_remediation: { remediate: async () => ({ status: 'REMEDIATED' as const }) },
       });
@@ -221,7 +257,7 @@ describe('recuperação de incidente através de submitRunDirective/resumeHumanI
         }
         return { payload: { stopped_by: 'ALL_DONE', generated_plan: { origin: 'MOCK' } }, exitCode: 0 };
       },
-      incident_investigator: { investigate: async () => targetProjectDiagnosis },
+      incident_investigator: { investigate: async () => diagnosed(targetProjectDiagnosis) },
       incident_remediation: {
         remediate: async () => {
           remediated = true;
@@ -252,7 +288,9 @@ describe('recuperação de incidente através de submitRunDirective/resumeHumanI
         calls += 1;
         return { payload: { stopped_by: 'BLOCKED', project_lifecycle: { halt: blockedHalt } }, exitCode: 9 };
       },
-      incident_investigator: { investigate: async () => ({ ...targetProjectDiagnosis, classification: 'HARNESS' as const }) },
+      incident_investigator: {
+        investigate: async () => diagnosed({ ...targetProjectDiagnosis, classification: 'HARNESS' as const }),
+      },
       incident_remediation: {
         remediate: async () => ({
           status: 'HUMAN_REQUIRED' as const,
@@ -284,7 +322,9 @@ describe('recuperação de incidente através de submitRunDirective/resumeHumanI
       payload: { stopped_by: 'BLOCKED', project_lifecycle: { halt: blockedHalt } },
       exitCode: 9,
     });
-    const investigator = { investigate: async () => { investigatorCalls += 1; return targetProjectDiagnosis; } };
+    const investigator = {
+      investigate: async () => { investigatorCalls += 1; return diagnosed(targetProjectDiagnosis); },
+    };
     const remediation = {
       remediate: async () => {
         remediationCalls += 1;

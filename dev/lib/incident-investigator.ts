@@ -19,7 +19,12 @@ import path from 'node:path';
 import { ExecutionAuthorizationScope } from '../../src/intake/index.js';
 import { assertNoApiCredentials, runBillingPreflight } from './billing.js';
 import type { IncidentInvestigatorPort } from './incident-recovery-coordinator.js';
-import { IncidentDiagnosis, type RecoveryIncident } from './incident-recovery.js';
+import {
+  IncidentDiagnosis,
+  type IncidentInvestigationResult,
+  type InvestigatorLaunchEvidence,
+  type RecoveryIncident,
+} from './incident-recovery.js';
 import { machineSafetyCeiling } from './machine-safety.js';
 import type { HarnessPaths } from './paths.js';
 import {
@@ -122,14 +127,13 @@ export function buildIncidentInvestigatorPrompt(input: {
   ].join('\n');
 }
 
-export type IncidentInvestigatorLaunchResult =
-  | { readonly outcome: 'DIAGNOSED'; readonly diagnosis: IncidentDiagnosis; readonly profile_id: string }
-  | { readonly outcome: 'UNAVAILABLE'; readonly reason: string };
+export type IncidentInvestigatorLaunchResult = IncidentInvestigationResult;
 
 export interface IncidentInvestigatorLaunchOptions {
   readonly paths: HarnessPaths;
   readonly authorization: LoadedProjectRunAuthorization;
   readonly incident: RecoveryIncident;
+  readonly maximumLaunches?: number;
   readonly port?: ProviderRoleInvocationPort;
   readonly probe?: PoolCapacityProbe;
 }
@@ -158,7 +162,10 @@ export async function launchIncidentInvestigator(
   const ceiling = machineSafetyCeiling();
 
   const reasons: string[] = [];
+  const launches: InvestigatorLaunchEvidence[] = [];
+  const maximumLaunches = options.maximumLaunches ?? Number.MAX_SAFE_INTEGER;
   for (const entry of authorization.file.profile_policy.profiles) {
+    if (launches.length >= maximumLaunches) break;
     let profile: LauncherProfile;
     try {
       profile = await loadProfileFromCatalog(paths.profileCatalogRoot, entry.id);
@@ -202,14 +209,21 @@ export async function launchIncidentInvestigator(
       continue;
     }
 
-    const overlay = buildRoleArgv(profile, { role: 'reviewer', prompt });
-    assertReadOnlyArgv('reviewer', profile.agent, overlay.argv, overlay.env);
-    const argv = resolveRoleOverlayArgv(paths, overlay.argv);
-    const roleEnv = { ...env, ...overlay.env };
-    assertReadOnlyArgv('reviewer', profile.agent, argv, roleEnv, {
-      catalogRoot: paths.profileCatalogRoot,
-      workerCwd: paths.repoRoot,
-    });
+    let argv: readonly string[];
+    let roleEnv: Readonly<Record<string, string | undefined>>;
+    try {
+      const overlay = buildRoleArgv(profile, { role: 'reviewer', prompt });
+      assertReadOnlyArgv('reviewer', profile.agent, overlay.argv, overlay.env);
+      argv = resolveRoleOverlayArgv(paths, overlay.argv);
+      roleEnv = { ...env, ...overlay.env };
+      assertReadOnlyArgv('reviewer', profile.agent, argv, roleEnv, {
+        catalogRoot: paths.profileCatalogRoot,
+        workerCwd: paths.repoRoot,
+      });
+    } catch (error) {
+      reasons.push(`${entry.id}: overlay read-only recusado — ${error instanceof Error ? error.message : String(error)}`);
+      continue;
+    }
 
     let stdout: string;
     try {
@@ -230,24 +244,35 @@ export async function launchIncidentInvestigator(
             ? error.message
             : String(error);
       reasons.push(`${entry.id}: invocação falhou — ${detail}`);
+      launches.push({ schema_version: 1, profile_id: profile.id, outcome: 'INVOCATION_FAILED', detail });
       continue;
     }
 
     const extracted = extractRoleModelJson({ agent: profile.agent, argv, stdout });
     if (extracted.outcome !== 'EXTRACTED') {
       reasons.push(`${entry.id}: ${extracted.outcome} — ${extracted.message}`);
+      launches.push({
+        schema_version: 1, profile_id: profile.id, outcome: 'INVALID_OUTPUT',
+        detail: `${extracted.outcome}: ${extracted.message}`,
+      });
       continue;
     }
     const parsed = IncidentDiagnosis.safeParse(extracted.value);
     if (!parsed.success) {
       reasons.push(`${entry.id}: diagnóstico não passou no schema — ${parsed.error.message}`);
+      launches.push({
+        schema_version: 1, profile_id: profile.id, outcome: 'INVALID_OUTPUT',
+        detail: `diagnóstico não passou no schema: ${parsed.error.message}`,
+      });
       continue;
     }
-    return { outcome: 'DIAGNOSED', diagnosis: parsed.data, profile_id: profile.id };
+    launches.push({ schema_version: 1, profile_id: profile.id, outcome: 'DIAGNOSED' });
+    return { outcome: 'DIAGNOSED', diagnosis: parsed.data, launches };
   }
 
   return {
     outcome: 'UNAVAILABLE',
+    launches,
     reason:
       reasons.length === 0
         ? 'nenhum profile elegível na profile_policy desta run'
@@ -262,12 +287,8 @@ export function createDefaultIncidentInvestigatorPort(options: {
   readonly probe?: PoolCapacityProbe;
 }): IncidentInvestigatorPort {
   return {
-    async investigate({ incident }) {
-      const result = await launchIncidentInvestigator({ ...options, incident });
-      if (result.outcome === 'UNAVAILABLE') {
-        throw new Error(result.reason);
-      }
-      return result.diagnosis;
+    async investigate({ incident, maximumLaunches }) {
+      return launchIncidentInvestigator({ ...options, incident, maximumLaunches });
     },
   };
 }

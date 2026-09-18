@@ -59,6 +59,7 @@ import {
   persistRunDirectiveHeader,
   type LabObservability,
   persistIncidentDiagnosis,
+  persistTerminalRecoveryRecord,
   persistRecoveryDecision,
   persistRecoveryIncident,
 } from './lab-runtime.js';
@@ -222,9 +223,18 @@ async function persistTechnicalRecoveryCandidate(input: {
   // reusado acima) faz destas chamadas um no-op idempotente via
   // `writeJsonOnce`, não uma segunda gravação divergente.
   await persistRecoveryIncident({ runtimeDir: input.runtimeDir, mode, incident });
+  const terminalRecordPath = await persistTerminalRecoveryRecord({
+    runtimeDir: input.runtimeDir,
+    incidentId,
+    halt,
+  });
   if (mode === 'stop') {
     await persistRecoveryDecision(input.runtimeDir, incidentId, 'stop');
-    await persistIncidentDiagnosis(input.runtimeDir, incidentId, diagnosticFromTechnicalHalt(halt));
+    await persistIncidentDiagnosis(
+      input.runtimeDir,
+      incidentId,
+      diagnosticFromTechnicalHalt(halt, terminalRecordPath),
+    );
   }
   input.onProgress?.({ stage: 'RECOVERY_REQUIRED', detail: `${halt.blocker} incident=${incidentId}` });
   return {

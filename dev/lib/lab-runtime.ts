@@ -15,11 +15,14 @@ import type { ResolvedPublishGrant } from './run-directive-auth.js';
 import { writeFileAtomic, writeJsonAtomic, writeJsonOnce } from './atomic.js';
 import {
   IncidentDiagnosis,
+  InvestigatorLaunchEvidence,
   RecoveryIncident,
   RecoveryMode,
   type RecoveryBudgetUsage,
+  type InvestigatorLaunchEvidence as InvestigatorLaunchEvidenceRecord,
   type RecoveryMode as RecoveryModeValue,
 } from './incident-recovery.js';
+import type { TechnicalBlockedOutput } from './control-plane-halt.js';
 import { resolveHarnessInstallationRoot, resolveHarnessPaths, type HarnessPaths } from './paths.js';
 import {
   loadProjectRunAuthorization,
@@ -145,6 +148,46 @@ export function incidentAttemptPaths(
   };
 }
 
+export function terminalRecoveryRecordPath(runtimeDir: string, incidentId: string): string {
+  return path.join(incidentArtifactPaths(runtimeDir, incidentId).root, 'terminal-lifecycle.json');
+}
+
+export async function persistTerminalRecoveryRecord(input: {
+  readonly runtimeDir: string;
+  readonly incidentId: string;
+  readonly halt: TechnicalBlockedOutput;
+}): Promise<string> {
+  const file = terminalRecoveryRecordPath(input.runtimeDir, input.incidentId);
+  await writeJsonOnce(file, { schema_version: 1, incident_id: input.incidentId, halt: input.halt });
+  return file;
+}
+
+export function investigatorLaunchEvidencePath(
+  runtimeDir: string,
+  incidentId: string,
+  sequence: number,
+): string {
+  return path.join(
+    incidentArtifactPaths(runtimeDir, incidentId).root,
+    'investigator-launches',
+    `${String(sequence).padStart(3, '0')}.json`,
+  );
+}
+
+export async function persistInvestigatorLaunchEvidence(input: {
+  readonly runtimeDir: string;
+  readonly incidentId: string;
+  readonly firstSequence: number;
+  readonly launches: readonly InvestigatorLaunchEvidenceRecord[];
+}): Promise<void> {
+  for (let index = 0; index < input.launches.length; index += 1) {
+    await writeJsonOnce(
+      investigatorLaunchEvidencePath(input.runtimeDir, input.incidentId, input.firstSequence + index),
+      InvestigatorLaunchEvidence.parse(input.launches[index]),
+    );
+  }
+}
+
 /** `null` quando este incidente ainda não foi persistido neste runtime. */
 export async function loadRecoveryIncident(
   runtimeDir: string,
@@ -241,13 +284,21 @@ export async function loadRecoveryUsage(runtimeDir: string, incidentId: string):
 export async function incrementRecoveryUsage(
   runtimeDir: string,
   incidentId: string,
-  delta: { readonly investigator_launch?: boolean; readonly remediation_cycle?: boolean },
+  delta: { readonly investigator_launches?: number; readonly remediation_cycles?: number },
 ): Promise<RecoveryUsageRecord> {
   const current = await loadRecoveryUsage(runtimeDir, incidentId);
+  const investigatorLaunches = delta.investigator_launches ?? 0;
+  const remediationCycles = delta.remediation_cycles ?? 0;
+  if (!Number.isInteger(investigatorLaunches) || investigatorLaunches < 0) {
+    throw new Error('investigator_launches delta deve ser inteiro não-negativo');
+  }
+  if (!Number.isInteger(remediationCycles) || remediationCycles < 0) {
+    throw new Error('remediation_cycles delta deve ser inteiro não-negativo');
+  }
   const next: RecoveryUsageRecord = {
     schema_version: 1,
-    investigator_launches: current.investigator_launches + (delta.investigator_launch === true ? 1 : 0),
-    remediation_cycles: current.remediation_cycles + (delta.remediation_cycle === true ? 1 : 0),
+    investigator_launches: current.investigator_launches + investigatorLaunches,
+    remediation_cycles: current.remediation_cycles + remediationCycles,
   };
   await writeJsonAtomic(recoveryUsagePath(runtimeDir, incidentId), next);
   return next;

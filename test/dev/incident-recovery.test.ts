@@ -15,6 +15,8 @@ import {
 } from '../../dev/lib/incident-recovery.js';
 import {
   incidentArtifactPaths,
+  investigatorLaunchEvidencePath,
+  loadRecoveryUsage,
   persistIncidentDiagnosis,
   persistRecoveryDecision,
   persistRecoveryIncident,
@@ -35,6 +37,12 @@ const halt = {
   options: ['inspecionar'],
   evidence_paths: ['runtime/attempts/1.json'],
 };
+
+const diagnosed = <T>(diagnosis: T) => ({
+  outcome: 'DIAGNOSED' as const,
+  diagnosis,
+  launches: [{ schema_version: 1 as const, profile_id: 'fixture-investigator', outcome: 'DIAGNOSED' as const }],
+});
 
 describe('incident recovery contracts', () => {
   it('reconhece somente o halt técnico tipado do lifecycle', () => {
@@ -66,7 +74,7 @@ describe('incident recovery contracts', () => {
   });
 
   it('o diagnóstico de stop é factual e não inventa autoridade humana', () => {
-    expect(diagnosticFromTechnicalHalt(halt)).toMatchObject({
+    expect(diagnosticFromTechnicalHalt(halt, '/runtime/terminal-lifecycle.json')).toMatchObject({
       classification: 'TARGET_PROJECT',
       safe_within_current_authority: false,
       root_cause: halt.why_automation_stopped,
@@ -135,7 +143,7 @@ describe('incident recovery coordinator', () => {
     };
     const result = await coordinateIncidentRecovery({
       runtimeDir, incident, usage: { investigator_launches: 0, remediation_cycles: 0, previous_fingerprints: [] },
-      investigator: { investigate: async () => ({
+      investigator: { investigate: async () => diagnosed({
         schema_version: 1, classification: 'HUMAN_DECISION', root_cause: 'decisão de produto ausente',
         evidence: [{ path: 'instruction.md', summary: 'não define a decisão' }], remediation: ['definir o comportamento'],
         safe_within_current_authority: false, resume_strategy: 'aguardar decisão',
@@ -155,19 +163,42 @@ describe('incident recovery coordinator', () => {
     const incident = {
       schema_version: 1 as const, incident_id: 'incident-repair', fingerprint: 'c'.repeat(64), task_id: 'T1',
       blocker: halt.blocker, reason: halt.why_automation_stopped, evidence_paths: halt.evidence_paths,
-      runtime_dir: runtimeDir, created_at: '2026-09-17T00:00:00.000Z', budget: DEFAULT_RECOVERY_BUDGET,
+      runtime_dir: runtimeDir, created_at: '2026-09-17T00:00:00.000Z',
+      budget: { ...DEFAULT_RECOVERY_BUDGET, max_investigator_launches: 2 },
     };
     let remediated = false;
     const result = await coordinateIncidentRecovery({
       runtimeDir, incident, usage: { investigator_launches: 0, remediation_cycles: 0, previous_fingerprints: [] },
-      investigator: { investigate: async () => ({
-        schema_version: 1, classification: 'TARGET_PROJECT', root_cause: 'defeito localizado',
-        evidence: [{ path: 'attempt.json', summary: 'falha reproduzível' }], remediation: ['rodar retry oficial'],
-        safe_within_current_authority: true, resume_strategy: 'retomar T1',
-      }) },
+      investigator: { investigate: async ({ maximumLaunches }) => {
+        expect(maximumLaunches).toBe(2);
+        return {
+          outcome: 'DIAGNOSED' as const,
+          diagnosis: {
+            schema_version: 1 as const, classification: 'TARGET_PROJECT' as const,
+            root_cause: 'defeito localizado',
+            evidence: [{ path: 'attempt.json', summary: 'falha reproduzível' }],
+            remediation: ['rodar retry oficial'], safe_within_current_authority: true,
+            resume_strategy: 'retomar T1',
+          },
+          launches: [
+            { schema_version: 1 as const, profile_id: 'profile-a', outcome: 'INVALID_OUTPUT' as const },
+            { schema_version: 1 as const, profile_id: 'profile-b', outcome: 'DIAGNOSED' as const },
+          ],
+        };
+      } },
       remediation: { remediate: async () => { remediated = true; return { status: 'REMEDIATED' as const }; } },
     });
     expect(remediated).toBe(true);
     expect(result.status).toBe('RESUME');
+    expect(await loadRecoveryUsage(runtimeDir, incident.incident_id)).toMatchObject({
+      investigator_launches: 2,
+      remediation_cycles: 1,
+    });
+    await expect(readFile(
+      investigatorLaunchEvidencePath(runtimeDir, incident.incident_id, 1), 'utf8',
+    )).resolves.toContain('profile-a');
+    await expect(readFile(
+      investigatorLaunchEvidencePath(runtimeDir, incident.incident_id, 2), 'utf8',
+    )).resolves.toContain('profile-b');
   });
 });

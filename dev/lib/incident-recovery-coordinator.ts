@@ -2,19 +2,25 @@
 import { createHumanRequired, type HumanRequiredOutput } from './control-plane-halt.js';
 import {
   IncidentDiagnosis,
+  IncidentInvestigationResult,
   recoveryBudgetStatus,
+  type IncidentInvestigationResult as IncidentInvestigationResultType,
   type RecoveryBudgetUsage,
   type RecoveryIncident,
 } from './incident-recovery.js';
 import {
   incrementRecoveryUsage,
+  persistInvestigatorLaunchEvidence,
   persistIncidentDiagnosis,
   persistRecoveryOutcome,
 } from './lab-runtime.js';
 import type { LabProgressListener } from './lab-progress.js';
 
 export interface IncidentInvestigatorPort {
-  investigate(input: { readonly incident: RecoveryIncident }): Promise<unknown>;
+  investigate(input: {
+    readonly incident: RecoveryIncident;
+    readonly maximumLaunches: number;
+  }): Promise<IncidentInvestigationResultType>;
 }
 
 /**
@@ -69,16 +75,36 @@ export async function coordinateIncidentRecovery(input: {
     return { status: 'BLOCKED', reason: budget.reason };
   }
   input.onProgress?.({ stage: 'RECOVERY_INVESTIGATING', detail: input.incident.incident_id });
+  const maximumLaunches = input.incident.budget.max_investigator_launches - input.usage.investigator_launches;
   let diagnosis: IncidentDiagnosis;
+  let investigation: IncidentInvestigationResultType;
   try {
-    diagnosis = IncidentDiagnosis.parse(await input.investigator.investigate({ incident: input.incident }));
+    investigation = IncidentInvestigationResult.parse(await input.investigator.investigate({
+      incident: input.incident,
+      maximumLaunches,
+    }));
   } catch (error) {
-    await incrementRecoveryUsage(input.runtimeDir, input.incident.incident_id, { investigator_launch: true });
     const reason = `investigator não produziu um diagnóstico válido: ${error instanceof Error ? error.message : String(error)}`;
     await persistRecoveryOutcome(input.runtimeDir, input.incident.incident_id, { schema_version: 1, status: 'BLOCKED', reason }, attempt);
     return { status: 'BLOCKED', reason };
   }
-  await incrementRecoveryUsage(input.runtimeDir, input.incident.incident_id, { investigator_launch: true });
+  await persistInvestigatorLaunchEvidence({
+    runtimeDir: input.runtimeDir,
+    incidentId: input.incident.incident_id,
+    firstSequence: input.usage.investigator_launches + 1,
+    launches: investigation.launches,
+  });
+  await incrementRecoveryUsage(input.runtimeDir, input.incident.incident_id, {
+    investigator_launches: investigation.launches.length,
+  });
+  if (investigation.outcome === 'UNAVAILABLE') {
+    const reason = `investigator indisponível: ${investigation.reason}`;
+    await persistRecoveryOutcome(input.runtimeDir, input.incident.incident_id, {
+      schema_version: 1, status: 'BLOCKED', reason,
+    }, attempt);
+    return { status: 'BLOCKED', reason };
+  }
+  diagnosis = IncidentDiagnosis.parse(investigation.diagnosis);
   await persistIncidentDiagnosis(input.runtimeDir, input.incident.incident_id, diagnosis, attempt);
   input.onProgress?.({ stage: 'ROOT_CAUSE_IDENTIFIED', detail: diagnosis.classification });
   if (diagnosis.classification === 'HUMAN_DECISION') {
@@ -102,7 +128,7 @@ export async function coordinateIncidentRecovery(input: {
   }
   input.onProgress?.({ stage: 'REMEDIATING', detail: diagnosis.classification });
   const outcome = await input.remediation.remediate({ incident: input.incident, diagnosis });
-  await incrementRecoveryUsage(input.runtimeDir, input.incident.incident_id, { remediation_cycle: true });
+  await incrementRecoveryUsage(input.runtimeDir, input.incident.incident_id, { remediation_cycles: 1 });
   if (outcome.status === 'HUMAN_REQUIRED') {
     await persistRecoveryOutcome(input.runtimeDir, input.incident.incident_id, {
       schema_version: 1, status: 'HUMAN_REQUIRED', human_authority: outcome.halt.human_authority,
