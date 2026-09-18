@@ -67,11 +67,11 @@ import {
   diagnosticFromTechnicalHalt,
   incidentFingerprint,
   recoveryModeForSession,
-  technicalHaltFromPayload,
   type IncidentDiagnosis,
   type RecoveryDecision,
   type RecoveryIncident,
 } from './incident-recovery.js';
+import { classifyTerminalRecovery, collectTerminalRecoveryFacts } from './terminal-recovery-policy.js';
 import {
   coordinateIncidentRecovery,
   type IncidentInvestigatorPort,
@@ -176,15 +176,20 @@ interface SharedLabInput {
  */
 async function persistTechnicalRecoveryCandidate(input: {
   readonly runtimeDir: string;
+  readonly paths: HarnessPaths;
   readonly executed: PlanRunResult;
   readonly configuredMode: 'ask' | 'auto' | 'stop' | undefined;
   readonly onProgress?: LabProgressListener;
 }): Promise<{ readonly payload: Record<string, unknown>; readonly incident: RecoveryIncident; readonly mode: 'ask' | 'auto' | 'stop' } | null> {
-  const halt = technicalHaltFromPayload(input.executed.payload);
-  if (halt === null) return null;
-  const taskId = typeof input.executed.payload['task_id'] === 'string'
+  const classification = classifyTerminalRecovery(await collectTerminalRecoveryFacts({
+    payload: input.executed.payload,
+    paths: input.paths,
+  }));
+  if (!classification.eligible) return null;
+  const halt = classification.halt;
+  const taskId = classification.task_id ?? (typeof input.executed.payload['task_id'] === 'string'
     ? input.executed.payload['task_id']
-    : null;
+    : null);
   const baseSha = typeof input.executed.payload['base_sha'] === 'string'
     ? input.executed.payload['base_sha']
     : null;
@@ -456,6 +461,7 @@ async function handleTechnicalRecovery(input: {
   const paths = labHarnessPaths({ repoRoot: input.repoRoot, runtimeDir: input.runtimeDir });
   const recoveryCandidate = await persistTechnicalRecoveryCandidate({
     runtimeDir: input.runtimeDir,
+    paths,
     executed: input.executed,
     configuredMode: input.configuredRecoveryMode,
     ...(input.onProgress === undefined ? {} : { onProgress: input.onProgress }),
@@ -489,6 +495,7 @@ async function handleTechnicalRecovery(input: {
   });
   const nextCandidate = await persistTechnicalRecoveryCandidate({
     runtimeDir: input.runtimeDir,
+    paths,
     executed: resumedExecution,
     configuredMode: input.configuredRecoveryMode,
     ...(input.onProgress === undefined ? {} : { onProgress: input.onProgress }),

@@ -1,9 +1,13 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { interpretHarnessRecoveryPayload, resumeHumanInstruction, submitRunDirective } from '../../dev/lib/lab.js';
+import { headSha } from '../../dev/lib/git.js';
+import { loadPlan } from '../../dev/lib/plan.js';
+import { writeCompletion } from '../../dev/lib/records.js';
+import { ensureRuntimeDirs, buildInitialState, withTaskState, writeState } from '../../dev/lib/state.js';
 import { runGit } from './helpers.js';
 
 const created: string[] = [];
@@ -93,6 +97,110 @@ describe('interpretHarnessRecoveryPayload', () => {
 });
 
 describe('recuperação de incidente através de submitRunDirective/resumeHumanInstruction', () => {
+  it('offers ask recovery for verification_only official FAIL without project_lifecycle.halt', async () => {
+    const target = await gitRepo('agentlab-recovery-verification-only-');
+    const runs = await mkdtemp(path.join(os.tmpdir(), 'agentlab-recovery-verification-only-runs-'));
+    created.push(runs);
+    const tty = Object.getOwnPropertyDescriptor(process.stderr, 'isTTY');
+    Object.defineProperty(process.stderr, 'isTTY', { configurable: true, value: true });
+    let calls = 0;
+    let promptCalls = 0;
+    let investigatorCalls = 0;
+    try {
+      const result = await submitRunDirective({
+        raw_directive: directive({
+          header: `target:\n  type: repository\n  path: ${target}\n`,
+          body: 'Verificar se docs/WP0.md existe.\n',
+        }),
+        instruction_source: 'stdin',
+        env: { AGENTLAB_FAKE_MODE: '1', AGENTLAB_RUNS_DIR: runs },
+        recovery_decide: async () => { promptCalls += 1; return 'investigate'; },
+        run_project: async ({ paths }) => {
+          calls += 1;
+          if (calls > 1) {
+            return { payload: { stopped_by: 'ALL_DONE', generated_plan: { origin: 'MOCK' } }, exitCode: 0 };
+          }
+          await ensureRuntimeDirs(paths);
+          const taskId = 'T1';
+          const plan = {
+            schema_version: 1 as const,
+            tasks: [{
+              id: taskId,
+              title: 'Verificar WP0',
+              blocked_by: [],
+              objective: 'Verificar se docs/WP0.md existe.',
+              initial_files: ['docs/WP0.md'],
+              acceptance: ['WP0 existe'],
+              validation: [{ argv: ['test', '-f', 'docs/WP0.md'], timeout_seconds: 30 }],
+              planner_metadata: {
+                taxonomy: { version: 1, task_class: 'chore', difficulty_declared: 'easy' },
+                risk: 'low', probable_files: [], context_scope: { areas: ['docs'] },
+                context_requirements: [], environment_requirements: [],
+                estimated_duration: { expected: 100, maximum: 1_000 },
+                validation_budget: { expected: 100, maximum: 1_000 },
+                resource_envelope: {
+                  duration_ms: { expected: 100, maximum: 1_000 },
+                  tokens: { expected: 100, maximum: 1_000 },
+                  changed_files: { expected: 0, maximum: 0 },
+                },
+              },
+            }],
+          };
+          await mkdir(path.dirname(paths.planFile), { recursive: true });
+          await writeFile(paths.planFile, JSON.stringify(plan), 'utf8');
+          const loaded = await loadPlan(paths.planFile);
+          const task = loaded.plan.tasks[0]!;
+          const base = await headSha(target);
+          const now = '2026-09-18T00:00:00.000Z';
+          await writeState(paths, withTaskState(
+            buildInitialState(loaded.plan, loaded.planSha256, { baselineSha: base, now }),
+            task.id,
+            {
+              status: 'FAIL', attempts: 1, base_sha: base,
+              diagnostics: 'validação oficial de verification_only falhou', finished_at: now,
+            },
+          ));
+          await writeCompletion(paths, {
+            schema_version: 1,
+            task_id: task.id,
+            status: 'FAIL',
+            report: null,
+            orchestrator_evidence: {
+              task_id: task.id, base_sha: base, candidate_commit: null, accepted_commit: null,
+              changed_files: [], working_tree_clean: true, process: null,
+              duration_ms: 1, exit_code: 0, timed_out: false,
+              revalidation: [{ argv: ['test', '-f', 'docs/WP0.md'], exit_code: 1, timed_out: false, duration_ms: 1 }],
+              observed_at: now,
+            },
+            report_matches_evidence: true,
+            discrepancies: [],
+            finalization_mode: 'normal',
+            closed_at: now,
+          });
+          return {
+            payload: {
+              stopped_by: 'FAIL', reason: 'validação oficial de verification_only falhou',
+              project_lifecycle: { halt: null },
+            },
+            exitCode: 9,
+          };
+        },
+        incident_investigator: {
+          investigate: async () => { investigatorCalls += 1; return targetProjectDiagnosis; },
+        },
+        incident_remediation: { remediate: async () => ({ status: 'REMEDIATED' as const }) },
+      });
+      expect(promptCalls).toBe(1);
+      expect(investigatorCalls).toBe(1);
+      expect(calls).toBe(2);
+      expect(result.payload['stopped_by']).toBe('ALL_DONE');
+    } finally {
+      if (tty === undefined) delete (process.stderr as { isTTY?: boolean }).isTTY;
+      else Object.defineProperty(process.stderr, 'isTTY', tty);
+      vi.restoreAllMocks();
+    }
+  });
+
   it('recovery_mode=auto remedia e retoma automaticamente o MESMO runtime até ALL_DONE', async () => {
     const target = await gitRepo('agentlab-recovery-auto-');
     const runs = await mkdtemp(path.join(os.tmpdir(), 'agentlab-recovery-auto-runs-'));
