@@ -1,0 +1,5 @@
+# Produto novo (executor desktop). A raiz continua sendo o control plane
+# antigo, congelado — ver docs/PRODUCT_VISION.md.
+packages:
+  - 'packages/*'
+  - 'apps/*'

@@ -1,0 +1,5 @@
+{"type":"system","subtype":"init","session_id":"fixture-session"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Patch concluído."}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_fixture","name":"Read","input":{"file_path":"src/index.ts"}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_fixture","content":"export {};"}]}}
+{"type":"result","subtype":"success","is_error":false,"total_cost_usd":0.4231,"usage":{"input_tokens":1200,"output_tokens":340,"cache_creation_input_tokens":10,"cache_read_input_tokens":20}}
