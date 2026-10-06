@@ -60,21 +60,21 @@ Objetivo: `asl run` executa um `plan.md` real até o fim, numa sessão nova de
 CLI por step, com gate, retry, commit e ledger.
 
 ### 1.1 Base
-- [ ] Criar `pnpm-workspace.yaml`, `packages/core` (`package.json`, `tsconfig`, `vitest.config`), mesmas opções estritas do `tsconfig` raiz
-- [ ] Teste de fronteira: nenhum arquivo de `packages/core/src` importa `../../src` ou `../../dev`
-- [ ] Confirmar que `pnpm typecheck` e `pnpm test` da raiz continuam verdes sem alteração
+- [x] Criar `pnpm-workspace.yaml`, `packages/core` (`package.json`, `tsconfig`, `vitest.config`), mesmas opções estritas do `tsconfig` raiz
+- [x] Teste de fronteira: nenhum arquivo de `packages/core/src` importa `../../src` ou `../../dev`
+- [x] Confirmar que `pnpm typecheck` e `pnpm test` da raiz continuam verdes sem alteração (typecheck verde; suíte: 6 falhas por carga sob execução paralela, os 5 arquivos passam isolados, 102/102)
 
 ### 1.2 Portar módulos (visão §5)
-- [ ] `providers/identity.ts` e `quota/{observation,probes,credentials}.ts` como estão, com testes portados de `test/` quando existirem
-- [ ] `quota/claude-usage.ts` adaptado (só probe e parse; tipos locais no lugar de `dev/lib/schemas.ts`)
-- [ ] `adapters/`: `events.ts`, contrato puro (`buildInvocation` + `parseLine`), decoders de `claude-stream`, `codex-transport`, `opencode-scaffold`, `worker-token-usage`, `redaction.ts`
+- [x] `providers/identity.ts` e `quota/{observation,probes,credentials}.ts` como estão, com testes portados de `test/` quando existirem
+- [x] `quota/claude-usage.ts` adaptado (só probe e parse; tipos locais no lugar de `dev/lib/schemas.ts`)
+- [x] `adapters/`: `events.ts`, contrato puro (`buildInvocation` + `parseLine`), decoders de `claude-stream`, `codex-transport`, `opencode-scaffold`, `worker-token-usage`, `redaction.ts`
 - [ ] Reverificar decoders contra as CLIs instaladas: claude 2.1.281 (código verificado em 2.1.226), codex 0.158.0 (verificado em 0.149.x), opencode 1.18.23. Gravar um fixture real de cada stream em `packages/core/test/fixtures/`
 - [ ] Adapter `fake` (script local que emite o stream) para testes sem gastar quota
 
 ### 1.3 Catálogo e modos
-- [ ] `catalog/models.yaml`: perfis (scaffold, provider, modelo, effort, tier, rank de custo), semeado dos argv verificados em `dev/profiles/` — tabela inicial a aprovar (pergunta Q2)
-- [ ] Mapear modo de permissão → argv por scaffold (`Plan` read-only; `Edit` e `Auto` conforme Q1). Flags proibidas: `--resume`, `--continue`, `--bare`, `--dangerously-skip-permissions`
-- [ ] Teste: cada (scaffold, modo) gera argv esperado; nenhum argv contém flag proibida
+- [x] `catalog/`: catálogo padrão em TS (`DEFAULT_CATALOG`) + leitor de YAML para override; perfis (scaffold, provider, modelo, effort, tier, rank de custo), semeado dos argv verificados em `dev/profiles/` — tabela inicial a aprovar (pergunta Q2)
+- [x] Mapear modo de permissão → argv por scaffold (`Plan` read-only; `Edit` e `Auto` conforme Q1). Flags proibidas: `--resume`, `--continue`, `--bare`, `--dangerously-skip-permissions`. Codex não tem allowlist por comando: `edit`/`auto` = sandbox `workspace-write` (rede só no `auto`). Credenciais de API são removidas do ambiente do step
+- [x] Teste: cada (scaffold, modo) gera argv esperado; nenhum argv contém flag proibida
 
 ### 1.4 Plano, handoff e loop
 - [ ] `plan/`: parser e escritor de `plan.md` (formato da visão §4); round-trip preserva texto do usuário byte a byte fora dos checkboxes
