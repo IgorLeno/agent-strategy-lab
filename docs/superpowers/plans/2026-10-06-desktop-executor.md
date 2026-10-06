@@ -1,6 +1,6 @@
 # Plano — executor de plano desktop
 
-> Status: **aguardando aprovação**. Visão e lista de reaproveitamento em
+> Status: **aprovado em 2026-10-06** (Q1–Q4, Q6, Q7 aceitas; Q5 e Q8 pendentes). Visão e lista de reaproveitamento em
 > [docs/PRODUCT_VISION.md](../../PRODUCT_VISION.md). Branch:
 > `feat/desktop-executor`. Nenhum código antes da aprovação deste documento.
 
@@ -169,7 +169,18 @@ Objetivo: o mesmo loop, dirigido pela UI, incluindo o chat de planejamento.
 - macOS/Windows.
 - Qualquer edição em `src/`, `dev/` ou `test/` da raiz.
 
-## Perguntas em aberto (responder antes da Fase 1)
+## Decisões (2026-10-06)
+
+- **Q1 aceita.** `Plan` = read-only; `Edit` = edita arquivos e roda só a allowlist de comandos do projeto (gate, build, test, git de leitura); `Auto` = qualquer shell exceto `git commit/push` e destrutivos. `--dangerously-skip-permissions` proibido.
+- **Q2 aceita.** `premium` = Claude Opus 5 high, Codex gpt-5.6-sol high; `standard` = Claude Sonnet 5 medium, Codex gpt-5.6-sol medium, OpenCode Go GLM 5.3; `economy` = Codex gpt-5.6-luna medium, OpenCode Go DeepSeek V4 Flash.
+- **Q3 aceita.** Leases espalham carga entre providers do tier. Teto de leases por pool existe como configuração opcional, **sem teto por padrão** (limite só com causa real). Medidores atualizam por evento (abertura, antes de cada step, botão manual); sem polling de fundo.
+- **Q4 aceita.** Daemon em `utilityProcess` do Electron.
+- **Q6 aceita.** electron-vite + electron-builder (AppImage).
+- **Q7 aceita.** `plan.md` em `.asl/plan.md` no repo alvo, commitado junto.
+- **Q5 pendente** — projeto real para a verificação da Fase 1 e o MVP. Não bloqueia 1.1–1.6.
+- **Q8 pendente** — destino da branch `fix/verification-process-recovery`.
+
+## Perguntas originais (histórico)
 
 - **Q1 — semântica de `Edit` vs `Auto` em modo headless.** Sem humano no loop, "pedir permissão" trava o processo (lição do OpenCode: `ask` não interativo trava). Proposta: `Plan` = read-only; `Edit` = edita arquivos e roda só comandos de uma allowlist do projeto (gate, build, test, git de leitura); `Auto` = qualquer shell, exceto `git commit/push` e destrutivos. `--dangerously-skip-permissions` continua proibido.
 - **Q2 — catálogo inicial por tier.** Proposta: `premium` = Claude Opus 5 high, Codex gpt-5.6-sol high; `standard` = Claude Sonnet 5 medium, Codex gpt-5.6-sol medium, OpenCode Go GLM 5.3; `economy` = Codex gpt-5.6-luna medium, OpenCode Go DeepSeek V4 Flash. Confirmar ou ajustar.

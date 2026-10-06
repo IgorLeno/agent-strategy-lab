@@ -1,7 +1,6 @@
 # Visão de produto — executor de plano desktop
 
-> Status: **proposta para aprovação** (2026-10-06). Nenhum código do produto
-> novo existe ainda. Plano de execução em
+> Status: **aprovado** (2026-10-06). Decisões das perguntas abertas e plano de execução em
 > [superpowers/plans/2026-10-06-desktop-executor.md](superpowers/plans/2026-10-06-desktop-executor.md).
 >
 > Este documento substitui a identidade "control plane autônomo / laboratório"
@@ -75,7 +74,7 @@ flowchart LR
     CT[Controles: modo, continuidade, Pausar]
   end
 
-  subgraph Main["Processo main / daemon (Node)"]
+  subgraph Main["Daemon (utilityProcess do Electron / Node headless)"]
     IPC[Ponte IPC tipada]
     PM[Project manager + Git mode]
     LR1[Loop runner — projeto A]
@@ -136,8 +135,8 @@ isso assim:
 - `UNKNOWN` continua `UNKNOWN`; só `EXHAUSTED` declarado pelo provider (ou
   `remaining 0` em janela viva) remove um pool.
 
-Ver pergunta aberta Q3: se o usuário quer de fato um teto de execuções
-simultâneas por pool.
+Teto de leases por pool: configuração opcional, sem teto por padrão
+(decisão Q3).
 
 ---
 
