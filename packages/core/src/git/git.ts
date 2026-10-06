@@ -98,8 +98,11 @@ async function sameContent(left: string, right: string): Promise<boolean> {
  * Prepara o workspace do plano e commita o `plan.md` aprovado (decisão Q7).
  *
  * O plano costuma chegar não commitado — o usuário acabou de aprová-lo — então
- * ele é o único caminho tolerado sujo. Qualquer outra mudança recusa: o commit
- * do step levaria junto trabalho que não é do agente.
+ * ele é o único caminho tolerado sujo num INÍCIO. Qualquer outra mudança
+ * recusa: o commit do step levaria junto trabalho que não é do agente.
+ *
+ * Numa RETOMADA (`knownBaseSha` presente) a árvore suja é aceita: é o trabalho
+ * do step que falhou ou foi interrompido, e a próxima tentativa continua dele.
  *
  * Retomar o mesmo plano reaproveita branch ou worktree. Na worktree, a cópia
  * do plano que vale é a dela.
@@ -116,7 +119,8 @@ export async function prepareWorkspace(input: {
   readonly knownBaseSha?: string;
 }): Promise<Workspace> {
   const { repo, mode, slug, planRelPath } = input;
-  if (!(await isClean(repo, [planRelPath]))) {
+  const resuming = input.knownBaseSha !== undefined;
+  if (!resuming && !(await isClean(repo, [planRelPath]))) {
     throw new GitError(`árvore suja em ${repo}: commite ou descarte as mudanças antes de iniciar`);
   }
   const branch = `asl/${slug}`;
@@ -143,7 +147,7 @@ export async function prepareWorkspace(input: {
         await mkdir(path.dirname(target), { recursive: true });
         await copyFile(source, target);
       }
-    } else if (!(await isClean(dir, [planRelPath]))) {
+    } else if (!resuming && !(await isClean(dir, [planRelPath]))) {
       throw new GitError(`árvore suja na worktree ${dir}`);
     }
   }
