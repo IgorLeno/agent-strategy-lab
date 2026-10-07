@@ -1,0 +1,34 @@
+{
+  "name": "@asl/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Executor de plano desktop: casca Electron sobre o @asl/core.",
+  "author": "Igor Leno de Souza Fernandes",
+  "main": "out/main/index.js",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "dist": "electron-vite build && electron-builder --linux AppImage"
+  },
+  "devDependencies": {
+    "@asl/core": "workspace:*",
+    "@types/node": "^22.10.2",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^5.2.0",
+    "electron": "44.6.0",
+    "electron-builder": "^26.15.3",
+    "electron-vite": "^5.0.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "typescript": "^5.7.2",
+    "vite": "^7.3.7",
+    "vitest": "^3.2.7"
+  }
+}

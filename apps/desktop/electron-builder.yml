@@ -1,0 +1,12 @@
+appId: dev.asl.desktop
+productName: Agent Strategy Lab
+directories:
+  output: dist
+# O bundle do electron-vite já contém tudo; node_modules não entra no pacote.
+files:
+  - out/**
+  - package.json
+linux:
+  target: AppImage
+  category: Development
+  artifactName: agent-strategy-lab-${version}.${ext}
