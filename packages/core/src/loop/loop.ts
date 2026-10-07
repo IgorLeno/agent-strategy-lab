@@ -22,6 +22,7 @@ import { parseClaudeLine } from '../adapters/claude/parser.js';
 import { parseCodexLine } from '../adapters/codex/parser.js';
 import { parseOpenCodeLine } from '../adapters/opencode/parser.js';
 import type { AdapterInvocation, ProviderEvent } from '../adapters/contract.js';
+import { AgentEvent } from '../adapters/events.js';
 import {
   buildInvocation,
   type InvocationRequest,
@@ -386,5 +387,16 @@ function lineParserOf(profile: ModelProfile): (line: string) => ProviderEvent | 
   if (profile.scaffold === 'claude_code') return (line) => (line.trim() === '' ? null : parseClaudeLine(line).event);
   if (profile.scaffold === 'codex_cli') return (line) => (line.trim() === '' ? null : parseCodexLine(line).event);
   if (profile.scaffold === 'opencode') return (line) => (line.trim() === '' ? null : parseOpenCodeLine(line).event);
+  // O agente fake já emite `AgentEvent`; as linhas de tokens/final ficam de fora.
+  if (profile.scaffold === 'fake') return parseFakeLine;
   return () => null;
+}
+
+function parseFakeLine(line: string): ProviderEvent | null {
+  try {
+    const parsed = AgentEvent.safeParse(JSON.parse(line));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
 }

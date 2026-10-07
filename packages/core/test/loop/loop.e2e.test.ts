@@ -228,6 +228,11 @@ describe('loop com agente falso', () => {
     await loop({}, events).run();
     const lines = events.filter((event) => event.type === 'transcript');
     expect(lines.length).toBeGreaterThan(0);
+    // Linhas do fake que são `AgentEvent` chegam decodificadas; tokens/final, não.
+    expect(lines.map((event) => event.type === 'transcript' && event.event)).toEqual([
+      { type: 'message', role: 'assistant', text: 'chamada 0' },
+      null,
+    ]);
     const [first] = await prompts();
     expect(first).toMatch(/^profile=fake-a\ntag=\d+:1:1:[0-9a-f-]{36}\n/);
   });
