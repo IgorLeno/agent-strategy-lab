@@ -15,8 +15,15 @@
 
 import { openCodeRunUsageOf } from './opencode-scaffold.js';
 
+/**
+ * Semântica ÚNICA entre scaffolds (normalizada em 2026-10-07 contra streams
+ * reais): `input` inclui o que veio de/foi para cache e `cached_input` é
+ * subconjunto dele; `output` inclui reasoning e `reasoning` é subconjunto dele;
+ * `total = input + output`. Cada provider reporta essas partes de um jeito —
+ * a tradução fica aqui, não no consumidor.
+ */
 export interface ObservedWorkerTokens {
-  /** Soma reportada pelo provider; sempre > 0 quando o objeto existe. */
+  /** `input + output`; sempre > 0 quando o objeto existe. */
   readonly total: number;
   readonly input: number | null;
   readonly cached_input: number | null;
@@ -42,15 +49,18 @@ function assemble(
   },
   provenance: string,
 ): ObservedWorkerTokens | null {
-  // `cached_input` é subconjunto de `input` nos dois providers: somá-lo
-  // contaria o mesmo token duas vezes.
-  const total = (parts.input ?? 0) + (parts.output ?? 0) + (parts.reasoning ?? 0);
+  // `cached_input` ⊂ `input` e `reasoning` ⊂ `output`: somá-los contaria o
+  // mesmo token duas vezes.
+  const total = (parts.input ?? 0) + (parts.output ?? 0);
   if (total <= 0) return null;
   return { total, ...parts, provenance };
 }
 
 /**
- * Codex `exec --json`: o evento `turn.completed` carrega `usage`. Um turno
+ * Codex `exec --json`: o evento `turn.completed` carrega `usage`, com
+ * `cached_input_tokens` ⊂ `input_tokens` e `reasoning_output_tokens` ⊂
+ * `output_tokens` (codex 0.158.0: reasoning < output em todos os streams reais,
+ * e `output − reasoning` estável para o mesmo prompt). Um turno
  * pode aparecer mais de uma vez num stream retomado; o ÚLTIMO é o que descreve
  * o estado final do turno.
  */
@@ -121,14 +131,25 @@ export interface ObservedWorkerTokensInput {
 function openCodeObservedTokens(stdout: string): ObservedWorkerTokens | null {
   const usage = openCodeRunUsageOf(stdout);
   if (usage.total_tokens === null || usage.total_tokens <= 0) return null;
+  // O OpenCode reporta input fresco, cache read/write, output e reasoning como
+  // partes DISJUNTAS (`total` é a soma; opencode 1.18.23 teve reasoning >
+  // output). Normaliza para cache ⊂ input e reasoning ⊂ output.
+  const cached = sumKnown(usage.cache_read_tokens, usage.cache_write_tokens);
+  const input = sumKnown(usage.input_tokens, cached);
+  const output = sumKnown(usage.output_tokens, usage.reasoning_tokens);
   return {
     total: usage.total_tokens,
-    input: usage.input_tokens,
-    cached_input: usage.cache_read_tokens,
-    output: usage.output_tokens,
+    input,
+    cached_input: cached,
+    output,
     reasoning: usage.reasoning_tokens,
     provenance: 'opencode_run_json:step_finish.part.tokens',
   };
+}
+
+/** Soma o que foi reportado; `null` só quando nenhuma parte foi. */
+function sumKnown(...parts: readonly (number | null)[]): number | null {
+  return parts.every((part) => part === null) ? null : parts.reduce<number>((sum, part) => sum + (part ?? 0), 0);
 }
 
 export function observedWorkerTokens(input: ObservedWorkerTokensInput): ObservedWorkerTokens | null {

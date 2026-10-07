@@ -68,10 +68,26 @@ describe('telemetria por run do OpenCode', () => {
     expect(usage.total_tokens).toBe(5923);
   });
 
+  it('reasoning do OpenCode é separado do output e entra no output normalizado', () => {
+    const observed = observedWorkerTokens({
+      agent: 'opencode',
+      // Linha real (glm-5.3, 2026-10-07): reasoning 25 > output 10, total = soma.
+      stdout: JSON.stringify({
+        type: 'step_finish',
+        part: { type: 'step-finish', tokens: { total: 5735, input: 137, output: 10, reasoning: 25, cache: { write: 0, read: 5563 } } },
+      }),
+    });
+    expect(observed).toMatchObject({ total: 5735, input: 137 + 5563, cached_input: 5563, output: 10 + 25, reasoning: 25 });
+  });
+
   it('observedWorkerTokens reconhece o scaffold OpenCode com proveniencia propria', () => {
     const observed = observedWorkerTokens({ agent: 'opencode', stdout: RUN_JSON });
     expect(observed?.total).toBe(5923);
+    // Mesma semântica dos outros scaffolds: cache ⊂ input, reasoning ⊂ output.
+    // O OpenCode reporta os quatro separados (total = soma deles).
+    expect(observed?.input).toBe(4055 + 1792);
     expect(observed?.cached_input).toBe(1792);
+    expect(observed?.output).toBe(76);
     // A proveniencia nomeia a FONTE: nao e `opencode stats`, que agrega todas
     // as sessoes locais e nao sabe atribuir consumo a uma task.
     expect(observed?.provenance).toContain('step_finish');

@@ -30,8 +30,9 @@ describe('contagem de tokens observada no stream do provider', () => {
   it('lê o turn.completed real do Codex e soma sem contar cache duas vezes', () => {
     const tokens = codexObservedTokens(PILOT_STREAM);
     expect(tokens).not.toBeNull();
-    // input + output + reasoning; `cached_input_tokens` é subconjunto de input.
-    expect(tokens?.total).toBe(748_537 + 7_786 + 2_659);
+    // input + output: `cached_input_tokens` ⊂ input e `reasoning_output_tokens`
+    // ⊂ output (streams reais de 2026-10-07: reasoning < output em 9/9).
+    expect(tokens?.total).toBe(748_537 + 7_786);
     expect(tokens?.input).toBe(748_537);
     expect(tokens?.cached_input).toBe(678_912);
     expect(tokens?.output).toBe(7_786);
