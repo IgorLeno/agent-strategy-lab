@@ -102,7 +102,12 @@ CLI por step, com gate, retry, commit e ledger.
 - [x] E2E com adapter `fake` num repo temporário: plano de 2 fases / 4 steps vai a 4×`[x]`, 4 commits, 4 linhas em `steps`; um step com gate vermelho na 1ª tentativa e verde na 2ª aparece com 2 `attempts`
 - [x] E2E com adapter `fake` que esgota retries: step vira `[!]`, loop pausa, nenhum commit desse step
 - [x] Pausa testada: pedido no meio de um step termina o step e não inicia o próximo
-- [ ] **Real:** um projeto real escolhido pelo usuário (Q5) roda com CLIs de assinatura do primeiro ao último step via `asl run`; gate verde no final; ledger com tokens, modelo e duração de todos os steps. Registrar resultado e o que falhou
+- [x] **Real:** um projeto real escolhido pelo usuário (Q5) roda com CLIs de assinatura do primeiro ao último step via `asl run`; gate verde no final; ledger com tokens, modelo e duração de todos os steps. Registrar resultado e o que falhou
+  - 2026-10-07, Q5 = xadrez aumentado refeito do zero em `/home/plasma-test/Projetos/augmented-chess-asl` (só a spec de augmented-chess d44d2e7, via `git archive`). Plano de 14 steps / 5 fases, modo `auto`, Git `branch`, gate `npm run typecheck && npm test && npm run build`.
+  - Resultado: 14/14 `[x]`, 14 commits em `asl/augmented-chess-mvp`, gate final verde rodado à parte (115 testes, build ok). Ledger: 26 tentativas, 35,8 M tokens, 4,8 h somadas — 3 h delas perdidas no defeito abaixo. Nenhum gate vermelho: todo step que terminou passou de primeira.
+  - Modelos: glm-5.3 (steps comuns), gpt-5.6-sol high e depois gpt-6-sol high (premium/frontier), deepseek-v4-flash (economy), gpt-6-luna max (balanced, quando a quota do Go acabou). Claude não foi escolhido: nunca foi o mais barato do tier.
+  - O que falhou: quota do OpenCode Go esgotada no step 1.3 deixou `opencode run` vivo e calado (retry por horas); três tentativas de 60 min antes de pausar. Corrigido em 7291c3a (limite lido do log ao vivo → falha de provider → próximo perfil) e provado no próprio run: nos steps 3.3, 4.2, 5.1 e 5.2 a troca glm-5.3 → deepseek-v4-pro → gpt-6-luna max levou segundos. Run relançado duas vezes (retomada após o `[!]` e troca para o código novo); retomada de plano conhecido funcionou nas duas.
+  - Pendências: pular de uma vez os perfis do mesmo pool de quota quando um deles bate no limite (hoje tenta cada um; custa segundos) → Fase 3. glm-5.3 não lê imagem: a referência visual PNG foi ignorada no step 3.2.
 
 ---
 
