@@ -46,7 +46,10 @@ export function runProcess(request: ProcessRequest): Promise<ProcessResult> {
   return new Promise((resolve) => {
     const child = spawn(command, args, {
       cwd: request.cwd,
-      env: request.env,
+      // PWD herdado aponta para onde o loop roda, não para o repo do step. O
+      // OpenCode 1.18 resolve o projeto por PWD e editou o repo errado num
+      // probe real (2026-10-07); o cwd do spawn é a única fonte.
+      env: { ...request.env, PWD: request.cwd },
       detached: true,
       stdio: ['pipe', 'pipe', 'pipe'],
     });

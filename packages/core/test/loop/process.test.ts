@@ -30,6 +30,21 @@ describe('runProcess', () => {
     expect(result.timedOut).toBe(false);
   });
 
+  it('PWD do filho é o cwd do step, nunca o herdado (OpenCode resolve o projeto por PWD)', async () => {
+    const { mkdtempSync, realpathSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const stepDir = realpathSync(mkdtempSync(join(tmpdir(), 'asl-pwd-')));
+    // `node` em vez de `sh`: o shell corrige PWD sozinho e esconderia o defeito.
+    const result = await runProcess({
+      argv: [process.execPath, '-e', 'process.stdout.write(String(process.env.PWD))'],
+      cwd: stepDir,
+      env: { ...ENV, PWD: process.cwd() },
+      timeoutMs: 10_000,
+    });
+    expect(result.stdout).toBe(stepDir);
+  });
+
   it('timeout encerra o grupo inteiro, inclusive neto em background', async () => {
     const result = await runProcess({
       argv: ['sh', '-c', 'sleep 30 & echo $!; wait'],
