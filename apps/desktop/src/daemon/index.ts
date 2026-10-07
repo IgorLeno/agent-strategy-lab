@@ -1,11 +1,12 @@
 /**
  * Entrada do `utilityProcess`: lock de instância, `Daemon` e a ponte de
  * mensagens com o main. Diretório de dados vem de `ASL_DATA_DIR` (o main
- * passa `app.getPath('userData')`).
+ * passa o mesmo do `asl` CLI, `$XDG_DATA_HOME/asl`).
  *
  * `ASL_FAKE_AGENT` (caminho do fake-agent.mjs) troca o catálogo pelo agente
  * fake — só para o teste de UI, que não gasta quota.
  */
+import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 
 import type { AdapterInvocation, InvocationRequest, ModelProfile } from '@asl/core';
@@ -51,6 +52,8 @@ function main(): void {
     post({ kind: 'fatal', error: 'ASL_DATA_DIR ausente' });
     return;
   }
+  // Primeiro uso: o diretório ainda não existe e o lock precisa dele.
+  mkdirSync(dataDir, { recursive: true });
   const lock = acquireInstanceLock(path.join(dataDir, 'daemon.lock'));
   if (!lock.ok) {
     post({ kind: 'fatal', error: `outro daemon do ASL já está rodando (pid ${lock.owner.pid})` });
