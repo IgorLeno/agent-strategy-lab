@@ -110,7 +110,7 @@ CLI por step, com gate, retry, commit e ledger.
 
 Objetivo: o mesmo loop, dirigido pela UI, incluindo o chat de planejamento.
 
-- [ ] Spike: `node:sqlite` dentro do Electron instalado. Se indisponível, trocar o driver do ledger por `better-sqlite3` + rebuild para Electron atrás da mesma interface (decidir e registrar)
+- [x] Spike: `node:sqlite` dentro do Electron instalado. Se indisponível, trocar o driver do ledger por `better-sqlite3` + rebuild para Electron atrás da mesma interface (decidir e registrar) (2026-10-07: **fica `node:sqlite`**. App mínimo empacotado com electron-builder 26.15.3 como AppImage e executado do `.AppImage`: Electron 44.6.0 / Node 24.21.0 / SQLite 3.53.4; `DatabaseSync` cria, grava e lê no processo main e num `utilityProcess.fork` (forma do daemon, Q4), `app.isPackaged = true`. Sem dependência nativa, sem rebuild)
 - [ ] `apps/desktop` com electron-vite + React + TypeScript (Q6); `contextIsolation` ligado, `nodeIntegration` desligado
 - [ ] Daemon: core rodando no main (ou `utilityProcess`, Q4); lock de instância única com pid + starttime
 - [ ] IPC tipado: comandos (adicionar projeto, iniciar, pausar, trocar modo/continuidade, aprovar plano) e eventos (transcript, estado do step, ledger)
