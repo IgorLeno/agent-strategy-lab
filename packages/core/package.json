@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "description": "Core headless do executor de plano: loop, router, quota broker, ledger e adapters de CLI.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
   "engines": {
     "node": ">=22.13.0"
   },
