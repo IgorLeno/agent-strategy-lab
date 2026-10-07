@@ -78,7 +78,7 @@ function Item({ item, previous }: { readonly item: TranscriptItem; readonly prev
       );
     case 'attempt_finished':
       return item.outcome === 'success' ? (
-        <div className="outcome outcome-ok">tentativa concluída — gate verde</div>
+        <div className="outcome outcome-ok">tentativa concluída</div>
       ) : (
         <div className="outcome outcome-fail">
           <strong>{item.outcome}</strong>
