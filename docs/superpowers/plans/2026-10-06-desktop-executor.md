@@ -68,7 +68,7 @@ CLI por step, com gate, retry, commit e ledger.
 - [x] `providers/identity.ts` e `quota/{observation,probes,credentials}.ts` como estão, com testes portados de `test/` quando existirem
 - [x] `quota/claude-usage.ts` adaptado (só probe e parse; tipos locais no lugar de `dev/lib/schemas.ts`)
 - [x] `adapters/`: `events.ts`, contrato puro (`buildInvocation` + `parseLine`), decoders de `claude-stream`, `codex-transport`, `opencode-scaffold`, `worker-token-usage`, `redaction.ts`
-- [ ] Reverificar decoders contra as CLIs instaladas: claude 2.1.281 (código verificado em 2.1.226), codex 0.158.0 (verificado em 0.149.x), opencode 1.18.23. Gravar um fixture real de cada stream em `packages/core/test/fixtures/`
+- [x] Reverificar decoders contra as CLIs instaladas: claude 2.1.281 (código verificado em 2.1.226), codex 0.158.0 (verificado em 0.149.x), opencode 1.18.23. Gravar um fixture real de cada stream em `packages/core/test/fixtures/` (2026-10-07: os 7 perfis do `DEFAULT_CATALOG` × plan/edit/auto rodaram com assinatura num repo temporário — argv aceito, exit 0, `decodeStepOutput` com texto final e tokens; plan não muda nada; edit nega comando fora da allowlist e rede sem travar; commit/push negados nos três modos e nos três scaffolds; `sandbox_workspace_write.network_access=true` aceito, curl 200 só em auto. `claude /usage` ainda parseia sem inferência. Fixtures em `test/fixtures/real/`. Correções: PWD do filho = cwd do step (OpenCode resolvia o projeto por PWD herdado e editou o repo errado); tokens normalizados entre scaffolds (cache ⊂ input, reasoning ⊂ output, total = input + output); parser de linha do OpenCode para o transcript ao vivo. `asl run` real com Claude/Codex/OpenCode num plano de 3 steps: 3 commits, ledger completo. NÃO verificado: `providerFailure` real (sem rate limit para provocar); Codex continua sem allowlist por comando em `edit` — `ls` e qualquer outro comando rodam, o limite é o sandbox)
 - [x] Adapter `fake` (script local que emite o stream) para testes sem gastar quota (`test/fixtures/fake-agent.mjs` + scaffold `fake` em `decodeStepOutput`)
 
 ### 1.3 Catálogo e modos
@@ -130,6 +130,8 @@ Objetivo: o mesmo loop, dirigido pela UI, incluindo o chat de planejamento.
 ---
 
 ## Fase 3 — quota, roteamento automático e broker
+
+> Nota (2026-10-07): o stream-json do Claude 2.1.281 traz `rate_limit_event` com `unifiedWindows.five_hour/seven_day.utilization` e `resetsAt` a cada step — medidor de quota sem custo, sem chamar `/usage`.
 
 - [ ] Broker: probes frescos por pool antes de cada rota (deduplicados por pool), `UNKNOWN` com motivo em falha; nunca reuso entre decisões (LESSONS 2026-08-28)
 - [ ] Leases de execução por pool para loops paralelos; liberados no fim do step, inclusive em crash do processo filho

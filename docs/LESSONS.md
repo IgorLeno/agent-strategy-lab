@@ -1323,3 +1323,20 @@ Mistake: medir intenção de coordenação em vez do recurso externo consumido.
 Rule: orçamento de investigator conta cada invocação real de profile/provider,
 persiste evidência por launch e limita failover pelo saldo antes do próximo
 launch; resume não reinicia o contador da fingerprint.
+
+[2026-10-07] Context: probe real do OpenCode 1.18.23 em modo edit num repo
+temporário; o processo foi lançado com `cwd` do repo temporário e `env` herdado.
+Mistake: confiar que `cwd` do spawn define o projeto. O OpenCode resolve o
+diretório por `PWD`, que veio herdado do processo pai, e editou um arquivo no
+repo do próprio lab. Testes com `sh` não pegam isso: o shell corrige `PWD`.
+Rule: todo spawn de agente sobrescreve `PWD` com o `cwd` do step, e probes
+reais rodam a partir de um diretório neutro (scratch), nunca de dentro de um
+repo que importa. Teste de ambiente do filho usa `node`, não `sh`.
+
+[2026-10-07] Context: ledger de tokens com três scaffolds.
+Mistake: cada decoder portado usava a semântica do seu provider — OpenCode com
+`input` sem cache e reasoning fora do output, Codex somando reasoning ao total
+embora ele já esteja no output. A mesma coluna significava coisas diferentes.
+Rule: tokens têm UMA semântica no core (cache ⊂ input, reasoning ⊂ output,
+total = input + output); a tradução fica no decoder de cada scaffold e é
+provada contra stream real gravado, não contra amostra sintética.
