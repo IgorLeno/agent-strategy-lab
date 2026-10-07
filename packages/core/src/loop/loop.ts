@@ -20,6 +20,7 @@ import path from 'node:path';
 
 import { parseClaudeLine } from '../adapters/claude/parser.js';
 import { parseCodexLine } from '../adapters/codex/parser.js';
+import { parseOpenCodeLine } from '../adapters/opencode/parser.js';
 import type { AdapterInvocation, ProviderEvent } from '../adapters/contract.js';
 import {
   buildInvocation,
@@ -384,5 +385,6 @@ export function pickProfile(
 function lineParserOf(profile: ModelProfile): (line: string) => ProviderEvent | null {
   if (profile.scaffold === 'claude_code') return (line) => (line.trim() === '' ? null : parseClaudeLine(line).event);
   if (profile.scaffold === 'codex_cli') return (line) => (line.trim() === '' ? null : parseCodexLine(line).event);
+  if (profile.scaffold === 'opencode') return (line) => (line.trim() === '' ? null : parseOpenCodeLine(line).event);
   return () => null;
 }
