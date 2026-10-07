@@ -150,15 +150,18 @@ nota.
 # Plano: <título>
 
 ## Fase 1 — <nome>
-- [ ] 1.1 [standard] <título do step>
+- [ ] 1.1 [balanced] <título do step>
   <descrição livre, critérios de aceite>
 - [ ] 1.2 [economy] <título>
 
 ## Fase 2 — <nome>
-- [ ] 2.1 [premium] <título>
+- [ ] 2.1 [frontier] <título>
 ```
 
-- Tier entre colchetes logo após o id; ausente = `standard`.
+- Tier entre colchetes logo após o id; ausente = `balanced`. Escala de 7, do
+  mais exigente ao mais barato: `frontier`, `expert`, `advanced`, `balanced`,
+  `core`, `fast`, `economy` (2026-10-07). Os nomes antigos `premium` e
+  `standard` são aceitos como aliases de `frontier` e `balanced`.
 - `- [x]` = concluído; `- [!]` = falhou após N retries (loop pausa).
 - Nota do step anterior fica no ledger e entra no handoff; não polui o
   `plan.md`.
