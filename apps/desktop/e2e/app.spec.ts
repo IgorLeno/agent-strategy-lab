@@ -43,8 +43,10 @@ test.beforeEach(async () => {
       ],
     }),
   );
+  // ASL_E2E_EXECUTABLE aponta o binário empacotado (dist/linux-unpacked/agent-strategy-lab).
+  const packaged = process.env['ASL_E2E_EXECUTABLE'];
   app = await electron.launch({
-    args: [APP_DIR],
+    ...(packaged === undefined ? { args: [APP_DIR] } : { executablePath: packaged, args: [] }),
     env: {
       ...process.env,
       ASL_DATA_DIR: path.join(root, 'data'),
