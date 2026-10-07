@@ -1340,3 +1340,15 @@ embora ele já esteja no output. A mesma coluna significava coisas diferentes.
 Rule: tokens têm UMA semântica no core (cache ⊂ input, reasoning ⊂ output,
 total = input + output); a tradução fica no decoder de cada scaffold e é
 provada contra stream real gravado, não contra amostra sintética.
+
+[2026-10-07] Context: run real do augmented-chess; step 1.3 no OpenCode Go
+estourou a quota no meio do trabalho.
+Mistake: assumir que falha de provider sempre aparece no stdout ou encerra a
+CLI. O OpenCode trata o 429 do limite do Go como retentável e reagenda pela
+`retry-after` (horas): o processo fica vivo e calado, e o loop gastou três
+tentativas de 60 min antes de pausar, sem trocar de perfil. O stdout também
+não era gravado, então o primeiro diagnóstico teve de sair do log da CLI.
+Rule: para cada scaffold, saber onde a CLI reporta falha terminal de conta
+(stdout, stderr ou log) e ler esse canal AO VIVO; falha de conta mata a
+tentativa na hora e troca de perfil. stdout/stderr brutos de toda tentativa
+ficam em disco.
