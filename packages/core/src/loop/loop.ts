@@ -383,7 +383,8 @@ export function pickProfile(
   return candidates[0] ?? null;
 }
 
-function lineParserOf(profile: ModelProfile): (line: string) => ProviderEvent | null {
+/** Parser de linha do stdout do scaffold → evento do transcript ao vivo. */
+export function lineParserOf(profile: ModelProfile): (line: string) => ProviderEvent | null {
   if (profile.scaffold === 'claude_code') return (line) => (line.trim() === '' ? null : parseClaudeLine(line).event);
   if (profile.scaffold === 'codex_cli') return (line) => (line.trim() === '' ? null : parseCodexLine(line).event);
   if (profile.scaffold === 'opencode') return (line) => (line.trim() === '' ? null : parseOpenCodeLine(line).event);

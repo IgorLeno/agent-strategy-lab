@@ -19,3 +19,12 @@ export {
 } from './ledger/ledger.js';
 export { PlanLoop, type Continuity, type LoopEvent, type LoopOptions, type LoopResult, type PauseReason } from './loop/loop.js';
 export { PlanFormatError, parsePlan, type Plan, type PlanStep, type StepStatus } from './plan/plan.js';
+export {
+  buildPlanningPrompt,
+  extractPlanDraft,
+  runPlanningTurn,
+  type PlanDraft,
+  type PlanningTurn,
+  type PlanningTurnOptions,
+  type PlanningTurnResult,
+} from './planning/planning.js';
