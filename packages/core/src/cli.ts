@@ -99,6 +99,7 @@ async function run(argv: readonly string[]): Promise<number> {
     catalog,
     ledger,
     sourceEnv: process.env,
+    attemptLogDir: path.join(path.dirname(path.resolve(values.ledger)), 'attempts'),
     onEvent: (event) => {
       const line = describe(event);
       if (line !== null) console.log(line);

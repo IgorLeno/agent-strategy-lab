@@ -15,12 +15,12 @@
  * motivo, e retomar é rodar de novo.
  */
 import { randomUUID } from 'node:crypto';
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { parseClaudeLine } from '../adapters/claude/parser.js';
 import { parseCodexLine } from '../adapters/codex/parser.js';
-import { parseOpenCodeLine } from '../adapters/opencode/parser.js';
+import { openCodeUsageLimitFromLog, parseOpenCodeLine } from '../adapters/opencode/parser.js';
 import type { AdapterInvocation, ProviderEvent } from '../adapters/contract.js';
 import { AgentEvent } from '../adapters/events.js';
 import {
@@ -88,6 +88,11 @@ export interface LoopOptions {
   readonly gateTimeoutMs?: number;
   readonly sourceEnv: Readonly<Record<string, string | undefined>>;
   readonly worktreeRoot?: string;
+  /**
+   * Onde gravar stdout/stderr brutos de cada tentativa (`<plano>/<step>-<n>.*`).
+   * Sem isto, um travamento de CLI não deixa evidência para diagnosticar.
+   */
+  readonly attemptLogDir?: string;
   readonly onEvent?: (event: LoopEvent) => void;
   /** Injetável nos testes; padrão: `buildInvocation`. */
   readonly invoke?: (request: InvocationRequest) => AdapterInvocation;
@@ -267,23 +272,39 @@ export class PlanLoop {
         extraEnv: { ASL_STEP_TAG: `${planId}:${step.id}:${attempt.attemptNo}:${randomUUID()}` },
       });
       const parseLine = lineParserOf(profile);
+      const detectFailure = liveFailureDetectorOf(profile);
+      // Aborto próprio da tentativa: falha de provider vista ao vivo encerra só
+      // este processo; o aborto do loop (app fechando) continua valendo.
+      const attemptAbort = new AbortController();
+      const forwardAbort = (): void => attemptAbort.abort();
+      if (this.abort.signal.aborted) forwardAbort();
+      this.abort.signal.addEventListener('abort', forwardAbort, { once: true });
+      let liveFailure: string | null = null;
       const run = await runProcess({
         argv: invocation.argv,
         cwd: workspace.dir,
         env: invocation.env ?? {},
         ...(invocation.stdin === undefined ? {} : { stdin: invocation.stdin }),
         timeoutMs: options.stepTimeoutMs ?? 60 * 60_000,
-        signal: this.abort.signal,
+        signal: attemptAbort.signal,
         onStdoutLine: (line) => this.emit({ type: 'transcript', stepId: step.id, line, event: parseLine(line) }),
+        onStderrLine: (line) => {
+          if (liveFailure !== null) return;
+          liveFailure = detectFailure(line);
+          if (liveFailure !== null) attemptAbort.abort();
+        },
       });
-      const output = decodeStepOutput(profile.scaffold, run.stdout);
+      this.abort.signal.removeEventListener('abort', forwardAbort);
+      await this.saveAttemptLog(planId, step.id, attempt.attemptNo, run.stdout, run.stderr);
+      const decoded = decodeStepOutput(profile.scaffold, run.stdout);
+      const output = { ...decoded, providerFailure: decoded.providerFailure ?? liveFailure };
       const base = { durationMs: run.durationMs, exitCode: run.exitCode, timedOut: run.timedOut, tokens: output.tokens };
       const finish = (outcome: AttemptOutcome, gateExitCode: number | null, error: string | null): void => {
         ledger.finishAttempt(attempt.id, { ...base, outcome, gateExitCode, error });
         this.emit({ type: 'attempt_finished', stepId: step.id, outcome, error });
       };
 
-      if (run.aborted) {
+      if (run.aborted && liveFailure === null) {
         finish('aborted', null, 'abortado');
         ledger.finishStep(stepRow.id, { status: 'interrupted' });
         return { kind: 'aborted' };
@@ -335,6 +356,26 @@ export class PlanLoop {
     }
   }
 
+  private async saveAttemptLog(
+    planId: number,
+    stepId: string,
+    attemptNo: number,
+    stdout: string,
+    stderr: string,
+  ): Promise<void> {
+    const root = this.options.attemptLogDir;
+    if (root === undefined) return;
+    const dir = path.join(root, String(planId));
+    const base = path.join(dir, `${stepId}-${attemptNo}`);
+    try {
+      await mkdir(dir, { recursive: true });
+      await writeFile(`${base}.stdout.jsonl`, stdout);
+      await writeFile(`${base}.stderr.txt`, stderr);
+    } catch {
+      // Log de diagnóstico: falhar em gravá-lo não muda o desfecho do step.
+    }
+  }
+
   private async runGate(dir: string): Promise<{ exitCode: number | null; output: string } | null> {
     if (this.options.gateCommand === null) return null;
     const env: Record<string, string> = {};
@@ -381,6 +422,15 @@ export function pickProfile(
     .filter((profile) => !excluded.has(profile.id))
     .sort((left, right) => left.cost_rank - right.cost_rank || left.id.localeCompare(right.id));
   return candidates[0] ?? null;
+}
+
+/**
+ * Falha de provider que só aparece AO VIVO e não encerra a CLI sozinha. Hoje:
+ * limite de uso do OpenCode Go, que deixa a sessão em retry por horas.
+ */
+function liveFailureDetectorOf(profile: ModelProfile): (stderrLine: string) => string | null {
+  if (profile.scaffold === 'opencode') return openCodeUsageLimitFromLog;
+  return () => null;
 }
 
 /** Parser de linha do stdout do scaffold → evento do transcript ao vivo. */

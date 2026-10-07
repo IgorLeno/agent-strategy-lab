@@ -21,6 +21,8 @@ export interface ProcessRequest {
   readonly killGraceMs?: number;
   /** Cada linha completa do stdout, na ordem, enquanto o processo roda. */
   readonly onStdoutLine?: (line: string) => void;
+  /** Cada linha completa do stderr, na ordem (logs da CLI, ex.: OpenCode `--print-logs`). */
+  readonly onStderrLine?: (line: string) => void;
   /** Aborto externo (app fechando): encerra o grupo como no timeout. */
   readonly signal?: AbortSignal;
 }
@@ -56,7 +58,6 @@ export function runProcess(request: ProcessRequest): Promise<ProcessResult> {
 
     let stdout = '';
     let stderr = '';
-    let pending = '';
     let timedOut = false;
     let aborted = false;
     let spawnError: string | null = null;
@@ -86,21 +87,17 @@ export function runProcess(request: ProcessRequest): Promise<ProcessResult> {
     if (request.signal?.aborted) onAbort();
     request.signal?.addEventListener('abort', onAbort, { once: true });
 
+    const stdoutLines = lineSplitter(request.onStdoutLine);
+    const stderrLines = lineSplitter(request.onStderrLine);
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', (chunk: string) => {
       stdout += chunk;
-      if (request.onStdoutLine === undefined) return;
-      pending += chunk;
-      let newline = pending.indexOf('\n');
-      while (newline >= 0) {
-        request.onStdoutLine(pending.slice(0, newline));
-        pending = pending.slice(newline + 1);
-        newline = pending.indexOf('\n');
-      }
+      stdoutLines.push(chunk);
     });
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (chunk: string) => {
       stderr += chunk;
+      stderrLines.push(chunk);
     });
     child.on('error', (error) => {
       spawnError = error.message;
@@ -113,7 +110,8 @@ export function runProcess(request: ProcessRequest): Promise<ProcessResult> {
       clearTimeout(timeout);
       if (killTimer !== null) clearTimeout(killTimer);
       request.signal?.removeEventListener('abort', onAbort);
-      if (pending !== '' && request.onStdoutLine !== undefined) request.onStdoutLine(pending);
+      stdoutLines.flush();
+      stderrLines.flush();
       // Netos podem ter sobrevivido ao líder do grupo: encerra o grupo de vez.
       signalGroup('SIGKILL');
       resolve({
@@ -128,4 +126,28 @@ export function runProcess(request: ProcessRequest): Promise<ProcessResult> {
       });
     });
   });
+}
+
+/** Entrega linhas completas na ordem; o resto sem `\n` sai no `flush`. */
+function lineSplitter(onLine: ((line: string) => void) | undefined): {
+  push(chunk: string): void;
+  flush(): void;
+} {
+  let pending = '';
+  return {
+    push(chunk) {
+      if (onLine === undefined) return;
+      pending += chunk;
+      let newline = pending.indexOf('\n');
+      while (newline >= 0) {
+        onLine(pending.slice(0, newline));
+        pending = pending.slice(newline + 1);
+        newline = pending.indexOf('\n');
+      }
+    },
+    flush() {
+      if (onLine !== undefined && pending !== '') onLine(pending);
+      pending = '';
+    },
+  };
 }

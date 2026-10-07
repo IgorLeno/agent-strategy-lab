@@ -195,6 +195,35 @@ describe('loop com agente falso', () => {
     ]);
   });
 
+  it('limite de uso do OpenCode visto no log encerra a tentativa na hora e troca de perfil', async () => {
+    await setup('# Plano: P\n- [ ] 1 Único\n');
+    await script([{ files: { 'a.txt': 'x' }, final: 'ok' }]);
+    const catalog = buildCatalog([
+      { id: 'oc', scaffold: 'opencode', provider: 'opencode_go', model: 'opencode-go/glm-5.3', effort: null, tier: 'standard', cost_rank: 1 },
+      { id: 'fake-b', scaffold: 'fake', provider: 'none', model: 'fake-b', effort: null, tier: 'standard', cost_rank: 2 },
+    ]);
+    // Linha real do log (opencode 1.18.23); depois disso a CLI real fica em retry por horas.
+    const limitLine =
+      'level=ERROR message="stream error" providerID=opencode-go error.error="AI_APICallError: Go usage limit exceeded"';
+    const invoke = (request: InvocationRequest) =>
+      request.profile.scaffold === 'opencode'
+        ? { argv: ['sh', '-c', `echo '${limitLine}' >&2; sleep 30`], env: { PATH: process.env['PATH'] ?? '' } }
+        : fakeInvoke(request);
+    const logDir = path.join(root, 'attempt-logs');
+    const started = Date.now();
+    const result = await loop({ catalog, invoke, maxRetries: 0, attemptLogDir: logDir }).run();
+    expect(result).toEqual({ status: 'done' });
+    expect(Date.now() - started).toBeLessThan(15_000);
+    const planId = db().plans()[0]?.id ?? -1;
+    const step = db().stepsOf(planId)[0];
+    expect(db().attemptsOf(step?.id ?? -1).map((attempt) => [attempt.profile_id, attempt.outcome, attempt.error])).toEqual([
+      ['oc', 'provider_failed', 'opencode: AI_APICallError: Go usage limit exceeded'],
+      ['fake-b', 'success', null],
+    ]);
+    expect(await readFile(path.join(logDir, String(planId), '1-1.stderr.txt'), 'utf8')).toContain('Go usage limit exceeded');
+    expect(existsSync(path.join(logDir, String(planId), '1-2.stdout.jsonl'))).toBe(true);
+  });
+
   it('tier sem perfil disponível pausa sem marcar o step como falho', async () => {
     await setup('# Plano: P\n- [ ] 1 [economy] Único\n');
     await script([{ providerFailure: 'fora do ar' }]);

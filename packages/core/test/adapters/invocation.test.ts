@@ -85,6 +85,8 @@ describe('invocação por scaffold e modo', () => {
       openCodePermissionForMode('edit', ALLOWED),
     );
     expect(invocation.env?.['OPENCODE_DISABLE_PROJECT_CONFIG']).toBe('1');
+    // Limite de uso não aparece no stdout (a sessão fica em retry); só no log.
+    expect(invocation.argv.join(' ')).toContain('--print-logs --log-level ERROR');
   });
 
   it('OpenCode: semântica findLast de cada modo', () => {

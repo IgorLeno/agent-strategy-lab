@@ -50,3 +50,18 @@ export function parseOpenCodeLine(raw: string): ParsedProviderLine {
   }
   return unknownLine(raw);
 }
+
+/**
+ * Linha do log (`--print-logs`) que prova limite de uso da conta. O OpenCode
+ * trata o 429 como retentável e reagenda pela `retry-after` (horas), sem nada
+ * no stdout: sem esta leitura o step fica pendurado até o teto de máquina.
+ * Forma real (opencode 1.18.23): `level=ERROR ... message="stream error" ...
+ * error.error="AI_APICallError: Go usage limit exceeded"`.
+ */
+const USAGE_LIMIT = /usage limit exceeded|GoUsageLimitError|FreeUsageLimitError/i;
+
+export function openCodeUsageLimitFromLog(line: string): string | null {
+  if (!line.includes('level=ERROR') || !USAGE_LIMIT.test(line)) return null;
+  const detail = /error\.error="([^"]*)"/.exec(line)?.[1];
+  return `opencode: ${detail ?? 'limite de uso excedido'}`;
+}

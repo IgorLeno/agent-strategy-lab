@@ -250,6 +250,11 @@ function openCodeArgv(request: InvocationRequest): string[] {
     'run',
     '--format',
     'json',
+    // Limite de uso do Go vira 429 com `retry-after` de horas: a sessão fica em
+    // retry calada no stdout e só o log registra o erro (opencode 1.18.23).
+    '--print-logs',
+    '--log-level',
+    'ERROR',
     '--model',
     profile.model,
     ...(profile.effort === null ? [] : ['--variant', profile.effort]),

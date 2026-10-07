@@ -45,6 +45,19 @@ describe('runProcess', () => {
     expect(result.stdout).toBe(stepDir);
   });
 
+  it('emite linhas do stderr na ordem, inclusive a última sem quebra', async () => {
+    const lines: string[] = [];
+    const result = await runProcess({
+      argv: ['sh', '-c', 'echo um >&2; printf dois >&2'],
+      cwd: process.cwd(),
+      env: ENV,
+      timeoutMs: 10_000,
+      onStderrLine: (line) => lines.push(line),
+    });
+    expect(lines).toEqual(['um', 'dois']);
+    expect(result.stderr).toBe('um\ndois');
+  });
+
   it('timeout encerra o grupo inteiro, inclusive neto em background', async () => {
     const result = await runProcess({
       argv: ['sh', '-c', 'sleep 30 & echo $!; wait'],
