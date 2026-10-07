@@ -111,20 +111,20 @@ CLI por step, com gate, retry, commit e ledger.
 Objetivo: o mesmo loop, dirigido pela UI, incluindo o chat de planejamento.
 
 - [x] Spike: `node:sqlite` dentro do Electron instalado. Se indisponível, trocar o driver do ledger por `better-sqlite3` + rebuild para Electron atrás da mesma interface (decidir e registrar) (2026-10-07: **fica `node:sqlite`**. App mínimo empacotado com electron-builder 26.15.3 como AppImage e executado do `.AppImage`: Electron 44.6.0 / Node 24.21.0 / SQLite 3.53.4; `DatabaseSync` cria, grava e lê no processo main e num `utilityProcess.fork` (forma do daemon, Q4), `app.isPackaged = true`. Sem dependência nativa, sem rebuild)
-- [ ] `apps/desktop` com electron-vite + React + TypeScript (Q6); `contextIsolation` ligado, `nodeIntegration` desligado
-- [ ] Daemon: core rodando no main (ou `utilityProcess`, Q4); lock de instância única com pid + starttime
-- [ ] IPC tipado: comandos (adicionar projeto, iniciar, pausar, trocar modo/continuidade, aprovar plano) e eventos (transcript, estado do step, ledger)
-- [ ] Sidebar: projetos e estado do loop de cada um
-- [ ] Transcript: eventos `AgentEvent` do step corrente ao vivo; steps anteriores do ledger
-- [ ] Painel do plano: fases, steps, tier, status; abrir `plan.md` no editor externo
-- [ ] Controles: modo de permissão, continuidade e **Pausar** sempre visível
-- [ ] Configuração por projeto: comando de gate, N de retries, Git mode (aviso explícito ao ligar push em `Direto`)
+- [x] `apps/desktop` com electron-vite + React + TypeScript (Q6); `contextIsolation` ligado, `nodeIntegration` desligado. Estrutura: `src/shared` (DTOs e canais IPC, sem import do core), `src/main` (janela, lock, ponte, diálogos), `src/daemon` (`utilityProcess`; lógica numa classe testável sem Electron), `src/preload` (`contextBridge` tipado), `src/renderer` (React). O core entra no bundle; o pacote não leva `node_modules` (2026-10-07: Electron 44.6.0, electron-vite 5, React 19, `sandbox: true`; preload CJS; navegação e `window.open` negados)
+- [x] Daemon: core rodando no main (ou `utilityProcess`, Q4); lock de instância única com pid + starttime (`utilityProcess`; lock `wx` com pid + starttime de `/proc`, órfão e pid reciclado retomados; dados em `$XDG_DATA_HOME/asl`, o mesmo ledger do `asl` CLI; o main resolve o ambiente do shell de login para o PATH das CLIs; fechar o app mata o step corrente, que fica `interrupted`. Verificado no AppImage: lock, ledger e SIGTERM limpo)
+- [ ] IPC tipado: comandos (adicionar projeto, iniciar, pausar, trocar modo/continuidade, aprovar plano) e eventos (transcript, estado do step, ledger) (feito, exceto aprovar plano, que depende do chat de planejamento; renderer só fala com o main, o main valida o remetente e repassa ao daemon, que valida o patch campo a campo)
+- [x] Sidebar: projetos e estado do loop de cada um (estado + progresso N/M; medidores de quota no rodapé mostram "desconhecido" até a Fase 3)
+- [x] Transcript: eventos `AgentEvent` do step corrente ao vivo; steps anteriores do ledger (cabeçalho step/tier/modelo/tentativa; ferramenta em bloco compacto; negação em vermelho reconhecida nos streams reais de Claude e OpenCode — Codex não sinaliza negação, o comando bloqueado pelo sandbox aparece como erro; steps anteriores numa linha com commit, duração, tokens e modelo)
+- [x] Painel do plano: fases, steps, tier, status; abrir `plan.md` no editor externo (`shell.openPath`; NÃO verificado abrindo o editor de verdade, para não abrir janela na sessão do usuário)
+- [x] Controles: modo de permissão, continuidade e **Pausar** sempre visível (modo e continuidade trocam com o loop rodando; Git mode só com o loop parado)
+- [x] Configuração por projeto: comando de gate, N de retries, Git mode (aviso explícito ao ligar push em `Direto`) (mais caminho do plano e allowlist do modo Edit; persistida em `projects.json`. Push não existe no core — nenhum modo faz push —, então o aviso em `Direto` é sobre commitar direto na branch atual)
 - [ ] Chat de planejamento: sessão em modo `Plan` com perfil premium produz `plan.md` no formato da visão §4; usuário edita e aprova; aprovação inicia o loop
-- [ ] Empacotar para Fedora (AppImage ou rpm, Q6)
+- [x] Empacotar para Fedora (AppImage ou rpm, Q6) (`pnpm --filter @asl/desktop dist` → `dist/agent-strategy-lab-0.1.0.AppImage`, ~125 MB; asar só com `out/` e `package.json` — sem a exclusão explícita, o electron-builder empacotava as dependências do control plane antigo. Sem ícone próprio ainda)
 
 ### Verificação da Fase 2
-- [ ] Teste de UI automatizado (Playwright para Electron) com adapter `fake`: adicionar projeto, aprovar plano, rodar `Step a step`, ver transcript, pausar, retomar, terminar
-- [ ] Renderer não importa `@asl/core` (teste de fronteira)
+- [ ] Teste de UI automatizado (Playwright para Electron) com adapter `fake`: adicionar projeto, aprovar plano, rodar `Step a step`, ver transcript, pausar, retomar, terminar (`pnpm --filter @asl/desktop test:ui`; passa no dev e no binário empacotado via `ASL_E2E_EXECUTABLE`. Falta "aprovar plano", que espera o chat de planejamento)
+- [x] Renderer não importa `@asl/core` (teste de fronteira) (`apps/desktop/test/boundary.test.ts`: renderer e shared só importam React e arquivos de renderer/shared)
 - [ ] **MVP:** um projeto real, do chat de planejamento ao último step, feito só pelo app instalado no Fedora. Ledger e commits conferidos
 
 ---
