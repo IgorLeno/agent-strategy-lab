@@ -14,10 +14,12 @@
     "build": "electron-vite build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "dist": "electron-vite build && electron-builder --linux AppImage"
+    "dist": "electron-vite build && electron-builder --linux AppImage",
+    "test:ui": "electron-vite build && playwright test"
   },
   "devDependencies": {
     "@asl/core": "workspace:*",
+    "@playwright/test": "1.63.0",
     "@types/node": "^22.10.2",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
