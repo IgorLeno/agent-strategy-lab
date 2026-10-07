@@ -9,7 +9,8 @@
 export type PermissionMode = 'plan' | 'edit' | 'auto';
 export type Continuity = 'step' | 'phase' | 'continuous';
 export type GitMode = 'direct' | 'branch' | 'worktree';
-export type Tier = 'economy' | 'standard' | 'premium';
+/** Espelha `TIERS` do core (o renderer não importa o core), do mais exigente ao mais barato. */
+export type Tier = 'frontier' | 'expert' | 'advanced' | 'balanced' | 'core' | 'fast' | 'economy';
 
 export interface ProjectSettings {
   /** Relativo à raiz do repo (Q7: `.asl/plan.md`). */

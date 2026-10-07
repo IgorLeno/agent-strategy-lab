@@ -17,8 +17,8 @@ const PLAN_REL = '.asl/plan.md';
 const GATE = 'test ! -f broken';
 
 const CATALOG = buildCatalog([
-  { id: 'fake-a', scaffold: 'fake', provider: 'none', model: 'fake-a', effort: null, tier: 'standard', cost_rank: 1 },
-  { id: 'fake-b', scaffold: 'fake', provider: 'none', model: 'fake-b', effort: null, tier: 'standard', cost_rank: 2 },
+  { id: 'fake-a', scaffold: 'fake', provider: 'none', model: 'fake-a', effort: null, tier: 'balanced', cost_rank: 1 },
+  { id: 'fake-b', scaffold: 'fake', provider: 'none', model: 'fake-b', effort: null, tier: 'balanced', cost_rank: 2 },
   { id: 'fake-c', scaffold: 'fake', provider: 'none', model: 'fake-c', effort: null, tier: 'economy', cost_rank: 1 },
 ]);
 
@@ -199,8 +199,8 @@ describe('loop com agente falso', () => {
     await setup('# Plano: P\n- [ ] 1 Único\n');
     await script([{ files: { 'a.txt': 'x' }, final: 'ok' }]);
     const catalog = buildCatalog([
-      { id: 'oc', scaffold: 'opencode', provider: 'opencode_go', model: 'opencode-go/glm-5.3', effort: null, tier: 'standard', cost_rank: 1 },
-      { id: 'fake-b', scaffold: 'fake', provider: 'none', model: 'fake-b', effort: null, tier: 'standard', cost_rank: 2 },
+      { id: 'oc', scaffold: 'opencode', provider: 'opencode_go', model: 'opencode-go/glm-5.3', effort: null, tier: 'balanced', cost_rank: 1 },
+      { id: 'fake-b', scaffold: 'fake', provider: 'none', model: 'fake-b', effort: null, tier: 'balanced', cost_rank: 2 },
     ]);
     // Linha real do log (opencode 1.18.23); depois disso a CLI real fica em retry por horas.
     const limitLine =

@@ -667,16 +667,20 @@ pre {
   flex: none;
 }
 
-.tier-economy {
-  background: var(--tier-e);
+.tier-frontier,
+.tier-expert,
+.tier-advanced {
+  background: var(--tier-p);
 }
 
-.tier-standard {
+.tier-balanced {
   background: var(--tier-s);
 }
 
-.tier-premium {
-  background: var(--tier-p);
+.tier-core,
+.tier-fast,
+.tier-economy {
+  background: var(--tier-e);
 }
 
 .panel-foot {

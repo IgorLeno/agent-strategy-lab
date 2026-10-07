@@ -25,7 +25,7 @@ export interface PlanningTurn {
 
 /** Abaixo do teto de 128 KiB por argumento (OpenCode recebe o prompt em argv). */
 export const PLANNING_PROMPT_MAX_BYTES = 100_000;
-const PLANNING_TIER: Tier = 'premium';
+const PLANNING_TIER: Tier = 'frontier';
 
 const INSTRUCTIONS = `Você é o planejador de um executor de planos. Converse com o usuário para entender o que ele quer construir neste repositório e escreva o plano que o executor vai seguir.
 
@@ -37,7 +37,7 @@ Como o executor trabalha (escreva o plano para ele):
 Regras do plano:
 - Steps pequenos e verificáveis: cada um deixa o projeto compilando e com testes passando.
 - Corpo de cada step (linhas indentadas abaixo dele) com o que fazer e os critérios de aceite. Seja concreto: arquivos, comportamento, testes.
-- Tier entre colchetes depois do id: [economy] para mecânico e bem delimitado; [standard] para o comum; [premium] para design difícil, depuração sutil ou decisões de arquitetura.
+- Tier entre colchetes depois do id, do mais exigente ao mais barato: [frontier], [expert], [advanced], [balanced], [core], [fast], [economy]. [frontier] para design difícil, depuração sutil ou decisões de arquitetura.
 - Agrupe em fases com "## Fase N — nome".
 
 Este turno é só de leitura: você pode ler arquivos do repositório, mas não edite nada.
@@ -48,13 +48,13 @@ Se faltar informação essencial, faça perguntas objetivas e NÃO escreva o pla
 # Plano: <título curto>
 
 ## Fase 1 — <nome>
-- [ ] 1.1 [standard] <título do step>
+- [ ] 1.1 [balanced] <título do step>
   <o que fazer e critérios de aceite>
 - [ ] 1.2 [economy] <título>
   <...>
 
 ## Fase 2 — <nome>
-- [ ] 2.1 [premium] <título>
+- [ ] 2.1 [frontier] <título>
   <...>
 \`\`\`
 

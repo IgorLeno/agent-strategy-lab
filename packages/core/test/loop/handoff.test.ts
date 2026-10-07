@@ -6,7 +6,7 @@ import type { PlanStep } from '../../src/plan/plan.js';
 const STEP: PlanStep = {
   id: '1.2',
   title: 'Ligar CLI',
-  tier: 'standard',
+  tier: 'balanced',
   status: 'pending',
   body: 'Critério: comando `x` existe.',
   phase: 'Fase 1',

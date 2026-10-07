@@ -26,9 +26,9 @@ describe('plan.md', () => {
     expect(plan.title).toBe('Exportar relatório');
     expect(plan.steps.map((step) => [step.id, step.tier, step.status, step.phase])).toEqual([
       ['1.1', 'economy', 'done', 'Fase 1 — Base'],
-      ['1.2', 'standard', 'pending', 'Fase 1 — Base'],
-      ['2.1', 'premium', 'failed', 'Fase 2 — Polimento'],
-      ['2.2', 'standard', 'pending', 'Fase 2 — Polimento'],
+      ['1.2', 'balanced', 'pending', 'Fase 1 — Base'],
+      ['2.1', 'frontier', 'failed', 'Fase 2 — Polimento'],
+      ['2.2', 'balanced', 'pending', 'Fase 2 — Polimento'],
     ]);
     expect(plan.steps[0]?.body).toBe('Critério: `pnpm test` verde.\n\nDetalhe depois de linha em branco.');
     expect(plan.steps[1]?.body).toBe('');

@@ -16,9 +16,9 @@ import {
 
 const FAKE_AGENT = path.join(import.meta.dirname, '..', 'fixtures', 'fake-agent.mjs');
 const CATALOG = [
-  { id: 'p-a', scaffold: 'fake', provider: 'none', model: 'p-a', effort: null, tier: 'premium', cost_rank: 1 },
-  { id: 'p-b', scaffold: 'fake', provider: 'none', model: 'p-b', effort: null, tier: 'premium', cost_rank: 2 },
-  { id: 's-a', scaffold: 'fake', provider: 'none', model: 's-a', effort: null, tier: 'standard', cost_rank: 1 },
+  { id: 'p-a', scaffold: 'fake', provider: 'none', model: 'p-a', effort: null, tier: 'frontier', cost_rank: 1 },
+  { id: 'p-b', scaffold: 'fake', provider: 'none', model: 'p-b', effort: null, tier: 'frontier', cost_rank: 2 },
+  { id: 's-a', scaffold: 'fake', provider: 'none', model: 's-a', effort: null, tier: 'balanced', cost_rank: 1 },
 ] as unknown as readonly ModelProfile[];
 
 const PLAN_BLOCK = '```plan\n# Plano: Demo\n\n## Fase 1 — Base\n- [ ] 1.1 [economy] Criar README\n  Um README com o nome do projeto.\n```';
@@ -119,7 +119,7 @@ describe('turno de planejamento com agente fake', () => {
     await writeFile(scriptPath, JSON.stringify({ calls: [{ providerFailure: 'limite A' }, { providerFailure: 'limite B' }] }));
     const result = await runPlanningTurn({ repo: root, turns: [user('x')], catalog: CATALOG, sourceEnv: {}, invoke: fakeInvoke });
     expect(result.status).toBe('failed');
-    expect(result.status === 'failed' && result.error).toMatch(/nenhum perfil premium disponível: p-a: .*limite A.*; p-b: .*limite B/);
+    expect(result.status === 'failed' && result.error).toMatch(/nenhum perfil frontier disponível: p-a: .*limite A.*; p-b: .*limite B/);
   });
 
   it('agente sem resposta volta como erro, sem retry automático', async () => {

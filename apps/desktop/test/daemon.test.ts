@@ -14,7 +14,7 @@ import type { DaemonEvent, LoopState, ProjectView } from '../src/shared/ipc.js';
 const run = promisify(execFile);
 const FAKE_AGENT = path.resolve(import.meta.dirname, '../../../packages/core/test/fixtures/fake-agent.mjs');
 const CATALOG = [
-  { id: 'fake-s', scaffold: 'fake', provider: 'none', model: 'fake-s', effort: null, tier: 'standard', cost_rank: 1 },
+  { id: 'fake-s', scaffold: 'fake', provider: 'none', model: 'fake-s', effort: null, tier: 'balanced', cost_rank: 1 },
 ] as unknown as readonly ModelProfile[];
 
 let root: string;
@@ -100,7 +100,7 @@ describe('daemon com agente fake', () => {
     expect(paused).toMatchObject({ state: 'paused', stateDetail: 'fim do step (Step a step)', progress: { done: 1, total: 3 } });
 
     const transcript = await daemon.handle('getTranscript', { projectId: project.id });
-    expect(transcript.header).toMatchObject({ stepId: '1.1', title: 'Primeiro', tier: 'standard', attemptNo: 1, model: 'fake-s' });
+    expect(transcript.header).toMatchObject({ stepId: '1.1', title: 'Primeiro', tier: 'balanced', attemptNo: 1, model: 'fake-s' });
     expect(transcript.items.map((item) => item.kind)).toEqual(['attempt', 'message', 'attempt_finished']);
 
     const plan = await daemon.handle('getPlan', { projectId: project.id });

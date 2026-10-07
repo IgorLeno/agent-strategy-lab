@@ -21,8 +21,8 @@ describe('ledger', () => {
     const ledger = new Ledger(':memory:');
     const plan = ledger.upsertPlan(PLAN);
     expect(plan.status).toBe('running');
-    const step = ledger.ensureStep(plan.id, { id: '1.1', title: 'a', tier: 'standard' });
-    expect(ledger.ensureStep(plan.id, { id: '1.1', title: 'a editado', tier: 'premium' }).id).toBe(step.id);
+    const step = ledger.ensureStep(plan.id, { id: '1.1', title: 'a', tier: 'balanced' });
+    expect(ledger.ensureStep(plan.id, { id: '1.1', title: 'a editado', tier: 'frontier' }).id).toBe(step.id);
     ledger.markStepRunning(step.id);
 
     const first = ledger.startAttempt({ stepRowId: step.id, profileId: 'p', scaffold: 'claude_code', provider: 'anthropic', model: 'm', effort: 'high', mode: 'edit' });
@@ -33,7 +33,7 @@ describe('ledger', () => {
 
     ledger.finishStep(step.id, { status: 'done', commitSha: 'def', note: 'feito' });
     const [row] = ledger.stepsOf(plan.id);
-    expect(row).toMatchObject({ status: 'done', title: 'a editado', tier: 'premium', commit_sha: 'def', note: 'feito' });
+    expect(row).toMatchObject({ status: 'done', title: 'a editado', tier: 'frontier', commit_sha: 'def', note: 'feito' });
     expect(ledger.attemptsOf(step.id).map((attempt) => [attempt.outcome, attempt.tokens_total])).toEqual([
       ['gate_failed', null],
       ['success', 30],

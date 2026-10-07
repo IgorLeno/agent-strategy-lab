@@ -20,8 +20,33 @@ import {
   type ProviderIdentity,
 } from '../providers/identity.js';
 
-export const Tier = z.enum(['economy', 'standard', 'premium']);
+/**
+ * Sete tiers, do mais exigente ao mais barato (catálogo do usuário,
+ * 2026-10-07). O planner marca o tier de cada step; o router só escolhe
+ * dentro dele.
+ */
+export const TIERS = ['frontier', 'expert', 'advanced', 'balanced', 'core', 'fast', 'economy'] as const;
+export const Tier = z.enum(TIERS);
 export type Tier = z.infer<typeof Tier>;
+
+/** Step sem tier no `plan.md`: o do meio da escala. */
+export const DEFAULT_TIER: Tier = 'balanced';
+
+/**
+ * Nomes da escala antiga de três tiers, aceitos em planos já escritos.
+ * `economy` continua existindo e passa a ser o tier 7.
+ */
+export const TIER_ALIASES: Readonly<Record<string, Tier>> = {
+  premium: 'frontier',
+  standard: 'balanced',
+};
+
+/** Tier canônico de um nome (canônico ou alias); `null` se desconhecido. */
+export function tierOf(name: string): Tier | null {
+  const parsed = Tier.safeParse(name);
+  if (parsed.success) return parsed.data;
+  return TIER_ALIASES[name] ?? null;
+}
 
 const nonEmpty = z.string().trim().min(1);
 
@@ -34,7 +59,8 @@ export const ModelProfileInput = z
     model: nonEmpty,
     /** Reasoning effort; `null` quando o scaffold não tem a dimensão ou o perfil não a fixa. */
     effort: nonEmpty.nullable(),
-    tier: Tier,
+    /** Aceita os aliases da escala antiga, como o `plan.md`. */
+    tier: z.preprocess((value) => (typeof value === 'string' ? (tierOf(value) ?? value) : value), Tier),
     /** Ordem de custo relativa dentro do catálogo: menor é mais barato. Só desempata. */
     cost_rank: z.number().int().nonnegative(),
   })
@@ -99,17 +125,37 @@ export function parseCatalogYaml(text: string): readonly ModelProfile[] {
 }
 
 /**
- * Catálogo padrão aprovado em 2026-10-06 (plano, decisão Q2). Modelos e flags
- * vêm dos perfis já verificados em `dev/profiles/`.
+ * Catálogo padrão (2026-10-07, tabela do usuário em 7 tiers). O router tenta
+ * o mais barato primeiro dentro do tier: `cost_rank` cresce do tier
+ * `economy` ao `frontier` e, dentro de cada tier, OpenCode Go (franquia fixa)
+ * < Codex < Claude; entre modelos OpenCode do mesmo tier vale a ordem da
+ * tabela. `gpt-6.1-sol` da tabela é recusado pela conta Codex (400 "not
+ * supported", verificado em 2026-10-07): `gpt-6-sol` ocupa as três vagas
+ * até a conta aceitar. `claude-sonnet-5-5` responde normalmente, mas a CLI
+ * 2.1.281 ainda imprime `unrecognized_model` no stderr (aviso, não falha).
  */
 export const DEFAULT_CATALOG: readonly ModelProfile[] = buildCatalog([
-  { id: 'claude-opus-5-high', scaffold: 'claude_code', provider: 'anthropic', model: 'claude-opus-5', effort: 'high', tier: 'premium', cost_rank: 7 },
-  { id: 'codex-sol-high', scaffold: 'codex_cli', provider: 'openai', model: 'gpt-5.6-sol', effort: 'high', tier: 'premium', cost_rank: 6 },
-  { id: 'claude-sonnet-5-medium', scaffold: 'claude_code', provider: 'anthropic', model: 'claude-sonnet-5', effort: 'medium', tier: 'standard', cost_rank: 4 },
-  { id: 'codex-sol-medium', scaffold: 'codex_cli', provider: 'openai', model: 'gpt-5.6-sol', effort: 'medium', tier: 'standard', cost_rank: 5 },
-  { id: 'opencode-go-glm-5.3', scaffold: 'opencode', provider: 'opencode_go', model: 'opencode-go/glm-5.3', effort: null, tier: 'standard', cost_rank: 3 },
-  { id: 'codex-luna-medium', scaffold: 'codex_cli', provider: 'openai', model: 'gpt-5.6-luna', effort: 'medium', tier: 'economy', cost_rank: 2 },
-  { id: 'opencode-go-deepseek-v4-flash', scaffold: 'opencode', provider: 'opencode_go', model: 'opencode-go/deepseek-v4-flash', effort: null, tier: 'economy', cost_rank: 1 },
+  { id: 'claude-opus-5.5-medium', scaffold: 'claude_code', provider: 'anthropic', model: 'claude-opus-5-5', effort: 'medium', tier: 'frontier', cost_rank: 67 },
+  { id: 'codex-sol-6-high', scaffold: 'codex_cli', provider: 'openai', model: 'gpt-6-sol', effort: 'high', tier: 'frontier', cost_rank: 65 },
+  { id: 'claude-sonnet-5.5-high', scaffold: 'claude_code', provider: 'anthropic', model: 'claude-sonnet-5-5', effort: 'high', tier: 'frontier', cost_rank: 67 },
+  { id: 'codex-sol-6-medium', scaffold: 'codex_cli', provider: 'openai', model: 'gpt-6-sol', effort: 'medium', tier: 'expert', cost_rank: 55 },
+  { id: 'claude-sonnet-5.5-medium', scaffold: 'claude_code', provider: 'anthropic', model: 'claude-sonnet-5-5', effort: 'medium', tier: 'expert', cost_rank: 57 },
+  { id: 'opencode-go-deepseek-v4.1-flash', scaffold: 'opencode', provider: 'opencode_go', model: 'opencode-go/deepseek-v4.1-flash', effort: null, tier: 'expert', cost_rank: 50 },
+  { id: 'codex-sol-6-low', scaffold: 'codex_cli', provider: 'openai', model: 'gpt-6-sol', effort: 'low', tier: 'advanced', cost_rank: 45 },
+  { id: 'claude-sonnet-5.5-low', scaffold: 'claude_code', provider: 'anthropic', model: 'claude-sonnet-5-5', effort: 'low', tier: 'advanced', cost_rank: 47 },
+  { id: 'opencode-go-qwen3.8-max', scaffold: 'opencode', provider: 'opencode_go', model: 'opencode-go/qwen3.8-max', effort: null, tier: 'advanced', cost_rank: 40 },
+  { id: 'codex-luna-6-max', scaffold: 'codex_cli', provider: 'openai', model: 'gpt-6-luna', effort: 'max', tier: 'balanced', cost_rank: 35 },
+  { id: 'opencode-go-glm-5.3', scaffold: 'opencode', provider: 'opencode_go', model: 'opencode-go/glm-5.3', effort: null, tier: 'balanced', cost_rank: 30 },
+  { id: 'opencode-go-deepseek-v4-pro', scaffold: 'opencode', provider: 'opencode_go', model: 'opencode-go/deepseek-v4-pro', effort: null, tier: 'balanced', cost_rank: 31 },
+  { id: 'codex-luna-6-high', scaffold: 'codex_cli', provider: 'openai', model: 'gpt-6-luna', effort: 'high', tier: 'core', cost_rank: 25 },
+  { id: 'opencode-go-kimi-k2.7-code', scaffold: 'opencode', provider: 'opencode_go', model: 'opencode-go/kimi-k2.7-code', effort: null, tier: 'core', cost_rank: 20 },
+  { id: 'opencode-go-qwen3.8-flash', scaffold: 'opencode', provider: 'opencode_go', model: 'opencode-go/qwen3.8-flash', effort: null, tier: 'core', cost_rank: 21 },
+  { id: 'codex-luna-6-medium', scaffold: 'codex_cli', provider: 'openai', model: 'gpt-6-luna', effort: 'medium', tier: 'fast', cost_rank: 15 },
+  { id: 'opencode-go-glm-5.3-flash', scaffold: 'opencode', provider: 'opencode_go', model: 'opencode-go/glm-5.3-flash', effort: null, tier: 'fast', cost_rank: 10 },
+  { id: 'opencode-go-minimax-m3', scaffold: 'opencode', provider: 'opencode_go', model: 'opencode-go/minimax-m3', effort: null, tier: 'fast', cost_rank: 11 },
+  { id: 'codex-luna-6-low', scaffold: 'codex_cli', provider: 'openai', model: 'gpt-6-luna', effort: 'low', tier: 'economy', cost_rank: 5 },
+  { id: 'opencode-go-mimo-v2.6-flash', scaffold: 'opencode', provider: 'opencode_go', model: 'opencode-go/mimo-v2.6-flash', effort: null, tier: 'economy', cost_rank: 0 },
+  { id: 'opencode-go-longcat-2.0', scaffold: 'opencode', provider: 'opencode_go', model: 'opencode-go/longcat-2.0', effort: null, tier: 'economy', cost_rank: 1 },
 ]);
 
 export function profilesOfTier(catalog: readonly ModelProfile[], tier: Tier): readonly ModelProfile[] {

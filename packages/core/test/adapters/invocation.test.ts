@@ -44,35 +44,35 @@ describe('invocação por scaffold e modo', () => {
   });
 
   it('Claude: plan é modo plan; edit libera só a allowlist; auto libera Bash; commit e push negados', () => {
-    const plan = invoke('claude-sonnet-5-medium', 'plan').argv;
+    const plan = invoke('claude-sonnet-5.5-medium', 'plan').argv;
     expect(plan).toContain('plan');
     expect(plan).not.toContain('Edit');
     expect(plan).toEqual(expect.arrayContaining(['--permission-prompts', 'none', '--no-session-persistence']));
 
-    const edit = invoke('claude-sonnet-5-medium', 'edit');
+    const edit = invoke('claude-sonnet-5.5-medium', 'edit');
     expect(edit.argv).toEqual(expect.arrayContaining(['acceptEdits', 'Bash(pnpm test:*)', 'Bash(git commit:*)']));
     expect(edit.argv).not.toContain('Bash');
     expect(edit.stdin).toBe('faça o step');
 
-    const auto = invoke('claude-opus-5-high', 'auto').argv;
+    const auto = invoke('claude-opus-5.5-medium', 'auto').argv;
     expect(auto).toContain('Bash');
     expect(auto.slice(auto.indexOf('--disallowedTools'))).toEqual(
       expect.arrayContaining(['Bash(git commit:*)', 'Bash(git push:*)', 'Bash(rm -rf:*)']),
     );
-    expect(auto).toEqual(expect.arrayContaining(['--model', 'claude-opus-5', '--effort', 'high']));
+    expect(auto).toEqual(expect.arrayContaining(['--model', 'claude-opus-5-5', '--effort', 'medium']));
   });
 
   it('Codex: sandbox read-only no plan, workspace-write nos demais, rede só no auto', () => {
     const sandboxOf = (mode: PermissionMode) => {
-      const argv = invoke('codex-sol-medium', mode).argv;
+      const argv = invoke('codex-sol-6-medium', mode).argv;
       return argv[argv.indexOf('--sandbox') + 1];
     };
     expect(sandboxOf('plan')).toBe('read-only');
     expect(sandboxOf('edit')).toBe('workspace-write');
     expect(sandboxOf('auto')).toBe('workspace-write');
-    expect(invoke('codex-sol-medium', 'edit').argv.join(' ')).not.toContain('network_access');
-    expect(invoke('codex-sol-medium', 'auto').argv).toContain('sandbox_workspace_write.network_access=true');
-    const argv = invoke('codex-sol-medium', 'edit').argv;
+    expect(invoke('codex-sol-6-medium', 'edit').argv.join(' ')).not.toContain('network_access');
+    expect(invoke('codex-sol-6-medium', 'auto').argv).toContain('sandbox_workspace_write.network_access=true');
+    const argv = invoke('codex-sol-6-medium', 'edit').argv;
     expect(argv.at(-1)).toBe('-');
     expect(argv).toContain('model_reasoning_effort="medium"');
   });

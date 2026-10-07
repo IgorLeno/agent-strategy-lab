@@ -4,15 +4,18 @@
  *   # Plano: <título>
  *
  *   ## Fase 1 — <nome>
- *   - [ ] 1.1 [standard] <título do step>
+ *   - [ ] 1.1 [balanced] <título do step>
  *     <descrição livre, indentada>
  *   - [x] 1.2 [economy] <título>      concluído
- *   - [!] 1.3 <título>                falhou depois dos retries; tier ausente = standard
+ *   - [!] 1.3 <título>                falhou depois dos retries; tier ausente = balanced
+ *
+ * Tiers: frontier, expert, advanced, balanced, core, fast, economy. Os nomes
+ * antigos `premium` e `standard` são aceitos como aliases (ver catálogo).
  *
  * O arquivo é do usuário. O loop só troca o caractere entre colchetes do
  * checkbox; todo o resto do texto é preservado byte a byte.
  */
-import { Tier } from '../catalog/catalog.js';
+import { DEFAULT_TIER, TIERS, tierOf, type Tier } from '../catalog/catalog.js';
 
 export type StepStatus = 'pending' | 'done' | 'failed';
 
@@ -75,10 +78,10 @@ export function parsePlan(text: string): Plan {
     seen.add(id);
 
     const rawTier = stepMatch[3];
-    const tier = rawTier === undefined ? 'standard' : Tier.safeParse(rawTier.trim());
-    if (typeof tier !== 'string' && !tier.success) {
+    const tier = rawTier === undefined ? DEFAULT_TIER : tierOf(rawTier.trim());
+    if (tier === null) {
       throw new PlanFormatError(
-        `linha ${index + 1}: tier "${rawTier}" desconhecido (use economy, standard ou premium)`,
+        `linha ${index + 1}: tier "${rawTier}" desconhecido (use ${TIERS.join(', ')})`,
       );
     }
 
@@ -102,7 +105,7 @@ export function parsePlan(text: string): Plan {
     steps.push({
       id,
       title: stepMatch[4] as string,
-      tier: typeof tier === 'string' ? tier : tier.data,
+      tier,
       status: STATUS_BY_MARK[stepMatch[1] as string] as StepStatus,
       body: dedent(bodyLines),
       phase,

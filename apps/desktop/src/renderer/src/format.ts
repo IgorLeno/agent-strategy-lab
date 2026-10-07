@@ -1,7 +1,24 @@
 import type { Continuity, GitMode, LoopState, PermissionMode, Tier } from '../../shared/ipc';
 
-export const TIER_LETTER: Readonly<Record<Tier, string>> = { economy: 'E', standard: 'S', premium: 'P' };
-export const TIER_NAME: Readonly<Record<Tier, string>> = { economy: 'economy', standard: 'standard', premium: 'premium' };
+/** Selo do tier: posição na escala de 7 (1 = frontier, 7 = economy). */
+export const TIER_LETTER: Readonly<Record<Tier, string>> = {
+  frontier: '1',
+  expert: '2',
+  advanced: '3',
+  balanced: '4',
+  core: '5',
+  fast: '6',
+  economy: '7',
+};
+export const TIER_NAME: Readonly<Record<Tier, string>> = {
+  frontier: 'frontier',
+  expert: 'expert',
+  advanced: 'advanced',
+  balanced: 'balanced',
+  core: 'core',
+  fast: 'fast',
+  economy: 'economy',
+};
 
 export const MODE_LABEL: Readonly<Record<PermissionMode, string>> = { plan: 'Plan', edit: 'Edit', auto: 'Auto' };
 export const CONTINUITY_LABEL: Readonly<Record<Continuity, string>> = {

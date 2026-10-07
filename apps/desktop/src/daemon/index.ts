@@ -31,7 +31,7 @@ function fakeAgent(): { catalog: readonly ModelProfile[]; invoke: (request: Invo
     cost_rank: rank,
   }) as ModelProfile;
   return {
-    catalog: [profile('fake-economy', 'economy', 1), profile('fake-standard', 'standard', 1), profile('fake-premium', 'premium', 1)],
+    catalog: [profile('fake-economy', 'economy', 1), profile('fake-balanced', 'balanced', 1), profile('fake-frontier', 'frontier', 1)],
     invoke: (request) => ({
       // Dentro do Electron, `execPath` é o binário do app: roda como Node puro.
       argv: [process.execPath, agent, request.profile.id],
